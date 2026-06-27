@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-apiserver
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    app.kubernetes.io/managed-by: agentctl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-apiserver
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: apiserver
+          image: agentctl/apiserver:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { containerPort: 6443, name: https }
+          env:
+            - name: RUST_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/agentctl-apiserver/tls
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /readyz, port: 6443, scheme: HTTPS }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /livez, port: 6443, scheme: HTTPS }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 300m, memory: 128Mi }
+      volumes:
+        - name: tls
+          secret:
+            secretName: agentctl-apiserver-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-apiserver
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-apiserver
+  ports:
+    - { port: 443, targetPort: 6443, name: https }

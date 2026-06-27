@@ -1,0 +1,22 @@
+[package]
+name = "agentctl-apiserver"
+version = "0.1.0"
+description = "agentctl aggregated APIServer (RFC 0009): the human management access path. Serves management.agents.x-k8s.io connect verbs with per-verb RBAC + identity, forwarding to the node-agent. Hand-rolled in Rust (axum + rustls)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "agentctl-apiserver"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+# TLS via rustls with the ring provider (no aws-lc-rs → no C toolchain).
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+serde_json.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

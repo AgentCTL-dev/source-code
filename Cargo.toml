@@ -18,6 +18,7 @@ members = [
     "crates/agentctl-node-agent",
     "crates/agentctl-cli",
     "crates/mock-agent",
+    "crates/agentctl-apiserver",
 ]
 
 [workspace.package]
