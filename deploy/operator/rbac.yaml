@@ -1,0 +1,58 @@
+# Least-privilege RBAC for the agentctl operator (RFC 0006/0015): watch the CRDs,
+# patch their status + finalizers, and own the rendered workloads.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-operator
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    app.kubernetes.io/managed-by: agentctl
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-operator
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    app.kubernetes.io/managed-by: agentctl
+rules:
+  # The CRDs the operator reconciles.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents", "agentfleets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Status + finalizers subresources (the operator patches status; the finalizer
+  # machinery edits .metadata.finalizers).
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents/status", "agentfleets/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents/finalizers", "agentfleets/finalizers"]
+    verbs: ["update"]
+  # The workloads the operator renders + owns (owner-ref GC reclaims them).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Event recording (optional but conventional).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-operator
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    app.kubernetes.io/managed-by: agentctl
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-operator
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-operator
+    namespace: agentctl-system

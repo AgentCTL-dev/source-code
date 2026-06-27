@@ -1,0 +1,9 @@
+# Deploy the agentctl operator (namespace + RBAC + Deployment).
+# Apply the CRDs first: kubectl apply -f deploy/crds/
+# Then:                  kubectl apply -k deploy/operator/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - deployment.yaml

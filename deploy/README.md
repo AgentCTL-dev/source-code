@@ -7,8 +7,36 @@ deploy/
   crds/                  # generated CRDs (cargo run -p agentctl-crdgen)
     agent.yaml
     agentfleet.yaml
+  operator/              # in-cluster operator install (namespace + RBAC + Deployment)
+    namespace.yaml
+    rbac.yaml            # ServiceAccount + least-privilege ClusterRole(+Binding)
+    deployment.yaml
+    Dockerfile           # distroless runtime over the host-built release binary
+    kustomization.yaml
   examples/
     agent-once.yaml      # a minimal once-mode Agent
+    agentfleet-claim.yaml # a claim-mode AgentFleet
+```
+
+## In-cluster install
+
+Run the operator *inside* the cluster (its own ServiceAccount + RBAC):
+
+```console
+# build + load the operator image into kind
+cargo build --release -p agentctl-operator --bin agentctl-operator
+docker build -f deploy/operator/Dockerfile -t agentctl/operator:dev .
+kind load docker-image agentctl/operator:dev --name agentctl
+
+# install CRDs + operator
+kubectl apply -f deploy/crds/
+kubectl apply -k deploy/operator/
+kubectl -n agentctl-system rollout status deploy/agentctl-operator
+
+# use it
+kubectl apply -f deploy/examples/agent-once.yaml
+kubectl get agents
+kubectl logs -n agentctl-system deploy/agentctl-operator
 ```
 
 ## Local end-to-end (kind)

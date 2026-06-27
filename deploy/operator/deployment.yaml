@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-operator
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    app.kubernetes.io/managed-by: agentctl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-operator
+    spec:
+      serviceAccountName: agentctl-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          # Built from deploy/operator/Dockerfile and `kind load`ed for local dev.
+          image: agentctl/operator:dev
+          imagePullPolicy: IfNotPresent
+          args: []
+          env:
+            - name: RUST_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
