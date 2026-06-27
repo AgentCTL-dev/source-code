@@ -1,0 +1,29 @@
+[package]
+name = "agentctl-operator"
+version = "0.1.0"
+description = "agentctl operator: reconcile Agent/AgentFleet → workloads. agentctl RFC 0006. (this crate holds the pure rendering core plus the kube runtime controller that drives reconcile.)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "agentctl-operator"
+path = "src/bin/operator.rs"
+
+[dependencies]
+agent-api = { path = "../agent-api" }
+# Default features keep the client (rustls + config); `runtime` adds the
+# Controller/watcher/finalizer, `derive` the CR typing the controller watches.
+kube = { version = "4", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.28", features = ["latest"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

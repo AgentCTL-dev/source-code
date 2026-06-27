@@ -1,0 +1,70 @@
+{
+  "contract_version": "1.0",
+  "agentd_version": "0.1.0",
+  "build_features": ["tls", "vsock", "serve-mcp", "a2a", "cron", "metrics", "otel"],
+  "identity": {
+    "run_id": "01J8X9ABCDEF0123456789ABCD",
+    "instance": "agent-0",
+    "uid": "1a2b3c4d-0000-0000-0000-000000000000",
+    "node": "node-1",
+    "namespace": "default"
+  },
+  "mode": "reactive",
+  "model": "claude-opus-4-8",
+  "intelligence": {
+    "transport": "https",
+    "endpoints": 2,
+    "healthy": "unknown"
+  },
+  "intelligence_summary": {
+    "toolmode": "native"
+  },
+  "mcp_servers": [
+    { "name": "fs", "tags": ["sensitive"] },
+    { "name": "web", "tags": ["untrusted_input", "egress"] }
+  ],
+  "a2a_peers": [
+    { "name": "planner", "transport": "vsock" }
+  ],
+  "exec_enabled": true,
+  "allow_trifecta": false,
+  "limits": {
+    "max_depth": 4,
+    "max_children": 8,
+    "max_total_subagents": 64,
+    "max_steps": 200,
+    "max_tokens": 1000000,
+    "tree_token_budget": 4000000,
+    "deadline_ms": 315360000000,
+    "drain_timeout_ms": 30000
+  },
+  "surfaces": {
+    "management": "vsock:5005",
+    "operator_tools": ["drain", "lame-duck", "pause", "resume", "cancel"],
+    "a2a": {
+      "version": "1.0",
+      "streaming": true,
+      "methods": [
+        "a2a.SendMessage",
+        "a2a.GetTask",
+        "a2a.CancelTask",
+        "a2a.ListTasks",
+        "a2a.SendStreamingMessage",
+        "a2a.SubscribeToTask"
+      ]
+    },
+    "metrics": ":9090",
+    "metrics_schema": "1.0",
+    "events": true,
+    "report_schema": "1.0",
+    "exit_codes": "1.0",
+    "intelligence": true,
+    "hot_reload": false,
+    "config_validate": true,
+    "config_schema": true,
+    "cluster": true,
+    "shard": "0/3",
+    "standby": false,
+    "claim": { "styles": ["tool", "resource"] }
+  }
+}

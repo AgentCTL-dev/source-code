@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentctl.dev/contract/v1/report.schema.json",
+  "title": "Agent Control Contract — Run-Outcome Report",
+  "description": "The machine-readable terminal-outcome object a once/loop/schedule-bounded agent run writes at the terminal transition (agentd RFC 0016 §6; reference source report.rs RunReport). It is the durable, structured backend for `kubectl agents results`: a Job's pod is gone seconds after exit, so the full outcome (terminal status, exit code, usage, timings, a pointer to the distilled result, the trace id) is captured here, not inferred from a vanished pod. Built ONCE, at the terminal transition, from what the supervisor knows; serialized before the proc.exit log line. Two delivery surfaces, both optional and off for a bare CLI run: a report file written atomically (temp + rename) at the terminal transition (env AGENT_REPORT_FILE, reference alias AGENTD_REPORT_FILE; flag --report-file PATH), and the served `agent://run/{run_id}` resource frozen to this schema (reference alias `agentd://run/{run_id}`, which embeds this object under the `report` key). Reactive daemons emit NO report — they have no single terminal outcome; their per-reaction outcomes live in metrics and the event stream (RFC 0016 §6.4). Telemetry never crashes the run (§8.4): a failed report-file write logs report.write.fail (warn) and the run STILL exits with the correct exit code — the exit code is the floor contract (RFC 0011 §5) and never depends on the report landing. This object is OPEN/additive-tolerant: a consumer MUST ignore unknown fields (a new field is a minor bump of report_schema) and refuse only an unknown report_schema MAJOR. SIBLING NOTE — events + correlation + trace: this report is the post-mortem of a run whose live narrative is the JSON-lines event stream (agent://events, schema events.schema.json). The two share the SAME run_id / trace_id correlation. For self-containment of codegen consumers, the event-line shape, the correlation tuple (run_id + agent_id + agent_path + W3C trace_id/span_id/parent_span_id), the closed v1 event vocabulary, and the P-trace traceparent-ingest open item are carried here as reference-only $defs ($defs.correlation, $defs.event_line, $defs.event_name_v1); they are NOT part of the report object and are duplicated from RFC 0010 §3.2/§3.3 + events.schema.json.",
+  "type": "object",
+  "additionalProperties": true,
+  "x-contract": {
+    "owner_rfc": "agentd RFC 0016 §6 (report); status authority RFC 0007 §3.4; exit-code authority RFC 0011 §5; line/correlation/vocab RFC 0010 §3.2/§3.3/§3.6",
+    "source_of_truth": "crates/agentd/src/report.rs (RunReport, Usage, Refusals, REPORT_SCHEMA, to_json field order, omitted-when-absent instance/trace_id)",
+    "manifest_surface": "surfaces.report_schema",
+    "current_version": "1.0",
+    "versioning": "report_schema major.minor; new field => minor (consumer tolerates via additionalProperties); removed/renamed/narrowed field => major (consumer branches or refuses). Surface absent in the manifest => the binary did not build the report path; the consumer degrades to exit-code + logs.",
+    "debranding": {
+      "note": "P0 de-branding. Neutral contract tokens are primary; the reference-impl (agentd) spellings are kept as current aliases. Cutover to drop the branded spelling is a GA decision — agents in the field emit the branded form today; a consumer MUST accept both until GA.",
+      "uri_scheme": {"neutral": "agent://", "reference_alias": "agentd://"},
+      "env": {
+        "AGENT_REPORT_FILE": "AGENTD_REPORT_FILE",
+        "AGENT_RUN_ID": "AGENTD_RUN_ID",
+        "AGENT_TRACEPARENT": "AGENTD_TRACEPARENT"
+      },
+      "metric_prefix": {"neutral": "agent_", "reference_alias": "agentd_"},
+      "flags": {"--report-file": "--report-file (neutral; binary name agentd is impl-specific)"}
+    },
+    "sibling_artifacts": {
+      "events": "contract/v1/events.schema.json (agent://events live window; same run_id/trace_id correlation)",
+      "metrics": "contract/v1/metrics.registry.json (status label domain == $defs.terminal_status)",
+      "common_lift": "terminal_status + exit_code SHOULD lift to a shared common.schema.json (co-used by the metrics status label and the exit-code-contract surface); inlined here to avoid colliding with the sibling extractions."
+    }
+  },
+  "required": [
+    "report_schema",
+    "run_id",
+    "mode",
+    "status",
+    "exit_code",
+    "has_usable_partial",
+    "usage",
+    "duration_ms",
+    "started_at",
+    "ended_at",
+    "distillate_ref",
+    "refusals"
+  ],
+  "properties": {
+    "report_schema": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Frozen schema version major.minor (RFC 0016 §6.2/§8.1; source const REPORT_SCHEMA). Current 1.0. A breaking field change bumps the major; the consumer refuses an unknown major and tolerates an unknown minor.",
+      "examples": ["1.0"]
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "RFC 0010 run_id — the unit of work, a ULID, stable across the whole process tree. Stable across a retried Job when the operator sets AGENT_RUN_ID (alias AGENTD_RUN_ID), so a retried unit's reports collapse to one (RFC 0011 §6). This is the primary correlation key joining the report to the event stream (see $defs.correlation)."
+    },
+    "instance": {
+      "type": "string",
+      "description": "Downward-API instance identity (e.g. pod name, from metadata.name via AGENT_POD_NAME / alias AGENTD_POD_NAME) when present (RFC 0014 §5/§6.4). OMITTED ENTIRELY when absent — never null. A consumer MUST model this as optional and NOT expect a null value."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["once", "loop", "schedule"],
+      "description": "Execution shape that produced this report. NEVER `reactive` — reactive daemons emit no report (RFC 0016 §6.4). Closed set: the report-emitting modes only."
+    },
+    "status": {
+      "$ref": "#/$defs/terminal_status"
+    },
+    "exit_code": {
+      "$ref": "#/$defs/exit_code"
+    },
+    "has_usable_partial": {
+      "type": "boolean",
+      "description": "Whether the run produced usable partial output. Drives the exit-code 3-vs-7 split (EXIT_PARTIAL vs EXIT_BUDGET) the supervisor decides from the result body, not from a distinct status (RFC 0011 §5.2; \"partial\" is NOT a terminal status — it is a result-body property)."
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Per-run usage roll-up. Token honesty (RFC 0010 §3.9 / RFC 0016 §4.3): absence is 0, NEVER an estimate — a gateway that omits usage leaves these at 0 so a cost reader stays trustworthy. The contract emits TOKENS, never currency; cost = tokens × a price table the consumer owns (no pricing in the data plane).",
+      "required": ["tokens_in", "tokens_out", "steps", "subagents"],
+      "properties": {
+        "tokens_in": {"type": "integer", "minimum": 0, "description": "Cumulative input tokens from the intelligence usage (RFC 0006). u64 in source."},
+        "tokens_out": {"type": "integer", "minimum": 0, "description": "Cumulative output tokens. u64 in source."},
+        "steps": {"type": "integer", "minimum": 0, "description": "Loop steps across the whole tree."},
+        "subagents": {"type": "integer", "minimum": 0, "description": "Total subagents spawned in the run."}
+      }
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock run duration in milliseconds (ended_at - started_at), clamped to 0 on a non-monotonic clock — never negative."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC start timestamp (millisecond precision; always UTC, never local time)."
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC terminal timestamp."
+    },
+    "distillate_ref": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^(agent|agentd)://",
+      "description": "Handle where the distilled result BODY lives (RFC 0007 §3.9 / RFC 0005 §3.3); neutral `agent://subagent/0/result`, reference alias `agentd://subagent/0/result` (the reference emits the branded form today). It POINTS, it does not embed — the report stays small and bounded; the body is read on demand (and for a CLI run is also on stdout). NOTE P5 (open): there is no contract guarantee that this handle is re-readable AFTER the process exits. A networkless once-mode result can be lost if the relay/collector blinks. A read-before-exit / short post-terminal linger / re-read-terminal-distillate-by-handle primitive is an OPEN ask (agentctl design §14 P5); until resolved, the durable copy is the report file itself, and the body is durable only via stdout capture. The bivalent scheme pattern (agent:// OR agentd://) is a de-branding compatibility concession — a naive codegen that hardcodes one scheme breaks on the other.",
+      "examples": ["agent://subagent/0/result", "agentd://subagent/0/result"]
+    },
+    "trace_id": {
+      "$ref": "#/$defs/trace_id"
+    },
+    "refusals": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Per-run roll-up of refusal/guard-trip counts over the closed reason set (RFC 0016 §4.3). The metric counters are fleet-cumulative; this is THIS run, so a reader shows \"this run hit 1 depth refusal\" with no metrics query. Reasons not hit this run stay 0. additionalProperties:true so a new bounded reason (additive, minor bump) is tolerated.",
+      "required": ["trifecta", "rate", "budget", "depth", "mcp"],
+      "properties": {
+        "trifecta": {"type": "integer", "minimum": 0, "description": "Rule-of-Two / trifecta scope refusal (RFC 0012)."},
+        "rate": {"type": "integer", "minimum": 0, "description": "Spawn-rate / restart-storm cap (RFC 0003/0009)."},
+        "budget": {"type": "integer", "minimum": 0, "description": "Token/step/tree-budget refusal (RFC 0007/0003)."},
+        "depth": {"type": "integer", "minimum": 0, "description": "Max-depth spawn refusal (RFC 0009)."},
+        "mcp": {"type": "integer", "minimum": 0, "description": "MCP scope / unavailable-tool refusal (RFC 0007 §3.6)."}
+      }
+    }
+  },
+  "$defs": {
+    "terminal_status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "refused",
+        "exhausted_steps",
+        "exhausted_tokens",
+        "deadline",
+        "stalled",
+        "loop_detected",
+        "cancelled",
+        "crashed"
+      ],
+      "description": "The terminal-status string — the precise reason the run stopped. SOLE AUTHORITY: agentd RFC 0007 §3.4 (the TerminalStatus enum); the same closed vocabulary is the `status` label domain of the run-lifecycle counter (agent_runs_total{status}) in the metrics registry. CLOSED set: adding a status is additive (minor bump), removing/renaming one is breaking (major bump). This $def SHOULD be lifted to a shared common.schema.json so the report, the metrics schema, and the A2A TerminalStatus->TaskState mapping reference one definition. Distinct from exit_code, which is the coarse, lossy projection (RFC 0011 §5.2): completed->0; refused->5; cancelled (clean drain)->0; crashed->1; deadline->124 (RFC framing; the reference once_exit() maps it to 7); an exhausted_*/stalled/loop_detected run projects to 3 when has_usable_partial else 7."
+    },
+    "exit_code": {
+      "type": "integer",
+      "description": "The process exit code — the coarse projection of `status` (agentd RFC 0011 §5, frozen as the `exit_codes` contract surfaced at surfaces.exit_codes; source const EXIT_CODES=1.0). Both `status` and `exit_code` are present so a reader sees the precise reason AND can author exit-code policy. Reachable by a once/Job run: 0/1/3/4/5/6/7/124 (+ kernel 137). 2 (EXIT_USAGE) is not reachable from a report — config validation fails before any run. 137 (OOM/kubelet SIGKILL) and 143 (ungraceful SIGTERM) are kernel-set and never returned by the binary — a clean drain returns 0, not 143 — kept in the enum for completeness.",
+      "enum": [0, 1, 2, 3, 4, 5, 6, 7, 124, 137, 143],
+      "x-codes": {
+        "0": "EXIT_OK (complete / clean drain) — intent complete",
+        "1": "EXIT_FAILURE — intent retriable",
+        "2": "EXIT_USAGE (config error; not reachable from a report) — intent terminal",
+        "3": "EXIT_PARTIAL — intent policy",
+        "4": "EXIT_INTELLIGENCE — intent retriable",
+        "5": "EXIT_SEMANTIC (refused) — intent terminal",
+        "6": "EXIT_MCP — intent retriable",
+        "7": "EXIT_BUDGET — intent policy",
+        "124": "EXIT_TIMEOUT — intent policy",
+        "137": "128+SIGKILL (OS-set) — intent infra",
+        "143": "128+SIGTERM (OS-set) — intent infra"
+      }
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "W3C trace-context trace id, 16 bytes as 32 lowercase hex chars (RFC 0010 §3.6). Stitches a multi-pod flow into one trace; the report's tie into the correlation tuple ($defs.correlation). OMITTED when no trace exists — never null. Ingested-or-minted on the run; a consumer sets it at the flow root via AGENT_TRACEPARENT (alias AGENTD_TRACEPARENT) or an inbound `_meta.traceparent`, and every downstream pod stitches in. NOTE P-trace (open): traceparent ingest on the A2A method surface is an open ask (RFC 0020 / RFC 0010 §3.6) — until it lands, a gateway-rooted trace cannot be claimed across an A2A hop; report.trace_id assumes the existing env/_meta ingest path."
+    },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "SIBLING/REFERENCE-ONLY (not part of the report object). The correlation tuple that joins this report to the live event stream (events.schema.json) and to cross-pod traces. run_id is the unit of work (matches report.run_id); agent_id + agent_path locate the emitting node within the tree; the W3C trace_id/span_id/parent_span_id stitch across pods (RFC 0010 §3.2/§3.6). A consumer correlates `kubectl agents results <run_id>` (this report) with `agent://events?...` lines sharing the same run_id, and with OTel spans sharing the same trace_id.",
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1, "description": "ULID for the whole invocation; matches report.run_id."},
+        "agent_id": {"type": "string", "description": "Emitting process id; the supervisor uses the reserved `sup`/`root`."},
+        "agent_path": {"type": "string", "description": "Dotted tree path (`0`, `0.2`, `0.2.1`); prefix-scopes a subtree with no backend join."},
+        "trace_id": {"$ref": "#/$defs/trace_id"},
+        "span_id": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "W3C span id, 8 bytes as 16 lowercase hex; present in-span."},
+        "parent_span_id": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "Parent W3C span id, 8 bytes as 16 lowercase hex; present in-span."}
+      }
+    },
+    "event_line": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "SIBLING/REFERENCE-ONLY (not part of the report object; duplicated from events.schema.json for codegen self-containment). One RFC 0010 §3.2 JSON-lines telemetry line. OPEN: event-specific fields (tool, server, tokens_in/tokens_out, resource_uri, route, limit, value, cap, child_agent_id, child_path, depth, signal, finish_reason, result_bytes, ...) ride additionalProperties keyed by the event name — a consumer ignores fields it does not recognise. The live agent://events window adds a monotonic ring `seq` on top of this line shape (see events.schema.json).",
+      "required": ["ts", "level", "event", "run_id", "agent_id", "agent_path", "comp", "pid"],
+      "properties": {
+        "ts": {"type": "string", "format": "date-time", "description": "RFC 3339 UTC timestamp, millisecond precision. Always UTC."},
+        "level": {"type": "string", "enum": ["trace", "debug", "info", "warn", "error"], "description": "Severity. Closed set (RFC 0010 §3.2)."},
+        "event": {
+          "type": "string",
+          "description": "Dotted event type — the primary index/filter key. A small CLOSED v1 vocabulary (RFC 0010 §3.3, see $defs.event_name_v1) BUT additive-tolerant: a new event name is a minor change (RFC 0016 §8.2), so this is typed `string` and a consumer MUST tolerate an unrecognised name (enforcing the enum would break additive tolerance).",
+          "examples": ["loop.step", "subagent.spawn", "limit.exceeded", "intel.result", "tool.result"]
+        },
+        "run_id": {"type": "string", "minLength": 1, "description": "ULID for the whole invocation, stable across the tree."},
+        "agent_id": {"type": "string", "description": "Emitting process id; supervisor uses `sup`/`root`."},
+        "agent_path": {"type": "string", "description": "Dotted tree path; prefix scopes a subtree."},
+        "comp": {"type": "string", "enum": ["supervisor", "agent", "mcp", "intel"], "description": "Emitting component. Closed set (RFC 0010 §3.2)."},
+        "pid": {"type": "integer", "minimum": 0, "description": "OS process id — joins the log tree to the OS pstree."},
+        "span_id": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "W3C span id, 8 bytes as 16 lowercase hex. Present in-span."},
+        "parent_span_id": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "Parent span id, 8 bytes as 16 lowercase hex. Present in-span."},
+        "trace_id": {"$ref": "#/$defs/trace_id"},
+        "dur_ms": {"type": "integer", "minimum": 0, "description": "Duration in milliseconds, present on `*.end`/`*.result` events."},
+        "err": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Structured error, present on error events — NEVER a stringified stack (RFC 0010 §3.2).",
+          "properties": {
+            "type": {"type": "string"},
+            "message": {"type": "string"}
+          }
+        },
+        "msg": {"type": "string", "description": "Optional short human string — never the structured payload."}
+      }
+    },
+    "event_name_v1": {
+      "description": "SIBLING/REFERENCE-ONLY. The frozen v1 closed event vocabulary (RFC 0010 §3.3): 19 supervisor/lifecycle + 8 agentic-loop = 27 names. Provided for codegen/reference; NOT enforced on the event_line.event field, because a new name is additive (RFC 0016 §8.2) and consumers must tolerate it. `comp:\"mcp\"` reuses these names; it introduces none. The report-write events (`report.written`/`report.write.fail`) are emitted by the reference impl (RFC 0016 §6.3/§8.4) and SHOULD be treated as additive members beyond the 27.",
+      "type": "string",
+      "enum": [
+        "proc.start",
+        "proc.ready",
+        "proc.shutdown",
+        "proc.exit",
+        "config.loaded",
+        "mcp.connect",
+        "mcp.connect.fail",
+        "mcp.disconnect",
+        "trigger.armed",
+        "trigger.fired",
+        "subscribe",
+        "unsubscribe",
+        "resource.updated",
+        "subagent.spawn",
+        "subagent.exit",
+        "subagent.signal",
+        "subagent.stuck",
+        "subagent.restart",
+        "limit.exceeded",
+        "loop.start",
+        "loop.step",
+        "loop.final",
+        "loop.error",
+        "intel.call",
+        "intel.result",
+        "tool.call",
+        "tool.result"
+      ]
+    }
+  }
+}

@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentctl.dev/contract/v1/events.schema.json",
+  "title": "Agent Control Contract — Live Event Stream (agent://events read body)",
+  "description": "The read body of the `agent://events` resource (reference alias `agentd://events`): a subscribable, bounded live-event window an operator drains to tail activity — loop steps, refusals, spawns, drain progress — over the self-MCP, without scraping container stderr (agentd RFC 0016 §7). It is a PROJECTION of the same stderr JSON-lines stream (RFC 0010 §3.2/§3.3), not a second telemetry path: identical lines, identical closed event vocabulary, plus a monotonic ring `seq`. Backed by a fixed-size in-memory ring (env AGENT_EVENTS_RING, reference alias AGENTD_EVENTS_RING; default 1024) that is LOSSY BY DESIGN — an overrun drops the oldest and bumps `dropped`, never blocking a slow subscriber. The transport is RFC 0005 notify-then-read: a payload-free `notifications/resources/updated{uri}` fires on new events; the subscriber `resources/read(\"agent://events?after=<seq>\")` to pull the window with seq > after, optionally filtered by `?level=` and `?event=<dotted-prefix-comma-list>`, advancing `after` to the last seq it saw. The ring is in-memory and dropped wholesale on SIGKILL; the durable record is stderr + the run report. This envelope is OPEN/additive-tolerant.",
+  "type": "object",
+  "additionalProperties": true,
+  "x-contract": {
+    "owner_rfc": "agentd RFC 0016 §7 (envelope); RFC 0010 §3.2/§3.3 (line schema + event vocabulary)",
+    "manifest_surface": "surfaces.events_schema (presence gated by surfaces.events; feature `events` + a served self-MCP)",
+    "current_version": "1.0",
+    "versioning": "events_schema major.minor versions ONLY the envelope (oldest_seq/newest_seq/dropped/events shape), NOT the line schema (RFC 0010 owns and versions that). A new event NAME is additive (consumer tolerates it). A new line field is additive. The consumer refuses only an unknown events_schema MAJOR. Surface absent => no ring built => consumer degrades to stderr/log scraping where reachable.",
+    "read_request": {
+      "uri": "agent://events",
+      "query": "?after=<seq>&level=<trace|debug|info|warn|error>&event=<dotted-prefix,dotted-prefix,...>",
+      "notes": "after defaults to 0 (whole held window). Unknown query keys are ignored (forward-compatible). A malformed `after` falls back to 0. `event` is a comma-list of dotted PREFIXES matched against the line `event` (e.g. `subagent.,limit.`). The server caps one read window (reference impl: 512 entries); the subscriber pages by advancing `after`.",
+      "debranding": {
+        "uri_scheme": {"neutral": "agent://", "reference_alias": "agentd://"},
+        "env": {"AGENT_EVENTS_RING": "AGENTD_EVENTS_RING", "AGENT_SERVE_EVENTS": "AGENTD_SERVE_EVENTS"}
+      }
+    }
+  },
+  "required": ["events_schema", "oldest_seq", "newest_seq", "dropped", "events"],
+  "properties": {
+    "events_schema": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Envelope schema version major.minor (RFC 0016 §7.2/§8.1). Current 1.0. Versions the envelope shape only.",
+      "examples": ["1.0"]
+    },
+    "oldest_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Smallest ring `seq` currently held. If a subscriber's `after` predates this, it fell behind (see `dropped`) and must re-baseline."
+    },
+    "newest_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Largest ring `seq` currently held. The subscriber advances its cursor toward this."
+    },
+    "dropped": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Cumulative count of lines evicted from the ring since process start (monotonic). dropped > 0 since the last read means the subscriber fell behind and lost lines — lossy by design (RFC 0016 §7.2/§8.4)."
+    },
+    "events": {
+      "type": "array",
+      "description": "The ring slice with seq > after (after optional level/event-prefix filtering), oldest-first. Each entry is an RFC 0010 §3.2 log line VERBATIM with one added field, the ring `seq`.",
+      "items": {"$ref": "#/$defs/event_line"}
+    }
+  },
+  "$defs": {
+    "event_line": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "One RFC 0010 §3.2 JSON-lines telemetry line plus the ring `seq`. OPEN: event-specific fields (tool, server, tokens_in/tokens_out, resource_uri, route, limit, value, cap, child_agent_id, child_path, depth, signal, finish_reason, result_bytes, ...) ride additionalProperties keyed by the event name — a consumer ignores fields it does not recognise.",
+      "required": ["seq", "ts", "level", "event", "run_id", "agent_id", "agent_path", "comp", "pid"],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic ring sequence — the ONLY field added over the stderr line (RFC 0016 §7.2). The subscriber's cursor key; advance `after` to the largest seq seen."
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 UTC timestamp, millisecond precision. Always UTC, never local time."
+        },
+        "level": {
+          "type": "string",
+          "enum": ["trace", "debug", "info", "warn", "error"],
+          "description": "Severity. Closed set (RFC 0010 §3.2)."
+        },
+        "event": {
+          "type": "string",
+          "description": "Dotted event type — the primary index/filter key. A small CLOSED vocabulary (RFC 0010 §3.3, see $defs.event_name_v1) BUT additive-tolerant: a new event name is a minor change (RFC 0016 §8.2), so this is typed `string` and a consumer MUST tolerate an unrecognised name (provisional modelling choice: enforcing the enum would break additive tolerance; the frozen v1 set lives in $defs.event_name_v1 for codegen/reference only).",
+          "examples": ["loop.step", "subagent.spawn", "limit.exceeded", "intel.result", "tool.result"]
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ULID for the whole invocation, stable across the tree (RFC 0010 §3.2)."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Emitting process id; the supervisor uses the reserved `sup`/`root`."
+        },
+        "agent_path": {
+          "type": "string",
+          "description": "Dotted tree path (`0`, `0.2`, `0.2.1`). The cheap superpower: scope a subtree by prefix, no backend join."
+        },
+        "comp": {
+          "type": "string",
+          "enum": ["supervisor", "agent", "mcp", "intel"],
+          "description": "Emitting component. Closed set (RFC 0010 §3.2)."
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "OS process id — joins the log tree to the OS `pstree`."
+        },
+        "span_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "description": "W3C span id, 8 bytes as 16 lowercase hex. Present in-span (RFC 0010 §3.2)."
+        },
+        "parent_span_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "description": "Parent span id, 8 bytes as 16 lowercase hex. Present in-span."
+        },
+        "trace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "W3C trace id, 16 bytes as 32 lowercase hex. Present when trace propagation is on (default). Correlates across pods (RFC 0010 §3.6)."
+        },
+        "dur_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Duration in milliseconds, present on `*.end`/`*.result` events."
+        },
+        "err": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Structured error, present on error events — NEVER a stringified stack (RFC 0010 §3.2).",
+          "properties": {
+            "type": {"type": "string"},
+            "message": {"type": "string"}
+          }
+        },
+        "msg": {
+          "type": "string",
+          "description": "Optional short human string — never the structured payload."
+        }
+      }
+    },
+    "event_name_v1": {
+      "description": "The frozen v1 closed event vocabulary (RFC 0010 §3.3): 19 supervisor/lifecycle + 8 agentic-loop = 27 names. Provided for codegen/reference; NOT enforced on the `event` field, because a new name is additive (RFC 0016 §8.2) and consumers must tolerate it. `comp:\"mcp\"` reuses these names; it introduces none. The report-write events (`report.written`/`report.write.fail`) are emitted by the reference impl (RFC 0016 §6.3/§8.4) and SHOULD be treated as additive members.",
+      "type": "string",
+      "enum": [
+        "proc.start",
+        "proc.ready",
+        "proc.shutdown",
+        "proc.exit",
+        "config.loaded",
+        "mcp.connect",
+        "mcp.connect.fail",
+        "mcp.disconnect",
+        "trigger.armed",
+        "trigger.fired",
+        "subscribe",
+        "unsubscribe",
+        "resource.updated",
+        "subagent.spawn",
+        "subagent.exit",
+        "subagent.signal",
+        "subagent.stuck",
+        "subagent.restart",
+        "limit.exceeded",
+        "loop.start",
+        "loop.step",
+        "loop.final",
+        "loop.error",
+        "intel.call",
+        "intel.result",
+        "tool.call",
+        "tool.result"
+      ]
+    }
+  }
+}

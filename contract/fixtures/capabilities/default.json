@@ -1,0 +1,70 @@
+{
+  "a2a_peers": [],
+  "agentd_version": "2.5.0",
+  "allow_trifecta": false,
+  "build_features": [
+    "serve-mcp",
+    "cron",
+    "metrics",
+    "otel"
+  ],
+  "contract_version": "1.0",
+  "exec_enabled": false,
+  "identity": {
+    "instance": null,
+    "namespace": null,
+    "node": null,
+    "run_id": "19f0ae13f093c57b8",
+    "uid": null
+  },
+  "intelligence": {
+    "endpoints": 0,
+    "healthy": "unknown",
+    "transport": null
+  },
+  "intelligence_summary": {
+    "toolmode": "native"
+  },
+  "limits": {
+    "deadline_ms": 600000,
+    "drain_timeout_ms": 25000,
+    "max_children": 8,
+    "max_depth": 4,
+    "max_steps": 50,
+    "max_tokens": 200000,
+    "max_total_subagents": 64,
+    "tree_token_budget": 2000000
+  },
+  "mcp_servers": [],
+  "mode": "once",
+  "model": null,
+  "surfaces": {
+    "a2a": false,
+    "claim": {
+      "styles": [
+        "tool",
+        "resource"
+      ]
+    },
+    "cluster": true,
+    "config_schema": true,
+    "config_validate": true,
+    "events": false,
+    "exit_codes": "1.0",
+    "hot_reload": true,
+    "intelligence": true,
+    "management": false,
+    "metrics": false,
+    "metrics_schema": "1.0",
+    "operator_tools": [
+      "drain",
+      "lame-duck",
+      "pause",
+      "resume",
+      "cancel"
+    ],
+    "report_schema": "1.0",
+    "shard": null,
+    "standby": false
+  }
+}

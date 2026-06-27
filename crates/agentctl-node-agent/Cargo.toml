@@ -1,0 +1,13 @@
+[package]
+name = "agentctl-node-agent"
+version = "0.1.0"
+description = "agentctl node-agent (RFC 0008). Tier A control bridge: speaks the management profile to a local agent over a unix socket. (Async tiers + discovery added next.)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agent-contract-client = { path = "../agent-contract-client" }
+serde.workspace = true
+serde_json.workspace = true

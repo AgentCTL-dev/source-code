@@ -1,0 +1,18 @@
+[package]
+name = "agentctl-crdgen"
+version = "0.1.0"
+description = "Emit the agentctl CRDs (Agent, AgentFleet) as apply-able YAML under deploy/crds/."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crdgen"
+path = "src/main.rs"
+
+[dependencies]
+agent-api = { path = "../agent-api" }
+kube = { version = "4", default-features = false, features = ["derive"] }
+k8s-openapi = { version = "0.28", features = ["latest"] }
+serde_yaml = "0.9"

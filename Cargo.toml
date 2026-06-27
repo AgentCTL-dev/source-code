@@ -1,0 +1,30 @@
+# agentctl workspace — the Kubernetes control plane for fleets of conformant agents.
+#
+# Per agentctl RFC 0001 (stack & repo decision record): Rust for all components,
+# the `kube-rs` ecosystem, one Cargo workspace. The data plane is ANY agent that
+# conforms to the Agent Control Contract (see `contract/`); `agentd` is the
+# reference implementation, never a dependency (principle P0).
+#
+# Crates are added to `members` as they land. The first foundation crate is
+# `agent-contract-client` — the typed, hand-written-where-codegen-can't client for
+# the contract (agentctl RFC 0018).
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent-contract-client",
+    "crates/agent-api",
+    "crates/agentctl-operator",
+    "crates/agentctl-crdgen",
+    "crates/agentctl-node-agent",
+    "crates/agentctl-cli",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/agentctl/agentctl"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

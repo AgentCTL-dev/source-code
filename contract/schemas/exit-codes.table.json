@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentctl.dev/contract/v1/exit-codes.table.json",
+  "title": "Agent Control Contract — Exit-Code Table",
+  "description": "The FROZEN exit-code table of the Agent Control Contract. Authority: agentd RFC 0011 §5 (the table) framed/versioned by RFC 0016 §5.1/§5.2 (podFailurePolicy intent mapping). Reference source of truth: crates/agentd/src/exit.rs (EXIT_CODES const, the SUCCESS..DEADLINE consts, SIGKILL_EXIT/SIGTERM_EXIT, once_exit(), pod_failure_intent()). This artifact is a DATA catalogue (not a JSON-document validator) carrying the code -> {neutral name, reference const alias, meaning, podFailurePolicy intent} mapping plus mode reachability. agentctl compiles `intent` into Job onExitCodes / podFailurePolicy rules. Versioned by `exit_codes_version` (== surfaces.exit_codes); additive => minor; any change to a code's meaning or to its intent => major. A consumer MUST refuse only an unknown MAJOR; an unrecognised code defaults to intent `retriable` (never a silent FailJob).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["exit_codes_version", "codes", "intent_vocabulary"],
+
+  "exit_codes_version": "1.0",
+  "x-version-note": "exit.rs EXIT_CODES = \"1.0\" and RFC 0016 §5.1 pin \"1.0\". RFC 0014 §5 jsonc sketch literally showed \"RFC-0011-§5\"; that form is kept only as a documentation alias below. The contract uses the bare major.minor string \"1.0\".",
+  "x-version-alias": "RFC-0011-§5",
+  "x-contract-version": "1.0",
+
+  "x-debranding": {
+    "rule": "Neutral token is canonical; the reference-impl spelling is the CURRENT ALIAS, accepted until a GA cutover decision. Branded spellings are NOT dropped (agents in the field emit them today).",
+    "scheme": { "neutral": "agent://", "reference_alias": "agentd://", "cutover": "GA (P0)" },
+    "env_prefix": { "neutral": "AGENT_", "reference_alias": "AGENTD_", "cutover": "GA (P0)" },
+    "metric_prefix": { "neutral": "agent_", "reference_alias": "agentd_", "cutover": "GA (P0)" }
+  },
+
+  "intent_vocabulary": {
+    "description": "The CLOSED podFailurePolicy intent vocabulary agentctl compiles into onExitCodes (RFC 0016 §5.2). pod_failure_intent() in exit.rs is total over the table and defaults an unrecognised code to `retriable`.",
+    "enum": ["complete", "terminal", "retriable", "policy", "infra"],
+    "semantics": {
+      "complete": "Treat as success; no retry, no FailJob (Job counts a completion).",
+      "terminal": "Permanent failure of THIS spec; do not retry (config/usage error or a reasoned refusal). Maps to FailJob.",
+      "retriable": "Transient/unspecified failure; eligible for backoff retry (Ignore toward backoffLimit).",
+      "policy": "Budget/partial outcome; verdict is operator policy (default-retriable but tunable via --budget-exit-code).",
+      "infra": "Kernel/infra-set (OOM, ungraceful SIGTERM); infrastructure remediation, not an application retry."
+    }
+  },
+
+  "codes": [
+    { "code": 0,   "name": "EXIT_OK",           "ref_name": "SUCCESS",           "intent": "complete",  "os_set": false, "returned_by_agent": true,  "meaning": "Success — one-shot completed / loop clean bound / CLEAN SIGTERM DRAIN (a clean drain exits 0, NOT 143)." },
+    { "code": 1,   "name": "EXIT_FAILURE",      "ref_name": "GENERIC",           "intent": "retriable", "os_set": false, "returned_by_agent": true,  "meaning": "Generic/unspecified failure. once_exit() also maps Cancelled and Crashed here." },
+    { "code": 2,   "name": "EXIT_USAGE",        "ref_name": "USAGE",             "intent": "terminal",  "os_set": false, "returned_by_agent": true,  "meaning": "Config/usage error — validation failed before any side effect. Also --validate-config invalid and a bad config file (RFC 0017)." },
+    { "code": 3,   "name": "EXIT_PARTIAL",      "ref_name": "PARTIAL",           "intent": "policy",    "os_set": false, "returned_by_agent": true,  "meaning": "Partial result emitted (a result-body property, not a status). once_exit() maps Stalled/LoopDetected here. Remappable via --budget-exit-code." },
+    { "code": 4,   "name": "EXIT_INTELLIGENCE", "ref_name": "INTEL_UNAVAILABLE", "intent": "retriable", "os_set": false, "returned_by_agent": true,  "meaning": "Intelligence endpoint unreachable / auth error after retries." },
+    { "code": 5,   "name": "EXIT_SEMANTIC",     "ref_name": "REFUSED",           "intent": "terminal",  "os_set": false, "returned_by_agent": true,  "meaning": "Agent ran correctly but concluded the task cannot be done / refused (TerminalStatus refused)." },
+    { "code": 6,   "name": "EXIT_MCP",          "ref_name": "MCP_REQUIRED_DOWN", "intent": "retriable", "os_set": false, "returned_by_agent": true,  "meaning": "A required MCP server failed connect/handshake or died unrecoverably." },
+    { "code": 7,   "name": "EXIT_BUDGET",       "ref_name": "BUDGET",            "intent": "policy",    "os_set": false, "returned_by_agent": true,  "meaning": "Hit max-steps/max-tokens/deadline/tree budget before a result (P-cost). once_exit() maps ExhaustedSteps/ExhaustedTokens/Deadline here. Remappable via --budget-exit-code." },
+    { "code": 124, "name": "EXIT_TIMEOUT",      "ref_name": "DEADLINE",          "intent": "policy",    "os_set": false, "returned_by_agent": false, "meaning": "Hard wall-clock deadline tripped (mnemonic to timeout(1)). Defined + OS-mnemonic, but UNREACHABLE via once_exit() in the reference, which folds Deadline into BUDGET(7). See x-mapping-divergence." },
+    { "code": 137, "name": "SIGKILL_EXIT",      "ref_name": "SIGKILL_EXIT",      "intent": "infra",     "os_set": true,  "returned_by_agent": false, "meaning": "128+SIGKILL — OOM / kubelet hard-kill (raise memory limit). Kernel-set; the binary never exit(137)s itself." },
+    { "code": 143, "name": "SIGTERM_EXIT",      "ref_name": "SIGTERM_EXIT",      "intent": "infra",     "os_set": true,  "returned_by_agent": false, "meaning": "128+SIGTERM — ungraceful exit (drain forced past budget). Kernel-set; DISTINCT from a clean drain, which is 0." }
+  ],
+
+  "x-mapping-divergence": {
+    "description": "The exit-code TABLE (code -> meaning -> intent) is the wire contract and is identical between RFC 0011 §5 and the reference. The INTERNAL status->code mapping fn once_exit() is impl-internal and NOT part of the contract; it diverges from RFC 0011 §5.2 prose. Prefer the source for what is emitted, but freeze only the table.",
+    "once_exit": {
+      "Completed": "0 (EXIT_OK), or 3 (EXIT_PARTIAL) when a usable partial exists",
+      "Refused": "5 (REFUSED)",
+      "ExhaustedSteps | ExhaustedTokens | Deadline": "7 (BUDGET) — note Deadline folds to 7, so 124 is unreachable via this fn",
+      "Stalled | LoopDetected": "3 (PARTIAL)",
+      "Cancelled": "1 (GENERIC) — RFC 0011 §5.2 prose said clean drain = 0",
+      "Crashed": "1 (GENERIC)"
+    },
+    "rfc_0011_§5.2_prose": "Deadline->124, Cancelled->0 (clean drain), Stalled/LoopDetected->3|1. Code 124 is defined and OS-mnemonic but currently unreachable through once_exit()."
+  },
+
+  "x-mode-reachability": {
+    "description": "Informational (RFC 0011 §7 / RFC 0016 §5.4) — which codes a mode can produce. Descriptive, not enforced.",
+    "once_job": [0, 1, 2, 3, 4, 5, 6, 7, 124, 137],
+    "loop_job": [0, 1, 2, 3, 4, 5, 6, 7, 124, 137],
+    "schedule_job": [0, 1, 2, 3, 4, 5, 6, 7, 124, 137],
+    "reactive_deployment": [0, 143],
+    "reactive_fatal": [4, 6, 137],
+    "note": "exit_code=2 (EXIT_USAGE) is never reachable from a run-outcome report (validation fails before any run). 137/143 are kernel-set and never returned by the binary."
+  },
+
+  "x-budget-exit-code-remap": {
+    "description": "An operator may remap EXIT_PARTIAL(3) and EXIT_BUDGET(7) via --budget-exit-code (RFC 0011 §5.2). The default-retriable/policy disposition is operator-tunable, not a fixed verdict. Relevant to P-cost.",
+    "flag": "--budget-exit-code",
+    "affects": [3, 7]
+  },
+
+  "x-sum-types": {
+    "exit_disposition": "In agent://status the exit_disposition field is null | integer(code) — null until terminal, then the integer code."
+  },
+
+  "x-provisional": {
+    "p_cost": "EXIT_BUDGET(7) is the P-cost budget signal; its policy disposition is operator-remappable (see x-budget-exit-code-remap).",
+    "code_124_unreachable": "124 is defined and OS-mnemonic but unreachable via the reference once_exit() (Deadline->7). Kept in the table for completeness."
+  }
+}

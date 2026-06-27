@@ -1,0 +1,22 @@
+[package]
+name = "agentctl-cli"
+version = "0.1.0"
+description = "agentctl CLI + kubectl-agent plugin (RFC 0016). get/describe over the Kubernetes API; management verbs via the node-agent path."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "agentctl"
+path = "src/main.rs"
+
+[dependencies]
+agent-api = { path = "../agent-api" }
+clap = { version = "4", features = ["derive"] }
+# Default features keep the client (rustls + config); `derive` is for CR typing.
+kube = { version = "4", features = ["derive"] }
+k8s-openapi = { version = "0.28", features = ["latest"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
+serde_json.workspace = true

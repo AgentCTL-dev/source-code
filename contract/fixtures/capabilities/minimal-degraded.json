@@ -1,0 +1,36 @@
+{
+  "contract_version": "1.0",
+  "agent_version": "0.2.0",
+  "build_features": [],
+  "identity": {
+    "run_id": "01J8X9ABCDEF0123456789ABCD",
+    "instance": null,
+    "uid": null,
+    "node": null,
+    "namespace": null
+  },
+  "mode": "once",
+  "model": null,
+  "intelligence": {
+    "transport": null,
+    "endpoints": 0,
+    "healthy": "unknown"
+  },
+  "surfaces": {
+    "management": false,
+    "operator_tools": [],
+    "a2a": false,
+    "metrics": false,
+    "metrics_schema": "1.0",
+    "events": false,
+    "report_schema": "1.0",
+    "exit_codes": "1.0",
+    "intelligence": false,
+    "hot_reload": false,
+    "config_validate": true,
+    "config_schema": true,
+    "cluster": false,
+    "shard": null,
+    "standby": false
+  }
+}

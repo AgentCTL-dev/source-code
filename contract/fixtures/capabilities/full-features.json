@@ -1,0 +1,94 @@
+{
+  "a2a_peers": [
+    {
+      "name": "coord",
+      "transport": "vsock"
+    }
+  ],
+  "agentd_version": "2.5.0",
+  "allow_trifecta": true,
+  "build_features": [
+    "tls",
+    "vsock",
+    "serve-mcp",
+    "a2a",
+    "cron",
+    "metrics",
+    "otel"
+  ],
+  "contract_version": "1.0",
+  "exec_enabled": true,
+  "identity": {
+    "instance": "agent-0",
+    "namespace": "agents",
+    "node": "node-1",
+    "run_id": "19f0ae21d543c5864",
+    "uid": "abc-123-uid"
+  },
+  "intelligence": {
+    "endpoints": 0,
+    "healthy": "unknown",
+    "transport": null
+  },
+  "intelligence_summary": {
+    "toolmode": "native"
+  },
+  "limits": {
+    "deadline_ms": 600000,
+    "drain_timeout_ms": 25000,
+    "max_children": 8,
+    "max_depth": 4,
+    "max_steps": 50,
+    "max_tokens": 200000,
+    "max_total_subagents": 64,
+    "tree_token_budget": 2000000
+  },
+  "mcp_servers": [
+    {
+      "name": "fs",
+      "tags": []
+    }
+  ],
+  "mode": "reactive",
+  "model": "claude-sonnet-4",
+  "surfaces": {
+    "a2a": {
+      "methods": [
+        "a2a.SendMessage",
+        "a2a.GetTask",
+        "a2a.CancelTask",
+        "a2a.ListTasks",
+        "a2a.SendStreamingMessage",
+        "a2a.SubscribeToTask"
+      ],
+      "streaming": true,
+      "version": "1.0"
+    },
+    "claim": {
+      "styles": [
+        "tool",
+        "resource"
+      ]
+    },
+    "cluster": true,
+    "config_schema": true,
+    "config_validate": true,
+    "events": true,
+    "exit_codes": "1.0",
+    "hot_reload": true,
+    "intelligence": true,
+    "management": "vsock:7000",
+    "metrics": "127.0.0.1:9090",
+    "metrics_schema": "1.0",
+    "operator_tools": [
+      "drain",
+      "lame-duck",
+      "pause",
+      "resume",
+      "cancel"
+    ],
+    "report_schema": "1.0",
+    "shard": "0/3",
+    "standby": false
+  }
+}
