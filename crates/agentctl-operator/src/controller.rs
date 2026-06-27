@@ -20,14 +20,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_api::{Agent, Condition, ContractStatus, Mode};
-use k8s_openapi::api::apps::v1::Deployment;
+use agent_api::{Agent, AgentStatus, Condition, ContractStatus, Mode};
+use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Api, Client, ResourceExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{render_agent, RenderError, Rendered};
 
@@ -94,37 +94,45 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     let observed = agent.metadata.generation;
     let agents: Api<Agent> = Api::namespaced(ctx.client.clone(), ns);
 
-    match render_agent(&agent) {
+    // Render + apply the workload, then derive the desired status. A RenderError
+    // is a user error (invalid spec) → Validated=False, not a retried failure.
+    let (condition, phase, contract) = match render_agent(&agent) {
         Ok(rendered) => {
             let kind = rendered_kind(&rendered);
             apply_workload(&ctx.client, ns, &rendered).await?;
-
-            let contract = ContractStatus {
-                mode: Some(mode_label(agent.spec.mode)),
-                ..Default::default()
-            };
-            let patch = status_patch(&ready_condition(observed, kind), observed, "Ready", &contract)?;
-            agents
-                .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
-                .await?;
-            info!(agent = %name, workload = kind, "applied workload and status");
-            Ok(Action::requeue(requeue_after()))
+            info!(agent = %name, workload = kind, "applied workload");
+            (
+                ready_condition(observed, kind),
+                "Ready",
+                ContractStatus {
+                    mode: Some(mode_label(agent.spec.mode)),
+                    ..Default::default()
+                },
+            )
         }
         Err(e) => {
-            // Invalid spec → Validated=False; nothing to retry until it changes.
-            let patch = status_patch(
-                &validated_failed_condition(&e.to_string()),
-                observed,
+            warn!(agent = %name, error = %e, "render rejected spec; marking Validated=False");
+            (
+                validated_failed_condition(&e.to_string()),
                 "Invalid",
-                &ContractStatus::default(),
-            )?;
-            agents
-                .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
-                .await?;
-            warn!(agent = %name, error = %e, "render rejected spec; marked Validated=False");
-            Ok(Action::requeue(requeue_after()))
+                ContractStatus::default(),
+            )
         }
+    };
+
+    // DeepEqual guard (RFC 0006 §2.6): only write status if it actually changed,
+    // so we don't churn the Agent (and re-trigger our own watch) every reconcile.
+    let desired = desired_status(&condition, observed, phase, &contract)?;
+    if status_changed(agent.status.as_ref(), &desired)? {
+        let patch = serde_json::json!({ "status": desired });
+        agents
+            .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+        debug!(agent = %name, phase, "patched status");
+    } else {
+        debug!(agent = %name, "status unchanged; skipped patch");
     }
+    Ok(Action::requeue(requeue_after()))
 }
 
 /// The `Cleanup` branch: the workload is owner-referenced, so Kubernetes GC
@@ -148,29 +156,41 @@ async fn apply_workload(client: &Client, ns: &str, rendered: &Rendered) -> Resul
             let name = dep.metadata.name.clone().ok_or(Error::MissingName)?;
             api.patch(&name, &pp, &Patch::Apply(dep.as_ref())).await?;
         }
+        Rendered::StatefulSet(sts) => {
+            let api: Api<StatefulSet> = Api::namespaced(client.clone(), ns);
+            let name = sts.metadata.name.clone().ok_or(Error::MissingName)?;
+            api.patch(&name, &pp, &Patch::Apply(sts.as_ref())).await?;
+        }
     }
     Ok(())
 }
 
-/// Build the merge patch for `Agent.status` (a partial doc; absent fields are
-/// left untouched by the apiserver merge).
-fn status_patch(
+/// Build the desired `Agent.status` body (the inner object the merge patch wraps
+/// under `"status"`). Kept separate from the write so it can be compared against
+/// the live status for the DeepEqual guard.
+fn desired_status(
     condition: &Condition,
     observed: Option<i64>,
     phase: &str,
     contract: &ContractStatus,
 ) -> Result<serde_json::Value, Error> {
-    let condition = serde_json::to_value(condition)?;
-    let observed = serde_json::to_value(observed)?;
-    let contract = serde_json::to_value(contract)?;
     Ok(serde_json::json!({
-        "status": {
-            "conditions": [condition],
-            "observedGeneration": observed,
-            "phase": phase,
-            "contract": contract,
-        }
+        "conditions": [serde_json::to_value(condition)?],
+        "observedGeneration": serde_json::to_value(observed)?,
+        "phase": phase,
+        "contract": serde_json::to_value(contract)?,
     }))
+}
+
+/// Whether the desired status differs from the live one. Compares as JSON so the
+/// managed fields line up with their serialized (camelCase) form; `None`
+/// (no status yet) always counts as changed.
+fn status_changed(current: Option<&AgentStatus>, desired: &serde_json::Value) -> Result<bool, Error> {
+    let current = match current {
+        Some(s) => serde_json::to_value(s)?,
+        None => serde_json::Value::Null,
+    };
+    Ok(&current != desired)
 }
 
 /// The workload kind label a render produced, without applying it. Pure so the
@@ -179,6 +199,7 @@ pub fn rendered_kind(rendered: &Rendered) -> &'static str {
     match rendered {
         Rendered::Job(_) => "Job",
         Rendered::Deployment(_) => "Deployment",
+        Rendered::StatefulSet(_) => "StatefulSet",
     }
 }
 
@@ -299,19 +320,39 @@ mod tests {
     }
 
     #[test]
-    fn status_patch_shapes_the_status_subobject() {
+    fn desired_status_shapes_the_inner_status() {
         let contract = ContractStatus {
             mode: Some(mode_label(Mode::Loop)),
             ..Default::default()
         };
-        let patch = status_patch(&ready_condition(Some(3), "Deployment"), Some(3), "Ready", &contract)
-            .unwrap();
-        let status = &patch["status"];
+        let status =
+            desired_status(&ready_condition(Some(3), "Deployment"), Some(3), "Ready", &contract)
+                .unwrap();
         assert_eq!(status["observedGeneration"], 3);
         assert_eq!(status["phase"], "Ready");
         assert_eq!(status["conditions"][0]["type"], "Ready");
         assert_eq!(status["conditions"][0]["status"], "True");
         assert_eq!(status["contract"]["mode"], "loop");
+    }
+
+    #[test]
+    fn status_changed_is_a_deep_equal_guard() {
+        let contract = ContractStatus {
+            mode: Some("once".into()),
+            ..Default::default()
+        };
+        let desired = desired_status(&ready_condition(Some(1), "Job"), Some(1), "Ready", &contract)
+            .unwrap();
+        // no status yet → changed
+        assert!(status_changed(None, &desired).unwrap());
+        // an equivalent live status → unchanged (no needless patch / churn)
+        let current: AgentStatus = serde_json::from_value(desired.clone()).unwrap();
+        assert!(!status_changed(Some(&current), &desired).unwrap());
+        // a different phase → changed
+        let draining =
+            desired_status(&ready_condition(Some(1), "Job"), Some(1), "Draining", &contract)
+                .unwrap();
+        assert!(status_changed(Some(&current), &draining).unwrap());
     }
 
     #[test]

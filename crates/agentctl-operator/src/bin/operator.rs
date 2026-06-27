@@ -11,13 +11,18 @@ use agentctl_operator::controller::{error_policy, reconcile, Ctx};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
+use kube::runtime::controller::Error as ControllerError;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Client};
-use tracing::{error, info};
+use tracing::{debug, error, info};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), kube::Error> {
-    tracing_subscriber::fmt().init();
+    // Honor RUST_LOG (e.g. `agentctl_operator=debug`); default to info.
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .init();
 
     let client = Client::try_default().await?;
 
@@ -34,6 +39,11 @@ async fn main() -> Result<(), kube::Error> {
         .for_each(|res| async move {
             match res {
                 Ok((obj, action)) => info!(?obj, ?action, "reconciled"),
+                // A queued reconcile for an object already gone from the store
+                // (the post-delete / finalizer race) is benign — log it quietly.
+                Err(e @ ControllerError::ObjectNotFound(_)) => {
+                    debug!(error = %e, "object gone before reconcile (post-delete race)")
+                }
                 Err(e) => error!(error = %e, "reconcile loop error"),
             }
         })
