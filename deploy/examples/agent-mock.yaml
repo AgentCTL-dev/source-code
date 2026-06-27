@@ -1,0 +1,14 @@
+# A reactive Agent backed by the mock-agent image (a conformant-agent stand-in
+# that serves the management profile). The operator renders a Deployment whose
+# pod binds the management socket on the stock-unix hostPath; the node-agent
+# DaemonSet then discovers it and reads its capabilities over the socket.
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Agent
+metadata:
+  name: mock
+  namespace: default
+spec:
+  mode: reactive
+  image: mock-agent:dev
+  instruction: "serve the management profile"
+  subscribe: ["queue://noop"]

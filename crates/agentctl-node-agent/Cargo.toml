@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "node-agent"
+path = "src/bin/node-agent.rs"
+
 [dependencies]
 agent-contract-client = { path = "../agent-contract-client" }
 serde.workspace = true

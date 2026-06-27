@@ -1,0 +1,15 @@
+[package]
+name = "mock-agent"
+version = "0.1.0"
+description = "A minimal CONFORMANT-AGENT stand-in: serves the contract management profile (self-MCP) on the substrate unix socket. A dev/e2e/conformance fixture — not a real agent (no agentic loop). Proves agentctl is agent-agnostic (P0)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mock-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true

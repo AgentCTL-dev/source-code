@@ -12,6 +12,8 @@
 //! dependency-light here; the async Tier-A/Tier-B split and CID/socket discovery
 //! are layered on next.
 
+pub mod discovery;
 pub mod mgmt;
 
+pub use discovery::{discover, DiscoveredAgent};
 pub use mgmt::{Error, ManagementClient};
