@@ -9,4 +9,4 @@
 pub mod controller;
 pub mod render;
 
-pub use render::{render_agent, RenderError, Rendered};
+pub use render::{render_agent, render_fleet, RenderError, Rendered};

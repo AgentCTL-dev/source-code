@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_api::{Agent, AgentStatus, Condition, ContractStatus, Mode};
+use agent_api::{Agent, AgentFleet, Condition, ContractStatus, Mode};
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Patch, PatchParams};
@@ -29,7 +29,7 @@ use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use crate::{render_agent, RenderError, Rendered};
+use crate::{render_agent, render_fleet, RenderError, Rendered};
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
 const FINALIZER: &str = "agentctl.dev/cleanup";
@@ -184,8 +184,12 @@ fn desired_status(
 
 /// Whether the desired status differs from the live one. Compares as JSON so the
 /// managed fields line up with their serialized (camelCase) form; `None`
-/// (no status yet) always counts as changed.
-fn status_changed(current: Option<&AgentStatus>, desired: &serde_json::Value) -> Result<bool, Error> {
+/// (no status yet) always counts as changed. Generic over the status type so
+/// both `Agent` and `AgentFleet` share one guard.
+fn status_changed<S: serde::Serialize>(
+    current: Option<&S>,
+    desired: &serde_json::Value,
+) -> Result<bool, Error> {
     let current = match current {
         Some(s) => serde_json::to_value(s)?,
         None => serde_json::Value::Null,
@@ -240,6 +244,76 @@ pub fn error_backoff() -> Duration {
 /// Requeue with a short backoff on any reconcile error.
 pub fn error_policy(_agent: Arc<Agent>, err: &Error, _ctx: Arc<Ctx>) -> Action {
     warn!(error = %err, "reconcile failed; requeueing");
+    Action::requeue(error_backoff())
+}
+
+// ---------------------------------------------------------------------------
+// AgentFleet reconcile (scaling plane, RFC 0011)
+// ---------------------------------------------------------------------------
+
+/// Reconcile one `AgentFleet`: render it to a Deployment (claim) or StatefulSet
+/// (shard) and apply it, wrapped in the deletion finalizer (the workload is
+/// owner-referenced, so GC reclaims it).
+pub async fn reconcile_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+    let ns = fleet.namespace().ok_or(Error::MissingNamespace)?;
+    let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), &ns);
+
+    finalizer(&fleets, FINALIZER, fleet, |event| async move {
+        match event {
+            Event::Apply(fleet) => apply_fleet(fleet, ctx, &ns).await,
+            Event::Cleanup(fleet) => {
+                info!(fleet = %fleet.name_any(), "fleet deleted; owned workload reclaimed by GC");
+                Ok(Action::await_change())
+            }
+        }
+    })
+    .await
+    .map_err(|e| Error::Finalizer(Box::new(e)))
+}
+
+async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Error> {
+    let name = fleet.name_any();
+    let observed = fleet.metadata.generation;
+    let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
+
+    let condition = match render_fleet(&fleet) {
+        Ok(rendered) => {
+            let kind = rendered_kind(&rendered);
+            apply_workload(&ctx.client, ns, &rendered).await?;
+            info!(fleet = %name, workload = kind, "applied fleet workload");
+            ready_condition(observed, kind)
+        }
+        Err(e) => {
+            warn!(fleet = %name, error = %e, "render rejected fleet spec; marking Validated=False");
+            validated_failed_condition(&e.to_string())
+        }
+    };
+
+    let desired = desired_fleet_status(&condition, observed)?;
+    if status_changed(fleet.status.as_ref(), &desired)? {
+        let patch = serde_json::json!({ "status": desired });
+        fleets
+            .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+        debug!(fleet = %name, "patched fleet status");
+    } else {
+        debug!(fleet = %name, "fleet status unchanged; skipped patch");
+    }
+    Ok(Action::requeue(requeue_after()))
+}
+
+/// The desired `AgentFleet.status` body (replica counts are owned by KEDA / the
+/// workload and projected in a later step; v1 carries the conditions + observed).
+fn desired_fleet_status(condition: &Condition, observed: Option<i64>) -> Result<serde_json::Value, Error> {
+    Ok(serde_json::json!({
+        "conditions": [serde_json::to_value(condition)?],
+        "observedGeneration": serde_json::to_value(observed)?,
+    }))
+}
+
+/// Requeue with a short backoff on any fleet reconcile error.
+pub fn error_policy_fleet(_fleet: Arc<AgentFleet>, err: &Error, _ctx: Arc<Ctx>) -> Action {
+    warn!(error = %err, "fleet reconcile failed; requeueing");
     Action::requeue(error_backoff())
 }
 
@@ -344,15 +418,27 @@ mod tests {
         let desired = desired_status(&ready_condition(Some(1), "Job"), Some(1), "Ready", &contract)
             .unwrap();
         // no status yet → changed
-        assert!(status_changed(None, &desired).unwrap());
+        assert!(status_changed::<agent_api::AgentStatus>(None, &desired).unwrap());
         // an equivalent live status → unchanged (no needless patch / churn)
-        let current: AgentStatus = serde_json::from_value(desired.clone()).unwrap();
+        let current: agent_api::AgentStatus = serde_json::from_value(desired.clone()).unwrap();
         assert!(!status_changed(Some(&current), &desired).unwrap());
         // a different phase → changed
         let draining =
             desired_status(&ready_condition(Some(1), "Job"), Some(1), "Draining", &contract)
                 .unwrap();
         assert!(status_changed(Some(&current), &draining).unwrap());
+    }
+
+    #[test]
+    fn desired_fleet_status_carries_condition_and_generation() {
+        let status = desired_fleet_status(&ready_condition(Some(2), "Deployment"), Some(2)).unwrap();
+        assert_eq!(status["observedGeneration"], 2);
+        assert_eq!(status["conditions"][0]["type"], "Ready");
+        assert_eq!(status["conditions"][0]["status"], "True");
+        // a fleet status with a matching condition is unchanged (guard works for fleets too)
+        let current: agent_api::AgentFleetStatus =
+            serde_json::from_value(status.clone()).unwrap();
+        assert!(!status_changed(Some(&current), &status).unwrap());
     }
 
     #[test]

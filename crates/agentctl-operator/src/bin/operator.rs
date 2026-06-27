@@ -6,10 +6,12 @@
 
 use std::sync::Arc;
 
-use agent_api::Agent;
-use agentctl_operator::controller::{error_policy, reconcile, Ctx};
+use agent_api::{Agent, AgentFleet};
+use agentctl_operator::controller::{
+    error_policy, error_policy_fleet, reconcile, reconcile_fleet, Ctx,
+};
 use futures::StreamExt;
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use kube::runtime::controller::Error as ControllerError;
 use kube::runtime::{watcher, Controller};
@@ -25,20 +27,21 @@ async fn main() -> Result<(), kube::Error> {
         .init();
 
     let client = Client::try_default().await?;
+    let ctx = Arc::new(Ctx {
+        client: client.clone(),
+    });
 
-    let agents = Api::<Agent>::all(client.clone());
-    let jobs = Api::<Job>::all(client.clone());
-    let deployments = Api::<Deployment>::all(client.clone());
+    info!("starting agentctl-operator controllers (Agent + AgentFleet)");
 
-    info!("starting agentctl-operator controller");
-    Controller::new(agents, watcher::Config::default())
-        .owns(jobs, watcher::Config::default())
-        .owns(deployments, watcher::Config::default())
+    // Agent → Job/Deployment.
+    let agent_ctrl = Controller::new(Api::<Agent>::all(client.clone()), watcher::Config::default())
+        .owns(Api::<Job>::all(client.clone()), watcher::Config::default())
+        .owns(Api::<Deployment>::all(client.clone()), watcher::Config::default())
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Ctx { client }))
+        .run(reconcile, error_policy, ctx.clone())
         .for_each(|res| async move {
             match res {
-                Ok((obj, action)) => info!(?obj, ?action, "reconciled"),
+                Ok((obj, action)) => info!(kind = "Agent", ?obj, ?action, "reconciled"),
                 // A queued reconcile for an object already gone from the store
                 // (the post-delete / finalizer race) is benign — log it quietly.
                 Err(e @ ControllerError::ObjectNotFound(_)) => {
@@ -46,9 +49,27 @@ async fn main() -> Result<(), kube::Error> {
                 }
                 Err(e) => error!(error = %e, "reconcile loop error"),
             }
-        })
-        .await;
+        });
 
-    info!("agentctl-operator controller stopped");
+    // AgentFleet → Deployment (claim) / StatefulSet (shard).
+    let fleet_ctrl =
+        Controller::new(Api::<AgentFleet>::all(client.clone()), watcher::Config::default())
+            .owns(Api::<Deployment>::all(client.clone()), watcher::Config::default())
+            .owns(Api::<StatefulSet>::all(client.clone()), watcher::Config::default())
+            .shutdown_on_signal()
+            .run(reconcile_fleet, error_policy_fleet, ctx.clone())
+            .for_each(|res| async move {
+                match res {
+                    Ok((obj, action)) => info!(kind = "AgentFleet", ?obj, ?action, "reconciled"),
+                    Err(e @ ControllerError::ObjectNotFound(_)) => {
+                        debug!(error = %e, "object gone before reconcile (post-delete race)")
+                    }
+                    Err(e) => error!(error = %e, "reconcile loop error"),
+                }
+            });
+
+    tokio::join!(agent_ctrl, fleet_ctrl);
+
+    info!("agentctl-operator controllers stopped");
     Ok(())
 }
