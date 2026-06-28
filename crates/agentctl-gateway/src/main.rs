@@ -161,6 +161,12 @@ async fn a2a_rpc(
         };
     }
 
+    // Push-notification config (RFC 0013) is gateway-owned: our agents are
+    // networkless, so the gateway stores the webhook and delivers. Not forwarded.
+    if let Some(op) = spec.strip_prefix("tasks/pushNotificationConfig/") {
+        return push_config(&state.pool, &ns, &name, op, &req, id).await;
+    }
+
     // Translate spec → reference; unknown method ⇒ -32601 (METHOD_NOT_FOUND).
     let streaming = spec == "message/stream";
     let reference = match translate_method(&spec) {
@@ -259,6 +265,10 @@ async fn a2a_rpc(
             {
                 tracing::warn!(error = %e, "store upsert failed");
             }
+            // Deliver a push notification if a webhook is registered (RFC 0013).
+            if let Ok(Some(url)) = store::push_get(&state.pool, &ns, &name, tid).await {
+                deliver_push(url, result.clone());
+            }
         }
     } else if spec == "tasks/cancel" {
         if let Some(tid) = body.pointer("/result/id").and_then(Value::as_str) {
@@ -325,6 +335,71 @@ async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> Respo
     }
 
     Json(json!({ "agents": rows })).into_response()
+}
+
+/// Serve the A2A `tasks/pushNotificationConfig/*` methods (set/get/list/delete)
+/// from the gateway-owned store. The agent is networkless, so the gateway holds
+/// the webhook config and performs delivery — these are never forwarded.
+async fn push_config(
+    pool: &Pool,
+    ns: &str,
+    name: &str,
+    op: &str,
+    req: &Value,
+    id: Value,
+) -> Response {
+    let task_id = req
+        .pointer("/params/taskId")
+        .or_else(|| req.pointer("/params/id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let url_param = req
+        .pointer("/params/pushNotificationConfig/url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    let outcome: Result<Value, String> = match op {
+        "set" if task_id.is_empty() || url_param.is_empty() => {
+            Err("set requires params.taskId and params.pushNotificationConfig.url".into())
+        }
+        "set" => store::push_set(pool, ns, name, &task_id, &url_param)
+            .await
+            .map(|_| json!({ "taskId": task_id, "pushNotificationConfig": { "url": url_param } })),
+        "get" => store::push_get(pool, ns, name, &task_id)
+            .await
+            .map(|u| match u {
+                Some(url) => json!({ "taskId": task_id, "pushNotificationConfig": { "url": url } }),
+                None => Value::Null,
+            }),
+        "list" => store::push_list(pool, ns, name).await.map(|rows| {
+            Value::Array(
+                rows.into_iter()
+                    .map(|(t, u)| json!({ "taskId": t, "pushNotificationConfig": { "url": u } }))
+                    .collect(),
+            )
+        }),
+        "delete" => store::push_delete(pool, ns, name, &task_id)
+            .await
+            .map(|_| Value::Null),
+        other => Err(format!("unknown pushNotificationConfig op: {other}")),
+    };
+
+    match outcome {
+        Ok(result) => Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response(),
+        Err(e) => Json(rpc_error(id, -32602, &e)).into_response(),
+    }
+}
+
+/// Fire-and-forget delivery of a task to a registered push webhook (RFC 0013).
+fn deliver_push(url: String, task: Value) {
+    tokio::spawn(async move {
+        match reqwest::Client::new().post(&url).json(&task).send().await {
+            Ok(r) => tracing::info!(%url, status = r.status().as_u16(), "push delivered"),
+            Err(e) => tracing::warn!(%url, error = %e, "push delivery failed"),
+        }
+    });
 }
 
 // --- pure helpers (unit-tested) --------------------------------------------

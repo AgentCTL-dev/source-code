@@ -17,7 +17,7 @@ pub struct TaskRow {
     pub artifact: String,
 }
 
-/// Create the table if missing (idempotent; called with retry at startup).
+/// Create the tables if missing (idempotent; called with retry at startup).
 pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     client
@@ -32,6 +32,14 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 PRIMARY KEY (namespace, agent, id)
+            );
+            CREATE TABLE IF NOT EXISTS a2a_push_configs (
+                namespace  text        NOT NULL,
+                agent      text        NOT NULL,
+                task_id    text        NOT NULL,
+                url        text        NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (namespace, agent, task_id)
             )",
         )
         .await
@@ -115,6 +123,83 @@ pub async fn set_state(
             "UPDATE a2a_tasks SET state = $4, updated_at = now()
              WHERE namespace = $1 AND agent = $2 AND id = $3",
             &[&ns, &agent, &id, &state],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
+/// Register (or replace) the push-notification webhook URL for a task.
+pub async fn push_set(
+    pool: &Pool,
+    ns: &str,
+    agent: &str,
+    task_id: &str,
+    url: &str,
+) -> Result<(), String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    client
+        .execute(
+            "INSERT INTO a2a_push_configs (namespace, agent, task_id, url)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (namespace, agent, task_id) DO UPDATE SET url = $4",
+            &[&ns, &agent, &task_id, &url],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The webhook URL registered for a task, if any.
+pub async fn push_get(
+    pool: &Pool,
+    ns: &str,
+    agent: &str,
+    task_id: &str,
+) -> Result<Option<String>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let row = client
+        .query_opt(
+            "SELECT url FROM a2a_push_configs
+             WHERE namespace = $1 AND agent = $2 AND task_id = $3",
+            &[&ns, &agent, &task_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// All push-notification configs registered for an agent.
+pub async fn push_list(
+    pool: &Pool,
+    ns: &str,
+    agent: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let rows = client
+        .query(
+            "SELECT task_id, url FROM a2a_push_configs
+             WHERE namespace = $1 AND agent = $2 ORDER BY created_at DESC",
+            &[&ns, &agent],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
+/// Remove a task's push-notification config. Returns whether a row matched.
+pub async fn push_delete(
+    pool: &Pool,
+    ns: &str,
+    agent: &str,
+    task_id: &str,
+) -> Result<bool, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let n = client
+        .execute(
+            "DELETE FROM a2a_push_configs
+             WHERE namespace = $1 AND agent = $2 AND task_id = $3",
+            &[&ns, &agent, &task_id],
         )
         .await
         .map_err(|e| e.to_string())?;

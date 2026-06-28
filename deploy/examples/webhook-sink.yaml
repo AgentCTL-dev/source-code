@@ -1,0 +1,52 @@
+# A minimal webhook receiver for the A2A push-notification e2e (RFC 0013): it
+# logs every POST body to stdout so we can confirm the gateway delivered a task.
+# Dev/test only — NOT part of the control plane.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-sink
+  namespace: default
+  labels:
+    app.kubernetes.io/name: webhook-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-sink
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: webhook-sink
+    spec:
+      containers:
+        - name: sink
+          image: python:3.12-alpine
+          command:
+            - python3
+            - -c
+            - |
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+              class H(BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      n = int(self.headers.get('content-length', 0))
+                      body = self.rfile.read(n).decode()
+                      print('WEBHOOK', self.path, body, flush=True)
+                      self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
+                  def log_message(self, *a): pass
+              print('webhook-sink listening on :8080', flush=True)
+              HTTPServer(('', 8080), H).serve_forever()
+          ports:
+            - { containerPort: 8080, name: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-sink
+  namespace: default
+  labels:
+    app.kubernetes.io/name: webhook-sink
+spec:
+  selector:
+    app.kubernetes.io/name: webhook-sink
+  ports:
+    - { port: 8080, targetPort: 8080, name: http }
