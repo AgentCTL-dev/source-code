@@ -32,7 +32,8 @@ emit the branded form today.
 ```
 contract/
   VERSION                                  # the contract version: 1.0
-  README.md                                # this file — the ACC spec
+  README.md                                # this file — the ACC overview + P0 + de-branding
+  SPEC.md                                  # the spec-level companion: cross-cutting laws, frozen catalogues, sum types, gotchas
   schemas/                                 # CANONICAL finalized schema set (draft 2020-12)
     manifest.schema.json                   # capabilities manifest — the discovery spine
     config.schema.json                     # agent config-file schema (reloadable + restart-only view)
