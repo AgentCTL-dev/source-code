@@ -17,9 +17,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agentctl_node_agent::{discover, DiscoveredAgent, ManagementClient};
+use agentctl_node_agent::{discover, metrics, DiscoveredAgent, ManagementClient};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -42,6 +42,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_handler))
         .route("/v1/agents/{pod_uid}/{verb}", post(verb_handler))
         .with_state(root);
 
@@ -87,6 +88,34 @@ async fn verb_handler(
             Json(json!({ "ok": false, "error": e.to_string() })),
         ),
     }
+}
+
+/// Scrape-proxy: read every local agent's metrics over the socket and re-expose
+/// them as one Prometheus exposition (RFC 0010). Networkless agents stay
+/// observable; Prometheus scrapes this node-agent endpoint.
+async fn metrics_handler(State(root): State<PathBuf>) -> ([(header::HeaderName, &'static str); 1], String) {
+    let agents = discover(&root).unwrap_or_default();
+    let mut collected: Vec<(String, String)> = Vec::new();
+    for agent in agents {
+        let socket = agent.socket.clone();
+        let scraped = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut client = ManagementClient::connect(&socket).map_err(|e| e.to_string())?;
+            client.initialize().map_err(|e| e.to_string())?;
+            client
+                .read_resource_text("agentd://metrics")
+                .map_err(|e| e.to_string())
+        })
+        .await;
+        match scraped {
+            Ok(Ok(text)) => collected.push((agent.pod_uid, text)),
+            Ok(Err(e)) => eprintln!("node-agent: scrape {} failed: {e}", agent.pod_uid),
+            Err(e) => eprintln!("node-agent: scrape task panicked: {e}"),
+        }
+    }
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        metrics::merge(&collected),
+    )
 }
 
 async fn discovery_loop(root: PathBuf, interval: Duration) {

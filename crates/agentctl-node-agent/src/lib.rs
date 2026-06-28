@@ -13,6 +13,7 @@
 //! are layered on next.
 
 pub mod discovery;
+pub mod metrics;
 pub mod mgmt;
 
 pub use discovery::{discover, DiscoveredAgent};

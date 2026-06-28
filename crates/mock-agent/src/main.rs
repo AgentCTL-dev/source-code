@@ -21,6 +21,20 @@ use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
 
+/// Mock Prometheus metrics (text exposition 0.0.4) served as an MCP resource.
+const METRICS: &str = "\
+# HELP agent_pending_events Reactive events awaiting processing.
+# TYPE agent_pending_events gauge
+agent_pending_events 3
+# HELP agent_tokens_total Tokens consumed by the agentic loop.
+# TYPE agent_tokens_total counter
+agent_tokens_total{direction=\"input\"} 1200
+agent_tokens_total{direction=\"output\"} 340
+# HELP agent_tool_calls_total MCP tool calls made.
+# TYPE agent_tool_calls_total counter
+agent_tool_calls_total 17
+";
+
 fn main() {
     let serve = env::var("AGENT_SERVE_MCP")
         .or_else(|_| env::var("AGENTD_SERVE_MCP"))
@@ -96,6 +110,10 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 "agent://inventory" | "agentd://inventory" => {
                     json!({ "agents": [], "warm_sessions": 0 }).to_string()
                 }
+                // Prometheus 0.0.4 text exposed as an MCP resource (RFC 0010 / P4):
+                // the node-agent reads this over the socket and re-exposes it, so a
+                // networkless agent is still scrapeable.
+                "agent://metrics" | "agentd://metrics" => METRICS.to_string(),
                 other => {
                     return Err((-32602, format!("unknown resource: {other}")));
                 }
