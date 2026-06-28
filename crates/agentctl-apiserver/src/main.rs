@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! agentctl aggregated APIServer (RFC 0009) — the human management access path.
 //!
 //! Registered via an `APIService` for `management.agents.x-k8s.io`; the

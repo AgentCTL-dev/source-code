@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! # agentctl-operator
 //!
 //! The agentctl operator (agentctl RFC 0006). It pairs a **pure rendering core**

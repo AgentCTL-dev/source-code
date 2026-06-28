@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `mock-agent` — a minimal **conformant-agent stand-in** for dev / e2e /
 //! conformance.
 //!

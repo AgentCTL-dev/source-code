@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! The `agentctl-operator` binary: run the reconcile [`Controller`] (RFC 0006).
 //!
 //! Watches `Agent` objects and the `Job`/`Deployment` workloads they own, and

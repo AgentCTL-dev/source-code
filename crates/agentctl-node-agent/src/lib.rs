@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! # agentctl-node-agent
 //!
 //! The on-node bridge (agentctl RFC 0008). This crate currently holds the

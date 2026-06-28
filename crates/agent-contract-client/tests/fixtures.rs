@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Validate the typed client against the GOLDEN capability fixtures in
 //! `contract/fixtures/capabilities/` — two of which are real `--capabilities`
 //! captures from the reference binary (agentd 2.5.0). This is the behavioral

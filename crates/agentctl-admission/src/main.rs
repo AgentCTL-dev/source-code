@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! agentctl admission plane (RFC 0007) — the validating webhook.
 //!
 //! The CRDs carry declarative CEL invariants enforced by the apiserver. This

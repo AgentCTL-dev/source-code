@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! The durable token-usage meter (RFC 0012, the intelligence plane).
 //!
 //! Every `/v1/infer` call records the tokens it consumed against its

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! The level-triggered reconcile loop (agentctl RFC 0006).
 //!
 //! A [`kube::runtime::Controller`] watches [`Agent`] objects and the workloads

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Emit the agentctl CRDs as apply-able YAML under `deploy/crds/`.
 //!
 //! Run from the workspace root: `cargo run -p agentctl-crdgen`. The output is

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! # agentctl
 //!
 //! The agentctl CLI (RFC 0016): read-only `get` / `describe` over the Kubernetes

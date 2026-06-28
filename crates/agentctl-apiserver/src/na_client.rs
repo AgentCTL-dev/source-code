@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! mTLS client for the apiserver → node-agent hop (RFC 0015).
 //!
 //! The node-agent's control API now requires a CA-signed **client** certificate,

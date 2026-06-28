@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! agentctl ModelGateway (RFC 0012) — the intelligence plane's inference proxy.
 //!
 //! Conformant agents are **networkless and hold NO provider secrets** (P0). They

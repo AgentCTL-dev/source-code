@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Agent Card signing (JWS / EdDSA) + JWKS publication (RFC 0013).
 //!
 //! The gateway signs every projected Agent Card with an Ed25519 key so A2A

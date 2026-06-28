@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! # agent-api
 //!
 //! The agentctl custom-resource types — `Agent` and `AgentFleet` — per agentctl

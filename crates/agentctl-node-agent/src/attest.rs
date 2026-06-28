@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Pod→socket attestation via `SO_PEERCRED` (RFC 0002 §7 / RFC 0015).
 //!
 //! On the stock-unix substrate the node-agent (a DaemonSet, `hostPID: true`)

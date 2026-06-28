@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Pure workload rendering: an [`Agent`]/[`AgentFleet`] → the Kubernetes
 //! workload that runs it.
 //!

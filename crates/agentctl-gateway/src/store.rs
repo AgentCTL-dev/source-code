@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! The durable A2A task store (RFC 0013 / brainstorm D4).
 //!
 //! The agent serves only *live* tasks; the gateway persists task records here so

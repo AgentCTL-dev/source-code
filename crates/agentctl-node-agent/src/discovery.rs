@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Socket discovery for the stock-unix substrate (RFC 0002 §6.1 / RFC 0008).
 //!
 //! The operator renders each agent pod with a per-pod hostPath subdir

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! # agent-contract-client
 //!
 //! The typed client for the **Agent Control Contract (ACC)** — the

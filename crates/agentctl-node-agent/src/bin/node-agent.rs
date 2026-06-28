@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! The `node-agent` binary (RFC 0008, Tier A — control bridge).
 //!
 //! One per node (a DaemonSet). It (1) periodically **discovers** local agent

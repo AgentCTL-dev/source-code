@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Hermetic test of the management bridge against a mock server that replicates
 //! the source-confirmed agent wire (NDJSON JSON-RPC, the `initialize` handshake,
 //! `tools/list` with operator tools on a management origin, `resources/read

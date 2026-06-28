@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Merge + relabel per-agent Prometheus metrics into one exposition (RFC 0010).
 //!
 //! The node-agent reads each local agent's metrics over the socket, then this

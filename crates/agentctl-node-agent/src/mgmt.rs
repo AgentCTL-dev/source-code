@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! The management-profile client: NDJSON JSON-RPC over a unix socket.
 //!
 //! Implements the consumer half of the contract management wire (agentd RFC

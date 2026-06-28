@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! agentctl A2A gateway (RFC 0013) — the public A2A HTTP/JSON-RPC surface.
 //!
 //! External A2A clients speak the spec slash-form over HTTP; the gateway:
