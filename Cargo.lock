@@ -62,6 +62,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentctl-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "k8s-openapi",
+ "kube",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentctl-node-agent"
 version = "0.1.0"
 dependencies = [

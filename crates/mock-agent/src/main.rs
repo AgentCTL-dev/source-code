@@ -125,6 +125,60 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }),
             )
         }
+        // A2A reference methods (RFC 0020 binding; the gateway translates the
+        // spec slash-form message/send|tasks/get|tasks/cancel → these). A served
+        // run IS a Task; this mock echoes the input back as the distillate.
+        "a2a.SendMessage" => {
+            let input = msg
+                .pointer("/params/message/parts/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            eprintln!("mock-agent: a2a.SendMessage");
+            let id = msg
+                .pointer("/params/message/messageId")
+                .and_then(Value::as_str)
+                .unwrap_or("task-1");
+            Ok(json!({
+                "id": id,
+                "contextId": "ctx-1",
+                "status": { "state": "completed" },
+                "artifacts": [{
+                    "artifactId": "art-1",
+                    "parts": [{ "kind": "text", "text": format!("echo: {input}") }]
+                }],
+                "kind": "task"
+            }))
+        }
+        "a2a.GetTask" => {
+            let id = msg
+                .pointer("/params/id")
+                .and_then(Value::as_str)
+                .unwrap_or("task-1");
+            eprintln!("mock-agent: a2a.GetTask {id}");
+            Ok(json!({
+                "id": id,
+                "contextId": "ctx-1",
+                "status": { "state": "completed" },
+                "artifacts": [{
+                    "artifactId": "art-1",
+                    "parts": [{ "kind": "text", "text": "echo: (mock)" }]
+                }],
+                "kind": "task"
+            }))
+        }
+        "a2a.CancelTask" => {
+            let id = msg
+                .pointer("/params/id")
+                .and_then(Value::as_str)
+                .unwrap_or("task-1");
+            eprintln!("mock-agent: a2a.CancelTask {id}");
+            Ok(json!({
+                "id": id,
+                "contextId": "ctx-1",
+                "status": { "state": "canceled" },
+                "kind": "task"
+            }))
+        }
         "tools/call" => {
             let name = msg
                 .pointer("/params/name")
@@ -174,7 +228,11 @@ fn manifest() -> Value {
         "surfaces": {
             "management": if serve.is_empty() { Value::Bool(false) } else { Value::String(serve) },
             "metrics": false,
-            "a2a": false,
+            "a2a": {
+                "version": "1.0",
+                "streaming": false,
+                "methods": ["a2a.SendMessage", "a2a.GetTask", "a2a.CancelTask"]
+            },
             "events": false,
             "operator_tools": ["drain", "lame-duck", "cancel"],
             "metrics_schema": "1.0",

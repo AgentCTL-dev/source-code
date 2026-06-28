@@ -3,7 +3,7 @@
 **The Kubernetes control plane for fleets of conformant agents.** agentctl
 provisions, supplies intelligence to, scales, observes, and manages agents on
 Kubernetes — via a CLI, a `kubectl agent[s]` plugin, an operator, an on-node
-bridge (node-agent), an aggregated APIServer, and (planned) an A2A gateway.
+bridge (node-agent), an aggregated APIServer, and an A2A gateway.
 
 > **Principle P0 — depend on the *contract*, never on a specific agent.** The
 > data plane is *any* agent that conforms to the **Agent Control Contract**
@@ -30,7 +30,7 @@ default; Kata-hybrid vsock as the hardened multi-tenant tier), a **two-tier
 node-agent**, and **contract-as-schema** anti-drift (codegen + behavioral
 conformance, not a shared crate).
 
-## Workspace (8 crates)
+## Workspace (9 crates)
 
 | crate | role |
 |---|---|
@@ -40,6 +40,7 @@ conformance, not a shared crate).
 | `agentctl-crdgen` | emits `deploy/crds/*.yaml` |
 | `agentctl-node-agent` | on-node bridge: socket discovery, management client, HTTP API, metrics scrape-proxy |
 | `agentctl-apiserver` | aggregated APIServer: front-proxy auth + SAR + verb forwarding |
+| `agentctl-gateway` | A2A gateway: public A2A HTTP/JSON-RPC + Agent Card projection, bridging to the agent over the node-agent |
 | `agentctl-cli` | `agentctl get` / `describe` |
 | `mock-agent` | a conformant-agent stand-in (management profile) for dev/e2e/conformance |
 

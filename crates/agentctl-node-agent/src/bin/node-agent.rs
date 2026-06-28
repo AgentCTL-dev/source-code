@@ -6,7 +6,9 @@
 //! to drive a management verb against a specific local agent:
 //!
 //! ```text
-//! POST /v1/agents/{pod_uid}/{verb}   # verb ∈ drain|lame-duck|cancel|status
+//! POST /v1/agents/{pod_uid}/{verb}          # verb ∈ drain|lame-duck|cancel|status
+//! POST /v1/agents/{pod_uid}/a2a             # bridge a reference a2a.* JSON-RPC request
+//! GET  /v1/agents/{pod_uid}/capabilities    # raw capabilities manifest (card projection)
 //! GET  /healthz
 //! ```
 //!
@@ -17,7 +19,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agentctl_node_agent::{discover, metrics, DiscoveredAgent, ManagementClient};
+use agentctl_node_agent::mgmt::URI_CAPABILITIES;
+use agentctl_node_agent::{discover, metrics, DiscoveredAgent, Error, ManagementClient};
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::routing::{get, post};
@@ -43,6 +46,11 @@ async fn main() {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/metrics", get(metrics_handler))
+        .route("/v1/agents/{pod_uid}/a2a", post(a2a_handler))
+        .route(
+            "/v1/agents/{pod_uid}/capabilities",
+            get(capabilities_handler),
+        )
         .route("/v1/agents/{pod_uid}/{verb}", post(verb_handler))
         .with_state(root);
 
@@ -84,6 +92,98 @@ async fn verb_handler(
 
     match result {
         Ok(Ok(value)) => (StatusCode::OK, Json(json!({ "ok": true, "result": value }))),
+        Ok(Err(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "ok": false, "error": e })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        ),
+    }
+}
+
+/// Bridge a **reference** A2A JSON-RPC request to the local agent and relay its
+/// response (the MVP bridging chain, agentctl RFC 0013). The body is the
+/// reference request verbatim (`{jsonrpc,id,method,params}`) — the gateway has
+/// already translated the spec slash-form (`message/send`, …) to the reference
+/// name (`a2a.SendMessage`, …). We forward `method`/`params` over the socket and
+/// wrap the outcome back into a JSON-RPC envelope carrying the original `id`.
+///
+/// An agent-level JSON-RPC error (e.g. `TASK_NOT_FOUND` −32001) is relayed with
+/// its own code; only a bridge-level failure (no socket, connect/handshake/IO)
+/// is reported as −32011.
+async fn a2a_handler(
+    State(root): State<PathBuf>,
+    Path(pod_uid): Path<String>,
+    Json(req): Json<Value>,
+) -> Json<Value> {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let method = req
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
+    let socket = root.join(&pod_uid).join("mgmt.sock");
+
+    // ManagementClient is blocking std → run it off the async runtime.
+    let bridged = tokio::task::spawn_blocking(move || -> Result<Value, (i64, String)> {
+        if !socket.exists() {
+            return Err((-32011, format!("no socket for pod {pod_uid}")));
+        }
+        let mut client = ManagementClient::connect(&socket).map_err(|e| (-32011, e.to_string()))?;
+        client.initialize().map_err(|e| (-32011, e.to_string()))?;
+        client.call(&method, params).map_err(|e| match e {
+            // A genuine agent error: relay its code so the gateway can map it.
+            Error::Rpc { code, message } => (code, message),
+            // Transport/protocol/json: a bridge failure.
+            other => (-32011, other.to_string()),
+        })
+    })
+    .await;
+
+    let response = match bridged {
+        Ok(Ok(result)) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Ok(Err((code, message))) => {
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+        }
+        Err(e) => json!({
+            "jsonrpc": "2.0", "id": id,
+            "error": { "code": -32011, "message": e.to_string() }
+        }),
+    };
+    Json(response)
+}
+
+/// Fetch the local agent's capabilities manifest as **raw JSON** (RFC 0005
+/// §3.6). The contract `Manifest` is deserialize-only, so we return the wire
+/// text parsed straight to a [`Value`] — the lossless passthrough the gateway
+/// projects into an Agent Card (RFC 0013), with no re-serialization round-trip.
+async fn capabilities_handler(
+    State(root): State<PathBuf>,
+    Path(pod_uid): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let socket = root.join(&pod_uid).join("mgmt.sock");
+    if !socket.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": format!("no socket for pod {pod_uid}") })),
+        );
+    }
+
+    let fetched = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let mut client = ManagementClient::connect(&socket).map_err(|e| e.to_string())?;
+        client.initialize().map_err(|e| e.to_string())?;
+        let text = client
+            .read_resource_text(URI_CAPABILITIES)
+            .map_err(|e| e.to_string())?;
+        serde_json::from_str::<Value>(&text).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match fetched {
+        Ok(Ok(manifest)) => (StatusCode::OK, Json(manifest)),
         Ok(Err(e)) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "ok": false, "error": e })),

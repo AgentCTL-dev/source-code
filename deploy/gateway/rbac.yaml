@@ -1,0 +1,35 @@
+# RBAC for the A2A gateway: resolve Agent → pod → node-agent (same routing as the
+# apiserver). Stateless; reads pods only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-gateway
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-gateway
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-gateway
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-gateway
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-gateway
+    namespace: agentctl-system

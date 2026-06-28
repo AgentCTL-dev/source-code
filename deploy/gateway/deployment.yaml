@@ -1,0 +1,64 @@
+# The A2A gateway (RFC 0013): a replicated, stateless HTTP service fronting the
+# agents' A2A-over-the-substrate surface (bridged via the node-agent). Projects
+# each agent's Agent Card and routes spec-form A2A JSON-RPC to the reference verbs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-gateway
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+    app.kubernetes.io/managed-by: agentctl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-gateway
+    spec:
+      serviceAccountName: agentctl-gateway
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: agentctl/gateway:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            - name: RUST_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-gateway
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-gateway
+  ports:
+    - { port: 80, targetPort: 8080, name: http }

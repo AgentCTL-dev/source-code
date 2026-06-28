@@ -155,6 +155,15 @@ impl ManagementClient {
         self.call_tool("drain", json!({}))
     }
 
+    /// Issue a raw JSON-RPC `method` with `params` and return its `result`.
+    ///
+    /// The generic escape hatch the node-agent API uses to forward arbitrary
+    /// reference methods (e.g. `a2a.SendMessage`/`a2a.GetTask`/`a2a.CancelTask`)
+    /// to a conformant agent without this crate knowing their shapes.
+    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, Error> {
+        self.request(method, params)
+    }
+
     // --- wire -------------------------------------------------------------
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, Error> {
