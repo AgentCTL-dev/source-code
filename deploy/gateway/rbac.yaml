@@ -18,6 +18,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # The mesh discovery registry (GET /agents) lists the CRDs.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents", "agentfleets"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

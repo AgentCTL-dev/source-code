@@ -77,6 +77,41 @@ fn serve_conn(stream: UnixStream) {
             continue; // a notification (e.g. notifications/initialized)
         };
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        // A2A streaming (RFC 0020): one request → MULTIPLE same-id response frames
+        // (working → artifact-update echo → completed/final), then resume reading.
+        if method == "a2a.SendStreamingMessage" {
+            eprintln!("mock-agent: a2a.SendStreamingMessage (stream)");
+            let input = msg
+                .pointer("/params/message/parts/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let tid = msg
+                .pointer("/params/message/messageId")
+                .and_then(Value::as_str)
+                .unwrap_or("task-1");
+            let frames = [
+                json!({ "jsonrpc": "2.0", "id": id, "result": {
+                    "kind": "status-update", "taskId": tid,
+                    "status": { "state": "working" }, "final": false
+                }}),
+                json!({ "jsonrpc": "2.0", "id": id, "result": {
+                    "kind": "artifact-update", "taskId": tid,
+                    "artifact": { "artifactId": "art-1", "parts": [
+                        { "kind": "text", "text": format!("echo: {input}") }
+                    ]}
+                }}),
+                json!({ "jsonrpc": "2.0", "id": id, "result": {
+                    "kind": "status-update", "taskId": tid,
+                    "status": { "state": "completed" }, "final": true
+                }}),
+            ];
+            for frame in &frames {
+                if write_line(&mut writer, frame).is_err() {
+                    return;
+                }
+            }
+            continue;
+        }
         let response = match dispatch(method, &msg) {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
             Err((code, message)) => {
@@ -231,7 +266,7 @@ fn manifest() -> Value {
             "a2a": {
                 "version": "1.0",
                 "streaming": false,
-                "methods": ["a2a.SendMessage", "a2a.GetTask", "a2a.CancelTask"]
+                "methods": ["a2a.SendMessage", "a2a.SendStreamingMessage", "a2a.GetTask", "a2a.CancelTask"]
             },
             "events": false,
             "operator_tools": ["drain", "lame-duck", "cancel"],

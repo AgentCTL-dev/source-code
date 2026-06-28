@@ -8,6 +8,7 @@
 //! ```text
 //! POST /v1/agents/{pod_uid}/{verb}          # verb ∈ drain|lame-duck|cancel|status
 //! POST /v1/agents/{pod_uid}/a2a             # bridge a reference a2a.* JSON-RPC request
+//! POST /v1/agents/{pod_uid}/a2a/stream      # bridge a streaming a2a.* request → SSE
 //! GET  /v1/agents/{pod_uid}/capabilities    # raw capabilities manifest (card projection)
 //! GET  /healthz
 //! ```
@@ -16,6 +17,7 @@
 //! [`ManagementClient`], run on a blocking task. (apiserver↔node-agent mTLS is a
 //! later hardening; in-cluster the node-agent is reached by pod IP + NetworkPolicy.)
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,9 +25,14 @@ use agentctl_node_agent::mgmt::URI_CAPABILITIES;
 use agentctl_node_agent::{discover, metrics, DiscoveredAgent, Error, ManagementClient};
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
+use axum::response::sse::{Event, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() {
@@ -47,6 +54,7 @@ async fn main() {
         .route("/healthz", get(|| async { "ok" }))
         .route("/metrics", get(metrics_handler))
         .route("/v1/agents/{pod_uid}/a2a", post(a2a_handler))
+        .route("/v1/agents/{pod_uid}/a2a/stream", post(a2a_stream_handler))
         .route(
             "/v1/agents/{pod_uid}/capabilities",
             get(capabilities_handler),
@@ -154,6 +162,70 @@ async fn a2a_handler(
         }),
     };
     Json(response)
+}
+
+/// Bridge a **streaming** reference A2A request to the local agent and relay the
+/// frames it emits as Server-Sent Events (the A2A `message/stream` chain, RFC
+/// 0020). The body is the reference request verbatim (`{jsonrpc,id,method,
+/// params}`) — the gateway has already translated `message/stream` →
+/// `a2a.SendStreamingMessage`. Each agent frame's `result` becomes one SSE
+/// `data:` event; the stream closes after the terminal (`final: true`) frame.
+///
+/// [`ManagementClient`] is blocking, so a [`tokio::task::spawn_blocking`] worker
+/// connects, handshakes, and drives [`ManagementClient::stream`], forwarding each
+/// frame down an mpsc channel that the SSE response drains. A bridge-level
+/// failure (no socket, connect/handshake/IO) is emitted as a single error event
+/// (`{"error":{"code":-32011,"message":...}}`) and then the stream closes.
+async fn a2a_stream_handler(
+    State(root): State<PathBuf>,
+    Path(pod_uid): Path<String>,
+    Json(req): Json<Value>,
+) -> impl IntoResponse {
+    let method = req
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
+    let socket = root.join(&pod_uid).join("mgmt.sock");
+
+    // The blocking client feeds frames to the SSE response through this channel;
+    // when the worker finishes (or fails), `tx` drops and the stream closes.
+    let (tx, rx) = mpsc::channel::<Value>(16);
+
+    tokio::task::spawn_blocking(move || {
+        let bridge_err =
+            |code: i64, message: String| json!({ "error": { "code": code, "message": message } });
+        if !socket.exists() {
+            let _ = tx.blocking_send(bridge_err(-32011, format!("no socket for pod {pod_uid}")));
+            return;
+        }
+        let mut client = match ManagementClient::connect(&socket) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.blocking_send(bridge_err(-32011, e.to_string()));
+                return;
+            }
+        };
+        if let Err(e) = client.initialize() {
+            let _ = tx.blocking_send(bridge_err(-32011, e.to_string()));
+            return;
+        }
+        if let Err(e) = client.stream(&method, params, |frame| {
+            let _ = tx.blocking_send(frame);
+        }) {
+            // Relay an agent JSON-RPC error with its own code; everything else is
+            // a bridge failure (transport/protocol/json).
+            let _ = tx.blocking_send(match e {
+                Error::Rpc { code, message } => bridge_err(code, message),
+                other => bridge_err(-32011, other.to_string()),
+            });
+        }
+    });
+
+    let events = ReceiverStream::new(rx)
+        .map(|frame| Ok::<_, Infallible>(Event::default().data(frame.to_string())));
+    Sse::new(events)
 }
 
 /// Fetch the local agent's capabilities manifest as **raw JSON** (RFC 0005

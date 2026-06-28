@@ -18,4 +18,7 @@ serde_json.workspace = true
 # The node-agent binary serves a small HTTP API (RFC 0009 backend) for the
 # aggregated apiserver to call; the ManagementClient itself stays blocking std.
 axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+# SSE bridge: adapt the blocking-task mpsc receiver into a `Stream` for axum's
+# `Sse` response (the A2A `message/stream` relay, RFC 0020).
+tokio-stream = "0.1"

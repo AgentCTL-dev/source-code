@@ -164,6 +164,61 @@ impl ManagementClient {
         self.request(method, params)
     }
 
+    /// Stream a JSON-RPC `method`: write the request once, then read the
+    /// **multiple same-id response frames** the agent emits, passing each frame's
+    /// `result` to `on_frame` until (and including) the terminal frame whose
+    /// `result.final == true`.
+    ///
+    /// This is the consumer half of the A2A streaming wire (RFC 0020): the
+    /// reference method is `a2a.SendStreamingMessage` (the gateway translates the
+    /// spec slash-form `message/stream` to it), the agent answers with a
+    /// `working` status-update → an `artifact-update` → a `completed`/`final`
+    /// status-update, and the node-agent re-emits each frame as one SSE event.
+    ///
+    /// Out-of-band frames (interleaved notifications / other ids) are skipped, as
+    /// in [`Self::request`]. A JSON-RPC error frame surfaces as [`Error::Rpc`]; a
+    /// connection closed before the final frame is an [`Error::Protocol`]
+    /// (inherited from [`Self::read_line`]). Blocking, like the rest of the
+    /// client.
+    pub fn stream(
+        &mut self,
+        method: &str,
+        params: Value,
+        mut on_frame: impl FnMut(Value),
+    ) -> Result<(), Error> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write_msg(&json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params
+        }))?;
+        loop {
+            let v: Value = serde_json::from_str(&self.read_line()?)?;
+            if v.get("id") != Some(&json!(id)) {
+                continue; // notification or an out-of-band id
+            }
+            if let Some(err) = v.get("error") {
+                return Err(Error::Rpc {
+                    code: err.get("code").and_then(Value::as_i64).unwrap_or(0),
+                    message: err
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+            }
+            let result = v.get("result").cloned().unwrap_or(Value::Null);
+            // The terminal marker rides on the last status-update.
+            let is_final = result
+                .get("final")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            on_frame(result);
+            if is_final {
+                return Ok(());
+            }
+        }
+    }
+
     // --- wire -------------------------------------------------------------
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, Error> {
