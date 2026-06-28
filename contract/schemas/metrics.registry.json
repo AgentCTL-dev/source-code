@@ -200,6 +200,14 @@
       "note": "intel/health.rs prose names this agentd_intel_endpoint_up; the rendered name is agentd_intel_up. Contract canonicalizes the rendered name."
     },
     {
+      "name": "agent_intel_all_down", "neutral_name": "agent_intel_all_down", "reference_alias": "agentd_intel_all_down",
+      "type": "gauge", "labels": [], "unit": "bool",
+      "help": "1 while all intelligence endpoints are down (RFC 0018 §6).",
+      "source": "obs/metrics.rs render(); RFC 0018 §6, RFC 0016 §4.3", "status": "stable",
+      "autoscaling_signal": false, "cost_signal": false,
+      "note": "Fleet-routing signal: 1 while EVERY model endpoint is down (the same latch that flips /readyz). Distinct from agent_intel_up (the active endpoint's reachability)."
+    },
+    {
       "name": "agent_intel_errors_total", "neutral_name": "agent_intel_errors_total", "reference_alias": "agentd_intel_errors_total",
       "type": "counter", "labels": [{ "key": "reason", "domain": "intel_error_reason" }], "unit": "1",
       "help": "Intelligence-endpoint errors by reason.",

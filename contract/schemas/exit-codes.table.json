@@ -40,7 +40,7 @@
     { "code": 5,   "name": "EXIT_SEMANTIC",     "ref_name": "REFUSED",           "intent": "terminal",  "os_set": false, "returned_by_agent": true,  "meaning": "Agent ran correctly but concluded the task cannot be done / refused (TerminalStatus refused)." },
     { "code": 6,   "name": "EXIT_MCP",          "ref_name": "MCP_REQUIRED_DOWN", "intent": "retriable", "os_set": false, "returned_by_agent": true,  "meaning": "A required MCP server failed connect/handshake or died unrecoverably." },
     { "code": 7,   "name": "EXIT_BUDGET",       "ref_name": "BUDGET",            "intent": "policy",    "os_set": false, "returned_by_agent": true,  "meaning": "Hit max-steps/max-tokens/deadline/tree budget before a result (P-cost). once_exit() maps ExhaustedSteps/ExhaustedTokens/Deadline here. Remappable via --budget-exit-code." },
-    { "code": 124, "name": "EXIT_TIMEOUT",      "ref_name": "DEADLINE",          "intent": "policy",    "os_set": false, "returned_by_agent": false, "meaning": "Hard wall-clock deadline tripped (mnemonic to timeout(1)). Defined + OS-mnemonic, but UNREACHABLE via once_exit() in the reference, which folds Deadline into BUDGET(7). See x-mapping-divergence." },
+    { "code": 124, "name": "EXIT_TIMEOUT",      "ref_name": "DEADLINE",          "intent": "policy",    "os_set": false, "returned_by_agent": true,  "meaning": "Hard wall-clock deadline tripped (mnemonic to timeout(1)). REACHABLE via the supervisor hard-kill ladder (KillReason::Deadline/Stuck -> exit::DEADLINE in main.rs kill_report_status()); NOT reachable via once_exit(), which folds TerminalStatus::Deadline into BUDGET(7). See x-mapping-divergence." },
     { "code": 137, "name": "SIGKILL_EXIT",      "ref_name": "SIGKILL_EXIT",      "intent": "infra",     "os_set": true,  "returned_by_agent": false, "meaning": "128+SIGKILL — OOM / kubelet hard-kill (raise memory limit). Kernel-set; the binary never exit(137)s itself." },
     { "code": 143, "name": "SIGTERM_EXIT",      "ref_name": "SIGTERM_EXIT",      "intent": "infra",     "os_set": true,  "returned_by_agent": false, "meaning": "128+SIGTERM — ungraceful exit (drain forced past budget). Kernel-set; DISTINCT from a clean drain, which is 0." }
   ],
@@ -50,7 +50,7 @@
     "once_exit": {
       "Completed": "0 (EXIT_OK), or 3 (EXIT_PARTIAL) when a usable partial exists",
       "Refused": "5 (REFUSED)",
-      "ExhaustedSteps | ExhaustedTokens | Deadline": "7 (BUDGET) — note Deadline folds to 7, so 124 is unreachable via this fn",
+      "ExhaustedSteps | ExhaustedTokens | Deadline": "7 (BUDGET) — note Deadline folds to 7, so 124 is unreachable via THIS fn (once_exit); 124 IS reachable via the supervisor kill ladder, see code_124 note",
       "Stalled | LoopDetected": "3 (PARTIAL)",
       "Cancelled": "1 (GENERIC) — RFC 0011 §5.2 prose said clean drain = 0",
       "Crashed": "1 (GENERIC)"
@@ -80,6 +80,6 @@
 
   "x-provisional": {
     "p_cost": "EXIT_BUDGET(7) is the P-cost budget signal; its policy disposition is operator-remappable (see x-budget-exit-code-remap).",
-    "code_124_unreachable": "124 is defined and OS-mnemonic but unreachable via the reference once_exit() (Deadline->7). Kept in the table for completeness."
+    "code_124_unreachable": "The 'unreachable' claim is scoped STRICTLY to once_exit(), which folds TerminalStatus::Deadline into BUDGET(7). 124 IS reachable: the supervisor hard-kill ladder maps KillReason::Deadline/Stuck to exit::DEADLINE (main.rs kill_report_status()), so returned_by_agent=true."
   }
 }

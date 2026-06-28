@@ -28,6 +28,8 @@
     "watch-config": "--watch-config (config-watch feature) — hot-reload on file change"
   },
   "x-reloadable": [
+    "intelligence",
+    "model_swap",
     "model",
     "max_tokens",
     "limits",
@@ -43,7 +45,6 @@
       "mode": "--mode / env AGENT_MODE (ref AGENTD_MODE)",
       "interval": "--interval (loop/schedule interval, e.g. \"5m\")",
       "cron": "--cron (5-field UTC cron; needs the `cron` build feature; only valid with mode=schedule)",
-      "intelligence_transport_endpoint": "env AGENT_INTELLIGENCE (ref AGENTD_INTELLIGENCE)",
       "intelligence_token": "env AGENT_INTELLIGENCE_TOKEN / _TOKEN_FILE (ref AGENTD_*)",
       "run_id": "--run-id / env AGENT_RUN_ID",
       "serve_mcp_transport": "env AGENT_SERVE_MCP",
@@ -73,9 +74,17 @@
       "pattern": "^\\d+\\.\\d+$",
       "description": "OPTIONAL. The file's OWN pin to a contract major the operator authored against (distinct from x-contract-version, which is the schema's version). A consumer refuses only an unknown MAJOR."
     },
+    "intelligence": {
+      "type": "string",
+      "description": "Reloadable. The primary intelligence transport/endpoint — the ordered intelligence endpoint list URI (RFC 0018 §3.1). File-settable + RELOADABLE so a ConfigMap update can repoint the endpoint list as a hot-swap (RFC 0018 §5): the reload fans ctrl/swap_intel to in-flight work and re-points new spawns. The transport SCHEME is data, not a secret; the per-endpoint credential is NEVER inline here (env/_FILE only). Flag --intelligence; env AGENT_INTELLIGENCE (ref AGENTD_INTELLIGENCE). Source = config_file.rs (ConfigFile.intelligence)."
+    },
+    "model_swap": {
+      "enum": ["finish-on-old", "restart-turn"],
+      "description": "Reloadable. The model hot-swap policy (RFC 0018 §5.3): finish-on-old | restart-turn. Validated against config::SwapPolicy. Flag --model-swap; env AGENT_MODEL_SWAP (ref AGENTD_MODEL_SWAP). Source = config_file.rs (ConfigFile.model_swap)."
+    },
     "model": {
       "type": "string",
-      "description": "Reloadable. Operator-declared model id param (NOT the intelligence transport/endpoint — that is restart-only env/flag). Never a secret. Flag --model; env AGENT_MODEL (ref AGENTD_MODEL)."
+      "description": "Reloadable. Operator-declared model id param (NOT the intelligence transport/endpoint — that is the reloadable `intelligence` file key). Never a secret. Flag --model; env AGENT_MODEL (ref AGENTD_MODEL)."
     },
     "max_tokens": {
       "type": "integer",
