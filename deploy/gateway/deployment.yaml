@@ -55,6 +55,11 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            - name: client-tls
+              mountPath: /etc/agentctl-client/tls
+              readOnly: true
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 2
@@ -66,6 +71,10 @@ spec:
           resources:
             requests: { cpu: 25m, memory: 32Mi }
             limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: client-tls
+          secret:
+            secretName: agentctl-client-tls
 ---
 apiVersion: v1
 kind: Service

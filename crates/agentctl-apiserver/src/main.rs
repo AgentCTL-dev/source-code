@@ -35,6 +35,8 @@ use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
 
+mod na_client;
+
 const GROUP: &str = "management.agents.x-k8s.io";
 const VERSION: &str = "v1alpha1";
 const TLS_DIR: &str = "/etc/agentctl-apiserver/tls";
@@ -42,6 +44,8 @@ const TLS_DIR: &str = "/etc/agentctl-apiserver/tls";
 #[derive(Clone)]
 struct AppState {
     client: Client,
+    /// mTLS client for the node-agent control hop (RFC 0015). Built once.
+    na: reqwest::Client,
 }
 
 #[tokio::main]
@@ -80,7 +84,10 @@ async fn main() {
             "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{ns}/agents/{name}/{verb}",
             post(handle_verb),
         )
-        .with_state(AppState { client })
+        .with_state(AppState {
+            client,
+            na: na_client::node_agent_client(),
+        })
         .fallback(not_found);
 
     let addr: SocketAddr = "0.0.0.0:6443".parse().unwrap();
@@ -188,7 +195,7 @@ async fn handle_verb(
     match authorize(&state.client, &user, &groups, &ns, &name, &verb).await {
         Ok(true) => {
             tracing::info!(%user, %ns, agent = %name, %verb, "authorized management verb");
-            match forward_to_node_agent(&state.client, &ns, &name, &verb).await {
+            match forward_to_node_agent(&state.client, &state.na, &ns, &name, &verb).await {
                 Ok(result) => {
                     tracing::info!(%ns, agent = %name, %verb, "forwarded to node-agent");
                     status(
@@ -262,6 +269,7 @@ async fn authorize(
 /// node-agent DaemonSet pod on `node` --> `POST /v1/agents/<pod_uid>/<verb>`.
 async fn forward_to_node_agent(
     client: &Client,
+    http: &reqwest::Client,
     ns: &str,
     name: &str,
     verb: &str,
@@ -299,8 +307,9 @@ async fn forward_to_node_agent(
         .find_map(|p| p.status.and_then(|s| s.pod_ip))
         .ok_or_else(|| format!("no running node-agent on node {node}"))?;
 
-    let url = format!("http://{na_ip}:8080/v1/agents/{pod_uid}/{verb}");
-    let resp = reqwest::Client::new()
+    // mTLS control hop (RFC 0015): https on :8443, client-cert required.
+    let url = format!("https://{na_ip}:8443/v1/agents/{pod_uid}/{verb}");
+    let resp = http
         .post(&url)
         .send()
         .await

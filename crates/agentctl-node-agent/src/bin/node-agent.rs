@@ -14,11 +14,25 @@
 //! ```
 //!
 //! The verb is executed by bridging to that pod's socket via the (blocking)
-//! [`ManagementClient`], run on a blocking task. (apiserver↔node-agent mTLS is a
-//! later hardening; in-cluster the node-agent is reached by pod IP + NetworkPolicy.)
+//! [`ManagementClient`], run on a blocking task.
+//!
+//! ## Two listeners (RFC 0015 — mTLS hardening)
+//!
+//! The node-agent serves two ports concurrently:
+//!
+//! * **`:8080` plaintext** — `GET /healthz` and `GET /metrics` only. The kubelet
+//!   probes and Prometheus scrape present no client cert, so these stay open.
+//! * **`:8443` mTLS** — every control route (`/v1/agents/...`). The TLS server
+//!   presents `tls.crt`/`tls.key` and **requires** a client cert chained to the
+//!   CA at `/etc/agentctl-node-agent/tls/ca.crt` (rustls `WebPkiClientVerifier`),
+//!   so only the control plane (apiserver, gateway) — which holds a CA-signed
+//!   client cert — can drive the verbs. No in-cluster pod can reach them.
 
 use std::convert::Infallible;
+use std::io::BufReader;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agentctl_node_agent::mgmt::URI_CAPABILITIES;
@@ -29,13 +43,25 @@ use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
+/// The node-agent's serving cert/key + the CA used to verify control-plane client
+/// certs, mounted as a Secret (provisioned separately; we only READ these files).
+const TLS_DIR: &str = "/etc/agentctl-node-agent/tls";
+
 #[tokio::main]
 async fn main() {
+    // mTLS via rustls with the ring provider (no aws-lc-rs → no C toolchain).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install ring crypto provider");
+
     let root: PathBuf = std::env::var("AGENTCTL_SOCKET_ROOT")
         .unwrap_or_else(|_| "/run/agentctl/sockets".to_string())
         .into();
@@ -45,14 +71,31 @@ async fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(30),
     );
-    let bind = std::env::var("AGENTCTL_NODE_AGENT_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let plain_bind =
+        std::env::var("AGENTCTL_NODE_AGENT_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let tls_bind =
+        std::env::var("AGENTCTL_NODE_AGENT_TLS_ADDR").unwrap_or_else(|_| "0.0.0.0:8443".into());
+    let plain_addr: SocketAddr = plain_bind
+        .parse()
+        .unwrap_or_else(|e| panic!("parse plaintext addr {plain_bind}: {e}"));
+    let tls_addr: SocketAddr = tls_bind
+        .parse()
+        .unwrap_or_else(|e| panic!("parse TLS addr {tls_bind}: {e}"));
 
     // Background: periodic discovery + capability logging.
     tokio::spawn(discovery_loop(root.clone(), interval));
 
-    let app = Router::new()
+    // :8080 plaintext — kubelet probes + Prometheus scrape present no client cert,
+    // so health and the metrics scrape-proxy stay open. The shared `root` state is
+    // what the metrics handler needs to discover + scrape local agents.
+    let plain = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/metrics", get(metrics_handler))
+        .with_state(root.clone());
+
+    // :8443 mTLS — the control surface. Same shared `root` state; reached only by a
+    // caller presenting a CA-signed client cert (enforced by the TLS layer below).
+    let control = Router::new()
         .route("/v1/agents/{pod_uid}/a2a", post(a2a_handler))
         .route("/v1/agents/{pod_uid}/a2a/stream", post(a2a_stream_handler))
         .route(
@@ -62,11 +105,77 @@ async fn main() {
         .route("/v1/agents/{pod_uid}/{verb}", post(verb_handler))
         .with_state(root);
 
-    let listener = tokio::net::TcpListener::bind(&bind)
+    let tls = build_tls_config().expect("build node-agent mTLS server config");
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
+
+    let listener = tokio::net::TcpListener::bind(plain_addr)
         .await
-        .unwrap_or_else(|e| panic!("bind {bind}: {e}"));
-    eprintln!("node-agent: HTTP API on {bind}");
-    axum::serve(listener, app).await.expect("serve");
+        .unwrap_or_else(|e| panic!("bind {plain_addr}: {e}"));
+    eprintln!("node-agent: plaintext (healthz, metrics) on {plain_addr}");
+    eprintln!("node-agent: mTLS control API on {tls_addr}");
+
+    // Run both listeners concurrently; if either exits the process should fail.
+    let plain_srv = async move {
+        axum::serve(listener, plain).await.expect("serve plaintext");
+    };
+    let tls_srv = async move {
+        axum_server::bind_rustls(tls_addr, tls_config)
+            .serve(control.into_make_service())
+            .await
+            .expect("serve mTLS");
+    };
+    tokio::join!(plain_srv, tls_srv);
+}
+
+// --- mTLS server config (RFC 0015) -----------------------------------------
+
+/// rustls server config for the `:8443` control surface: present the node-agent's
+/// serving cert AND **require** a client cert chained to the CA at
+/// `{TLS_DIR}/ca.crt` (so only the control plane can reach the control verbs).
+/// Mirrors the apiserver's `build_tls_config`.
+fn build_tls_config() -> Result<ServerConfig, String> {
+    let certs = load_certs(&PathBuf::from(TLS_DIR).join("tls.crt"))?;
+    let key = load_key(&PathBuf::from(TLS_DIR).join("tls.key"))?;
+    let client_ca = load_client_ca(&PathBuf::from(TLS_DIR).join("ca.crt"))?;
+    let verifier = WebPkiClientVerifier::builder(Arc::new(client_ca))
+        .build()
+        .map_err(|e| format!("client verifier: {e}"))?;
+    ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("server config: {e}"))
+}
+
+/// Load the CA bundle used to VERIFY control-plane client certs.
+fn load_client_ca(path: &std::path::Path) -> Result<RootCertStore, String> {
+    let mut r =
+        BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
+    let mut roots = RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut r) {
+        roots
+            .add(cert.map_err(|e| format!("parse CA: {e}"))?)
+            .map_err(|e| format!("add CA: {e}"))?;
+    }
+    if roots.is_empty() {
+        return Err(format!("no CA certs in {path:?}"));
+    }
+    Ok(roots)
+}
+
+fn load_certs(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>, String> {
+    let mut r =
+        BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
+    rustls_pemfile::certs(&mut r)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read certs: {e}"))
+}
+
+fn load_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>, String> {
+    let mut r =
+        BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
+    rustls_pemfile::private_key(&mut r)
+        .map_err(|e| format!("read key: {e}"))?
+        .ok_or_else(|| "no private key in tls.key".into())
 }
 
 /// Execute a management verb against the local agent identified by `pod_uid`.

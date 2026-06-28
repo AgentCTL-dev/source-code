@@ -17,10 +17,20 @@ axum = "0.8"
 # rustls/ring → no aws-lc-rs, no C toolchain.
 kube = { version = "4", default-features = false, features = ["client", "rustls-tls", "ring"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }
-# Minimal HTTP client for the gateway→node-agent hop (plain HTTP in-cluster;
-# no tls feature → no C toolchain). `stream` enables `Response::bytes_stream`
-# for the SSE passthrough on `message/stream`.
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+# HTTP client for the gateway→node-agent hop, now over mTLS (RFC 0015). `stream`
+# enables `Response::bytes_stream` for the SSE passthrough on `message/stream`.
+# `rustls-tls-manual-roots-no-provider` enables `use_preconfigured_tls` WITHOUT
+# pulling a default crypto provider → no aws-lc-rs, no C toolchain. We hand it a
+# ring-backed ClientConfig (see src/na_client.rs).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls-manual-roots-no-provider",
+] }
+# rustls (ring provider) for the node-agent mTLS ClientConfig + custom verifier.
+# ring, never aws-lc-rs → no C toolchain (matches the apiserver).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
 # CRD types (Agent / AgentFleet) for the mesh discovery registry (GET /agents).
 agent-api = { path = "../agent-api" }
 # Durable A2A task store (RFC 0013). NoTls in-cluster → pure Rust, no C toolchain.

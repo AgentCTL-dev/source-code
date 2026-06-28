@@ -24,7 +24,8 @@ spec:
           image: agentctl/node-agent:dev
           imagePullPolicy: IfNotPresent
           ports:
-            - { containerPort: 8080, name: http }
+            - { containerPort: 8080, name: http }       # /healthz + /metrics (plaintext)
+            - { containerPort: 8443, name: https }       # /v1/agents/* (mTLS, RFC 0015)
           env:
             - name: RUST_LOG
               value: "info"
@@ -37,6 +38,9 @@ spec:
           volumeMounts:
             - name: sockets
               mountPath: /run/agentctl/sockets
+            - name: tls
+              mountPath: /etc/agentctl-node-agent/tls
+              readOnly: true
           resources:
             requests:
               cpu: 25m
@@ -49,3 +53,6 @@ spec:
           hostPath:
             path: /run/agentctl/sockets
             type: DirectoryOrCreate
+        - name: tls
+          secret:
+            secretName: agentctl-node-agent-tls

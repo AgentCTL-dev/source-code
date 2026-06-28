@@ -22,3 +22,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 # SSE bridge: adapt the blocking-task mpsc receiver into a `Stream` for axum's
 # `Sse` response (the A2A `message/stream` relay, RFC 0020).
 tokio-stream = "0.1"
+# mTLS control surface (RFC 0015): the :8443 listener presents the node-agent's
+# serving cert and REQUIRES a CA-signed client cert, so only the control plane
+# (apiserver, gateway) can drive the control verbs. rustls with the ring provider
+# (no aws-lc-rs → no C toolchain); mirror the apiserver's ServerConfig.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"

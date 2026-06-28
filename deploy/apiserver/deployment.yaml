@@ -39,6 +39,10 @@ spec:
             - name: tls
               mountPath: /etc/agentctl-apiserver/tls
               readOnly: true
+            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            - name: client-tls
+              mountPath: /etc/agentctl-client/tls
+              readOnly: true
           # tcpSocket (not httpGet): the server requires a front-proxy client
           # cert for TLS, which the kubelet probes don't present.
           readinessProbe:
@@ -56,6 +60,9 @@ spec:
         - name: tls
           secret:
             secretName: agentctl-apiserver-tls
+        - name: client-tls
+          secret:
+            secretName: agentctl-client-tls
 ---
 apiVersion: v1
 kind: Service

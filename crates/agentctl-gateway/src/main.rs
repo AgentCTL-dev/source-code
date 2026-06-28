@@ -36,6 +36,7 @@ use kube::{Api, Client};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
 
+mod na_client;
 mod signing;
 mod store;
 
@@ -47,6 +48,8 @@ struct AppState {
     client: Client,
     pool: Pool,
     signer: Arc<signing::Signer>,
+    /// mTLS client for the node-agent control hop (RFC 0015). Built once.
+    na: reqwest::Client,
 }
 
 #[tokio::main]
@@ -56,6 +59,12 @@ async fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    // ring crypto provider as the process default (RFC 0015): no aws-lc-rs → no
+    // C toolchain. Required so reqwest's rustls backend (federation/push) and the
+    // node-agent mTLS client both resolve a provider.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install ring crypto provider");
 
     let client = Client::try_default().await.expect("in-cluster kube client");
 
@@ -93,6 +102,7 @@ async fn main() {
             client,
             pool,
             signer,
+            na: na_client::node_agent_client(),
         });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
@@ -123,8 +133,10 @@ async fn build_signed_card(
     kind: Option<&str>,
 ) -> Result<Value, String> {
     let (uid, na_ip) = resolve(&state.client, ns, name).await?;
-    let url = format!("http://{na_ip}:8080/v1/agents/{uid}/capabilities");
-    let manifest = reqwest::Client::new()
+    // mTLS control hop (RFC 0015): https on :8443, client-cert required.
+    let url = format!("https://{na_ip}:8443/v1/agents/{uid}/capabilities");
+    let manifest = state
+        .na
         .get(&url)
         .send()
         .await
@@ -280,8 +292,8 @@ async fn a2a_rpc(
         // Streaming path: forward to the node-agent's SSE endpoint and pipe the
         // raw `text/event-stream` body straight through — do NOT parse the SSE
         // frames (transparent byte pipe; the node-agent already framed them).
-        let url = format!("http://{na_ip}:8080/v1/agents/{uid}/a2a/stream");
-        return match reqwest::Client::new().post(&url).json(&req).send().await {
+        let url = format!("https://{na_ip}:8443/v1/agents/{uid}/a2a/stream");
+        return match state.na.post(&url).json(&req).send().await {
             Ok(resp) => (
                 [(header::CONTENT_TYPE, "text/event-stream")],
                 Body::from_stream(resp.bytes_stream()),
@@ -296,8 +308,8 @@ async fn a2a_rpc(
         };
     }
 
-    let url = format!("http://{na_ip}:8080/v1/agents/{uid}/a2a");
-    let body = match reqwest::Client::new().post(&url).json(&req).send().await {
+    let url = format!("https://{na_ip}:8443/v1/agents/{uid}/a2a");
+    let body = match state.na.post(&url).json(&req).send().await {
         Ok(resp) => match resp.json::<Value>().await {
             Ok(b) => b,
             Err(e) => {
