@@ -1,0 +1,42 @@
+# RBAC for the aggregated apiserver (RFC 0009): delegated authz (SAR/TokenReview)
+# + read the front-proxy CA from kube-system.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-apiserver
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+---
+# SubjectAccessReview / TokenReview (delegated authn/authz).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-apiserver-auth-delegator
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-apiserver
+    namespace: agentctl-system
+---
+# Read extension-apiserver-authentication (the requestheader / front-proxy CA).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentctl-apiserver-authreader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-apiserver
+    namespace: agentctl-system

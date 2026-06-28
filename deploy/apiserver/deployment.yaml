@@ -16,6 +16,7 @@ spec:
       labels:
         app.kubernetes.io/name: agentctl-apiserver
     spec:
+      serviceAccountName: agentctl-apiserver
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -38,12 +39,14 @@ spec:
             - name: tls
               mountPath: /etc/agentctl-apiserver/tls
               readOnly: true
+          # tcpSocket (not httpGet): the server requires a front-proxy client
+          # cert for TLS, which the kubelet probes don't present.
           readinessProbe:
-            httpGet: { path: /readyz, port: 6443, scheme: HTTPS }
+            tcpSocket: { port: 6443 }
             initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /livez, port: 6443, scheme: HTTPS }
+            tcpSocket: { port: 6443 }
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:

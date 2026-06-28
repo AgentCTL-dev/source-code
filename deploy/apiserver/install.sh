@@ -41,6 +41,9 @@ kubectl -n "$NS" create secret tls "${SVC}-tls" \
   --cert="$DIR/tls.crt" --key="$DIR/tls.key" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+echo "==> applying RBAC (ServiceAccount + auth-delegator + authreader)"
+kubectl apply -f deploy/apiserver/rbac.yaml
+
 echo "==> applying Deployment + Service"
 kubectl apply -f deploy/apiserver/deployment.yaml
 

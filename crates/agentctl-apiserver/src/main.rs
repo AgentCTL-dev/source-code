@@ -1,79 +1,257 @@
 //! agentctl aggregated APIServer (RFC 0009) — the human management access path.
 //!
-//! Registered via an `APIService` for `management.agents.x-k8s.io`, the
-//! kube-aggregator proxies requests here. **Stage 1 (this file):** serve TLS +
-//! the discovery + health surface so the aggregator marks the APIService
-//! `Available=True`. **Stage 2 (next):** the `agents/<name>/drain` connect verb —
-//! verify the front-proxy client cert, trust `X-Remote-User`, `SubjectAccessReview`
-//! the verb, then forward to the node-agent → agent.
+//! Registered via an `APIService` for `management.agents.x-k8s.io`; the
+//! kube-aggregator proxies requests here.
 //!
-//! Hand-rolled in Rust (axum + rustls, ring provider) — agentctl is Rust-only.
+//! **Stage 1:** TLS + discovery + health → `APIService Available=True`.
+//! **Stage 2 (this file):** the `agents/<name>/{drain,lame-duck,cancel}` connect
+//! verbs with the front-proxy trust model — rustls **requires** a client cert
+//! verified against the `requestheader-client-ca` (so only the kube-apiserver can
+//! reach the API surface), the handler trusts `X-Remote-User`/`-Group`, and a
+//! `SubjectAccessReview` authorizes the verb before acting. (Forwarding to the
+//! node-agent is Stage 2b — here an authorized verb returns Success.)
+//!
+//! Hand-rolled in Rust (axum + rustls/ring; agentctl is Rust-only). Probes are
+//! `tcpSocket` so the kubelet need not present a client cert.
 
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use axum::http::StatusCode;
-use axum::routing::get;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use k8s_openapi::api::authorization::v1::{
+    ResourceAttributes, SubjectAccessReview, SubjectAccessReviewSpec,
+};
+use k8s_openapi::api::core::v1::ConfigMap;
+use kube::api::PostParams;
+use kube::{Api, Client};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
 
 const GROUP: &str = "management.agents.x-k8s.io";
 const VERSION: &str = "v1alpha1";
+const TLS_DIR: &str = "/etc/agentctl-apiserver/tls";
+
+#[derive(Clone)]
+struct AppState {
+    client: Client,
+}
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
-
-    // Install the ring crypto provider (the no-provider axum-server feature).
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install ring crypto provider");
 
-    let tls_dir = std::env::var("TLS_DIR").unwrap_or_else(|_| "/etc/agentctl-apiserver/tls".into());
-    let cert = PathBuf::from(&tls_dir).join("tls.crt");
-    let key = PathBuf::from(&tls_dir).join("tls.key");
+    let client = Client::try_default()
+        .await
+        .expect("in-cluster kube client");
+
+    // Front-proxy trust anchor: only the kube-apiserver (presenting a cert signed
+    // by this CA) may reach the API surface; then we trust its X-Remote-* headers.
+    let client_ca = load_requestheader_ca(&client)
+        .await
+        .expect("load requestheader-client-ca from extension-apiserver-authentication");
+
+    let tls = build_tls_config(client_ca).expect("build TLS server config");
 
     let app = Router::new()
-        // Health/availability surface the aggregator + kubelet probe.
         .route("/", get(ok))
         .route("/healthz", get(ok))
         .route("/readyz", get(ok))
         .route("/livez", get(ok))
-        // Discovery the aggregator + kubectl consume.
         .route("/apis", get(api_group_list))
         .route("/apis/management.agents.x-k8s.io", get(api_group))
         .route("/apis/management.agents.x-k8s.io/v1alpha1", get(api_resources))
+        .route(
+            "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{ns}/agents/{name}/{verb}",
+            post(handle_verb),
+        )
+        .with_state(AppState { client })
         .fallback(not_found);
 
     let addr: SocketAddr = "0.0.0.0:6443".parse().unwrap();
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
-        .await
-        .unwrap_or_else(|e| panic!("load TLS from {tls_dir}: {e}"));
-
-    tracing::info!(%addr, group = GROUP, version = VERSION, "agentctl aggregated apiserver serving (stage 1: discovery + health)");
+    let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
+    tracing::info!(%addr, group = GROUP, "agentctl aggregated apiserver serving (stage 2: connect verbs + SAR)");
     axum_server::bind_rustls(addr, config)
         .serve(app.into_make_service())
         .await
         .expect("serve");
 }
 
+// --- TLS / front-proxy -----------------------------------------------------
+
+/// Read the `requestheader-client-ca-file` PEM from the kube-system
+/// `extension-apiserver-authentication` ConfigMap (the CA the kube-apiserver's
+/// front-proxy client cert is signed by).
+async fn load_requestheader_ca(client: &Client) -> Result<RootCertStore, String> {
+    let cm: ConfigMap = Api::namespaced(client.clone(), "kube-system")
+        .get("extension-apiserver-authentication")
+        .await
+        .map_err(|e| format!("get configmap: {e}"))?;
+    let pem = cm
+        .data
+        .as_ref()
+        .and_then(|d| d.get("requestheader-client-ca-file"))
+        .ok_or("requestheader-client-ca-file missing")?;
+    let mut roots = RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+        roots
+            .add(cert.map_err(|e| format!("parse CA: {e}"))?)
+            .map_err(|e| format!("add CA: {e}"))?;
+    }
+    if roots.is_empty() {
+        return Err("requestheader CA had no certs".into());
+    }
+    Ok(roots)
+}
+
+/// rustls server config: present the serving cert AND **require** a client cert
+/// chained to the front-proxy CA (so unproxied callers can't reach the API).
+fn build_tls_config(client_ca: RootCertStore) -> Result<ServerConfig, String> {
+    let certs = load_certs(&PathBuf::from(TLS_DIR).join("tls.crt"))?;
+    let key = load_key(&PathBuf::from(TLS_DIR).join("tls.key"))?;
+    let verifier = WebPkiClientVerifier::builder(Arc::new(client_ca))
+        .build()
+        .map_err(|e| format!("client verifier: {e}"))?;
+    ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("server config: {e}"))
+}
+
+fn load_certs(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>, String> {
+    let mut r = BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
+    rustls_pemfile::certs(&mut r)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read certs: {e}"))
+}
+
+fn load_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>, String> {
+    let mut r = BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
+    rustls_pemfile::private_key(&mut r)
+        .map_err(|e| format!("read key: {e}"))?
+        .ok_or_else(|| "no private key in tls.key".into())
+}
+
+// --- connect verbs (drain / lame-duck / cancel) ----------------------------
+
+/// A management connect verb on an Agent. The connection is already front-proxy
+/// authenticated (rustls required a valid client cert), so we trust the
+/// `X-Remote-*` identity; we then `SubjectAccessReview` the verb before acting.
+async fn handle_verb(
+    State(state): State<AppState>,
+    Path((ns, name, verb)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !matches!(verb.as_str(), "drain" | "lame-duck" | "cancel") {
+        return status(StatusCode::NOT_FOUND, "Failure", &format!("unknown verb: {verb}"));
+    }
+
+    let user = headers
+        .get("X-Remote-User")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if user.is_empty() {
+        return status(StatusCode::UNAUTHORIZED, "Failure", "no X-Remote-User (not proxied?)");
+    }
+    let groups: Vec<String> = headers
+        .get_all("X-Remote-Group")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .collect();
+
+    match authorize(&state.client, &user, &groups, &ns, &name, &verb).await {
+        Ok(true) => {
+            tracing::info!(%user, %ns, agent = %name, %verb, "authorized management verb");
+            // Stage 2b: forward to the node-agent on the agent's node → agent.
+            status(
+                StatusCode::OK,
+                "Success",
+                &format!("{verb} authorized for {ns}/{name} by {user} (node-agent forward: stage 2b)"),
+            )
+        }
+        Ok(false) => {
+            tracing::warn!(%user, %ns, agent = %name, %verb, "denied by SubjectAccessReview");
+            status(
+                StatusCode::FORBIDDEN,
+                "Failure",
+                &format!("{user:?} cannot {verb} agents/{name} in {ns}"),
+            )
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "SubjectAccessReview failed");
+            status(StatusCode::INTERNAL_SERVER_ERROR, "Failure", &e)
+        }
+    }
+}
+
+/// SubjectAccessReview: may `user` (with `groups`) `create` the `agents/<verb>`
+/// subresource on `name` in `ns`?
+async fn authorize(
+    client: &Client,
+    user: &str,
+    groups: &[String],
+    ns: &str,
+    name: &str,
+    verb: &str,
+) -> Result<bool, String> {
+    let sar = SubjectAccessReview {
+        spec: SubjectAccessReviewSpec {
+            user: Some(user.to_string()),
+            groups: Some(groups.to_vec()),
+            resource_attributes: Some(ResourceAttributes {
+                group: Some(GROUP.to_string()),
+                resource: Some("agents".to_string()),
+                subresource: Some(verb.to_string()),
+                verb: Some("create".to_string()),
+                namespace: Some(ns.to_string()),
+                name: Some(name.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let api: Api<SubjectAccessReview> = Api::all(client.clone());
+    let resp = api
+        .create(&PostParams::default(), &sar)
+        .await
+        .map_err(|e| format!("create SAR: {e}"))?;
+    Ok(resp.status.map(|s| s.allowed).unwrap_or(false))
+}
+
+fn status(code: StatusCode, kind: &str, message: &str) -> (StatusCode, Json<Value>) {
+    (
+        code,
+        Json(json!({
+            "kind": "Status", "apiVersion": "v1", "status": kind,
+            "message": message, "code": code.as_u16()
+        })),
+    )
+}
+
+// --- discovery / health ----------------------------------------------------
+
 async fn ok() -> &'static str {
     "ok"
 }
 
-/// `GET /apis` — the aggregated group list for this server.
 async fn api_group_list() -> Json<Value> {
-    Json(json!({
-        "kind": "APIGroupList",
-        "apiVersion": "v1",
-        "groups": [group_obj()],
-    }))
+    Json(json!({ "kind": "APIGroupList", "apiVersion": "v1", "groups": [group_obj()] }))
 }
 
-/// `GET /apis/management.agents.x-k8s.io` — the group.
 async fn api_group() -> Json<Value> {
     Json(group_obj())
 }
@@ -81,21 +259,15 @@ async fn api_group() -> Json<Value> {
 fn group_obj() -> Value {
     let gv = format!("{GROUP}/{VERSION}");
     json!({
-        "kind": "APIGroup",
-        "apiVersion": "v1",
-        "name": GROUP,
+        "kind": "APIGroup", "apiVersion": "v1", "name": GROUP,
         "versions": [{ "groupVersion": gv, "version": VERSION }],
         "preferredVersion": { "groupVersion": gv, "version": VERSION },
     })
 }
 
-/// `GET /apis/management.agents.x-k8s.io/v1alpha1` — the resource list. The
-/// management verbs are modeled as connect subresources on `agents` (Stage 2
-/// implements their handlers).
 async fn api_resources() -> Json<Value> {
     Json(json!({
-        "kind": "APIResourceList",
-        "apiVersion": "v1",
+        "kind": "APIResourceList", "apiVersion": "v1",
         "groupVersion": format!("{GROUP}/{VERSION}"),
         "resources": [
             { "name": "agents/drain", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
@@ -106,11 +278,5 @@ async fn api_resources() -> Json<Value> {
 }
 
 async fn not_found() -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({
-            "kind": "Status", "apiVersion": "v1", "status": "Failure",
-            "reason": "NotFound", "code": 404
-        })),
-    )
+    status(StatusCode::NOT_FOUND, "Failure", "not found")
 }
