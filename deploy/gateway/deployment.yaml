@@ -39,6 +39,17 @@ spec:
                 secretKeyRef:
                   name: agentctl-postgres
                   key: DATABASE_URL
+            # Ed25519 seed for Agent Card JWS signing (RFC 0014).
+            - name: GATEWAY_SIGNING_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-gateway-signing
+                  key: GATEWAY_SIGNING_SEED
+            # Mesh registry federation (RFC 0014): peer gateway base URLs (CSV).
+            # Self-reference here demonstrates the merge (peers are queried with
+            # ?local=1 to prevent recursion).
+            - name: FEDERATION_PEERS
+              value: "http://agentctl-gateway.agentctl-system"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

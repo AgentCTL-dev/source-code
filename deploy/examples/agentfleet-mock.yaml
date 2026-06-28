@@ -1,0 +1,21 @@
+# A claim-mode AgentFleet backed by the mock-agent image, so its pod serves the
+# management profile over the substrate socket — enough for the gateway to
+# project (and JWS-sign) a fleet-level Agent Card.
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: AgentFleet
+metadata:
+  name: mockfleet
+  namespace: default
+spec:
+  template:
+    mode: reactive
+    image: mock-agent:dev
+    subscribe: ["queue://noop"]
+  scaling:
+    mode: claim
+    min: 1
+    max: 5
+    target:
+      signal: pending_events
+      value: "5"
+  workSource: "queue://noop"

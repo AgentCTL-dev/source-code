@@ -18,11 +18,13 @@
 //! `forward_to_node_agent` (RFC 0009). Hand-rolled in Rust (axum); agentctl is
 //! Rust-only and depends on the contract wire, never on a specific agent (P0).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use agent_api::{Agent, AgentFleet};
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -34,6 +36,7 @@ use kube::{Api, Client};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
 
+mod signing;
 mod store;
 
 /// Namespace the node-agent DaemonSet runs in (same as the apiserver assumes).
@@ -43,6 +46,7 @@ const NODE_AGENT_NS: &str = "agentctl-system";
 struct AppState {
     client: Client,
     pool: Pool,
+    signer: Arc<signing::Signer>,
 }
 
 #[tokio::main]
@@ -54,6 +58,9 @@ async fn main() {
         .init();
 
     let client = Client::try_default().await.expect("in-cluster kube client");
+
+    // The Agent Card signing key (RFC 0013) — required at startup.
+    let signer = Arc::new(signing::Signer::from_env().expect("GATEWAY_SIGNING_SEED"));
 
     // The durable task store (RFC 0013). Retry the schema — the DB pod may start
     // after us.
@@ -71,13 +78,22 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/.well-known/jwks.json", get(jwks))
         .route("/agents", get(list_agents))
         .route(
             "/agents/{ns}/{name}/.well-known/agent-card.json",
             get(agent_card),
         )
+        .route(
+            "/fleets/{ns}/{name}/.well-known/agent-card.json",
+            get(fleet_card),
+        )
         .route("/agents/{ns}/{name}", post(a2a_rpc))
-        .with_state(AppState { client, pool });
+        .with_state(AppState {
+            client,
+            pool,
+            signer,
+        });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -89,45 +105,72 @@ async fn main() {
 
 // --- handlers --------------------------------------------------------------
 
-/// Project the A2A Agent Card from the agent's capabilities manifest, fetched
-/// from the node-agent on the agent's node.
+/// Publish the JWKS that verifies signed Agent Cards (RFC 0013).
+async fn jwks(State(state): State<AppState>) -> Json<Value> {
+    Json(state.signer.jwks())
+}
+
+/// Project a **signed** A2A Agent Card from the agent's capabilities manifest,
+/// fetched from the node-agent on the agent's node. `kind` (when `Some`) is
+/// attached as `x-agentctl-kind` — used to mark fleet cards. This is the shared
+/// path behind both [`agent_card`] and [`fleet_card`] (a fleet's pods are
+/// labelled the same way an agent's are, so [`resolve`] works for both).
+async fn build_signed_card(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+    base_url: &str,
+    kind: Option<&str>,
+) -> Result<Value, String> {
+    let (uid, na_ip) = resolve(&state.client, ns, name).await?;
+    let url = format!("http://{na_ip}:8080/v1/agents/{uid}/capabilities");
+    let manifest = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("node-agent GET {url}: {e}"))?
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("decode capabilities: {e}"))?;
+    let mut card = project_card(&manifest, ns, name, base_url);
+    if let Some(k) = kind {
+        card["x-agentctl-kind"] = json!(k);
+    }
+    state.signer.sign_card(&mut card);
+    Ok(card)
+}
+
+/// Project the signed A2A Agent Card for an `Agent` CR.
 async fn agent_card(
     State(state): State<AppState>,
     Path((ns, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
     let base_url = base_url(&headers);
-    let (uid, na_ip) = match resolve(&state.client, &ns, &name).await {
-        Ok(loc) => loc,
+    match build_signed_card(&state, &ns, &name, &base_url, None).await {
+        Ok(card) => (StatusCode::OK, Json(card)),
         Err(e) => {
-            tracing::warn!(%ns, agent = %name, error = %e, "card resolve failed");
-            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": e })));
+            tracing::warn!(%ns, agent = %name, error = %e, "card build failed");
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": e })))
         }
-    };
+    }
+}
 
-    let url = format!("http://{na_ip}:8080/v1/agents/{uid}/capabilities");
-    let manifest = match reqwest::Client::new().get(&url).send().await {
-        Ok(resp) => match resp.json::<Value>().await {
-            Ok(m) => m,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": format!("decode capabilities: {e}") })),
-                )
-            }
-        },
+/// Project the signed A2A Agent Card for an `AgentFleet` CR (marked
+/// `x-agentctl-kind: AgentFleet`).
+async fn fleet_card(
+    State(state): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    let base_url = base_url(&headers);
+    match build_signed_card(&state, &ns, &name, &base_url, Some("AgentFleet")).await {
+        Ok(card) => (StatusCode::OK, Json(card)),
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": format!("node-agent GET {url}: {e}") })),
-            )
+            tracing::warn!(%ns, fleet = %name, error = %e, "fleet card build failed");
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": e })))
         }
-    };
-
-    (
-        StatusCode::OK,
-        Json(project_card(&manifest, &ns, &name, &base_url)),
-    )
+    }
 }
 
 /// Bridge a spec-form A2A JSON-RPC request to the agent's reference method.
@@ -165,6 +208,29 @@ async fn a2a_rpc(
     // networkless, so the gateway stores the webhook and delivers. Not forwarded.
     if let Some(op) = spec.strip_prefix("tasks/pushNotificationConfig/") {
         return push_config(&state.pool, &ns, &name, op, &req, id).await;
+    }
+
+    // `tasks/resubscribe` is served by the GATEWAY: a one-shot SSE resume of the
+    // stored task. NOTE: live resume of an in-flight stream is future work — our
+    // agents complete synchronously, so the stored task is already terminal and a
+    // single replayed frame is the whole stream.
+    if spec == "tasks/resubscribe" {
+        let tid = req
+            .pointer("/params/id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        return match store::get(&state.pool, &ns, &name, &tid).await {
+            Ok(Some(row)) => (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                format!("data: {}\n\n", store::task_json(&row)),
+            )
+                .into_response(),
+            Ok(None) => {
+                Json(rpc_error(id, -32001, &format!("task not found: {tid}"))).into_response()
+            }
+            Err(e) => Json(rpc_error(id, -32603, &format!("store get: {e}"))).into_response(),
+        };
     }
 
     // Translate spec → reference; unknown method ⇒ -32601 (METHOD_NOT_FOUND).
@@ -266,8 +332,8 @@ async fn a2a_rpc(
                 tracing::warn!(error = %e, "store upsert failed");
             }
             // Deliver a push notification if a webhook is registered (RFC 0013).
-            if let Ok(Some(url)) = store::push_get(&state.pool, &ns, &name, tid).await {
-                deliver_push(url, result.clone());
+            if let Ok(Some((url, token))) = store::push_get(&state.pool, &ns, &name, tid).await {
+                deliver_push(url, token, result.clone());
             }
         }
     } else if spec == "tasks/cancel" {
@@ -282,7 +348,11 @@ async fn a2a_rpc(
 /// Mesh discovery registry: the union of `Agent` and `AgentFleet` CRs across all
 /// namespaces, each carrying its projected Agent Card URL. Contract-shaped — the
 /// rows describe CR identity + mode, never any agent's internals (P0).
-async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn list_agents(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
     let base_url = base_url(&headers);
     let mut rows: Vec<Value> = Vec::new();
 
@@ -296,13 +366,9 @@ async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 let mode = serde_json::to_value(a.spec.mode)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned));
-                rows.push(registry_row(
-                    "Agent",
-                    &ns,
-                    &name,
-                    mode.as_deref(),
-                    &base_url,
-                ));
+                let mut row = registry_row("Agent", &ns, &name, mode.as_deref(), &base_url);
+                row["origin"] = json!("local");
+                rows.push(row);
             }
         }
         Err(e) => {
@@ -322,7 +388,9 @@ async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 let name = f.metadata.name.unwrap_or_default();
                 // `AgentFleet` has no top-level `spec.mode` (mode lives on the
                 // per-replica template) ⇒ null.
-                rows.push(registry_row("AgentFleet", &ns, &name, None, &base_url));
+                let mut row = registry_row("AgentFleet", &ns, &name, None, &base_url);
+                row["origin"] = json!("local");
+                rows.push(row);
             }
         }
         Err(e) => {
@@ -331,6 +399,34 @@ async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 Json(json!({ "error": format!("list fleets: {e}") })),
             )
                 .into_response()
+        }
+    }
+
+    // `?local=…` ⇒ return ONLY local rows. This is the endpoint peers call when
+    // federating, so it must NOT fan out again (no infinite recursion).
+    if params.contains_key("local") {
+        return Json(json!({ "agents": rows })).into_response();
+    }
+
+    // Federation: merge each peer gateway's local rows, tagging the peer origin.
+    // A peer fetch error is logged and skipped — never fail the whole registry.
+    let peers = federation_peers(&std::env::var("FEDERATION_PEERS").unwrap_or_default());
+    for peer in peers {
+        let url = format!("{peer}/agents?local=1");
+        match reqwest::Client::new().get(&url).send().await {
+            Ok(resp) => match resp.json::<Value>().await {
+                Ok(body) => {
+                    if let Some(arr) = body.get("agents").and_then(Value::as_array) {
+                        for r in arr {
+                            let mut r = r.clone();
+                            r["origin"] = json!(peer);
+                            rows.push(r);
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(%peer, error = %e, "decode peer agents; skipping"),
+            },
+            Err(e) => tracing::warn!(%peer, error = %e, "fetch peer agents; skipping"),
         }
     }
 
@@ -359,18 +455,27 @@ async fn push_config(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let token_param = req
+        .pointer("/params/pushNotificationConfig/token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
 
     let outcome: Result<Value, String> = match op {
         "set" if task_id.is_empty() || url_param.is_empty() => {
             Err("set requires params.taskId and params.pushNotificationConfig.url".into())
         }
-        "set" => store::push_set(pool, ns, name, &task_id, &url_param)
+        "set" => store::push_set(pool, ns, name, &task_id, &url_param, &token_param)
             .await
-            .map(|_| json!({ "taskId": task_id, "pushNotificationConfig": { "url": url_param } })),
+            .map(|_| {
+                json!({ "taskId": task_id, "pushNotificationConfig": push_cfg(&url_param, &token_param) })
+            }),
         "get" => store::push_get(pool, ns, name, &task_id)
             .await
             .map(|u| match u {
-                Some(url) => json!({ "taskId": task_id, "pushNotificationConfig": { "url": url } }),
+                Some((url, token)) => {
+                    json!({ "taskId": task_id, "pushNotificationConfig": push_cfg(&url, &token) })
+                }
                 None => Value::Null,
             }),
         "list" => store::push_list(pool, ns, name).await.map(|rows| {
@@ -393,12 +498,31 @@ async fn push_config(
 }
 
 /// Fire-and-forget delivery of a task to a registered push webhook (RFC 0013).
-fn deliver_push(url: String, task: Value) {
+/// Retries up to 3 attempts (200ms backoff) until a 2xx; a non-empty `token` is
+/// sent as `Authorization: Bearer <token>`.
+fn deliver_push(url: String, token: String, task: Value) {
     tokio::spawn(async move {
-        match reqwest::Client::new().post(&url).json(&task).send().await {
-            Ok(r) => tracing::info!(%url, status = r.status().as_u16(), "push delivered"),
-            Err(e) => tracing::warn!(%url, error = %e, "push delivery failed"),
+        let client = reqwest::Client::new();
+        let mut last = String::from("no attempt");
+        for attempt in 1..=3u32 {
+            let mut rb = client.post(&url).json(&task);
+            if !token.is_empty() {
+                rb = rb.bearer_auth(&token);
+            }
+            match rb.send().await {
+                Ok(r) if r.status().is_success() => {
+                    let status = r.status().as_u16();
+                    tracing::info!(%url, status, attempt, "push delivered");
+                    return;
+                }
+                Ok(r) => last = format!("status {}", r.status().as_u16()),
+                Err(e) => last = e.to_string(),
+            }
+            if attempt < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
         }
+        tracing::warn!(%url, error = %last, "push delivery failed after 3 attempts");
     });
 }
 
@@ -414,6 +538,26 @@ fn translate_method(spec: &str) -> Option<&'static str> {
         "tasks/cancel" => Some("a2a.CancelTask"),
         _ => None,
     }
+}
+
+/// Build the `pushNotificationConfig` object echoed back to clients: always the
+/// `url`, plus `token` only when one is set (don't leak an empty token field).
+fn push_cfg(url: &str, token: &str) -> Value {
+    let mut cfg = json!({ "url": url });
+    if !token.is_empty() {
+        cfg["token"] = json!(token);
+    }
+    cfg
+}
+
+/// Parse the comma-separated `FEDERATION_PEERS` env value into clean gateway
+/// base URLs (trimmed; empties dropped). Pure — unit-tested.
+fn federation_peers(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// One mesh-registry row for a discovered CR (`Agent` / `AgentFleet`): identity,
@@ -604,6 +748,36 @@ mod tests {
             "http://h:8080/agents/ns/fleet-a/.well-known/agent-card.json"
         );
         assert_eq!(row["mode"], Value::Null);
+    }
+
+    #[test]
+    fn push_cfg_includes_token_only_when_set() {
+        let with = push_cfg("https://hook", "s3cr3t");
+        assert_eq!(with["url"], "https://hook");
+        assert_eq!(with["token"], "s3cr3t");
+
+        let without = push_cfg("https://hook", "");
+        assert_eq!(without["url"], "https://hook");
+        assert_eq!(without.get("token"), None);
+    }
+
+    #[test]
+    fn federation_peers_splits_trims_and_drops_empties() {
+        assert_eq!(federation_peers(""), Vec::<String>::new());
+        assert_eq!(federation_peers("   "), Vec::<String>::new());
+        assert_eq!(federation_peers(",,"), Vec::<String>::new());
+        assert_eq!(
+            federation_peers("http://a , http://b ,, http://c "),
+            vec![
+                "http://a".to_string(),
+                "http://b".to_string(),
+                "http://c".to_string()
+            ]
+        );
+        assert_eq!(
+            federation_peers("http://only"),
+            vec!["http://only".to_string()]
+        );
     }
 
     #[test]

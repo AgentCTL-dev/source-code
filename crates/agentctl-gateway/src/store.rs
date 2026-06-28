@@ -38,9 +38,12 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
                 agent      text        NOT NULL,
                 task_id    text        NOT NULL,
                 url        text        NOT NULL,
+                token      text        NOT NULL DEFAULT '',
                 created_at timestamptz NOT NULL DEFAULT now(),
                 PRIMARY KEY (namespace, agent, task_id)
-            )",
+            );
+            -- Idempotent migration for stores created before the auth token landed.
+            ALTER TABLE a2a_push_configs ADD COLUMN IF NOT EXISTS token text NOT NULL DEFAULT ''",
         )
         .await
         .map_err(|e| e.to_string())
@@ -129,44 +132,47 @@ pub async fn set_state(
     Ok(n > 0)
 }
 
-/// Register (or replace) the push-notification webhook URL for a task.
+/// Register (or replace) the push-notification webhook URL (and optional bearer
+/// `token`) for a task.
 pub async fn push_set(
     pool: &Pool,
     ns: &str,
     agent: &str,
     task_id: &str,
     url: &str,
+    token: &str,
 ) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     client
         .execute(
-            "INSERT INTO a2a_push_configs (namespace, agent, task_id, url)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (namespace, agent, task_id) DO UPDATE SET url = $4",
-            &[&ns, &agent, &task_id, &url],
+            "INSERT INTO a2a_push_configs (namespace, agent, task_id, url, token)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (namespace, agent, task_id) DO UPDATE SET url = $4, token = $5",
+            &[&ns, &agent, &task_id, &url, &token],
         )
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
-/// The webhook URL registered for a task, if any.
+/// The webhook URL and bearer token registered for a task, if any (token is the
+/// empty string when none was set).
 pub async fn push_get(
     pool: &Pool,
     ns: &str,
     agent: &str,
     task_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, String)>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let row = client
         .query_opt(
-            "SELECT url FROM a2a_push_configs
+            "SELECT url, token FROM a2a_push_configs
              WHERE namespace = $1 AND agent = $2 AND task_id = $3",
             &[&ns, &agent, &task_id],
         )
         .await
         .map_err(|e| e.to_string())?;
-    Ok(row.map(|r| r.get(0)))
+    Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
 /// All push-notification configs registered for an agent.

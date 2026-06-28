@@ -16,15 +16,16 @@ implementation lands; the binding plan is `docs/design/agentctl-architecture-bra
 | **Observability** (scrape-proxy) | 0010 | ✅ (metrics) | node-agent `/metrics` re-exposes a networkless agent's metrics, relabeled with `agent_pod_uid` |
 | **A2A gateway + streaming + mesh registry** | 0013/0014 | ✅ | `message/send` + **`message/stream`** (live SSE: working→artifact→completed) + `tasks/get`/`tasks/cancel`; per-agent **Agent Card** at `/.well-known/`; **`GET /agents`** discovery registry (Agent + AgentFleet) |
 | **A2A durable task store** | 0013 | ✅ | Postgres-backed: `message/send` persists tasks, **`tasks/list`** returns history, `tasks/get` resolves from the store; **survives a gateway pod restart** (state in the DB, gateway stays stateless) |
-| **A2A push notifications** | 0013 | ✅ | `tasks/pushNotificationConfig/set·get·list·delete` (gateway-owned, since agents are networkless); on completion the gateway **delivers the task to the webhook** (verified: sink received the task, gateway logged `push delivered status=200`) |
+| **A2A push notifications** | 0013 | ✅ | `tasks/pushNotificationConfig/set·get·list·delete` (gateway-owned, since agents are networkless); on completion the gateway **delivers the task to the webhook** with retries + `Authorization: Bearer` (verified: sink received the task with `auth=Bearer …`) |
+| **A2A mesh: card signing + fleet card + federation** | 0014 | ✅ | Agent **+ fleet** Cards are **JWS-signed** (Ed25519); `GET /.well-known/jwks.json` serves the key — **a live card verifies against it**; `GET /agents` **federates** peer registries (`origin` per row); `tasks/resubscribe` replays a stored task over SSE |
 | **Contract client + CRD gen + conformance fixture** | 0018 | ✅ (hand-written) | typed manifest client validated vs real golden `--capabilities` fixtures; `mock-agent` as a conformant stand-in |
 
-**Engineering:** 9 crates, 57 tests, `clippy -D warnings` clean, `cargo fmt` clean.
+**Engineering:** 9 crates, 64 tests, `clippy -D warnings` clean, `cargo fmt` clean.
 
 ## Remaining (roadmap)
 
 - **Observability** (rest of 0010): events pipeline (`agent://events`→logs), run-outcome capture (`kubectl agents results`), CLI `top`, trace correlation.
-- **A2A mesh (rest of 0013/0014)**: fleet-level *single* Agent Card (one card per `AgentFleet`) + card **signing** (JWS/JWKS) + federation; resumable SSE + push delivery retries/auth + streaming-task push. (Done: the gateway, per-agent card, `message/send`, **`message/stream` live SSE**, `tasks/get`/`tasks/cancel`, the **`GET /agents` discovery registry**, the **Postgres durable task store + `tasks/list`**, and **push notifications** — `tasks/pushNotificationConfig/*` + webhook delivery.)
+- **A2A — protocol surface complete.** Done: `message/send`, **`message/stream`** (live SSE), `tasks/get`·`list`·`cancel`·**`resubscribe`**, **`pushNotificationConfig/*`** + webhook delivery (retry + bearer auth), per-agent **and fleet JWS-signed Agent Cards** + JWKS, the **`GET /agents` federated registry**, and the **Postgres durable task store**. Remaining is hardening/scale only: cross-cluster federation *trust* (verify peer card signatures + dedup), live in-flight stream resume (agents complete synchronously today), and push delivery for streaming tasks.
 - **Intelligence plane** (0012): the egress proxy / ModelPool; zero-secret-in-pod; cost governance.
 - **Admission** (0007): CRD CEL invariants + the validating webhook (trifecta-override gate).
 - **Hardening** (0015): apiserver↔node-agent mTLS, pod→socket attestation (`SO_PEERCRED`, 0002 §7), per-tenant isolation, the Kata-hybrid substrate tier.

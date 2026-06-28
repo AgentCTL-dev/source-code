@@ -30,7 +30,8 @@ spec:
                   def do_POST(self):
                       n = int(self.headers.get('content-length', 0))
                       body = self.rfile.read(n).decode()
-                      print('WEBHOOK', self.path, body, flush=True)
+                      auth = self.headers.get('authorization', '-')
+                      print('WEBHOOK', self.path, 'auth=' + auth, body, flush=True)
                       self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
                   def log_message(self, *a): pass
               print('webhook-sink listening on :8080', flush=True)
