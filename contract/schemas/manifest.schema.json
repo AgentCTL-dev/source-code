@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentctl.dev/contract/v1/manifest.schema.json",
   "title": "Agent Control Contract — Capabilities Manifest",
-  "description": "The neutral, machine-readable capabilities manifest: the discovery spine of the Agent Control Contract (ACC). A conformant agent emits this object from the one-shot `--capabilities` entrypoint and (later) from the live `agent://capabilities` resource. agentctl consumes ONLY this contract, never an agent-specific shape (principle P0). The `surfaces{}` block is the SINGLE discovery point for every control-plane surface (RFC 0014 §6.2): a key ABSENT means the surface is unbuilt and the consumer degrades gracefully; never branch on a value that is not advertised here. VERSIONING (RFC 0014 §6.3): `contract_version` is major.minor; additive growth (new fields/tools/metrics/surfaces keys) bumps MINOR and a consumer MUST tolerate it (this object and its open sub-objects use additionalProperties:true); a consumer refuses ONLY an unknown MAJOR. DE-BRANDING (P0): the reference implementation emits agentd-branded spellings (agentd_version key, agentd:// scheme, agentd_ metric prefix, AGENTD_* env). The contract canonicalizes neutral tokens (agent_version, agent://, agent_, AGENT_*) and keeps the branded spellings as accepted aliases; cutover is a GA decision and branded forms are NOT dropped while fielded agents emit them. SECRETS: this manifest NEVER carries credentials (RFC 0012 §3.7) — intelligence is structural (transport scheme + endpoint count) only.",
+  "description": "The neutral, machine-readable capabilities manifest: the discovery spine of the Agent Control Contract (ACC). A conformant agent emits this object from the one-shot `--capabilities` entrypoint and (later) from the live `agent://capabilities` resource. agentctl consumes ONLY this contract, never an agent-specific shape (principle P0). The `surfaces{}` block is the SINGLE discovery point for every control-plane surface (RFC 0014 §6.2): a key ABSENT means the surface is unbuilt and the consumer degrades gracefully; never branch on a value that is not advertised here. VERSIONING (RFC 0014 §6.3): `contract_version` is major.minor; additive growth (new fields/tools/metrics/surfaces keys) bumps MINOR and a consumer MUST tolerate it (this object and its open sub-objects use additionalProperties:true); a consumer refuses ONLY an unknown MAJOR. NEUTRAL TOKENS (P0): the contract uses neutral tokens only — agent_version, agent://, agent_, AGENT_*. SECRETS: this manifest NEVER carries credentials (RFC 0012 §3.7) — intelligence is structural (transport scheme + endpoint count) only.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -11,17 +11,8 @@
     "identity",
     "mode",
     "intelligence",
-    "surfaces"
-  ],
-  "anyOf": [
-    {
-      "required": ["agent_version"],
-      "description": "Neutral de-branded version key."
-    },
-    {
-      "required": ["agentd_version"],
-      "description": "Branded reference-impl alias (emitted by the reference agent today)."
-    }
+    "surfaces",
+    "agent_version"
   ],
   "properties": {
     "contract_version": {
@@ -32,11 +23,7 @@
     },
     "agent_version": {
       "type": "string",
-      "description": "NEUTRAL build/version string of the agent binary (de-branded from agentd_version). Free-form, impl-defined (reference emits CARGO_PKG_VERSION). De-branding compat: at least one of agent_version / agentd_version MUST be present (anyOf at the root)."
-    },
-    "agentd_version": {
-      "type": "string",
-      "description": "BRANDED ALIAS of agent_version. The reference implementation emits THIS key today; the contract accepts it until the GA cutover. Consumers SHOULD prefer agent_version when both are present."
+      "description": "Build/version string of the agent binary. Free-form, impl-defined (reference emits CARGO_PKG_VERSION). REQUIRED at the root."
     },
     "build_features": {
       "type": "array",
@@ -81,28 +68,28 @@
     "identity": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Downward-API identity block (RFC 0014 §6.4, RFC 0015 §6). DESCRIPTIVE only — never load-bearing for placement/scheduling. run_id is always present (a ULID is synthesized if unset); the Kubernetes-sourced fields are string-or-null. Reference reads these from the downward-API env vars noted per field (neutral AGENT_* with the branded AGENTD_* alias accepted until GA); an empty env value is coerced to unset (null).",
+      "description": "Downward-API identity block (RFC 0014 §6.4, RFC 0015 §6). DESCRIPTIVE only — never load-bearing for placement/scheduling. run_id is always present (a ULID is synthesized if unset); the Kubernetes-sourced fields are string-or-null. Reference reads these from the downward-API env vars noted per field (AGENT_*); an empty env value is coerced to unset (null).",
       "required": ["run_id"],
       "properties": {
         "run_id": {
           "type": "string",
-          "description": "Always present. Stable run identity (ULID if not supplied). Reference env: AGENT_RUN_ID (alias AGENTD_RUN_ID)."
+          "description": "Always present. Stable run identity (ULID if not supplied). Reference env: AGENT_RUN_ID."
         },
         "instance": {
           "type": ["string", "null"],
-          "description": "Pod name. Downward API metadata.name via AGENT_POD_NAME (alias AGENTD_POD_NAME). null when unset."
+          "description": "Pod name. Downward API metadata.name via AGENT_POD_NAME. null when unset."
         },
         "uid": {
           "type": ["string", "null"],
-          "description": "Pod UID. Downward API metadata.uid via AGENT_POD_UID (alias AGENTD_POD_UID). null when unset."
+          "description": "Pod UID. Downward API metadata.uid via AGENT_POD_UID. null when unset."
         },
         "node": {
           "type": ["string", "null"],
-          "description": "Node name. Downward API spec.nodeName via AGENT_NODE_NAME (alias AGENTD_NODE_NAME). null when unset."
+          "description": "Node name. Downward API spec.nodeName via AGENT_NODE_NAME. null when unset."
         },
         "namespace": {
           "type": ["string", "null"],
-          "description": "Namespace. Downward API metadata.namespace via AGENT_POD_NAMESPACE (alias AGENTD_POD_NAMESPACE). null when unset."
+          "description": "Namespace. Downward API metadata.namespace via AGENT_POD_NAMESPACE. null when unset."
         }
       }
     },

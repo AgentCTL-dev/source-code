@@ -9,13 +9,13 @@
 > it owns the *policy*, the contract owns the *primitives* (P0).** The cross-replica
 > ownership rule (the work-claim lease, the shard predicate, the autoscaling-signal
 > set, the drain-release step) is **frozen by the contract** (the reference
-> implementation's agentd RFC 0019, the `work.*` names in agentd RFC 0015 §5.6, the
-> metric set in agentd RFC 0016 §4.3) and honoured by *any* conformant agent.
+> implementation's agent RFC 0019, the `work.*` names in agent RFC 0015 §5.6, the
+> metric set in agent RFC 0016 §4.3) and honoured by *any* conformant agent.
 > agentctl supplies the Kubernetes-shaped halves the agent refuses to learn: the
 > **KEDA external scaler** (`crates/scaler`), the **reference coordination MCP
 > server** (the atomic-lease + dedupe backbone agentctl ships and operates), the
 > **shard-resize controller**, and the **warm-pool** orchestration. Where this RFC
-> names a concrete surface it cites the reference implementation (agentd RFCs) as
+> names a concrete surface it cites the reference implementation (agent RFCs) as
 > *where the contract is presently written down*, never as a dependency.
 
 > **KEDA owns `.spec.replicas`; agentctl never fights the HPA.** For an elastic
@@ -28,7 +28,7 @@
 > **The agent never learns it is in a fleet.** It claims one item, shards one key
 > space, emits one instance's gauges, and drains itself on SIGTERM. Fan-out,
 > aggregation, scale decisions, victim selection, and rebalance are **exclusively
-> agentctl's** (agentd RFC 0016 §7.3, agentd RFC 0014 §6 non-goals). A
+> agentctl's** (agent RFC 0016 §7.3, agent RFC 0014 §6 non-goals). A
 > `"cluster":false` agent degrades to a single, un-scaled singleton (§9).
 
 ---
@@ -39,14 +39,14 @@ agentctl must horizontally scale **reactive** fleets — N workers all subscribe
 one MCP work source — and the moment there is a second replica, the contract's
 own correctness guarantee turns against us:
 
-- **Replicating the worker replicates the owner.** agentd RFC 0008 §2.2 makes one
+- **Replicating the worker replicates the owner.** agent RFC 0008 §2.2 makes one
   instance an exactly-one-owner: every inbound
   `notifications/resources/updated{uri}` matches **exactly one** route, in order,
   no fan-out. That guarantee is **intra-instance**. Run two reactive Deployments
   on `file:///inbox/*.json` and the source server delivers the *same* notification
   to *both* connections — each routes it to its own owning route and processes it.
   R replicas = R processings = **R× duplicate side effects, not R× throughput**
-  (agentd RFC 0019 §1). A naive KEDA scale 1→10 is a correctness bug, not a win.
+  (agent RFC 0019 §1). A naive KEDA scale 1→10 is a correctness bug, not a win.
 
 - **The pods are networkless.** Under the locked substrate decision (agentctl RFC
   0002) the production multi-tenant tier (Kata-hybrid) and the portable off-pod
@@ -55,22 +55,22 @@ own correctness guarantee turns against us:
   — and the autoscaling signal cannot be a per-pod scrape at the source (§5, §6).
 
 - **Scale-from-zero is the headline elastic property and the hardest one.** A
-  reactive worker idles at near-zero CPU between events (agentd RFC 0008 §3.1.3),
+  reactive worker idles at near-zero CPU between events (agent RFC 0008 §3.1.3),
   so the natural floor is **zero pods**. But every per-replica gauge the agent
-  emits — `agentd_pending_events`, `agentd_reaction_lag_ms` (agentd RFC 0016 §4.3)
+  emits — `agent_pending_events`, `agent_reaction_lag_ms` (agent RFC 0016 §4.3)
   — emits **nothing at replica 0** (no pod exists to emit it). The signal that
   there is *pending work when zero workers run* must come from **off the pods** —
   the work store itself (§5.3, contract ask **P9**).
 
 - **Scale-down must not drop a held claim or in-flight work.** An HPA deleting a
   replica must let that pod **release its claims** and **bleed in-flight work**
-  before exit, or the fleet loses an item until a lease TTL elapses (agentd RFC
+  before exit, or the fleet loses an item until a lease TTL elapses (agent RFC
   0019 §6). The drain choreography and the workload kind interact (a StatefulSet
   scale-down deletes the highest ordinal; a Deployment can pick the least-loaded
   victim, agentctl RFC 0003 §4.2).
 
 The contract already solves the **data-plane** half: a work-claim lease that makes
-exactly-one-owner hold *across* instances (agentd RFC 0019 §3), a static shard
+exactly-one-owner hold *across* instances (agent RFC 0019 §3), a static shard
 predicate (§4), an honest autoscaling-signal surface (§5), and a drain that
 releases claims (§6). **None of the Kubernetes half exists until agentctl builds
 it**, and several of the surfaces the data plane assumes are unbuilt or
@@ -82,10 +82,10 @@ unreconciled. This RFC owns that half and names the gaps as contract asks.
 |---|---|---|
 | `AgentFleet.spec` (`scaling.mode`, `target`, `work.*`, `drain`/`grace`) | **agentctl RFC 0003 §4** | consume; never re-define the schema |
 | Mode→workload render; `ScaledObject` render; **KEDA-owns-replicas** field-ownership | **agentctl RFC 0006 §6/§8.4** | specify the **trigger detail** the operator renders; own the resize handoff |
-| The claim *lifecycle* the agent honours; the shard predicate; the drain-release step | **agentd RFC 0019** (contract) | reuse verbatim; build the **server** + scaler + resize controller around it |
-| `work.*` tool names + `_meta` + `claim_key` | **agentd RFC 0015 §5.6** (frozen) | the reference coordination server implements the **server side** of this |
-| Frozen autoscaling-signal metric set; the **P10** name defect | **agentd RFC 0016 §4.3 / agentctl RFC 0010 §5.4** | author triggers against the **frozen** names only; reconcile via P10 |
-| The Tier A telemetry bridge / scrape-proxy / `agentd://capacity` read | **agentctl RFC 0008 / RFC 0010** | consume for in-pod refinement + victim selection |
+| The claim *lifecycle* the agent honours; the shard predicate; the drain-release step | **agent RFC 0019** (contract) | reuse verbatim; build the **server** + scaler + resize controller around it |
+| `work.*` tool names + `_meta` + `claim_key` | **agent RFC 0015 §5.6** (frozen) | the reference coordination server implements the **server side** of this |
+| Frozen autoscaling-signal metric set; the **P10** name defect | **agent RFC 0016 §4.3 / agentctl RFC 0010 §5.4** | author triggers against the **frozen** names only; reconcile via P10 |
+| The Tier A telemetry bridge / scrape-proxy / `agent://capacity` read | **agentctl RFC 0008 / RFC 0010** | consume for in-pod refinement + victim selection |
 | Networkless **egress** (the agent's outbound MCP/claim connection) | **agentctl RFC 0002 / RFC 0012** | route the claim transport over the egress path (§3.4) |
 | **KEDA external scaler** (`crates/scaler`, `tonic`) | **this RFC** (built per agentctl RFC 0001) | `externalscaler.proto` server reading the off-pod backlog |
 | **Reference coordination MCP server** | **this RFC** | atomic lease + `claim_key` dedupe + off-pod backlog count (P9) |
@@ -99,7 +99,7 @@ unreconciled. This RFC owns that half and names the gaps as contract asks.
 1. **`AgentFleet` renders to one of two topologies, selected by `scaling.mode`
    (agentctl RFC 0003 §4.2), because two scaling regimes cannot share one
    topology.** KEDA wanting to jiggle `.spec.replicas` continuously and `--shard
-   K/N` requiring `N` to be a fleet-consistent immutable config (agentd RFC 0019
+   K/N` requiring `N` to be a fleet-consistent immutable config (agent RFC 0019
    Decision 4) are irreconcilable in one object. So:
    - **`claim` (recommended default; the only elastic regime)** → a **Deployment**
      (fungible pods) + a KEDA `ScaledObject`. Cross-instance ownership is the
@@ -118,8 +118,8 @@ unreconciled. This RFC owns that half and names the gaps as contract asks.
    and the **off-pod backlog count** scale-from-zero needs (§3.2). It is a
    first-class stateful service agentctl runs (HA, backed up), and it is
    **pluggable** — a fleet may point at any server advertising the frozen `work.*`
-   contract (agentd RFC 0015 §5.6). It is the SERVER side of `work.*`; the agent is
-   only ever a *caller* (agentd RFC 0019 §2).
+   contract (agent RFC 0015 §5.6). It is the SERVER side of `work.*`; the agent is
+   only ever a *caller* (agent RFC 0019 §2).
 
 3. **The KEDA scaler is an EXTERNAL gRPC scaler (`crates/scaler`, `tonic`), not a
    Prometheus scaler — because the from-zero signal is off-pod and the per-pod
@@ -138,26 +138,26 @@ unreconciled. This RFC owns that half and names the gaps as contract asks.
    claims → exit 0 — never a CR finalizer.** KEDA deletes individual replica pods;
    a CR finalizer fires only on CR deletion (agentctl RFC 0006 §7.1). The pod's
    `terminationGracePeriodSeconds` (> `drain.timeoutSeconds`, the agentctl RFC 0003
-   CEL invariant) + the agent's claim-release drain (agentd RFC 0019 §6) do the
+   CEL invariant) + the agent's claim-release drain (agent RFC 0019 §6) do the
    work (§3.3).
 
 6. **Correctness never depends on exactly-once delivery.** It rests on (a) a single
    serializing claim *or* a single owning shard, **and** (b) an item-derived
-   idempotency key on every side effect (agentd RFC 0019 §3.5/§8). When (a)
+   idempotency key on every side effect (agent RFC 0019 §3.5/§8). When (a)
    momentarily fails — a lease TTL expiry, a rebalance seam, a mis-assignment — (b)
    holds the line. The reference coordination server MUST provide (b) transactionally
    (§3.2), or the system is at-least-once with no safety net (§7).
 
 7. **Author autoscaling triggers against the FROZEN metric names only.** The frozen
-   reactive set is `agentd_pending_events` / `agentd_reaction_lag_ms` /
-   `agentd_inflight_reactions` / `agentd_subscriptions_active` (agentd RFC 0016
-   §4.3). The names agentd RFC 0019 §5 used (`agentd_reactive_backlog` /
-   `agentd_saturation` / …) are **not in the frozen schema** and are treated as
+   reactive set is `agent_pending_events` / `agent_reaction_lag_ms` /
+   `agent_inflight_reactions` / `agent_subscriptions_active` (agent RFC 0016
+   §4.3). The names agent RFC 0019 §5 used (`agent_reactive_backlog` /
+   `agent_saturation` / …) are **not in the frozen schema** and are treated as
    not-real until **contract ask P10** reconciles the two sets (agentctl RFC 0010
    §5.4). The off-pod from-zero signal is neither set — it is the coordination
    server's count (P9).
 
-8. **`AGENTD_SHARD="K/N"` is unimplementable from one StatefulSet pod template — a
+8. **`AGENT_SHARD="K/N"` is unimplementable from one StatefulSet pod template — a
    contract defect, fixed by `--shard auto/N` (P3).** A pod template's env is
    identical across ordinals; the downward API exposes `metadata.name` (with the
    ordinal) but cannot express a computed composite `"3/8"` (agentctl RFC 0003
@@ -175,12 +175,12 @@ surface or a contract ask is absent (§9).
 ### 3.1 The regime
 
 In claim mode every pod is shard `0/1` (no partitioning); cross-instance ownership
-is the work-claim lease and nothing else (agentd RFC 0019 §3). The flow per
-reactive wake (agentd RFC 0019 §3.4) is: route the item (intra-instance
+is the work-claim lease and nothing else (agent RFC 0019 §3). The flow per
+reactive wake (agent RFC 0019 §3.4) is: route the item (intra-instance
 exactly-one-owner) → **claim** it on the coordination server → process only on a
 *granted* claim → **ack** on success / **release** on wind-down. Replicas are
 fungible: any pod can process any item, and a re-claimed item runs identically
-anywhere (agentd RFC 0019 §6). That is precisely what lets the HPA treat the fleet
+anywhere (agent RFC 0019 §6). That is precisely what lets the HPA treat the fleet
 as interchangeable cattle and own `.spec.replicas` freely.
 
 agentctl renders claim mode to a **Deployment** — not a StatefulSet — for two
@@ -189,38 +189,38 @@ ordinal, is the owner), and a Deployment + `controller.kubernetes.io/pod-deletio
 (driven from per-pod load) lets the HPA remove the **least-loaded** victim, which a
 StatefulSet (highest-ordinal-first) cannot (agentctl RFC 0003 §4.2). The
 pod-deletion-cost annotation is maintained by the operator from per-pod load read
-through Tier A (`agentd://capacity` / `agentd_active_subagents`, agentctl RFC 0008
-§3.2) — gated on **contract ask P4** (the `agentd://capacity` schema is referenced
-by agentd RFC 0019 but undefined in agentd RFC 0005/0015).
+through Tier A (`agent://capacity` / `agent_active_subagents`, agentctl RFC 0008
+§3.2) — gated on **contract ask P4** (the `agent://capacity` schema is referenced
+by agent RFC 0019 but undefined in agent RFC 0005/0015).
 
 ### 3.2 The reference coordination MCP server (the correctness backbone)
 
-The claim convention is only as correct as the server behind it. agentd is a
+The claim convention is only as correct as the server behind it. agent is a
 *participant*: it calls `work.claim`/`renew`/`ack`/`release` and supplies the
-`claim_key`; it **assumes the server makes the claim atomic** (agentd RFC 0019 §8
-row 1) and **assumes the server dedupes the side effect on the key** (agentd RFC
+`claim_key`; it **assumes the server makes the claim atomic** (agent RFC 0019 §8
+row 1) and **assumes the server dedupes the side effect on the key** (agent RFC
 0019 §3.5). If the server cannot, two-owner is possible and only idempotency saves
 correctness. So **agentctl ships a reference coordination MCP server** and operates
 it as a first-class stateful service. It owns, exactly:
 
 | Responsibility | Contract anchor | Notes |
 |---|---|---|
-| **Atomic `work.claim`** | agentd RFC 0015 §5.6, agentd RFC 0019 §3.3 | the single serializing point; grants to exactly one of N racers |
-| **Lease lifecycle** (`renew`/`ack`/`release`, TTL expiry) | agentd RFC 0019 §3.2 | a dead claimer's lease expires → item re-offered to the fleet |
-| **Transactional dedupe on `claim_key`** | agentd RFC 0019 §3.5/§10 | a redelivered-but-already-acked item is a server-side no-op; **the safety net for at-least-once** |
+| **Atomic `work.claim`** | agent RFC 0015 §5.6, agent RFC 0019 §3.3 | the single serializing point; grants to exactly one of N racers |
+| **Lease lifecycle** (`renew`/`ack`/`release`, TTL expiry) | agent RFC 0019 §3.2 | a dead claimer's lease expires → item re-offered to the fleet |
+| **Transactional dedupe on `claim_key`** | agent RFC 0019 §3.5/§10 | a redelivered-but-already-acked item is a server-side no-op; **the safety net for at-least-once** |
 | **Off-pod backlog count** (`work.stats` / `work://pending`) | **contract ask P9** | the scale-from-zero signal the external scaler reads (§5.3) |
-| **Both styles** (`tool` and `resource`) | agentd RFC 0015 §5.6 | tool: serves the four `work.*` tools; resource: items carry a `lease` field + a compare-and-set |
+| **Both styles** (`tool` and `resource`) | agent RFC 0015 §5.6 | tool: serves the four `work.*` tools; resource: items carry a `lease` field + a compare-and-set |
 
 > **Contract status (P12 / P9, made precise).** The `work.*` **tool names**,
-> argument shapes, the `agentd/*` `_meta` keys, and the item-derived `claim_key`
-> are **already frozen** in agentd RFC 0015 §5.6 (which resolved agentd RFC 0019
+> argument shapes, the `agent/*` `_meta` keys, and the item-derived `claim_key`
+> are **already frozen** in agent RFC 0015 §5.6 (which resolved agent RFC 0019
 > §12) — so the *claim* contract is settled and the reference server implements its
 > server side directly. The residual asks are two: **(P9)** an off-pod **backlog
 > count** surface (a `work.stats` tool or a countable `work://pending` resource) so
 > a scaler can read "items pending" when **zero** pods exist; and the **`assign`**
-> directed-assign tool for warm-pool push (§7), which agentd RFC 0019 §7.2 and §12
+> directed-assign tool for warm-pool push (§7), which agent RFC 0019 §7.2 and §12
 > leave un-frozen. Until `assign` lands, directed-assign falls back to
-> `subagent.spawn` (agentd RFC 0005 §3.2). **Contract asks: P9, P12 (`assign`).**
+> `subagent.spawn` (agent RFC 0005 §3.2). **Contract asks: P9, P12 (`assign`).**
 
 The server is **pluggable**: `work.claim.server` (agentctl RFC 0003 §4.1) names a
 declared MCP server; a fleet may BYO any server advertising the frozen `work.*`
@@ -233,17 +233,17 @@ point for every fleet that depends on it.
 **Claim TTL must be budget-aware, not a flat 120 s.** A lease shorter than the
 realistic processing time (a slow LLM turn) expires mid-flight → the item is
 redelivered → two replicas process concurrently → both write under the same
-`claim_key` → the server dedupes to one effect (agentd RFC 0019 §8 row 7). Correct,
+`claim_key` → the server dedupes to one effect (agent RFC 0019 §8 row 7). Correct,
 but wasteful. agentctl sets `work.claim.ttlSeconds` from the fleet's
 `limits.deadlineSeconds` / typical turn budget, and the agent renews at `ttl/3`
-(agentd RFC 0019 §3.6). The TTL is the *requested* value; the server is the
+(agent RFC 0019 §3.6). The TTL is the *requested* value; the server is the
 authority.
 
 ### 3.3 Scale-down: drain → bleed in-flight → release claims → exit 0
 
 When KEDA scales a claim fleet down, the HPA deletes a replica **pod** (not the
-CR). The pod's SIGTERM path runs the agent's drain choreography (agentd RFC 0011
-§4.2) extended by agentd RFC 0019 §6's **step 1.5**:
+CR). The pod's SIGTERM path runs the agent's drain choreography (agent RFC 0011
+§4.2) extended by agent RFC 0019 §6's **step 1.5**:
 
 ```
 KEDA/HPA scale-down  ──►  delete pod  ──►  SIGTERM:
@@ -252,11 +252,11 @@ KEDA/HPA scale-down  ──►  delete pod  ──►  SIGTERM:
        (best-effort, sub-budget min(2s, drain_timeout/4); lease TTL is the backstop)
   2.   bleed in-flight: wind down subagents at turn boundaries
          └─ each that reaches `completed` → work.ack; else → work.release
-  3.   flush; exit 0   ◄── clean drain is 0, NOT 143 (agentd RFC 0011 §5)
+  3.   flush; exit 0   ◄── clean drain is 0, NOT 143 (agent RFC 0011 §5)
 ```
 
 Two normative couplings agentctl renders to make this safe (agentctl RFC 0006
-§7.1, agentd RFC 0019 §8 row 10):
+§7.1, agent RFC 0019 §8 row 10):
 
 - **`podGraceSeconds` MUST exceed `drain.timeoutSeconds`** (the agentctl RFC 0003
   CEL invariant). A scale-down that SIGKILLs before drain completes leaks a held
@@ -301,7 +301,7 @@ networkless pod is not free**.
 
 Shard mode statically partitions the key space so a fleet need not contend on every
 item: an instance with shard `K` of `N` handles an item only if
-`fnv1a64(shard_key(item)) % N == K` (agentd RFC 0019 §4.1). The hash is a
+`fnv1a64(shard_key(item)) % N == K` (agent RFC 0019 §4.1). The hash is a
 hand-rolled **FNV-1a/64** — stable across versions, languages, and architectures
 (it must produce the same partition on every conformant agent in the fleet,
 regardless of vendor) — and the predicate runs **at routing intake, before claim
@@ -316,17 +316,17 @@ ordinal = `K`) with `.spec.replicas == N` operator-owned, and KEDA paused (§5.4
 with claim**: shard narrows *which* items a replica considers, claim resolves
 contention among replicas sharing a shard (transient overlap during a resize) — the
 recommended belt-and-braces for work that must make progress despite a node loss
-(agentd RFC 0019 §4.1 bottom row). Shard-only (no claim) is the cheapest and is
+(agent RFC 0019 §4.1 bottom row). Shard-only (no claim) is the cheapest and is
 correct as long as a dead shard's items may wait for the StatefulSet to reschedule
 that ordinal — acceptable only for level-triggered, current-state work.
 
-### 4.2 The `AGENTD_SHARD` defect → `--shard auto/N` (P3)
+### 4.2 The `AGENT_SHARD` defect → `--shard auto/N` (P3)
 
-agentd RFC 0014 §6.4 / agentd RFC 0019 §4.2 specify the agent reading
-`AGENTD_SHARD="K/N"` from env, with `K` = the StatefulSet ordinal and `N` =
+agent RFC 0014 §6.4 / agent RFC 0019 §4.2 specify the agent reading
+`AGENT_SHARD="K/N"` from env, with `K` = the StatefulSet ordinal and `N` =
 `.spec.replicas`. **This is unimplementable from a single StatefulSet pod
 template** (agentctl RFC 0003 §9.1): a pod template's `env` is **identical across
-all ordinals** — every replica would receive the *same* `AGENTD_SHARD` — and the
+all ordinals** — every replica would receive the *same* `AGENT_SHARD` — and the
 downward API can expose `metadata.name` (which *contains* the ordinal,
 `<name>-<k>`) but **cannot express a computed composite** like `"3/8"`. So an
 operator literally cannot inject a correct per-replica `K/N` via the template.
@@ -334,21 +334,21 @@ operator literally cannot inject a correct per-replica `K/N` via the template.
 The fix is a contract primitive, not a leak into agentctl:
 
 > **Contract ask P3 (a FIX).** `--shard auto/N`: the agent reads `N` from config
-> and **derives `K` itself** from the ordinal in `AGENTD_POD_NAME`. The operator
+> and **derives `K` itself** from the ordinal in `AGENT_POD_NAME`. The operator
 > then injects only `N` (uniform across the template, legal) and validates
-> `0 ≤ K < N` at startup (agentd RFC 0019 §4.4, exit 2). The operator renders the
+> `0 ≤ K < N` at startup (agent RFC 0019 §4.4, exit 2). The operator renders the
 > shard env by the negotiated contract (agentctl RFC 0006 §6.3): **P3 present →
 > inject `N`, agent derives `K`**; **P3 absent → an initContainer shim** parses the
-> ordinal from the downward-API pod name and writes `AGENTD_SHARD="K/N"` to a shared
+> ordinal from the downward-API pod name and writes `AGENT_SHARD="K/N"` to a shared
 > `emptyDir` env file the agent sources — which **requires a non-scratch image**
 > (a shell), defeating the scratch posture, so it is a stopgap only.
 
 ### 4.3 The shard-resize controller (rebalance hazards on an `N` change)
 
 An `N`-change re-partitions the key space: items that hashed to shard 3-of-8 may now
-belong to 5-of-12. agentd holds shard identity as **immutable config** (agentd RFC
+belong to 5-of-12. agent holds shard identity as **immutable config** (agent RFC
 0011 §4.1, no live reload), so a resize is a **rolling restart driven by agentctl**,
-never an in-process migration (agentd RFC 0019 §4.3, Decision 4). agentctl owns a
+never an in-process migration (agent RFC 0019 §4.3, Decision 4). agentctl owns a
 **shard-resize controller** (a sub-controller of the operator, agentctl RFC 0006)
 that choreographs it:
 
@@ -359,7 +359,7 @@ shard-resize(fleet, N: 8 → 12):
                             or remove it — exactly one replica-field writer during the resize (§5.4)
   1. patch StatefulSet .spec.replicas 8 → 12  (== scaling.shards, operator-owned in shard mode)
   2. ROLL one pod at a time (NOT all at once):
-       SIGTERM pod-k ──► drain (agentd RFC 0019 §4.3):
+       SIGTERM pod-k ──► drain (agent RFC 0019 §4.3):
          a. DRAINING: stop routing (old owns() predicate)
          b. work.release every held claim        ◄── frees in-flight items immediately
          c. wind down subagents at turn boundaries; exit 0
@@ -367,13 +367,13 @@ shard-resize(fleet, N: 8 → 12):
   3. UNPAUSE / re-establish the ScaledObject (or leave pinned if shard is fixed)
 ```
 
-**Rebalance hazards, and how each is covered (agentd RFC 0019 §4.3 / §8 rows 8, 9,
+**Rebalance hazards, and how each is covered (agent RFC 0019 §4.3 / §8 rows 8, 9,
 14):**
 
 | Hazard | Cover |
 |---|---|
 | **Two *live* shards own the same item** during the seam | The old pod's `owns()` stops routing (step 2a) **before** the new pod with the new `N` starts. One-pod-at-a-time bounds the overlap to one pod's restart. If claim is layered, the lease resolves any transient two-owner. |
-| **An item owned by *neither* live shard** (old drained, new not ready) | Harmless for level-triggered work: read-after-subscribe reconcile (agentd RFC 0008 §3.5) re-synthesizes a `Synthetic("possibly changed")` event when the now-owning shard comes up. |
+| **An item owned by *neither* live shard** (old drained, new not ready) | Harmless for level-triggered work: read-after-subscribe reconcile (agent RFC 0008 §3.5) re-synthesizes a `Synthetic("possibly changed")` event when the now-owning shard comes up. |
 | **A held claim not cleanly released** (forced kill) | The lease TTL is the backstop — the item redelivers when the lease expires. |
 | **KEDA un-paused mid-resize** | Two replica-field writers → scale churn racing the roll. **The controller MUST pause KEDA first** (step 0) — this is the §5.4 one-writer rule applied to the resize. |
 | **Shard-only fleet, a shard's pod down** | Items wait for the StatefulSet to reschedule that ordinal; acceptable only for level-triggered work, else enable claim (§4.1). |
@@ -394,18 +394,18 @@ RFC 0006 §8). A resize-in-progress is surfaced as an `AgentFleet` condition (a
 KEDA ships a `prometheus` scaler that reads a PromQL query, and agentctl *does* feed
 Prometheus (the Tier A scrape-proxy + recording rules, agentctl RFC 0010 §4/§5.3).
 It is tempting to point a `prometheus` trigger at the
-`agentctl:fleet_backlog = sum by (namespace, agent)(agentd_pending_events)`
+`agentctl:fleet_backlog = sum by (namespace, agent)(agent_pending_events)`
 recording rule (agentctl RFC 0010 §5.3) and be done. **That breaks at the one place
 elasticity matters most:**
 
-- **At replica 0 there is no pod to scrape.** `agentd_pending_events` is a
-  **per-replica** gauge (agentd RFC 0016 §4.3); with zero pods, the recording rule
+- **At replica 0 there is no pod to scrape.** `agent_pending_events` is a
+  **per-replica** gauge (agent RFC 0016 §4.3); with zero pods, the recording rule
   sums to *absent/zero*, and a Prometheus scaler reading zero **can never scale up
   from zero** — the fleet is wedged off. The signal that *work is pending while no
   worker runs* exists only **off the pods**, in the work store.
 - **Networkless pods are not scraped at the source.** Even above zero, the per-pod
   metrics reach Prometheus only via the Tier A bridge (agentctl RFC 0010 §4) — an
-  aggregate the **agent never computes** (agentd RFC 0016 §7.3: fan-out is the
+  aggregate the **agent never computes** (agent RFC 0016 §7.3: fan-out is the
   subscriber's job). The cross-pod fleet view lives where the cross-pod
   serialization already lives: the coordination server.
 
@@ -456,7 +456,7 @@ external trigger as the load-bearing one:
    blind. This is the trigger that makes `scaling.min: 0` work.
 2. **Prometheus (optional, in-pod refinement, floor ≥ 1).** When the floor is ≥ 1
    (a warm pool, §7, or a no-from-zero fleet), a second `prometheus` trigger on the
-   **frozen** `agentd_pending_events` / `agentd_reaction_lag_ms` recording rule
+   **frozen** `agent_pending_events` / `agent_reaction_lag_ms` recording rule
    (agentctl RFC 0010 §5.3) adds per-pod saturation awareness the off-pod count
    lacks. KEDA takes the **max** of the triggers' replica recommendations, so the
    refinement only ever scales *further up*, never below the off-pod floor.
@@ -489,9 +489,9 @@ The operator never writes the HPA or the replica field directly. The
 
 ```
               ┌────────────────────── the fleet (N reactive workers, networkless) ──────────────────────┐
-              │  pod-0 … pod-k   agentd: claim over egress (§3.4) · emits per-pod gauges (agentd RFC 0016)│
+              │  pod-0 … pod-k   agent: claim over egress (§3.4) · emits per-pod gauges (agent RFC 0016)│
               └────────┬───────────────────────────────────────────────────────────┬─────────────────────┘
-   off-pod backlog     │ work.claim/renew/ack/release (frozen, agentd RFC 0015 §5.6) │ agentd_pending_events,
+   off-pod backlog     │ work.claim/renew/ack/release (frozen, agent RFC 0015 §5.6) │ agent_pending_events,
    (correct at 0)      ▼                                                             │ reaction_lag_ms (FROZEN)
         ▲     ┌──────────────────────────────────────┐                              ▼ scraped via Tier A
         │     │ reference coordination MCP server      │   work.stats / work://pending   ┌──────────────────┐
@@ -522,23 +522,23 @@ builds, and only ever refines *upward*.
 There are **two competing name sets** in the contract, and agentctl authors only
 against the real one (agentctl RFC 0010 §5.4):
 
-- **Frozen — author triggers against these** (agentd RFC 0016 §4.3): `agentd_pending_events`
-  (gauge), `agentd_reaction_lag_ms` (gauge), `agentd_inflight_reactions` (gauge),
-  `agentd_subscriptions_active` (gauge).
-- **NOT frozen — do NOT author against these** (agentd RFC 0019 §5 names them and
-  *falsely calls them frozen*): `agentd_reactive_backlog`, `agentd_saturation`,
-  `agentd_tokens_per_sec`, `agentd_claims_lost_total`. They are **not in the frozen
-  schema** (agentd RFC 0016 §4.3).
+- **Frozen — author triggers against these** (agent RFC 0016 §4.3): `agent_pending_events`
+  (gauge), `agent_reaction_lag_ms` (gauge), `agent_inflight_reactions` (gauge),
+  `agent_subscriptions_active` (gauge).
+- **NOT frozen — do NOT author against these** (agent RFC 0019 §5 names them and
+  *falsely calls them frozen*): `agent_reactive_backlog`, `agent_saturation`,
+  `agent_tokens_per_sec`, `agent_claims_lost_total`. They are **not in the frozen
+  schema** (agent RFC 0016 §4.3).
 
 > **Contract ask P10 (a FIX).** Reconcile the two sets into **one**, and — if
-> `agentd_saturation` (`in_flight / capacity`) is to be the HPA "utilization"
-> trigger agentd RFC 0019 §5.2 wants — **add it to the frozen `metrics_schema`**.
+> `agent_saturation` (`in_flight / capacity`) is to be the HPA "utilization"
+> trigger agent RFC 0019 §5.2 wants — **add it to the frozen `metrics_schema`**.
 > Until P10 lands, the in-pod refinement trigger (§5.3) uses **only**
-> `agentd_pending_events` / `agentd_reaction_lag_ms`; `saturation`/`backlog` are
+> `agent_pending_events` / `agent_reaction_lag_ms`; `saturation`/`backlog` are
 > treated as not-real. The `scaling.target.signal` token in the CRD is deliberately
 > **un-prefixed and contract-neutral** (`reactive_backlog`, *not*
-> `agentd_reactive_backlog`); the webhook maps the neutral token onto the negotiated
-> `metrics_schema`'s actual (possibly `agentd_`-prefixed) name, so the CRD never
+> `agent_reactive_backlog`); the webhook maps the neutral token onto the negotiated
+> `metrics_schema`'s actual (possibly `agent_`-prefixed) name, so the CRD never
 > bakes in a vendor prefix and never hard-transcribes a name codegen should own
 > (agentctl RFC 0003 §4.3, the brainstorm §11.2 transcription-hazard correction).
 > **Contract ask: P10.**
@@ -557,7 +557,7 @@ a literal string in the scaler binary.
 Scale-from-zero (§5) trades a **cold start** — one intelligence handshake + MCP
 connects on the first event — for a zero idle cost. A **warm pool** trades a small
 steady-state cost for **no cold start**: `--standby` workers hold the intelligence
-session and MCP connections open and wait to be *assigned* work (agentd RFC 0019
+session and MCP connections open and wait to be *assigned* work (agent RFC 0019
 §7). The two are in direct tension: a warm floor `> 0` is incompatible with `min: 0`
 on the *same* pods. agentctl resolves it by **regime, per fleet**:
 
@@ -573,7 +573,7 @@ on the *same* pods. agentctl resolves it by **regime, per fleet**:
 
 ### 7.2 How work reaches a standby member (reuse MCP — no new protocol)
 
-Two mechanisms (agentd RFC 0019 §7.2), an operator picks one:
+Two mechanisms (agent RFC 0019 §7.2), an operator picks one:
 
 1. **Claim-pull (preferred, symmetric with §3).** Standby members subscribe to a
    shared assignment resource (`work://pending`) on the coordination server; on its
@@ -581,34 +581,34 @@ Two mechanisms (agentd RFC 0019 §7.2), an operator picks one:
    return to standby. **No new code**: it is the claim convention with the warm pool
    as the contender set, and the lease still covers a winner that dies.
 2. **Directed-assign (push).** agentctl, having chosen a specific warm member from
-   `agentd://capacity` (P4), hands it a unit of work directly. The canonical push
+   `agent://capacity` (P4), hands it a unit of work directly. The canonical push
    tool is an **`assign` management tool that does not yet exist** in the frozen
-   contract (agentd RFC 0019 §7.2/§12) — **residual contract ask P12 (`assign`)** —
+   contract (agent RFC 0019 §7.2/§12) — **residual contract ask P12 (`assign`)** —
    so until it lands, directed-assign falls back to `subagent.spawn` over the
-   management transport (agentd RFC 0005 §3.2). The *choice of which member* is
-   always agentctl policy (agentd RFC 0014 §3); the agent only exposes the
-   spawn/assign primitive and `agentd://capacity` so agentctl sees who is free.
+   management transport (agent RFC 0005 §3.2). The *choice of which member* is
+   always agentctl policy (agent RFC 0014 §3); the agent only exposes the
+   spawn/assign primitive and `agent://capacity` so agentctl sees who is free.
 
 ```jsonc
-// agentd://capacity (agentd RFC 0005 resource, contract ask P4) — what agentctl reads to place work
+// agent://capacity (agent RFC 0005 resource, contract ask P4) — what agentctl reads to place work
 { "instance":"pod-abc", "shard":"3/8", "standby":true,
   "free_slots":4, "active_subagents":0, "intelligence":{"warm":true,"healthy":true},
   "max_total_subagents":64, "saturation":0.0 }
-// NOTE: `saturation` here is the P4 `agentd://capacity` RESOURCE field (a placement input, gated on
-// the P4 capacity schema being defined), NOT the P10 `agentd_saturation` METRIC (§6.2 / Decision 7,
+// NOTE: `saturation` here is the P4 `agent://capacity` RESOURCE field (a placement input, gated on
+// the P4 capacity schema being defined), NOT the P10 `agent_saturation` METRIC (§6.2 / Decision 7,
 // treated as not-frozen until P10). The capacity-resource field and the metrics-schema gauge are
 // distinct surfaces; do not conflate them.
 ```
 
 Standby is **not** session checkpoint/restore: a standby pod holds *open
 connections*, never *prior work*, so it stays as stateless and fungible as any other
-replica (agentd RFC 0019 §7.3) — a scale-down or eviction loses nothing but a warm
+replica (agent RFC 0019 §7.3) — a scale-down or eviction loses nothing but a warm
 connection.
 
 ### 7.3 Exactly-once + rebalance hazards (the invariant, restated)
 
 Across **every** scaling action — scale-up, scale-down, from-zero wake, shard
-resize, warm-pool assign — the invariant holds (agentd RFC 0019 §8):
+resize, warm-pool assign — the invariant holds (agent RFC 0019 §8):
 
 > Correctness **never** depends on exactly-once delivery. It depends on **(a)** a
 > single serializing claim *or* a single owning shard, **and (b)** an item-derived
@@ -691,7 +691,7 @@ spec:
   scaleTargetRef: { name: inbox-workers }    # the Deployment
   minReplicaCount: 0                          # from scaling.min — scale-to/from-zero
   maxReplicaCount: 50
-  cooldownPeriod: 120                         # hysteresis vs bursty backlog (agentd RFC 0019 §5.2)
+  cooldownPeriod: 120                         # hysteresis vs bursty backlog (agent RFC 0019 §5.2)
   triggers:
     - type: external-push                     # PRIMARY — off-pod, from-zero (§5)
       metadata:
@@ -702,7 +702,7 @@ spec:
     - type: prometheus                        # OPTIONAL refinement — in-pod, frozen names, floor ≥1 (§5.3)
       metadata:
         serverAddress: http://prometheus.monitoring:9090
-        query: 'agentctl:fleet_backlog{namespace="agents",agent="inbox-workers"}'  # FROZEN agentd_pending_events sum
+        query: 'agentctl:fleet_backlog{namespace="agents",agent="inbox-workers"}'  # FROZEN agent_pending_events sum
         threshold: "5"
 ---
 apiVersion: apps/v1                           # the reference coordination MCP server (agentctl ships+operates)
@@ -724,11 +724,11 @@ spec:
     target: { signal: reactive_backlog, threshold: 5 }   # inert while paused; used only if claim layered
   work:
     source:   { mcp: inbox, uri: "file:///inbox/*.json" }
-    shardKey: item                           # FNV-1a/64 over this key (agentd RFC 0019 §4.1)
+    shardKey: item                           # FNV-1a/64 over this key (agent RFC 0019 §4.1)
     claim:    { server: coord, style: tool, ttlSeconds: 30 }   # OPTIONAL — layered for rebalance safety (§4.1)
   drain: { timeoutSeconds: 45 }
   podGraceSeconds: 60
-# Rendered: a StatefulSet with .spec.replicas: 8 (operator-owned). Each pod gets AGENTD_SHARD's N
+# Rendered: a StatefulSet with .spec.replicas: 8 (operator-owned). Each pod gets AGENT_SHARD's N
 # injected uniformly; K is derived by the agent from its ordinal via --shard auto/N (P3), or by an
 # initContainer shim on a non-scratch image (§4.2). A shard-resize (N: 8→12) is the controller-driven
 # drain-and-reassign roll with KEDA paused first (§4.3) — never an HPA action.
@@ -739,9 +739,9 @@ spec:
 ## 9. Graceful degradation
 
 The scaling plane degrades cleanly when a surface or a contract ask is absent
-(agentd RFC 0014 §7, agentctl RFC 0006 §6.1):
+(agent RFC 0014 §7, agentctl RFC 0006 §6.1):
 
-- **`surfaces.cluster: false`** (a non-cluster build, agentd RFC 0019 §9) → the
+- **`surfaces.cluster: false`** (a non-cluster build, agent RFC 0019 §9) → the
   agent is a single-instance worker; agentctl runs it as a `reactive` **singleton**
   (a Deployment `strategy: Recreate`, agentctl RFC 0003 §5.1), **never** as an
   `AgentFleet` — admission rejects an `AgentFleet` whose negotiated agent lacks
@@ -751,7 +751,7 @@ The scaling plane degrades cleanly when a surface or a contract ask is absent
 - **`work.claim.style` not in the negotiated agent's `surfaces.claim.styles`** → the
   webhook **rejects** the fleet at admission (agentctl RFC 0007). A fleet may select
   only a claim style the conformant agent advertises (the agent's manifest declares
-  `claim: { styles: [...] }`, agentd RFC 0015 §5.6 / RFC 0019 §9). This is the same
+  `claim: { styles: [...] }`, agent RFC 0015 §5.6 / RFC 0019 §9). This is the same
   read-it-from-`surfaces{}`-never-assume discipline that gates `min: 0` on the
   from-zero backlog surface — a mistyped `style` fails at admission, not at runtime.
 - **`crates/scaler` (external scaler) unavailable** → KEDA gets no external metric;
@@ -770,12 +770,12 @@ The scaling plane degrades cleanly when a surface or a contract ask is absent
 - **P3 absent** (no `--shard auto/N`) → shard mode falls back to the initContainer
   shim on a non-scratch image; on a scratch image, shard mode is unavailable and the
   webhook says so (agentctl RFC 0003 §9.1).
-- **P10 unmet** → in-pod refinement uses only `agentd_pending_events` /
-  `agentd_reaction_lag_ms`; `saturation`-based triggers are not authored.
+- **P10 unmet** → in-pod refinement uses only `agent_pending_events` /
+  `agent_reaction_lag_ms`; `saturation`-based triggers are not authored.
 - **`assign` absent** → directed-assign falls back to `subagent.spawn`; claim-pull
   warm-pool assignment is unaffected.
 - **Coordination server unreachable at startup** → a `claim` route's agent exits
-  **6 (EXIT_MCP)**, retriable (agentd RFC 0019 §8 row 4); the operator surfaces a
+  **6 (EXIT_MCP)**, retriable (agent RFC 0019 §8 row 4); the operator surfaces a
   `CoordinationUnreachable` condition and the fleet does not silently double-process
   (no claim = no processing on a `claim` route, by construction).
 
@@ -785,15 +785,15 @@ The scaling plane degrades cleanly when a surface or a contract ask is absent
 
 - **No queue, broker, consensus, or autoscaler in the data plane.** The agent
   claims, shards, and emits signals; it ships no Redis/Raft/etcd client and no HPA
-  logic (agentd RFC 0019 §10). All of that is agentctl's.
+  logic (agent RFC 0019 §10). All of that is agentctl's.
 - **No exactly-once delivery.** At-least-once + item-derived idempotency only (§7.3,
-  agentd RFC 0019 §3.5). A use case needing true exactly-once needs a transactional
+  agent RFC 0019 §3.5). A use case needing true exactly-once needs a transactional
   backing service; the reference coordination server *is* that service for its own
   side effects, but agentctl does not make arbitrary non-idempotent compositions
   exactly-once.
 - **No live shard migration / consistent-hashing ring in v1.** Rebalance is a
   rolling restart (§4.3); a minimal-disruption consistent-hash assignment is a
-  later agentctl placement refinement, not a v1 mechanism (agentd RFC 0019 §10).
+  later agentctl placement refinement, not a v1 mechanism (agent RFC 0019 §10).
 - **No `Task`/`Run` CRD and no per-item state in etcd.** Claim/lease state lives in
   the coordination server; fleet scaling state is the HPA's + the curated
   `AgentFleet.status` projection (agentctl RFC 0003 §6.2). Task/status-event churn
@@ -807,7 +807,7 @@ The scaling plane degrades cleanly when a surface or a contract ask is absent
   matter (a reference impl this RFC ships), not a contract; a BYO server need only
   satisfy the frozen surface.
 - **No intelligence-cost-aware scaling enforcement in v1.** Backlog *can* become a
-  scale signal when a fleet hits its tree-token budget (agentd RFC 0019 §8 row 12),
+  scale signal when a fleet hits its tree-token budget (agent RFC 0019 §8 row 12),
   but **hard** budget-back-pressure as a scale brake needs the `EXIT_BUDGET` /
   readiness-back-pressure primitive (contract ask **P-cost**, agentctl RFC 0012);
   v1 is best-effort.
@@ -873,20 +873,20 @@ The scaling plane degrades cleanly when a surface or a contract ask is absent
   this RFC builds against); the contract-as-schema anti-drift the neutral
   `scaling.target.signal` token relies on.
 - **agentctl RFC 0002** — substrate & transport: the networkless reach the claim
-  egress (§3.4) and the `agentd://capacity` read ride; the exec-health probe (P1) the
+  egress (§3.4) and the `agent://capacity` read ride; the exec-health probe (P1) the
   scaled pods use on networkless tiers.
 - **agentctl RFC 0003** — Agent & AgentFleet CRDs: the `AgentFleet.spec` this RFC
   consumes (`scaling.mode` claim/shard §4.2, the claim-only `scaling.min`/`scaling.max`
   range and the shard-only `scaling.shards` partition count `N` §4.1, `scaling.target`
   §4.1, `work.*`, drain<grace, the KEDA-owns-replicas field-ownership §4.3, the
-  `AGENTD_SHARD` defect §9.1, the neutral `scaling.target.signal` §4.3, the status
+  `AGENT_SHARD` defect §9.1, the neutral `scaling.target.signal` §4.3, the status
   projection §6.2).
 - **agentctl RFC 0006** — operator reconcile: renders the StatefulSet/Deployment +
   `ScaledObject` (this RFC owns the trigger detail), omits `.spec.replicas` (§8.4),
   the two drain paths (§7.1), the downward-API shard `N` injection (§6.3); host of
   the shard-resize controller.
 - **agentctl RFC 0008** — node-agent (two tiers): the Tier A telemetry bridge / load
-  read (`agentd://capacity`, `agentd_active_subagents`) for pod-deletion-cost and
+  read (`agent://capacity`, `agent_active_subagents`) for pod-deletion-cost and
   victim selection, and the lame-duck/drain victim path.
 - **agentctl RFC 0010** — observability & telemetry bridge: the frozen
   autoscaling-signal set, the **P10** flag (§5.4), the `agentctl:fleet_backlog`
@@ -901,36 +901,36 @@ The scaling plane degrades cleanly when a surface or a contract ask is absent
   home for multi-tenant coordination isolation — the tenant-scoped `claim_key`/backlog
   surface and the per-tenant scaler isolation (§11 #8).
 
-**Contract spec (the reference implementation, agentd RFCs)**
+**Contract spec (the reference implementation, agent RFCs)**
 
-- **agentd RFC 0019** — horizontal scaling: the work-claim lease (§3), the FNV-1a/64
+- **agent RFC 0019** — horizontal scaling: the work-claim lease (§3), the FNV-1a/64
   shard predicate (§4), the autoscaling-signal surface (§5), the drain-release
   **step 1.5** (§6), standby (§7), the edge-case/failure-semantics table (§8), the
   `cluster` manifest additions (§9) — the whole data-plane half this RFC builds the
   Kubernetes half around.
-- **agentd RFC 0015** — management & control surface: the **frozen `work.*` contract**
+- **agent RFC 0015** — management & control surface: the **frozen `work.*` contract**
   (§5.6 — names, `_meta`, `claim_key`, styles), the operator tools
   (`drain`/`lame-duck`/`cancel`) for scale-down victim selection.
-- **agentd RFC 0016** — telemetry & lifecycle contract: the **frozen metrics schema**
+- **agent RFC 0016** — telemetry & lifecycle contract: the **frozen metrics schema**
   (§4.3, the four reactive gauges this RFC's triggers key off), the exit-code table,
-  `agentd_drains_total{phase}`.
-- **agentd RFC 0008** — execution modes & reactive routing: the intra-instance
+  `agent_drains_total{phase}`.
+- **agent RFC 0008** — execution modes & reactive routing: the intra-instance
   exactly-one-owner rule (§2.2) this RFC extends across instances; the reactive wake
   (§3.7) the claim/shard gates insert into; read-after-subscribe reconcile (§3.5).
-- **agentd RFC 0011** — cloud-native contract: the drain choreography (extended by
+- **agent RFC 0011** — cloud-native contract: the drain choreography (extended by
   RFC 0019 §6), the exit-code table (2/6 classify claim-server failures), RUN_ID
   idempotency (the claim key), statelessness (fungible replicas).
-- **agentd RFC 0005** — self-MCP & control: `agentd://capacity`/`agentd://metrics`
+- **agent RFC 0005** — self-MCP & control: `agent://capacity`/`agent://metrics`
   (contract ask **P4**) for placement and the networkless metrics path;
   `subagent.spawn` as the directed-assign fallback.
-- **agentd RFC 0014** — control-plane umbrella: primitives-not-policy; the
+- **agent RFC 0014** — control-plane umbrella: primitives-not-policy; the
   capabilities manifest (`surfaces.cluster`/`claim`/`shard`/`standby`); the
-  downward-API env convention (and the `AGENTD_SHARD` §6.4 defect, P3).
+  downward-API env convention (and the `AGENT_SHARD` §6.4 defect, P3).
 
 **Contract asks raised or cited by this RFC** (agentctl brainstorm §14): **P3**
-(`--shard auto/N` — the `AGENTD_SHARD` defect, a FIX), **P4** (`agentd://capacity` /
-`agentd://metrics` schema, a FIX), **P9** (off-pod backlog count for scale-from-zero,
+(`--shard auto/N` — the `AGENT_SHARD` defect, a FIX), **P4** (`agent://capacity` /
+`agent://metrics` schema, a FIX), **P9** (off-pod backlog count for scale-from-zero,
 NEW), **P10** (autoscaling metric-name reconciliation, a FIX), **P12** (`work.*`
-ownership — **resolved/frozen** in agentd RFC 0015 §5.6; residual: the `assign`
+ownership — **resolved/frozen** in agent RFC 0015 §5.6; residual: the `assign`
 directed-assign tool, NEW), **P1** (exec health verb for networkless scaled pods),
 **P-cost** (budget back-pressure for budget-aware scaling).

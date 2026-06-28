@@ -2,22 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentctl.dev/contract/v1/events.schema.json",
   "title": "Agent Control Contract — Live Event Stream (agent://events read body)",
-  "description": "The read body of the `agent://events` resource (reference alias `agentd://events`): a subscribable, bounded live-event window an operator drains to tail activity — loop steps, refusals, spawns, drain progress — over the self-MCP, without scraping container stderr (agentd RFC 0016 §7). It is a PROJECTION of the same stderr JSON-lines stream (RFC 0010 §3.2/§3.3), not a second telemetry path: identical lines, identical closed event vocabulary, plus a monotonic ring `seq`. Backed by a fixed-size in-memory ring (env AGENT_EVENTS_RING, reference alias AGENTD_EVENTS_RING; default 1024) that is LOSSY BY DESIGN — an overrun drops the oldest and bumps `dropped`, never blocking a slow subscriber. The transport is RFC 0005 notify-then-read: a payload-free `notifications/resources/updated{uri}` fires on new events; the subscriber `resources/read(\"agent://events?after=<seq>\")` to pull the window with seq > after, optionally filtered by `?level=` and `?event=<dotted-prefix-comma-list>`, advancing `after` to the last seq it saw. The ring is in-memory and dropped wholesale on SIGKILL; the durable record is stderr + the run report. This envelope is OPEN/additive-tolerant.",
+  "description": "The read body of the `agent://events` resource: a subscribable, bounded live-event window an operator drains to tail activity — loop steps, refusals, spawns, drain progress — over the self-MCP, without scraping container stderr (agent RFC 0016 §7). It is a PROJECTION of the same stderr JSON-lines stream (RFC 0010 §3.2/§3.3), not a second telemetry path: identical lines, identical closed event vocabulary, plus a monotonic ring `seq`. Backed by a fixed-size in-memory ring (env AGENT_EVENTS_RING; default 1024) that is LOSSY BY DESIGN — an overrun drops the oldest and bumps `dropped`, never blocking a slow subscriber. The transport is RFC 0005 notify-then-read: a payload-free `notifications/resources/updated{uri}` fires on new events; the subscriber `resources/read(\"agent://events?after=<seq>\")` to pull the window with seq > after, optionally filtered by `?level=` and `?event=<dotted-prefix-comma-list>`, advancing `after` to the last seq it saw. The ring is in-memory and dropped wholesale on SIGKILL; the durable record is stderr + the run report. This envelope is OPEN/additive-tolerant.",
   "type": "object",
   "additionalProperties": true,
   "x-contract": {
-    "owner_rfc": "agentd RFC 0016 §7 (envelope); RFC 0010 §3.2/§3.3 (line schema + event vocabulary)",
+    "owner_rfc": "agent RFC 0016 §7 (envelope); RFC 0010 §3.2/§3.3 (line schema + event vocabulary)",
     "manifest_surface": "surfaces.events_schema (presence gated by surfaces.events; feature `events` + a served self-MCP)",
     "current_version": "1.0",
     "versioning": "events_schema major.minor versions ONLY the envelope (oldest_seq/newest_seq/dropped/events shape), NOT the line schema (RFC 0010 owns and versions that). A new event NAME is additive (consumer tolerates it). A new line field is additive. The consumer refuses only an unknown events_schema MAJOR. Surface absent => no ring built => consumer degrades to stderr/log scraping where reachable.",
     "read_request": {
       "uri": "agent://events",
       "query": "?after=<seq>&level=<trace|debug|info|warn|error>&event=<dotted-prefix,dotted-prefix,...>",
-      "notes": "after defaults to 0 (whole held window). Unknown query keys are ignored (forward-compatible). A malformed `after` falls back to 0. `event` is a comma-list of dotted PREFIXES matched against the line `event` (e.g. `subagent.,limit.`). The server caps one read window (reference impl: 512 entries); the subscriber pages by advancing `after`.",
-      "debranding": {
-        "uri_scheme": {"neutral": "agent://", "reference_alias": "agentd://"},
-        "env": {"AGENT_EVENTS_RING": "AGENTD_EVENTS_RING", "AGENT_SERVE_EVENTS": "AGENTD_SERVE_EVENTS"}
-      }
+      "notes": "after defaults to 0 (whole held window). Unknown query keys are ignored (forward-compatible). A malformed `after` falls back to 0. `event` is a comma-list of dotted PREFIXES matched against the line `event` (e.g. `subagent.,limit.`). The server caps one read window (reference impl: 512 entries); the subscriber pages by advancing `after`."
     }
   },
   "required": ["events_schema", "oldest_seq", "newest_seq", "dropped", "events"],

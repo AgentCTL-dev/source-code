@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! The management-profile client: NDJSON JSON-RPC over a unix socket.
 //!
-//! Implements the consumer half of the contract management wire (agentd RFC
+//! Implements the consumer half of the contract management wire (agent RFC
 //! 0005 §3.6 / RFC 0015): a blocking, thread-per-connection-friendly client that
 //! `initialize`s, lists tools, reads `agent://` resources, and calls operator
 //! tools. It is the only thing that needs the per-pod socket; the operator and
@@ -17,9 +17,8 @@ use serde_json::{json, Value};
 /// The MCP protocol version this client speaks (contract baseline, MCP 2025-11-25).
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// The capabilities resource URI — the **neutral** `agent://` spelling the
-/// rebranded reference serves (the legacy `agentd://` alias is still accepted by
-/// the agent for back-compat; contract `management-profile` / README map).
+/// The capabilities resource URI — the `agent://` spelling the reference serves
+/// (contract `management-profile` / README map).
 pub const URI_CAPABILITIES: &str = "agent://capabilities";
 /// The live subagent/inventory tree (operator-facing).
 pub const URI_INVENTORY: &str = "agent://inventory";

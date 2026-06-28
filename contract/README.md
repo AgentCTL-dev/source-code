@@ -6,7 +6,7 @@ agent** implements. It is published as a set of JSON Schemas (draft 2020-12) plu
 fixtures and frozen data catalogues.
 
 This directory is the **working home** for the contract while it is extracted out of the
-reference implementation's RFCs (agentd RFCs 0014–0020). It is structured to later lift into
+reference implementation's RFCs (agent RFCs 0014–0020). It is structured to later lift into
 its own neutral repository — see *Open question P0* at the bottom.
 
 ---
@@ -14,17 +14,15 @@ its own neutral repository — see *Open question P0* at the bottom.
 ## P0 — agentctl depends on the CONTRACT, never on a specific agent
 
 The foundational principle: **agentctl consumes only this contract; it never depends on a
-specific agent implementation.** `agentd` is the *reference* implementation — the first agent
-to satisfy the ACC — but it is not privileged. Any binary that emits a conformant
-capabilities manifest, honors the exit-code table, serves the declared surfaces, and speaks
-the declared wire protocols is a conformant agent that agentctl can drive.
+specific agent implementation.** The reference `agent` binary is the *reference*
+implementation — the first agent to satisfy the ACC — but it is not privileged. Any binary
+that emits a conformant capabilities manifest, honors the exit-code table, serves the declared
+surfaces, and speaks the declared wire protocols is a conformant agent that agentctl can drive.
 
-The contract was first specified inside the reference repo, which originally emitted
-**branded spellings** (`agentd_*` env, `agentd://` URIs, `agentd_` metric prefix). The
-reference implementation (the `agent` binary) has since **rebranded to the neutral tokens**
-(`agent_*`, `agent://`, `AGENT_*`) — which the contract makes canonical. The legacy branded
-spellings remain **accepted aliases** (back-compat with pre-rebrand agents) and are not
-silently dropped, but new agents emit the neutral form (see *De-branding map*).
+The contract is **fully neutral**: it defines only the neutral tokens (`agent_*` env and
+metric prefix, `AGENT_*` env vars, the `agent://` URI scheme, the `agent/*` `_meta`
+namespace). ("agentd" was the pre-rebrand name of the reference agent; the de-brand is
+complete and no branded spellings survive — see *De-branding map*.)
 
 ---
 
@@ -109,31 +107,27 @@ need a hand-written deserializer:
 
 ## De-branding map (P0)
 
-For each token the contract defines a neutral canonical spelling and **accepts** the legacy
-branded spelling as an alias. The reference (the `agent` binary) now emits the neutral form;
-the branded forms are retained for back-compat with pre-rebrand agents and are NOT dropped
-(final removal is a GA decision).
+The de-brand is **complete**: the contract defines only the neutral canonical spellings.
+("agentd" was the pre-rebrand name of the reference agent; no branded alias survives.)
 
-| concern | neutral (canonical, emitted) | legacy alias (accepted) | drop ≥ |
-|---|---|---|---|
-| downward-API env prefix | `AGENT_*` | `AGENTD_*` | GA |
-| URI scheme | `agent://` | `agentd://` | GA |
-| metric name prefix | `agent_` | `agentd_` | GA |
-| manifest version key | `agent_version` | `agentd_version` | GA |
-| `_meta` namespace | `agent/*` | `agentd/*` | GA |
-| capabilities entrypoint | `--capabilities` | `--capabilities` | (neutral; binary name impl-specific) |
+| concern | neutral (canonical) |
+|---|---|
+| downward-API env prefix | `AGENT_*` |
+| URI scheme | `agent://` |
+| metric name prefix | `agent_` |
+| manifest version key | `agent_version` |
+| `_meta` namespace | `agent/*` |
+| capabilities entrypoint | `--capabilities` (neutral; binary name impl-specific) |
 
-Compatibility rules enforced by the schemas:
+Rules enforced by the schemas:
 
-- The manifest root `anyOf`-requires **`agent_version` OR `agentd_version`** (the rebranded
-  reference emits the neutral `agent_version`; the golden fixtures are pre-rebrand captures
-  that emit `agentd_version`, exercising the back-compat alias).
-- `report.schema.json` `distillate_ref` accepts **`^(agent|agentd)://`** (bivalent).
-- Every metric in `metrics.registry.json` carries the neutral `name` plus the `reference_alias`
-  (`agentd_…`). Every env var in `env-convention.json` carries the `AGENT_*` name plus the
-  `AGENTD_*` alias. Same pattern for `agent://` resources in `management-profile.json`.
+- The manifest root requires **`agent_version`**.
+- `report.schema.json` `distillate_ref` matches **`^agent://`**.
+- Every metric in `metrics.registry.json` carries only the neutral `name`. Every env var in
+  `env-convention.json` carries the `AGENT_*` name. Same for `agent://` resources in
+  `management-profile.json`.
 
-A consumer MUST accept both spellings until GA; codegen MUST NOT hardcode a single scheme.
+Codegen targets the single neutral scheme.
 
 ---
 
@@ -186,7 +180,7 @@ behavioral conformance suite. Codegen notes:
    bool|string|object discriminations (RFC 0018 §3.3).
 3. **Tolerate unknown additive content** (open objects, unknown surface keys, unknown operator
    tools/metrics). Refuse only an unknown `contract_version` MAJOR.
-4. **Accept both branded and neutral spellings** until GA (see de-branding map).
+4. Target the **neutral spellings** — the contract is fully neutral (see de-branding map).
 5. Treat `build_features` as opaque diagnostic metadata — branch on `surfaces{}`, never on a
    feature token.
 
@@ -206,7 +200,8 @@ A new agent is conformant by **behavior**, not by sharing code with the referenc
    naming.
 5. Pass the behavioral conformance suite. The golden fixtures in `fixtures/capabilities/` are
    the validation ground-truth: `default.json` and `full-features.json` are **real captures**
-   from the reference binary and together exercise both branches of every sum-type surface key.
+   from the reference binary (emitting `agent_version`) and together exercise both branches of
+   every sum-type surface key.
 
 ---
 

@@ -131,7 +131,7 @@ pub struct AgentSpec {
     pub model_pool: Option<String>,
 }
 
-/// The run shape (RFC 0003 §5 / agentd RFC 0008).
+/// The run shape (RFC 0003 §5 / agent RFC 0008).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {

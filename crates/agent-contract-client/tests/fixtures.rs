@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Validate the typed client against the GOLDEN capability fixtures in
 //! `contract/fixtures/capabilities/` — two of which are real `--capabilities`
-//! captures from the reference binary (agentd 2.5.0). This is the behavioral
+//! captures from the reference binary (agent 2.5.0). This is the behavioral
 //! ground-truth: if the client and the contract drift, these fail.
 
 use agent_contract_client::*;
@@ -42,7 +42,7 @@ fn every_fixture_parses_and_negotiates() {
 fn default_capture_has_surfaces_off() {
     // Real capture: a once-mode build with the management/metrics/a2a surfaces off.
     let m = load("default.json");
-    assert_eq!(m.version(), Some("2.5.0")); // resolved via the agentd_version alias
+    assert_eq!(m.version(), Some("2.5.0")); // resolves via agent_version
     assert_eq!(m.mode.as_deref(), Some("once"));
     assert!(!m.surfaces.management.is_served());
     assert!(!m.surfaces.metrics.is_served());

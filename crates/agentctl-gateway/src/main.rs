@@ -586,13 +586,11 @@ fn registry_row(kind: &str, ns: &str, name: &str, mode: Option<&str>, base_url: 
 }
 
 /// Project a minimal A2A Agent Card from a capabilities manifest. The version is
-/// read from the neutral `agent_version`, falling back to the reference alias
-/// `agentd_version` (de-branding, P0).
+/// read from the neutral `agent_version` key.
 fn project_card(manifest: &Value, ns: &str, name: &str, base_url: &str) -> Value {
     let version = manifest
         .get("agent_version")
         .and_then(Value::as_str)
-        .or_else(|| manifest.get("agentd_version").and_then(Value::as_str))
         .unwrap_or("unknown");
     json!({
         "protocolVersion": "1.0",
@@ -709,20 +707,6 @@ mod tests {
         assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
         assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
         assert_eq!(card["skills"], json!([]));
-    }
-
-    #[test]
-    fn project_card_falls_back_to_branded_version_alias() {
-        let manifest = json!({ "agentd_version": "mock-agent-0.1.0" });
-        let card = project_card(&manifest, "ns", "a", "http://h:8080");
-        assert_eq!(card["version"], "mock-agent-0.1.0");
-    }
-
-    #[test]
-    fn project_card_prefers_neutral_over_alias() {
-        let manifest = json!({ "agent_version": "9.9", "agentd_version": "old" });
-        let card = project_card(&manifest, "ns", "a", "http://h");
-        assert_eq!(card["version"], "9.9");
     }
 
     #[test]

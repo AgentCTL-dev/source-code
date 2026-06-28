@@ -18,23 +18,23 @@
 
 > **P0 (locked 2026-06-27).** The data plane is *any* agent that conforms to the
 > contract; the reference implementation (whose contract is currently authored in
-> agentd RFCs 0014–0020) is the **first** conformant agent, **not a dependency**.
+> agent RFCs 0014–0020) is the **first** conformant agent, **not a dependency**.
 > Every mechanism here is therefore vendor- and language-neutral by construction:
 > the codegen input is *schemas*, never an agent crate; the conformance suite
 > drives a *binary*, never a linked library; and the pinning identity is a
 > *contract version*, never an agent SHA. Naming the reference impl's branded
-> surfaces (`--capabilities`, `agentd://`, the `agentd_` metric prefix, `AGENTD_*`
+> surfaces (`--capabilities`, `agent://`, the `agent_` metric prefix, `AGENT_*`
 > env, the `a2a.*` strings) is **citing where the contract is presently written
 > down**, flagged for neutralization (§5.4), never importing it.
 
 > **agentctl does not author the contract; it consumes it.** The schemas' *content*
-> is owned by the contract (the reference impl's agentd RFCs 0014–0020, eventually
+> is owned by the contract (the reference impl's agent RFCs 0014–0020, eventually
 > a neutral spec — §5). This RFC owns the *consumption pipeline*: how those schemas
 > become a typed client, how an agent is proven to honour them, and how drift is
 > caught before it reaches production. The single open contract precondition (CC —
 > the schemas must actually be *published*; today the reference manifest is
 > `json!`→`Value` and `--config-schema` is unbuilt) is named honestly throughout
-> as contract work (agentd asks **P6 / P3b**), not agentctl-coupling work.
+> as contract work (agent asks **P6 / P3b**), not agentctl-coupling work.
 
 ---
 
@@ -46,7 +46,7 @@ specific agent binary (it would weld agentctl to one vendor and make a
 second-vendor conformant agent unmanageable), and the shared crate would be
 *illusory* anyway (the reference manifest is built `serde_json::json!` → `Value`
 by deliberate secret-safety design — the `Secret` newtype has no `Serialize`, so
-it cannot reach the builder; agentd RFC 0012 §3.7). RFC 0001 §4 therefore fixed
+it cannot reach the builder; agent RFC 0012 §3.7). RFC 0001 §4 therefore fixed
 the anti-drift mechanism as **conformance to a published, language-neutral
 contract + a behavioral conformance suite**, drew the diagram, and named the
 crates — but explicitly deferred the *mechanics* here (RFC 0001 §7 Non-goals,
@@ -66,7 +66,7 @@ imposes:
    one of the five components.
 3. **agentctl must prove *any* agent behaviorally** — a black-box conformance
    suite that drives a real agent binary over the substrate transport and asserts
-   the contract holds, mirroring the reference impl's own `agentd-conformance`
+   the contract holds, mirroring the reference impl's own `agent-conformance`
    crate, which is black-box *by charter* and "links nothing." That suite is the
    **third source of truth** — the executable definition of "a conformant agent,"
    and the operational meaning of P0.
@@ -76,26 +76,26 @@ that **the contract is not yet published in the form this pipeline needs**, and
 several of its surfaces are genuinely hostile to naive codegen:
 
 - **The reference manifest is `json!` → `Value`, not a `derive(Serialize)`
-  struct** (agentd RFC 0012 §3.7; verified in `crates/agentd/src/capabilities.rs`).
+  struct** (agent RFC 0012 §3.7; verified in `crates/agent/src/capabilities.rs`).
   There is no schema document to consume, and the no-struct property is a
   *security invariant*, not laziness. So the manifest schema must be **hand-authored**
   until the contract ships an emitter, with conformance as the enforcement.
 - **`--config-schema` / `--validate-config` are unbuilt** in the reference impl
-  (agentd RFC 0017 §4.1/§4.2 specifies them; they do not yet exist). Config-struct
+  (agent RFC 0017 §4.1/§4.2 specifies them; they do not yet exist). Config-struct
   codegen and the admission ladder (agentctl RFC 0007) are both blocked on them
   (contract ask **P6**).
 - **The `surfaces{}` block is JSON sum types** (`bool | string`, `bool | object`
-  — `"management": false | "vsock:PORT" | "unix:PATH"`; agentd RFC 0014 §5,
+  — `"management": false | "vsock:PORT" | "unix:PATH"`; agent RFC 0014 §5,
   §6.2) that defeat typed codegen in *any* language and need **hand-written
   deserializers** scoped to those fields (RFC 0001 §2.4).
-- **The contract is additive-by-minor by design** (agentd RFC 0014 §6.3):
+- **The contract is additive-by-minor by design** (agent RFC 0014 §6.3):
   consumers MUST tolerate unknown additive fields/tools/metrics and refuse only on
   unknown **major**. A generated type with `deny_unknown_fields` would *break*
   negotiation; a lenient one dissolves the static "cannot drift" guarantee — so
   conformance must catch *regressive* drift and an additive-drift report must
   surface *additive* drift (§6.4).
-- **The autoscaling metric names are unreconciled** (agentd RFC 0016 frozen set vs
-  RFC 0019 scaling signals — e.g. `agentd_reactive_backlog` is cited by the
+- **The autoscaling metric names are unreconciled** (agent RFC 0016 frozen set vs
+  RFC 0019 scaling signals — e.g. `agent_reactive_backlog` is cited by the
   scaling RFC but absent from the frozen schema; contract ask **P10**). Hand-
   transcribing them is "exactly the failure codegen is meant to prevent"
   (brainstorm §11.2) — so the metrics registry is **derived by scraping a real
@@ -117,8 +117,8 @@ It is consistent with RFC 0001 (the contract-as-schema principle, the generated
 client, the conformance suite, the `surfaces{}` sum types needing hand-written
 deserializers), with the contract asks **CC / P6** (published schemas +
 `--config-schema`/`--validate-config`) and **P3b** (versioned `--capabilities`
-golden corpus), with the reference impl's version-negotiation spine (agentd
-RFC 0014 §6.3), and with `agentd-conformance` as the blessed black-box pattern.
+golden corpus), with the reference impl's version-negotiation spine (agent
+RFC 0014 §6.3), and with `agent-conformance` as the blessed black-box pattern.
 
 ---
 
@@ -144,7 +144,7 @@ discipline that binds them. This is RFC 0001 §4 made concrete; the lettering
    │ `agent-contract-client`          │        │ drives ANY conformant agent binary  │
    │ GENERATED Rust types +           │        │ over the substrate transport;       │
    │ hand-written surfaces{} deserders│        │ asserts the contract BEHAVIORALLY;  │
-   │ links NO agent  (§4)             │        │ mirrors agentd-conformance  (§7)    │
+   │ links NO agent  (§4)             │        │ mirrors agent-conformance  (§7)    │
    └───────────────┬─────────────────┘        └────────────────┬───────────────────┘
                    │ the SOLE wire-type home; used by all 5      │ first subject =
                    ▼ components                                  ▼ the reference agent
@@ -157,7 +157,7 @@ discipline that binds them. This is RFC 0001 §4 made concrete; the lettering
 | **Decision** | Anti-drift is three artifacts — **(a) published neutral schemas**, **(b) a generated client crate `agent-contract-client`**, **(c) a black-box behavioral conformance suite** — bound by **(d) runtime version-negotiation + graceful degradation**, all pinned by **(contract major.minor + schema digest)**. |
 | **Status** | Accepted (the detailed spec of RFC 0001 §4; brainstorm §11, §0.6 P0/CC). |
 | **Source of truth precedence** | The **schemas (a)** are authoritative for *shape*; the **conformance suite (c)** is authoritative for *behaviour*. The generated client **(b)** is a derived artifact of (a) and is never hand-edited (except the scoped sum-type deserializers, §4.2). On conflict, a *behavioral* failure (c) outranks a *shape* match (a) — a binary that parses but misbehaves is non-conformant. |
-| **Rejected alternatives** | A shared wire crate (forbidden by P0 + illusory; RFC 0001 §2.4); hand-maintained client types (drift-prone, the exact failure this prevents); schema-validation-only with no behavioral suite (catches shape but not the `drain ≡ SIGTERM ≡ exit 0` class of contract — agentd RFC 0015 §4.1); a single monolithic "contract crate" the agent also imports (re-creates the forbidden coupling). |
+| **Rejected alternatives** | A shared wire crate (forbidden by P0 + illusory; RFC 0001 §2.4); hand-maintained client types (drift-prone, the exact failure this prevents); schema-validation-only with no behavioral suite (catches shape but not the `drain ≡ SIGTERM ≡ exit 0` class of contract — agent RFC 0015 §4.1); a single monolithic "contract crate" the agent also imports (re-creates the forbidden coupling). |
 | **Consequences** | agentctl owns the codegen pipeline (`xtask`), the conformance suite, the pinning discipline, the CI gating, and — jointly with RFC 0001 §9 — the contract-extraction + brand-neutralization plan (§5). It depends on the CC precondition (P6/P3b) being real contract work. |
 
 The three artifacts and their per-surface production strategy are §3 (a), §4 (b),
@@ -186,23 +186,23 @@ strategy is honest about whether the artifact is **published**, **hand-authored*
 
 | Artifact (`contract/…`) | Surface | Presently specified in (reference impl) | Production strategy | State |
 |---|---|---|---|---|
-| `manifest.schema.json` | capabilities manifest + `surfaces{}` + identity + limits | agentd RFC 0014 §5, RFC 0015 §5.2 | **hand-authored** (manifest is `json!`→`Value`, no emitter) | interim; conformance-enforced |
-| `config.schema.json` | the config file the operator renders to a ConfigMap | agentd RFC 0017 §4.2 (`--config-schema`) | **emitter** (`--config-schema` → `typify`) | **PENDING (P6)** — emitter unbuilt |
-| `report.schema.json` | machine-readable run-outcome report | agentd RFC 0016 §6 | hand-authored, then emitter | interim (P6) |
-| `metrics.registry.json` | frozen metric names/labels/HELP | agentd RFC 0016 §4 | **scrape-derived** from a live `/metrics` | derived; names unreconciled (**P10**) |
-| `exit-codes.table.json` | the versioned exit-code table | agentd RFC 0016 §5, RFC 0011 §5 | checked-in table → `podFailurePolicy` constants | stable |
-| `a2a.methods.json` | A2A method set + `Task`/`Message`/`Part` shapes | agentd RFC 0020 | hand-authored *once strings freeze* | **PENDING (P2)** — wire strings uncommitted |
-| `mgmt.profile.json` | operator tool/resource names | agentd RFC 0015 §4/§5 | checked-in registry of names | stable |
+| `manifest.schema.json` | capabilities manifest + `surfaces{}` + identity + limits | agent RFC 0014 §5, RFC 0015 §5.2 | **hand-authored** (manifest is `json!`→`Value`, no emitter) | interim; conformance-enforced |
+| `config.schema.json` | the config file the operator renders to a ConfigMap | agent RFC 0017 §4.2 (`--config-schema`) | **emitter** (`--config-schema` → `typify`) | **PENDING (P6)** — emitter unbuilt |
+| `report.schema.json` | machine-readable run-outcome report | agent RFC 0016 §6 | hand-authored, then emitter | interim (P6) |
+| `metrics.registry.json` | frozen metric names/labels/HELP | agent RFC 0016 §4 | **scrape-derived** from a live `/metrics` | derived; names unreconciled (**P10**) |
+| `exit-codes.table.json` | the versioned exit-code table | agent RFC 0016 §5, RFC 0011 §5 | checked-in table → `podFailurePolicy` constants | stable |
+| `a2a.methods.json` | A2A method set + `Task`/`Message`/`Part` shapes | agent RFC 0020 | hand-authored *once strings freeze* | **PENDING (P2)** — wire strings uncommitted |
+| `mgmt.profile.json` | operator tool/resource names | agent RFC 0015 §4/§5 | checked-in registry of names | stable |
 
 The corpus is JSON Schema (Draft 2020-12, the dialect the reference impl's
-`--config-schema` promises; agentd RFC 0017 §4.2) plus two small flat registries
+`--config-schema` promises; agent RFC 0017 §4.2) plus two small flat registries
 (metrics, methods). It is neutral by construction — no Rust, no agent binary, no
 language assumption.
 
 ### 3.2 The four codegen lanes (how (a) feeds (b))
 
 **Lane 1 — config (emitter → `typify`).** When the reference impl ships
-`agentd --config-schema` (P6), agentctl vendors its output, pins it by digest, and
+`agent --config-schema` (P6), agentctl vendors its output, pins it by digest, and
 runs `typify` to generate the config structs into `agent-contract-client`.
 **Caveat — `typify` vs Draft 2020-12.** `typify` is built around draft-07/2019-09
 (the schemars 0.8 Schema model) and has *incomplete* support for 2020-12-specific
@@ -216,28 +216,28 @@ mirroring the golden round-trip the manifest path already has (§6.2/§7.4). Unt
 this lane is **blocked**; the admission ladder's in-webhook JSON-Schema check
 (agentctl RFC 0007 §3.3) and the operator's render-target validation degrade to
 the hand-authored interim schema, and the authoritative check defers to the
-`agentd --validate-config` init-container running the *exact target image*
+`agent --validate-config` init-container running the *exact target image*
 (agentctl RFC 0007). Both subcommands are P6.
 
 **Lane 2 — manifest / inventory / status / report / capacity (hand-authored JSON
 Schema, conformance-enforced).** Because the manifest is deliberately `json!` →
-`Value` (no `derive`, no `schemars`, no emitter — agentd RFC 0012 §3.7), agentctl
+`Value` (no `derive`, no `schemars`, no emitter — agent RFC 0012 §3.7), agentctl
 **hand-authors** these schemas from the contract RFCs and *enforces them
 behaviorally* via the conformance suite (§7), which scrapes the real binary and
 fails on any divergence. This lane is the reason (c) exists: it is the only honest
-way to keep a hand-authored schema true to a `Value`-built surface. (`agentd://capacity`
-and `agentd://metrics` are referenced by the scaling RFC but undefined in the
+way to keep a hand-authored schema true to a `Value`-built surface. (`agent://capacity`
+and `agent://metrics` are referenced by the scaling RFC but undefined in the
 reference RFCs 0005/0015 — contract ask **P4**; the schema for them is pending
 that freeze.)
 
 **Lane 3 — metrics + exit codes (scrape-derived registry → constants).** The
 metric-name registry is **derived by scraping a live `/metrics` (or
-`agentd://metrics`)**, *never hand-transcribed* — hand-transcription
-(`agentd_reactive_backlog` does not exist in the frozen schema) is precisely the
+`agent://metrics`)**, *never hand-transcribed* — hand-transcription
+(`agent_reactive_backlog` does not exist in the frozen schema) is precisely the
 class of error codegen exists to prevent (brainstorm §11.2; the metric-name
 reconciliation is contract ask **P10**). The scrape output, pinned by
 `(digest + feature-set)`, is checked in as `metrics.registry.json` and compiled
-into name constants; the exit-code table (agentd RFC 0016 §5) is checked in
+into name constants; the exit-code table (agent RFC 0016 §5) is checked in
 directly and compiled into the `podFailurePolicy` mapping constants the operator
 uses (agentctl RFC 0010 / RFC 0006). Conformance asserts the registry names are
 *present* on a live scrape (§7.2).
@@ -253,7 +253,7 @@ agentctl cannot generate against today.
 
 ### 3.3 The `surfaces{}` sum types — hand-written deserializers, always
 
-`surfaces{}` is the *single discovery point* (agentd RFC 0014 §6.2) and is JSON
+`surfaces{}` is the *single discovery point* (agent RFC 0014 §6.2) and is JSON
 sum types — `bool | string` (`management`, `metrics`, `hot_reload`, …) and
 `bool | object` (the richer entries). `typify` cannot generate a faithful Rust
 type for these; **every `surfaces{}` field gets a hand-written `Deserialize`**
@@ -266,7 +266,7 @@ type for these; **every `surfaces{}` field gets a hand-written `Deserialize`**
 pub enum SurfaceAddr {
     Off,                 // false
     On,                  // true        (build-gated on, address substrate-assigned)
-    Unix(String),        // "unix:/run/agentd/<pod>.sock"
+    Unix(String),        // "unix:/run/agent/<pod>.sock"
     Vsock(u32),          // "vsock:PORT"
     Tcp(String),         // ":9090"
     Other(String),       // any unknown additive string form — RETAINED, never an error
@@ -325,12 +325,12 @@ the dependency graph (RFC 0001 §5 layout invariant).
    the documented exception. A CI drift check (§7.4) regenerates and fails on any
    diff to the checked-in artifact, so a manual edit cannot silently persist.
 2. **Lenient deserialization, never `deny_unknown_fields`** — the contract is
-   additive-by-minor (agentd RFC 0014 §6.3); unknown fields/tools/metrics are
+   additive-by-minor (agent RFC 0014 §6.3); unknown fields/tools/metrics are
    *tolerated* and surfaced through the additive-drift report (§6.4), not rejected.
    A `deny_unknown_fields` derive would break negotiation and is **forbidden**
    (RFC 0001 §4.2/§4.4).
 3. **No `Secret`, no credentials, ever** — the schema corpus carries none (the
-   reference impl's `Secret` has no `Serialize`, agentd RFC 0012 §3.7), so the
+   reference impl's `Secret` has no `Serialize`, agent RFC 0012 §3.7), so the
    generated client structurally cannot hold one. The secret-safety invariant of
    the data plane is preserved on the consumer side by construction.
 4. **Single dependency direction** — `agent-contract-client` depends only on
@@ -352,7 +352,7 @@ is whether the output is committed (Open Q §9).
 ## 5. The P0 contract-extraction realization
 
 This is the realization P0 forces and RFC 0001 §9 Open Q #1 names: **the contract
-is currently authored *inside* the reference agent's repo (agentd RFCs 0014–0020),
+is currently authored *inside* the reference agent's repo (agent RFCs 0014–0020),
 but it is implementation-neutral, and under P0 neither side should own the other.**
 This RFC owns the *plan* (jointly with RFC 0001 §9); the steady-state home is a
 human decision (Open Q §9).
@@ -405,9 +405,9 @@ resolution (RFC 0001 §4.5, brainstorm §0.6 P0).
 The Rust decision (RFC 0001 §2.2) and this pipeline both rest on **CC — the
 contract must be published as language-neutral, machine-readable schemas.** Today:
 the reference **manifest is `json!`→`Value`** (no struct, no schema — by design,
-agentd RFC 0012 §3.7), and **`--config-schema` is unbuilt** (agentd RFC 0017 §4.2
+agent RFC 0012 §3.7), and **`--config-schema` is unbuilt** (agent RFC 0017 §4.2
 specifies it; it does not exist). So CC is **real contract work** — and crucially
-it is **contract work, not agentd-coupling work**: implementing the emitter and
+it is **contract work, not agent-coupling work**: implementing the emitter and
 publishing the corpus is exactly what makes the contract portable to *other*
 agents, which is what P0 demands (RFC 0001 §4.5). agentctl MUST NOT work around the
 gap by linking the agent (forbidden) or by exec'ing tenant binaries in the webhook
@@ -419,9 +419,9 @@ deletion of that interim code.
 
 The contract is presently *branded* with the reference impl's identifiers, which
 are **contract-normative-but-branded**: the `--capabilities` CLI entrypoint, the
-`agentd://` URI scheme (`agentd://capabilities`/`metrics`/`inventory`/`status`/
-`events`), the `agentd_`-prefixed metric names (agentd RFC 0016 §4), the `AGENTD_*`
-downward-API env family (agentd RFC 0014 §6.4), and the `a2a.*` strings. Depending
+`agent://` URI scheme (`agent://capabilities`/`metrics`/`inventory`/`status`/
+`events`), the `agent_`-prefixed metric names (agent RFC 0016 §4), the `AGENT_*`
+downward-API env family (agent RFC 0014 §6.4), and the `a2a.*` strings. Depending
 on these is depending on the *contract* (they are normative — RFC 0014 §3,
 RFC 0015 §5.2, RFC 0016 §4), so it is P0-clean; but **true, brand-free vendor
 portability requires renaming them to a vendor-neutral spelling** (RFC 0001 §4.3
@@ -438,7 +438,7 @@ This RFC owns the **neutralization plan** (the contract-extraction open question
   branded *or* the neutral spelling passes), so the rename is non-breaking for the
   reference impl.
 - Until extraction, the suite asserts the **branded** spelling verbatim, and the
-  portability claim is honestly scoped to "implementations of the agentd-branded
+  portability claim is honestly scoped to "implementations of the agent-branded
   contract," not arbitrary brandings (RFC 0001 §4.3).
 
 The brand-neutralization is **not** a v1 deliverable; it is the Phase-2 work this
@@ -458,7 +458,7 @@ Codegen, the schema corpus, the golden fixtures, and the metrics registry are al
 pinned by **`(contract major.minor + schema digest)`** — *not* by an agent SHA
 (RFC 0001 §8, which makes the P0 "not a SHA" call; brainstorm §11.3 records the
 pinning-unit as an open question — **superseding** the SHA-*inclusive* formula in
-brainstorm §11.1, "(agentd SHA + cargo feature-set + contract major.minor)", which P0
+brainstorm §11.1, "(agent SHA + cargo feature-set + contract major.minor)", which P0
 overrides). The reason is decisive: the reference impl's
 manifest, `surfaces{}`, and metric set are **`cfg!`-conditional / build-feature-
 gated** — two binaries at the *same* SHA but different cargo feature-sets emit
@@ -470,11 +470,11 @@ The full pin recorded with each generated artifact:
 ```jsonc
 // contract/PIN.json  — recorded alongside the corpus and the generated client
 {
-  "contract_version": "1.0",                 // major.minor (agentd RFC 0014 §6.3)
+  "contract_version": "1.0",                 // major.minor (agent RFC 0014 §6.3)
   "schema_digest": "sha256:9f2c…",           // digest of the contract/ corpus
   "feature_set": ["serve-mcp","metrics","events","hot-reload","vsock","a2a"],
   "source_binary": {                          // the codegen/scrape input (§3.4)
-    "ref_impl_version": "agentd 2.2.0",       // descriptive, NOT a pin authority
+    "ref_impl_version": "agent 2.2.0",       // descriptive, NOT a pin authority
     "binary_digest": "sha256:1a4e…",          // hash-pinned + signature-verified
     "signature": "cosign:…"
   },
@@ -510,29 +510,29 @@ Until P3b publishes a *contract-blessed* corpus, agentctl **scrapes its own**
 fixtures from the pinned reference binary (§3.4) and marks them
 `source: scraped` rather than `source: published`; Phase-1 (§5.2) replaces them.
 
-### 6.3 Runtime version negotiation (agentd RFC 0014 §6.3)
+### 6.3 Runtime version negotiation (agent RFC 0014 §6.3)
 
 Every component negotiates through `agent-contract-client`, identically:
 
 - **Refuse on unknown major.** agentctl reads `contract_version`; if the **major**
   is unknown, it refuses to drive the instance (it still manages liveness + exit
-  codes + logs — the floor every agent supports, agentd RFC 0014 §8). This mirrors
+  codes + logs — the floor every agent supports, agent RFC 0014 §8). This mirrors
   the reference impl's own refusal of an instance whose major it does not
   understand (`CONTRACT_VERSION = "1.0"`; the negotiation spine is real and shipped,
   brainstorm §0.6).
 - **Branch on minor + sub-schema versions.** Within a known major, agentctl reads
   the **minor** and the independently-versioned sub-schemas surfaced in
-  `surfaces{}` (`metrics_schema`, `report_schema`, `config_schema`; agentd
+  `surfaces{}` (`metrics_schema`, `report_schema`, `config_schema`; agent
   RFC 0014 §6.3) to decide which features to drive.
 - **Degrade off `surfaces{}`.** `surfaces{}` is the *single* discovery point
-  (agentd RFC 0014 §6.2). A surface absent ⇒ unbuilt/off ⇒ agentctl drives only
+  (agent RFC 0014 §6.2). A surface absent ⇒ unbuilt/off ⇒ agentctl drives only
   what is declared. A `"cluster":false` agent degrades to an unscaled singleton
   (agentctl RFC 0011 §9 graceful degradation); an agent advertising only `management` degrades to
   control-without-metrics; an agent advertising nothing degrades to the floor.
 
 ### 6.4 Why `deny_unknown_fields` is forbidden — and the additive-drift report
 
-The contract is **additive-by-minor by design** (agentd RFC 0014 §6.3): a new
+The contract is **additive-by-minor by design** (agent RFC 0014 §6.3): a new
 optional manifest key, optional tool/resource, or new metric is a *minor* bump that
 older consumers MUST tolerate. Therefore:
 
@@ -557,14 +557,14 @@ older consumers MUST tolerate. Therefore:
 ## 7. Source of truth (c) — the behavioral, black-box conformance suite
 
 `crates/conformance` is agentctl's **executable definition of "a conformant
-agent."** It mirrors the reference impl's own `agentd-conformance` crate — which is
-black-box *by charter* (`crates/agentd-conformance/src/lib.rs`, verbatim):
-*"Nothing here links the agentd library: conformance is judged against the MCP /
-JSON-RPC spec and the documented exit-code table, not against agentd's own types."*
+agent."** It mirrors the reference impl's own `agent-conformance` crate — which is
+black-box *by charter* (`crates/agent-conformance/src/lib.rs`, verbatim):
+*"Nothing here links the agent library: conformance is judged against the MCP /
+JSON-RPC spec and the documented exit-code table, not against agent's own types."*
 agentctl's suite does the same against **any** agent binary, over the substrate
 transports — the unix-socket dev loop being the contract-clean local path (agentctl
 RFC 0002). It **links no agent**; it drives a *binary* (downloaded/pinned, §3.4)
-and asserts behaviour. Where the reference impl's `agentd-conformance` proves the
+and asserts behaviour. Where the reference impl's `agent-conformance` proves the
 *data-plane* contract (MCP server/client, supervisor, agent loop, security,
 work-claim — the `Category` families it already ships), agentctl's
 `crates/conformance` proves the *control-plane* contract the five components
@@ -577,7 +577,7 @@ consume.
 pub struct Harness { /* spawns the binary, opens the discovered socket (RFC 0002) */ }
 
 pub enum Family {
-    Manifest,    // --capabilities + agentd://capabilities vs the published schema
+    Manifest,    // --capabilities + agent://capabilities vs the published schema
     Management,  // the operator tool/resource profile BEHAVES (drain/lame-duck/cancel)
     Metrics,     // the frozen metric names are PRESENT on a live scrape
     Config,      // --validate-config / --config-schema  (gated on P6)
@@ -588,17 +588,17 @@ pub enum Family {
 ```
 
 Each family is a flat list of named checks returning pass / fail-with-diagnostic,
-exactly as `agentd-conformance` structures its `Check`/`Category`/`Outcome` — so a
+exactly as `agent-conformance` structures its `Check`/`Category`/`Outcome` — so a
 single suite backs both `cargo test` (CI gating) and a `conformance` runner binary
 that renders a PASS/FAIL report a vendor runs against their own agent (§7.3).
 
 ### 7.2 What it asserts (the contract, behaviorally)
 
 - **Manifest (shape + identity invariant).** `--capabilities` (stdout JSON, exit 0)
-  and the live `agentd://capabilities` resource both validate against
+  and the live `agent://capabilities` resource both validate against
   `manifest.schema.json`, **and are semantically equal — parsed-then-compared as JSON
   values, never byte-compared.** The contract guarantee is *same-source* (both surfaces
-  read one const "so the manifest and the live surface cannot drift," agentd
+  read one const "so the manifest and the live surface cannot drift," agent
   `capabilities.rs`), which is **structural equality of the parsed documents**, not byte
   identity: a conformant agent that compacts one surface and pretty-prints the other (or
   orders keys differently) is **fully conformant** and MUST NOT be failed. Asserting
@@ -606,10 +606,10 @@ that renders a PASS/FAIL report a vendor runs against their own agent (§7.3).
   parses both and compares JSON values. `surfaces{}` deserializes through the
   hand-written sum-type path (§3.3) for every advertised form.
 - **Management profile (behaviour, not presence).** `drain` ≡ SIGTERM ≡ a **clean
-  exit 0** (agentd RFC 0015 §4.1 — `drain` is *not* a drain-without-delete; it is
+  exit 0** (agent RFC 0015 §4.1 — `drain` is *not* a drain-without-delete; it is
   the supervised graceful exit); `lame-duck` flips readiness to NotReady **without
-  exiting** (agentd RFC 0015 §4.2); `cancel` by run handle terminates the targeted
-  run; the `agentd://` resource set (`capabilities`/`inventory`/`status`/`events`)
+  exiting** (agent RFC 0015 §4.2); `cancel` by run handle terminates the targeted
+  run; the `agent://` resource set (`capabilities`/`inventory`/`status`/`events`)
   is subscribable. (Asserting *presence* of a `drain` tool is worthless; asserting
   it *exits 0 cleanly* is the contract.) **The required-vs-optional partition is read
   from `mgmt.profile.json`** (the contract-declared management profile, §3.1), **not
@@ -621,33 +621,33 @@ that renders a PASS/FAIL report a vendor runs against their own agent (§7.3).
   *from the artifact* — so a contract minor that makes a tool optional does **not**
   require a suite code change, and the bar tracks the contract rather than one binary.
 - **Metrics (registry presence on a live scrape, after warm-up).** The authority for
-  *which names must exist* is the contract's **frozen metrics schema** (agentd RFC 0016
+  *which names must exist* is the contract's **frozen metrics schema** (agent RFC 0016
   §4, the P10-reconciled set), **not** the reference binary's emitted set. The scrape of
-  a live `/metrics` (or `agentd://metrics`, P4) is used to (a) assert every
+  a live `/metrics` (or `agent://metrics`, P4) is used to (a) assert every
   contract-frozen name is present on the agent and (b) catch the *hand-transcription*
   error by **diffing the scrape against the contract-declared frozen set** (a name in a
-  doc that no binary emits, e.g. `agentd_reactive_backlog`, §3.2 Lane 3). **Scrape
+  doc that no binary emits, e.g. `agent_reactive_backlog`, §3.2 Lane 3). **Scrape
   precondition:** counters/histograms are commonly absent from `/metrics` until first
   observation, so presence is asserted only **after a defined warm-up** (drive one run /
   one work item) — or the registry distinguishes always-present gauges from
   observe-on-first-use series; a freshly-spawned agent is never failed for not yet having
   emitted an observe-on-use metric. The clean-drain exit-code distinction (a graceful
-  SIGTERM returns `0`, not `143`; agentd RFC 0016 §5.3) is asserted here as it is the
+  SIGTERM returns `0`, not `143`; agent RFC 0016 §5.3) is asserted here as it is the
   metric/exit-code seam.
-- **Config (gated on P6).** `agentd --validate-config` exits `2` on bad config with
-  diagnostics and `0` on good (agentd RFC 0017 §4.1); `agentd --config-schema`
+- **Config (gated on P6).** `agent --validate-config` exits `2` on bad config with
+  diagnostics and `0` on good (agent RFC 0017 §4.1); `agent --config-schema`
   emits a valid Draft 2020-12 document that round-trips through the Lane-1 generator
   (§3.2). Skipped-with-reason until P6.
 - **Exit codes (under induced failures).** Drive a usage error → `2` (`FailJob`), a
   semantic refusal → `5` (`FailJob`), a budget exhaustion → `7` (policy, **remap-
   sensitive** — `--budget-exit-code` can move it; brainstorm §3.2, P-cost), a timeout
   → `124`, and assert the table **sourced from `exit-codes.table.json`** (the default
-  values; agentd RFC 0016 §5), never inline literals — a conformant agent configured
+  values; agent RFC 0016 §5), never inline literals — a conformant agent configured
   with a remapped budget code is driven with that config and not failed for the remap.
   These are the codes the operator compiles into `podFailurePolicy` (agentctl RFC
   0006/0010).
 - **A2A (gated on P2).** Once the wire strings freeze: the method set, the
-  `Task`/`Message`/`Part` shapes, and the manifest-as-Agent-Card projection (agentd
+  `Task`/`Message`/`Part` shapes, and the manifest-as-Agent-Card projection (agent
   RFC 0020). Skipped-with-reason until P2.
 - **Negotiation (the (d) discipline).** Feed the major-refusal, minor-tolerance,
   and `surfaces{}`-degradation fixtures (§6.2) and assert agentctl's client behaves
@@ -668,8 +668,8 @@ vendor** — self-certifies by:
 
 The **reference agent is simply the first subject** of this suite, not a privileged
 one (RFC 0001 §4.3). The honest caveat (RFC 0001 §4.3): until brand-neutralization
-(§5.4), "conformant" means honouring the agentd-*branded* surfaces verbatim
-(`--capabilities`, `agentd://`, `agentd_` metric prefix); the suite accepts the
+(§5.4), "conformant" means honouring the agent-*branded* surfaces verbatim
+(`--capabilities`, `agent://`, `agent_` metric prefix); the suite accepts the
 neutral spelling too once the alias table lands. The vendor-portability claim is
 scoped to "implementations of the (branded today, neutral later) contract."
 
@@ -734,14 +734,14 @@ needs a Kata-capable node — a self-hosted runner; cost/placement is Open Q #7.
 
 | Scenario | The invariant under test | Expected behaviour |
 |---|---|---|
-| **node-agent (Tier A) bounce** | "Tier A crash = control gap only, **zero data-plane impact**" (agentctl RFC 0008 §3.3 — the bounce-safe invariant, scoped to Tier A) | agent keeps running (liveness = supervisor heartbeat, independent of the mgmt connection; agentd RFC 0015 §8); reconnect is a clean re-read; `drain` still reachable via SIGTERM (pod delete). **Assert no run is interrupted.** |
+| **node-agent (Tier A) bounce** | "Tier A crash = control gap only, **zero data-plane impact**" (agentctl RFC 0008 §3.3 — the bounce-safe invariant, scoped to Tier A) | agent keeps running (liveness = supervisor heartbeat, independent of the mgmt connection; agent RFC 0015 §8); reconnect is a clean re-read; `drain` still reachable via SIGTERM (pod delete). **Assert no run is interrupted.** |
 | **scaler (`crates/scaler`) loss** | the from-zero signal is a control-plane SPOF (agentctl RFC 0011 §11 #9) | a `min:0` claim fleet stranded at zero wakes via the `activationFallbackReplicas` floor or KEDA's last-replicas hold; **assert no permanent stuck-at-zero.** |
 | **coordination-server loss** | the serializing point's blast radius (agentctl RFC 0011 §11 #1) | in-flight claims survive failover via transactional `claim_key` dedupe; **assert no double-processing across the seam.** |
 | **A2A task-store loss** | shared durable store survives node/pod loss (agentctl RFC 0013 / brainstorm D4) | terminal tasks answered from the store; live ops re-routed to the owner; **assert no lost distillate** (the relay is a must-not-miss consumer; contract ask **P5**). |
 | **contract-skew** | negotiation + graceful degradation (§6.3) | an agent advertising a **minor-newer** manifest is driven at the pinned minor + emits the additive-drift report; an agent advertising a **feature-subset** is driven down to its declared surfaces; an **unknown-major** agent is refused-but-floor-managed. **Assert no hard crash, correct degradation.** |
 | **two-owner lease seam** | claim correctness under a partition (agentctl RFC 0011) | at most one owner per item; **assert no concurrent double-claim.** |
 | **operator failover mid-reconcile** | level-triggered idempotent reconcile (agentctl RFC 0006) | the new leader re-derives desired state from spec+observed; **assert no orphaned/duplicated children, no status hot-loop.** |
-| **reschedule mid-task** | statelessness + re-drive policy (agentctl RFC 0013 / agentd RFC 0019 §6) | default = FAIL + final webhook on owner loss; re-drive only behind the per-fleet idempotency opt-in. **Assert the default does not silently re-execute a non-idempotent composition.** |
+| **reschedule mid-task** | statelessness + re-drive policy (agentctl RFC 0013 / agent RFC 0019 §6) | default = FAIL + final webhook on owner loss; re-drive only behind the per-fleet idempotency opt-in. **Assert the default does not silently re-execute a non-idempotent composition.** |
 
 ### 8.4 The local/dev story (no microVM needed)
 
@@ -758,7 +758,7 @@ than required for every local change. This keeps the contributor barrier at "Doc
 ## Non-goals
 
 - **Authoring the contract's content.** The schemas' *shape and semantics* are
-  owned by the contract (the reference impl's agentd RFCs 0014–0020, eventually the
+  owned by the contract (the reference impl's agent RFCs 0014–0020, eventually the
   neutral spec, §5). This RFC owns the *consumption pipeline*, not the contract. A
   disagreement on the wire is a contract ask (P-series), never an agentctl override.
 - **Building the reference impl's schema emitters.** `--config-schema` /
@@ -860,27 +860,27 @@ than required for every local change. This keeps the contributor barrier at "Doc
 - **agentctl RFC 0016** — CLI & kubectl-plugin: the runtime negotiation +
   graceful-degradation UX (§6.3) the CLI renders.
 
-**agentd RFCs (the reference impl's contract spec)**
+**agent RFCs (the reference impl's contract spec)**
 
-- **agentd RFC 0014** (the contract umbrella) — manifest spine §5, `surfaces{}`
+- **agent RFC 0014** (the contract umbrella) — manifest spine §5, `surfaces{}`
   discovery §6.2, **versioning/negotiation §6.3** (the additive-minor/breaking-major
   rule this RFC enforces), downward-API env §6.4, graceful degradation §8.
-- **agentd RFC 0015** (the reference impl's contract spec) — management & control
+- **agent RFC 0015** (the reference impl's contract spec) — management & control
   surface; manifest schema §5.2, operator tools §4 (`drain`/`lame-duck`/`cancel`
   the suite asserts behaviorally), the frozen `work.*` §5.6.
-- **agentd RFC 0016** (the reference impl's contract spec) — the frozen metrics
+- **agent RFC 0016** (the reference impl's contract spec) — the frozen metrics
   schema §4 (the scrape-derived registry), the exit-code table §5, the clean-drain
   `0`-not-`143` distinction §5.3, run-outcome reports §6.
-- **agentd RFC 0017** (the reference impl's contract spec) — declarative config;
+- **agent RFC 0017** (the reference impl's contract spec) — declarative config;
   `--validate-config` §4.1 and `--config-schema` §4.2 (the CC precondition surface,
   unbuilt — contract ask **P6**).
-- **agentd RFC 0020** (the reference impl's contract spec) — A2A over the substrate;
+- **agent RFC 0020** (the reference impl's contract spec) — A2A over the substrate;
   the A2A method set (wire strings not yet frozen — contract ask **P2**, §3.2
   Lane 4).
-- **agentd RFC 0012 §3.7** (the reference impl) — the `Secret`-has-no-`Serialize`
+- **agent RFC 0012 §3.7** (the reference impl) — the `Secret`-has-no-`Serialize`
   invariant that makes the manifest deliberately `json!`→`Value`, the root reason
   the manifest schema is hand-authored (§3.2 Lane 2, §4.2 rule 3).
-- **`crates/agentd-conformance`** (the reference impl) — the black-box,
+- **`crates/agent-conformance`** (the reference impl) — the black-box,
   never-link-the-library conformance pattern `crates/conformance` mirrors for *any*
   agent (§7); its `Category` taxonomy (MCP server/client, supervisor, agent loop,
   security, work-claim) is the data-plane analogue of §7.1's control-plane families.
@@ -895,8 +895,8 @@ than required for every local change. This keeps the contributor barrier at "Doc
 - **P2** — `surfaces.a2a` manifest key + committed A2A wire strings (§3.2 Lane 4).
 - **P10** — reconcile the autoscaling metric names into one frozen set (§3.2
   Lane 3).
-- **P4** — define `agentd://metrics` (byte-identical Prom 0.0.4) and
-  `agentd://capacity` (frozen schema) (§3.2 Lane 2).
+- **P4** — define `agent://metrics` (byte-identical Prom 0.0.4) and
+  `agent://capacity` (frozen schema) (§3.2 Lane 2).
 - **P5** — read-before-exit / terminal-distillate re-read (the A2A store-loss chaos
   lane, §8.3).
 - **P-pause** — implement `pause`/`resume` (the optional-when-absent management

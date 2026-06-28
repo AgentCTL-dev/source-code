@@ -16,12 +16,12 @@
 
 > **Contract-first, no new primitive (P0).** A fleet's mesh identity is **pure
 > control-plane policy.** The card's *fields* project the capabilities manifest —
-> the same manifest any conformant agent emits (`agentd --capabilities`, the
-> reference impl's agentd RFC 0015 §5.2) and the same projection agentd RFC 0020 §5
+> the same manifest any conformant agent emits (`agent --capabilities`, the
+> reference impl's agent RFC 0015 §5.2) and the same projection agent RFC 0020 §5
 > defines. Signing, provenance, naming, publication, and discovery are layered **on
 > top** by agentctl and require **zero** agent cooperation: a conformant agent never
 > learns it is in a fleet, never signs anything, and never learns its mesh URL
-> (agentd RFC 0014 §6 non-goals). This RFC adds **no** agentd ask of its own; it
+> (agent RFC 0014 §6 non-goals). This RFC adds **no** agent ask of its own; it
 > inherits the A2A asks (P2, P-meta) the gateway already carries (agentctl RFC 0013).
 
 ---
@@ -30,7 +30,7 @@
 
 agentctl turns a declarative `Agent`/`AgentFleet` into a running, observable,
 manageable workload (agentctl RFC 0003/0006) and — when A2A is enabled — into a
-**first-class agent in the mesh** reachable by other agents over A2A (agentd RFC
+**first-class agent in the mesh** reachable by other agents over A2A (agent RFC
 0020; the gateway and per-card serving mechanics are agentctl RFC 0013). The A2A
 model is *Agent Card → Task → methods*: a consumer first fetches an **Agent Card**
 (capability + endpoint discovery), then drives the agent through it.
@@ -76,7 +76,7 @@ the split.
 
 | Concern | Owner | What it covers |
 |---|---|---|
-| **Per-card field mapping** (manifest → A2A Agent Card schema) | **RFC 0013** | the projection of one capabilities manifest into A2A's card schema (`name`/`url`/`capabilities`/`skills`/…), the honesty rules (`capabilities.streaming` = status-level only; truthful `input-required`/`auth-required`, agentd RFC 0020 §6), the version pin, the `agent/getAuthenticatedExtendedCard` method. |
+| **Per-card field mapping** (manifest → A2A Agent Card schema) | **RFC 0013** | the projection of one capabilities manifest into A2A's card schema (`name`/`url`/`capabilities`/`skills`/…), the honesty rules (`capabilities.streaming` = status-level only; truthful `input-required`/`auth-required`, agent RFC 0020 §6), the version pin, the `agent/getAuthenticatedExtendedCard` method. |
 | **Card *serving*** (the HTTP endpoint) | **RFC 0013** | the gateway serving a (pre-assembled, pre-signed) card at the well-known endpoint and the extended-card method; TLS/auth/PEP. |
 | **Whose manifest, and emit exactly ONE** | **RFC 0014** (this) | feeding RFC 0013's projection from the operator's **resolved fleet capability facts** (not a live pod), collapsing N replicas to one canonical card. |
 | **Signing / provenance / key lifecycle** | **RFC 0014** | central JWS signing, the JWKS trust anchor, rotation/revocation. |
@@ -137,7 +137,7 @@ A2A discovery is "fetch the card, then drive the agent." For a singleton that is
 trivial. For an `AgentFleet` it is not: the fleet is a set of fungible replicas
 (claim or shard regime, agentctl RFC 0003 §4.2) sized continuously by KEDA, each
 with its **own** instance-local manifest (`identity.run_id`, `identity.instance`,
-`identity.uid`, live counts — agentd RFC 0015 §5.2/§5.4). If the mesh saw replica
+`identity.uid`, live counts — agent RFC 0015 §5.2/§5.4). If the mesh saw replica
 manifests it would see:
 
 - **N cards** that differ only in volatile identity fields — meaningless to a
@@ -210,14 +210,14 @@ brainstorm P9).
 | `url`, `preferredTransport` | the **fleet** A2A ingress (§3.4) | one stable URL; never a pod IP/node. |
 | `provider` (`{organization, url}`) | control-plane install config | the self-asserted org; **provenance is the signature (§4)**, not this field. |
 | `protocolVersion`, `version` | A2A version pin (RFC 0013) + the resolved `contract_version` | card version bumps when the resolved facts change (§5.4). |
-| `capabilities` (`{streaming, pushNotifications, …}`) | `surfaces{}` + RFC 0013 honesty rules | `streaming` = **status-level only** (distillate-only, agentd RFC 0020 §6 / agentd RFC 0009 §8); declared truthfully by RFC 0013. |
+| `capabilities` (`{streaming, pushNotifications, …}`) | `surfaces{}` + RFC 0013 honesty rules | `streaming` = **status-level only** (distillate-only, agent RFC 0020 §6 / agent RFC 0009 §8); declared truthfully by RFC 0013. |
 | `skills` | operator-declared / derived | the derivation rule is RFC 0013's per-card mechanic; the fleet card carries the **operator-declared** set (the manifest has no skills concept) — see OQ #4. |
 | `defaultInputModes`/`defaultOutputModes` | RFC 0013 projection | from the contract surface. |
-| `securitySchemes`/`security` | the gateway PEP (RFC 0013) | the auth the **gateway** enforces, not the agent (agentd is auth-free, agentd RFC 0012 §3.8). |
+| `securitySchemes`/`security` | the gateway PEP (RFC 0013) | the auth the **gateway** enforces, not the agent (agent is auth-free, agent RFC 0012 §3.8). |
 | `signatures` | the card-signer (§4) | the central JWS provenance. |
 
 The card carries **no secrets** (it is a public document) — the same invariant the
-manifest already guarantees (no tokens, no resolved `{{secret:…}}`, agentd RFC
+manifest already guarantees (no tokens, no resolved `{{secret:…}}`, agent RFC
 0015 §5.2 / RFC 0012 §3.7) — and **no per-replica identity**.
 
 ### 3.4 Hiding the replica fan-out
@@ -266,7 +266,7 @@ serve a **stale** card — it cannot **forge** one.
 ### 4.2 The JWS mechanism
 
 A2A Agent Cards (the version RFC 0013 pins — see §5.1; the contract reference impl
-currently serves the `0.2.x` `/.well-known/agent.json` path, agentd RFC 0020 §5)
+currently serves the `0.2.x` `/.well-known/agent.json` path, agent RFC 0020 §5)
 carry an optional `signatures` array of detached JWS objects. The card-signer:
 
 1. Takes the unsigned canonical card (§3.2), serialized with a **deterministic
@@ -444,7 +444,7 @@ agentctl RFC 0004 §3.3):
   URL space too; the gateway PEP (RFC 0013) treats the `tenant` as an
   authorization predicate (row-level, brainstorm §7.2), not a descriptive field.
 - The descriptive caller/tenant identity a gateway passes inward to the agent is
-  the contract's `_meta` convention (P-meta, agentd RFC 0020 §5) — never
+  the contract's `_meta` convention (P-meta, agent RFC 0020 §5) — never
   re-verified by the agent (the gateway already did). Mesh identity (this RFC) is
   the **callee** side of that same tenancy story.
 
@@ -497,12 +497,12 @@ add these; they layer on top.
   agentctl RFC 0013 (the transport bridge + PEP, the durable task store, the
   manifest→card projection function, the well-known endpoint + extended-card
   method, the A2A version pin). This RFC feeds and signs what that gateway serves.
-- **The A2A method surface and task lifecycle.** agentd RFC 0020 / agentctl RFC
+- **The A2A method surface and task lifecycle.** agent RFC 0020 / agentctl RFC
   0013 (`SendMessage`/`GetTask`/`CancelTask`, Task states, streaming semantics).
   This RFC is about *identity*, not *work*.
 - **The cluster A2A ingress / Service and the per-node relay topology.** agentctl
   RFC 0008 (Tier B) / RFC 0013. This RFC consumes "one stable fleet URL."
-- **The capabilities manifest schema and any agent-side behavior.** agentd RFC
+- **The capabilities manifest schema and any agent-side behavior.** agent RFC
   0015 §5.2 (the reference impl's manifest). agentctl invents no agent surface and
   asks for no new primitive here (the load-bearing P0 callout).
 - **The internal mTLS/PKI for control-plane components.** agentctl RFC 0015. The
@@ -540,7 +540,7 @@ add these; they layer on top.
    A2A cards advertise skills for discovery. v1 carries an **operator-declared**
    skill set on the CRD (§3.3). Should skills instead/also be **derived** (from the
    instruction, the MCP tool set, or a future contract `skills` surface — a
-   possible agentd ask), and is the derivation RFC 0013's per-card mechanic or a
+   possible agent ask), and is the derivation RFC 0013's per-card mechanic or a
    CRD field this RFC must define? Resolve before publishing cross-org cards.
 5. **Whether ephemeral (`once`/`schedule`) agents are ever cataloged (§6.3).** A
    fire-and-exit Job is not a stable mesh endpoint, but its card *is* projectable.
@@ -600,20 +600,20 @@ add these; they layer on top.
 **Contract (the reference implementation's spec — where the contract is presently
 written down, not a dependency, P0)**
 
-- **agentd RFC 0015 §5.2** — the capabilities manifest = the Agent Card source; the
+- **agent RFC 0015 §5.2** — the capabilities manifest = the Agent Card source; the
   no-secrets / `Secret`-unserializable invariant the card inherits (§3.3).
-- **agentd RFC 0020** — A2A interop: §5 the manifest→Agent-Card projection (the
+- **agent RFC 0020** — A2A interop: §5 the manifest→Agent-Card projection (the
   card *is* the manifest, projected); §6 streaming = status-level honesty and the
   descriptive `_meta` caller/tenant convention (P-meta, §6.2).
-- **agentd RFC 0014 §3/§6** — primitives-not-policy; the agent never learns it is in
+- **agent RFC 0014 §3/§6** — primitives-not-policy; the agent never learns it is in
   a fleet, never signs, never learns its mesh URL (the §3.2 / P0 premise).
-- **agentd RFC 0012 §3.8** — the transport-is-the-boundary / auth-free agent posture
+- **agent RFC 0012 §3.8** — the transport-is-the-boundary / auth-free agent posture
   (provenance and caller-auth are agentctl's, not the agent's).
 
 **Contract asks inherited (the cross-repo critical path, brainstorm §14)** — this
 RFC raises **no new** ask; it depends on the A2A asks RFC 0013 already carries:
 
-- **P2** — `surfaces.a2a` (served A2A version + address, or false) + agentd's `a2a`
+- **P2** — `surfaces.a2a` (served A2A version + address, or false) + agent's `a2a`
   feature committing to specific wire strings — gates whether a fleet is
   mesh-publishable at all and which well-known path/schema the signature covers.
 - **P-meta** — the descriptive caller/tenant `_meta` convention (the caller side of

@@ -9,7 +9,7 @@ see [`README.md`](README.md); for the anti-drift pipeline see agentctl RFC 0018.
 > **One-line model.** agentctl drives *any* binary that emits a conformant
 > capabilities **manifest**, honours the frozen **exit-code table**, serves the
 > surfaces it **declares**, and speaks the declared **wire protocols** — never a
-> specific agent. `agentd` is the *reference* implementation, not a dependency.
+> specific agent. The reference `agent` binary is the *reference* implementation, not a dependency.
 
 ---
 
@@ -62,21 +62,19 @@ All version keys are `major.minor` (`^\d+\.\d+$`). **Additive growth ⇒ MINOR b
 unknown major).** Sub-schemas (`metrics_schema`, `report_schema`, `config_schema`)
 version independently within a known contract major. See [§6](#6-version-keys).
 
-### L4 — De-branding (P0): neutral canonical, branded alias, both accepted to GA
-The reference (the `agent` binary) now emits the **neutral** spellings; the contract makes
-those canonical and **accepts** the legacy branded spellings as aliases (back-compat with
-pre-rebrand agents), dropped only at a GA cutover:
+### L4 — De-branding (P0): fully neutral (de-brand complete)
+The contract defines only the **neutral** spellings; the de-brand is complete and no branded
+alias survives. ("agentd" was the pre-rebrand name of the reference agent.)
 
-| concern | neutral (canonical, emitted) | legacy alias (accepted) |
-|---|---|---|
-| env prefix | `AGENT_*` | `AGENTD_*` |
-| URI scheme | `agent://` | `agentd://` |
-| metric prefix | `agent_` | `agentd_` |
-| manifest version key | `agent_version` | `agentd_version` |
-| `_meta` namespace | `agent/*` | `agentd/*` |
+| concern | neutral (canonical) |
+|---|---|
+| env prefix | `AGENT_*` |
+| URI scheme | `agent://` |
+| metric prefix | `agent_` |
+| manifest version key | `agent_version` |
+| `_meta` namespace | `agent/*` |
 
-The manifest root `anyOf`-requires **`agent_version` OR `agentd_version`**.
-Consumers MUST accept both spellings; codegen MUST NOT hardcode one scheme.
+The manifest root requires **`agent_version`**. Codegen targets the single neutral scheme.
 
 ### L5 — Secret-freedom is structural
 The manifest **never** carries credentials — `intelligence` is structural only
@@ -118,7 +116,7 @@ resource — the two MUST be **semantically equal as parsed JSON** (not byte-equ
 a compacted vs pretty-printed surface is conformant).
 
 **Required root:** `contract_version`, `build_features`, `identity`, `mode`,
-`intelligence`, `surfaces` — plus (`agent_version` OR `agentd_version`).
+`intelligence`, `surfaces` — plus `agent_version`.
 
 - `contract_version` — `major.minor`; reference `"1.0"`; negotiate on major (L3).
 - `mode` — **open** string; reference set `once | loop | reactive | schedule`;
@@ -200,11 +198,12 @@ Open object, 12 required keys. `mode` is `once | loop | schedule` — **never
 `completed, refused, exhausted_steps, exhausted_tokens, deadline, stalled,
 loop_detected, cancelled, crashed`. `usage` carries **tokens, never currency**
 (cost = tokens × a price table the consumer owns). `distillate_ref` *points*
-(`^(agent|agentd)://…`), it does not embed the body. `has_usable_partial` (a
+(`^agent://…`), it does not embed the body. `has_usable_partial` (a
 result-body property, not a status) drives the 3-vs-7 exit split.
 
+
 ### 4.4 Metrics registry (`metrics.registry.json`)
-Prefix `agent_` / `agentd_`. **46 records — 29 stable, 8 legacy, 9 provisional.**
+Prefix `agent_`. **46 records — 29 stable, 8 legacy, 9 provisional.**
 Prometheus `0.0.4` text (hand-rendered; no version label on `/metrics` — version
 is `surfaces.metrics_schema`).
 **Cardinality rule: bounded labels only** — never `run_id` / `agent_id` /

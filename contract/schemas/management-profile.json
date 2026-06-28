@@ -2,20 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentctl.dev/contract/v1/management-profile.json",
   "title": "Agent Control Contract — Management Profile",
-  "description": "The operator management profile of the Agent Control Contract: the operator MCP tool set served on the management transport, the agent:// operator resources, and the PeerOrigin authority model. Authority: agentd RFC 0015 §3.4 (PeerOrigin gating), §4 (operator tools drain/lame-duck/pause/resume/cancel; attach == subagent.send), §5.1 (operator agentd:// resources), §5.5 (operator-surface metrics), §7 (trust boundary = transport). Reference source of truth: crates/agentd/src/capabilities.rs (OPERATOR_TOOLS const, surfaces() builder, management = bool|String), signals.rs (drain machinery), agentd_uri.rs (resource URIs). This is a DATA catalogue describing the profile; tools are advertised in manifest surfaces.operator_tools. Versioning: open objects are additive-tolerant; a new tool/resource is a MINOR bump; a consumer MUST tolerate unknown additive tools/resources and refuse only an unknown MAJOR. A surfaces{} key ABSENT => surface unbuilt => graceful degradation.",
+  "description": "The operator management profile of the Agent Control Contract: the operator MCP tool set served on the management transport, the agent:// operator resources, and the PeerOrigin authority model. Authority: agent RFC 0015 §3.4 (PeerOrigin gating), §4 (operator tools drain/lame-duck/pause/resume/cancel; attach == subagent.send), §5.1 (operator agent:// resources), §5.5 (operator-surface metrics), §7 (trust boundary = transport). Reference source of truth: crates/agent/src/capabilities.rs (OPERATOR_TOOLS const, surfaces() builder, management = bool|String), signals.rs (drain machinery), agent_uri.rs (resource URIs). This is a DATA catalogue describing the profile; tools are advertised in manifest surfaces.operator_tools. Versioning: open objects are additive-tolerant; a new tool/resource is a MINOR bump; a consumer MUST tolerate unknown additive tools/resources and refuse only an unknown MAJOR. A surfaces{} key ABSENT => surface unbuilt => graceful degradation.",
   "type": "object",
   "additionalProperties": true,
   "required": ["operator_tools", "operator_resources", "peer_origin", "gating"],
 
   "x-contract-version": "1.0",
-
-  "x-debranding": {
-    "rule": "Neutral token is canonical; the reference-impl spelling is the CURRENT ALIAS, accepted until a GA cutover decision. Branded spellings are NOT dropped.",
-    "scheme": { "neutral": "agent://", "reference_alias": "agentd://", "cutover": "GA (P0)" },
-    "metric_prefix": { "neutral": "agent_", "reference_alias": "agentd_", "cutover": "GA (P0)" },
-    "meta_namespace": { "neutral": "agent/", "reference_alias": "agentd/", "cutover": "GA (P0)" },
-    "entrypoint": { "neutral": "--capabilities", "reference_alias": "--capabilities", "note": "flag is already neutral; only the agentd binary NAME is impl-specific" }
-  },
 
   "operator_tools": {
     "description": "The operator-tool set advertised on the management transport and mirrored in manifest surfaces.operator_tools (capabilities.rs OPERATOR_TOOLS). FROZEN order. Open registry per-tool (additive tools tolerated). Advertised as [] without the serve-mcp feature (no management transport). `attach` is NOT a tool: it maps to subagent.send (RFC 0005). There is NO `force` tool in v1 (force == a 2nd SIGTERM).",
@@ -63,18 +55,18 @@
   },
 
   "operator_resources": {
-    "description": "Operator agent:// resources (alias agentd://). Open registry (additive resources tolerated). Subscribable resources emit notifications/resources/updated{uri} (notify-then-read; no payload in the notification). Only agent://capabilities is also visible on the stdio (work) transport; all others require the management transport.",
+    "description": "Operator agent:// resources. Open registry (additive resources tolerated). Subscribable resources emit notifications/resources/updated{uri} (notify-then-read; no payload in the notification). Only agent://capabilities is also visible on the stdio (work) transport; all others require the management transport.",
     "resources": {
-      "agent://capabilities":      { "alias": "agentd://capabilities",      "subscribable": true,  "stdio_visible": true,  "owner": "RFC-0015", "note": "the capabilities manifest / Agent Card; the ONLY operator resource also served on stdio" },
-      "agent://inventory":         { "alias": "agentd://inventory",         "subscribable": true,  "stdio_visible": false, "owner": "RFC-0015" },
-      "agent://status":            { "alias": "agentd://status",            "subscribable": true,  "stdio_visible": false, "owner": "RFC-0015", "note": "identity-bearing; exit_disposition: null | integer(code)" },
-      "agent://events":            { "alias": "agentd://events",            "subscribable": false, "stdio_visible": false, "owner": "RFC-0016", "note": "bounded ring stream; read query ?after=<seq>&level=<lvl>&event=<dotted-prefix,..>; see events.schema.json" },
-      "agent://run/{run_id}":      { "alias": "agentd://run/{run_id}",      "owner": "RFC-0005", "note": "embeds the run-outcome report under `report`" },
-      "agent://subagent/{handle}": { "alias": "agentd://subagent/{handle}", "owner": "RFC-0005" },
-      "agent://session/{handle}":  { "alias": "agentd://session/{handle}",  "owner": "RFC-0005" },
-      "agent://intelligence":      { "alias": "agentd://intelligence",      "owner": "RFC-0018", "provisional": true, "note": "intelligence health resource" },
-      "agent://capacity":          { "alias": "agentd://capacity",          "owner": "RFC-0019", "provisional": "P4 — frozen schema undefined upstream" },
-      "agent://metrics":           { "alias": "agentd://metrics",           "owner": "RFC-0016", "provisional": "P4 — Prom 0.0.4 text body + mimeType not yet pinned" }
+      "agent://capabilities":      { "subscribable": true,  "stdio_visible": true,  "owner": "RFC-0015", "note": "the capabilities manifest / Agent Card; the ONLY operator resource also served on stdio" },
+      "agent://inventory":         { "subscribable": true,  "stdio_visible": false, "owner": "RFC-0015" },
+      "agent://status":            { "subscribable": true,  "stdio_visible": false, "owner": "RFC-0015", "note": "identity-bearing; exit_disposition: null | integer(code)" },
+      "agent://events":            { "subscribable": false, "stdio_visible": false, "owner": "RFC-0016", "note": "bounded ring stream; read query ?after=<seq>&level=<lvl>&event=<dotted-prefix,..>; see events.schema.json" },
+      "agent://run/{run_id}":      { "owner": "RFC-0005", "note": "embeds the run-outcome report under `report`" },
+      "agent://subagent/{handle}": { "owner": "RFC-0005" },
+      "agent://session/{handle}":  { "owner": "RFC-0005" },
+      "agent://intelligence":      { "owner": "RFC-0018", "provisional": true, "note": "intelligence health resource" },
+      "agent://capacity":          { "owner": "RFC-0019", "provisional": "P4 — frozen schema undefined upstream" },
+      "agent://metrics":           { "owner": "RFC-0016", "provisional": "P4 — Prom 0.0.4 text body + mimeType not yet pinned" }
     }
   },
 
@@ -103,20 +95,20 @@
   },
 
   "operator_state_metrics": {
-    "description": "Operator-state metrics (names FROZEN by RFC 0016; this surface only references them — see metrics.registry.json). De-branded agent_* canonical, agentd_* alias.",
-    "agent_paused":          { "alias": "agentd_paused", "type": "gauge", "values": "0|1", "owner": "RFC-0015 §5.5" },
-    "agent_ready":           { "alias": "agentd_ready",  "type": "gauge", "values": "0|1", "computed": "!draining && !lame_duck", "owner": "RFC-0016" },
-    "agent_drains_total":    { "alias": "agentd_drains_total", "type": "counter", "labels": { "phase": ["started", "completed", "forced", "other"] }, "owner": "RFC-0016" },
-    "agent_active_subagents":{ "alias": "agentd_active_subagents", "type": "gauge", "owner": "RFC-0010/0016" },
-    "agent_tree_depth":      { "alias": "agentd_tree_depth", "type": "gauge", "owner": "RFC-0010" }
+    "description": "Operator-state metrics (names FROZEN by RFC 0016; this surface only references them — see metrics.registry.json). Neutral agent_* names.",
+    "agent_paused":          { "type": "gauge", "values": "0|1", "owner": "RFC-0015 §5.5" },
+    "agent_ready":           { "type": "gauge", "values": "0|1", "computed": "!draining && !lame_duck", "owner": "RFC-0016" },
+    "agent_drains_total":    { "type": "counter", "labels": { "phase": ["started", "completed", "forced", "other"] }, "owner": "RFC-0016" },
+    "agent_active_subagents":{ "type": "gauge", "owner": "RFC-0010/0016" },
+    "agent_tree_depth":      { "type": "gauge", "owner": "RFC-0010" }
   },
 
   "meta_convention": {
-    "description": "The _meta keys this control surface relies on (RFC 0011 §6.2; RFC 0015 §5.6). Neutral agent/* canonical, agentd/* alias. traceparent is W3C and unbranded.",
-    "agent/run_id":    { "alias": "agentd/run_id",    "note": "idempotency key on every tools/call" },
-    "agent/claim_key": { "alias": "agentd/claim_key", "note": "claim-route stable item-derived key (RFC 0015 §5.6)" },
-    "agent/instance":  { "alias": "agentd/instance" },
-    "agent/shard":     { "alias": "agentd/shard" },
+    "description": "The _meta keys this control surface relies on (RFC 0011 §6.2; RFC 0015 §5.6). Neutral agent/* names. traceparent is W3C and unbranded.",
+    "agent/run_id":    { "note": "idempotency key on every tools/call" },
+    "agent/claim_key": { "note": "claim-route stable item-derived key (RFC 0015 §5.6)" },
+    "agent/instance":  {},
+    "agent/shard":     {},
     "traceparent":     { "note": "W3C trace context; unbranded" }
   },
 
@@ -130,7 +122,7 @@
   "x-provisional": {
     "p_pause": "RESOLVED-in-source: pause/resume ship despite the design record marking them deferred.",
     "p4_resources": "agent://capacity and agent://metrics bodies are undefined upstream (P4); listed but provisional.",
-    "operator_metric_divergence": "RFC 0015 §5.5 lists gauges agentd_draining + agentd_lame_duck + agentd_paused; the SOURCE emits agentd_paused + agentd_ready (computed) + agentd_drains_total{phase} with NO standalone draining/lame_duck gauge. draining/lame_duck are observable via agent_ready==0 + agent_drains_total. Prefer source.",
+    "operator_metric_divergence": "RFC 0015 §5.5 lists gauges agent_draining + agent_lame_duck + agent_paused; the SOURCE emits agent_paused + agent_ready (computed) + agent_drains_total{phase} with NO standalone draining/lame_duck gauge. draining/lame_duck are observable via agent_ready==0 + agent_drains_total. Prefer source.",
     "auth_model": "No in-band auth in v1; the transport IS the authority. A future cutover may add credentialed management access (GA decision)."
   }
 }

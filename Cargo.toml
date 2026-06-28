@@ -2,7 +2,7 @@
 #
 # Per agentctl RFC 0001 (stack & repo decision record): Rust for all components,
 # the `kube-rs` ecosystem, one Cargo workspace. The data plane is ANY agent that
-# conforms to the Agent Control Contract (see `contract/`); `agentd` is the
+# conforms to the Agent Control Contract (see `contract/`); `agent` is the
 # reference implementation, never a dependency (principle P0).
 #
 # Crates are added to `members` as they land. The first foundation crate is

@@ -1,11 +1,11 @@
 # agentctl RFCs — index
 
-> **Note (rebrand):** these RFCs were authored when the reference agent was named
-> `agentd`; it has since rebranded to **`agent`** (binary + image + the neutral
-> `agent_*` / `agent://` / `AGENT_*` spellings the ACC makes canonical). The design
-> is unchanged — read `agentd` references here as the reference agent (its repo is
-> still `agentd-dev`). The branded `agentd_*` spellings remain accepted legacy
-> aliases; see `contract/README.md` and `contract/SPEC.md` (L4).
+> **Note (de-brand: COMPLETE):** these RFCs are now neutral-only. The reference
+> agent's pre-rebrand name was `agentd`; it has rebranded to **`agent`**, and this
+> corpus carries no legacy branded spellings — `agent_*` / `agent://` / `AGENT_*`
+> are the canonical forms the ACC makes authoritative. The design is unchanged
+> (the reference agent's repo dir is still `agentd-dev`). There are no accepted
+> branded aliases; see `contract/README.md` and `contract/SPEC.md` (L4).
 
 This directory holds the agentctl RFC set. **agentctl is the Kubernetes control
 plane for *conformant agents*** — it provisions, reaches, scales, observes, and
@@ -39,24 +39,24 @@ depends on the **contract**, not on any one agent binary. The data plane is *any
 agent that conforms to the published, language-neutral control contract — the
 capabilities manifest, the management MCP profile, the frozen metrics + exit-code
 contract, the config schema, A2A over the substrate, and the downward-API env
-convention. **agentd is the reference / first implementation, not a dependency.**
+convention. **agent is the reference / first implementation, not a dependency.**
 Future agents from other vendors implementing the same contract must be manageable
 by agentctl unchanged. Concretely: the anti-drift mechanism is *conformance to a
 published contract + a behavioral conformance suite* (never a shared agent type);
 agentctl codegens its client from the **contract schemas**, never from a data-plane
 binary's source; and every RFC is written against "a conformant agent" / "the
-contract," naming agentd only as the reference implementation in worked examples.
+contract," naming agent only as the reference implementation in worked examples.
 
-**The contract these RFCs consume is currently specified by agentd RFCs
+**The contract these RFCs consume is currently specified by agent RFCs
 0014–0020** (the reference implementation's control-plane track). That contract is
-implementation-neutral but is *presently authored inside the agentd repo*.
+implementation-neutral but is *presently authored inside the agent repo*.
 **Extracting it into a standalone, neutral "Agent Control Contract" spec — its own
 home with published, versioned JSON Schemas, so neither agentctl nor any agent owns
 the other — is the standing P0 open question** (agentctl RFC 0001 §9 / RFC 0002
 open question (a)). Until extraction, agentctl vendors the schemas under
 `contract/`, pinned by `(contract major.minor + digest)`, and the contract surfaces
-remain agentd-branded (the `--capabilities`/`AGENTD_SERVE_MCP` entrypoints, the
-`agentd://` URI scheme, the `agentd_` metric prefix, the `AGENTD_*` env family) —
+remain agent-branded (the `--capabilities`/`AGENT_SERVE_MCP` entrypoints, the
+`agent://` URI scheme, the `agent_` metric prefix, the `AGENT_*` env family) —
 all flagged for neutralization.
 
 ## The binding decision record
@@ -69,7 +69,7 @@ on "open a discovered socket"); **D2 — stack** (Rust for all five components, 
 `kube-rs` control-plane ecosystem, overriding the analysis's Go recommendation);
 **hostile multi-tenancy in v1**; and **all planes in v1** (not a thin MVP). Where
 an RFC and that record diverge, the record wins and the RFC is refined to match.
-Where an RFC and an agentd contract spec disagree *on the wire*, the contract wins
+Where an RFC and an agent contract spec disagree *on the wire*, the contract wins
 and the RFC files a primitive ask (the cross-repo critical path, brainstorm §14).
 
 ## The written RFCs
@@ -85,7 +85,7 @@ and the RFC files a primitive ask (the cross-repo critical path, brainstorm §14
 | [0007](0007-admission-validation-ladder.md) | Admission validation ladder | Proposed | Four rungs cheapest→most authoritative (CEL → webhook cross-object/policy → cached config-schema → init-container ground truth in the exact image); trifecta union advisory + the gated `allowTrifecta` override; fail-closed wiring with the bootstrap-deadlock + operator-SA exemptions; `auditAnnotations` dry-run-safe audit. |
 | [0008](0008-node-agent-architecture.md) | node-agent architecture (two tiers) | Proposed | The on-node keystone as a *process set*: a bounce-safe Tier A (control + telemetry) and an HA Tier B A2A data path (node-pinned relay + replicated stateless gateway), intelligence-proxy-out; the discovery/connection-manager/attestation implementation of the RFC 0002 abstractions; the mTLS API *shape* + per-target-namespace authz chokepoint (policy is 0009); per-tier failure/blast-radius/upgrade. |
 | [0009](0009-management-access-path-and-rbac.md) | Management access path & RBAC | Proposed | Split by caller: operator → node-agent direct mTLS; humans → an aggregated APIServer (the single sanctioned RFC 0001 §6 hybrid seam, Go out-of-workspace) so per-verb RBAC + end-user identity survive; why raw `pods/proxy` fails under hostile tenancy (admin/single-tenant stopgap only); the CRD-stays-on-kube-apiserver vs verbs-on-a-distinct-aggregated-GroupVersion split; the attach/inject no-puppeting gate. |
-| [0010](0010-observability-and-telemetry-bridge.md) | Observability & telemetry bridge | Proposed | The node-agent (Tier A) as the single networked telemetry bridge for networkless agents: a byte-identical metrics scrape-proxy + central `http_sd`, stderr→Loki bulk vs `agentd://events` live-tail, run-outcome capture before once/Job GC, exit-code observability (137/143 from pod status, not the report), `trace_id` correlation, fleet rollups + cost×price-table, control-plane self-observability; the caller→proxy hop locked down under hostile tenancy. |
+| [0010](0010-observability-and-telemetry-bridge.md) | Observability & telemetry bridge | Proposed | The node-agent (Tier A) as the single networked telemetry bridge for networkless agents: a byte-identical metrics scrape-proxy + central `http_sd`, stderr→Loki bulk vs `agent://events` live-tail, run-outcome capture before once/Job GC, exit-code observability (137/143 from pod status, not the report), `trace_id` correlation, fleet rollups + cost×price-table, control-plane self-observability; the caller→proxy hop locked down under hostile tenancy. |
 | [0011](0011-scaling-plane.md) | Scaling plane | Proposed | The elastic plane: claim vs shard regimes (Deployment+KEDA `ScaledObject` vs StatefulSet with the shard-resize controller), the `crates/scaler` KEDA external scaler reading an off-pod backlog (scale-from-zero, P9), the reference coordination MCP server (atomic lease + `claim_key` dedupe), drain→bleed→release on SIGTERM, the claim-only `scaling.min`/`scaling.max` range vs the shard-only `scaling.shards` partition count `N`; KEDA-owns-replicas, exactly one replica-field writer. |
 | [0012](0012-intelligence-plane.md) | Intelligence plane | Proposed | The egress proxy data path behind the one model endpoint (out of the node-agent, a data-PATH component): two-level resilience (proxy within-pool LB/breaker vs agent across-pool failover), zero-secret-in-pod, dialect pass-through-vs-translate read from the agent's manifest (P-dialects), the price table + chosen token source, tiered cost governance (per-run hard → fleet best-effort → fleet hard gated on P-cost). |
 | [0013](0013-a2a-gateway-and-task-store.md) | A2A gateway & task store | Proposed | The replicated stateless A2A HTTP gateway (the A2A PEP: TLS/auth/SSE/webhooks/rate-limit/version-negotiation) fronting the node-pinned relay (RFC 0008); the shared durable task store (Postgres; tenant as a row-level predicate); live-vs-durable method routing; the JSON-RPC binding-string commitment (P2); SSRF-guarded encrypted webhooks; delegation-out. |
@@ -118,7 +118,7 @@ node-agent chokepoint 0008, the A2A gateway 0013) plus the egress-authority poin
 `P-attach-gate`; 0016 is the kubectl-native client of 0009's access path; 0017
 sequences the machinery 0005/0006/0008/0011/0013/0014 own into rolling/skew/DR/GitOps/
 air-gap choreography; and 0018 is the detailed spec of 0001 §4 anti-drift. All keep
-agentd as the reference implementation only (P0).
+agent as the reference implementation only (P0).
 
 ## The full proposed track
 
@@ -141,8 +141,8 @@ allow-list, per-tenant isolation, and `P-attach-gate`) are now **resolved** in t
 authored 0015; 0016/0017/0018 likewise fill the CLI, lifecycle, and conformance seams
 the earlier RFCs deferred. **The next gates are execution, not more RFCs:** the phased
 build roadmap (brainstorm **§16**, with the explicit MVP cut line) and the **cross-repo
-critical path** — the ~12 agentd contract primitives/fixes v1 depends on (brainstorm
-**§14**), since agentd repo work must lead agentctl work for each plane (brainstorm
+critical path** — the ~12 agent contract primitives/fixes v1 depends on (brainstorm
+**§14**), since agent repo work must lead agentctl work for each plane (brainstorm
 §0.6).
 
 ## Supporting material (non-normative)
@@ -151,5 +151,5 @@ In [`docs/design/`](../docs/design/): `agentctl-architecture-brainstorm.md` (the
 binding pre-RFC record synthesizing ten per-dimension designs, their red-teams, and
 four cross-cutting analyses) and `ideas.md` (the original vision; superseded where
 the brainstorm revises it, brainstorm §13). The contract track these RFCs consume
-lives in the sibling **agentd** repository's `rfcs/` directory (the reference
+lives in the sibling **agent** repository's `rfcs/` directory (the reference
 implementation's RFCs 0014–0020).

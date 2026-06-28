@@ -11,7 +11,7 @@
 //! — and demonstrates P0: agentctl manages *any* conformant agent.
 //!
 //! Bind address comes from the contract bind instruction
-//! `AGENT_SERVE_MCP` / `AGENTD_SERVE_MCP` (e.g. `unix:/run/agent/mgmt.sock`),
+//! `AGENT_SERVE_MCP` (e.g. `unix:/run/agent/mgmt.sock`),
 //! which the operator injects (RFC 0002 §6.1).
 
 use std::io::{BufRead, BufReader, Write};
@@ -38,8 +38,7 @@ agent_tool_calls_total 17
 
 fn main() {
     let serve = env::var("AGENT_SERVE_MCP")
-        .or_else(|_| env::var("AGENTD_SERVE_MCP"))
-        .expect("AGENT_SERVE_MCP / AGENTD_SERVE_MCP must be set (e.g. unix:/run/agent/mgmt.sock)");
+        .expect("AGENT_SERVE_MCP must be set (e.g. unix:/run/agent/mgmt.sock)");
     let path = serve.strip_prefix("unix:").unwrap_or(&serve).to_string();
 
     let _ = fs::remove_file(&path); // clear a stale socket from a prior pod
@@ -145,14 +144,12 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let text = match uri {
-                "agent://capabilities" | "agentd://capabilities" => manifest().to_string(),
-                "agent://inventory" | "agentd://inventory" => {
-                    json!({ "agents": [], "warm_sessions": 0 }).to_string()
-                }
+                "agent://capabilities" => manifest().to_string(),
+                "agent://inventory" => json!({ "agents": [], "warm_sessions": 0 }).to_string(),
                 // Prometheus 0.0.4 text exposed as an MCP resource (RFC 0010 / P4):
                 // the node-agent reads this over the socket and re-exposes it, so a
                 // networkless agent is still scrapeable.
-                "agent://metrics" | "agentd://metrics" => METRICS.to_string(),
+                "agent://metrics" => METRICS.to_string(),
                 other => {
                     return Err((-32602, format!("unknown resource: {other}")));
                 }
@@ -232,12 +229,9 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
 /// A minimal but contract-valid capabilities manifest (agent-contract-client
 /// parses this). Identity comes from the downward-API env the operator injects.
 fn manifest() -> Value {
-    let serve = env::var("AGENT_SERVE_MCP")
-        .or_else(|_| env::var("AGENTD_SERVE_MCP"))
-        .unwrap_or_default();
-    let id = |neutral: &str, alias: &str| {
-        env::var(neutral)
-            .or_else(|_| env::var(alias))
+    let serve = env::var("AGENT_SERVE_MCP").unwrap_or_default();
+    let id = |name: &str| {
+        env::var(name)
             .ok()
             .map(Value::String)
             .unwrap_or(Value::Null)
@@ -248,10 +242,10 @@ fn manifest() -> Value {
         "build_features": [],
         "identity": {
             "run_id": "mock-run",
-            "instance": id("AGENT_POD_NAME", "AGENTD_POD_NAME"),
-            "namespace": id("AGENT_POD_NAMESPACE", "AGENTD_POD_NAMESPACE"),
-            "node": id("AGENT_NODE_NAME", "AGENTD_NODE_NAME"),
-            "uid": id("AGENT_POD_UID", "AGENTD_POD_UID")
+            "instance": id("AGENT_POD_NAME"),
+            "namespace": id("AGENT_POD_NAMESPACE"),
+            "node": id("AGENT_NODE_NAME"),
+            "uid": id("AGENT_POD_UID")
         },
         "mode": "reactive",
         "model": null,

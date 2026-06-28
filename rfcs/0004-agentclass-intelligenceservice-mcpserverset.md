@@ -10,14 +10,14 @@
 > ordered set of model endpoints, a reusable tagged MCP-server bundle — for **any
 > agent that conforms to the Agent Control Contract**. They MUST NOT encode the
 > internals of one data-plane binary. Where a concrete field shape is needed, this
-> RFC cites the **reference implementation's** contract spec (agentd RFCs
+> RFC cites the **reference implementation's** contract spec (agent RFCs
 > 0014–0020) as *where the contract is presently written down*, never as a
-> dependency. The agentd-branded contract surfaces these objects resolve into
-> (`AGENTD_INTELLIGENCE`, the `AGENTD_INTELLIGENCE_TOKEN[_n]` env family, the
-> failover/breaker env family `AGENTD_INTEL_BREAKER_*` / `AGENTD_INTEL_ALLDOWN_BACKOFF`,
-> the `agentd_intel_*` metric series, the `--model-swap` knob) are
+> dependency. The agent-branded contract surfaces these objects resolve into
+> (`AGENT_INTELLIGENCE`, the `AGENT_INTELLIGENCE_TOKEN[_n]` env family, the
+> failover/breaker env family `AGENT_INTEL_BREAKER_*` / `AGENT_INTEL_ALLDOWN_BACKOFF`,
+> the `agent_intel_*` metric series, the `--model-swap` knob) are
 > contract-normative-but-branded — cited as the reference spelling and flagged for
-> neutralization (they fall under the general `AGENTD_*` / `agentd_` neutralization
+> neutralization (they fall under the general `AGENT_*` / `agent_` neutralization
 > pattern; the P0 contract-extraction open question, agentctl RFC 0001 §9).
 
 > **The ops/dev seam is the whole point.** An `Agent` author writes *what the agent
@@ -98,22 +98,22 @@ conversion/versioning machinery (agentctl RFC 0005). It references each.
    hostile-tenant class is forced to `kata-hybrid` and an `AgentClass` selecting
    `stock-unix` under hostile tenancy is **rejected at admission** (§3.3). The
    contract-version pin (which image + which `contract_version` range a class binds,
-   negotiated per agentd RFC 0014 §6.3) lives here and **nowhere else** (§3.4).
+   negotiated per agent RFC 0014 §6.3) lives here and **nowhere else** (§3.4).
 
 3. **`IntelligenceService` is the model-endpoint plane as data.** It is an **ordered
    list of endpoints (pools)** that resolves to the contract's ordered
-   `--intelligence` failover list (agentd RFC 0018 §2). Provider credentials are
+   `--intelligence` failover list (agent RFC 0018 §2). Provider credentials are
    resolved **at the egress proxy** (agentctl RFC 0012), **never injected into the
-   agent pod** (agentd RFC 0006 §6 / RFC 0012 §3.7); the agent dials the proxy over
+   agent pod** (agent RFC 0006 §6 / RFC 0012 §3.7); the agent dials the proxy over
    the substrate socket/vsock, keyless. Each endpoint carries a **stable name** for
    metric labels (contract ask **P7**) and may advertise **served models** for
    model-aware placement (§4).
 
 4. **`MCPServerSet` is a reusable, tagged tool bundle.** It names MCP servers and
-   their operator-declared trifecta/capability tags (agentd RFC 0012 §3.1). An
+   their operator-declared trifecta/capability tags (agent RFC 0012 §3.1). An
    `Agent` composes `serverSetRefs` + inline `servers` by **union (ADD)**; the
    **tag union is computed at the `Agent`** and feeds admission (agentctl RFC 0007)
-   and the contract's granted-MCP-subset trust budget (agentd RFC 0012 §3.2). The
+   and the contract's granted-MCP-subset trust budget (agent RFC 0012 §3.2). The
    admission trifecta check is **advisory**, not blocking (§5.3, brainstorm §2.2).
 
 5. **Override/merge is deterministic: deep-merge maps, replace lists, ADD MCP
@@ -121,7 +121,7 @@ conversion/versioning machinery (agentctl RFC 0005). It references each.
    maps/scalars (`limits`, `surfaces`, `resources`, `nodeSelector`), **replaces
    wholesale** for lists (`tolerations`), and **adds (unions)** for MCP servers
    (the one documented exception, mirroring the contract's `--mcp` deviation,
-   agentd RFC 0017 §3.3 / agentctl RFC 0003 §3.1). This answers RFC 0003 OQ4 (§6.1).
+   agent RFC 0017 §3.3 / agentctl RFC 0003 §3.1). This answers RFC 0003 OQ4 (§6.1).
 
 6. **All three are optional; they add a seam, not a requirement.** Each resolves a
    reference RFC 0003 already reserved, and each has an inline `Agent` equivalent. A
@@ -130,8 +130,8 @@ conversion/versioning machinery (agentctl RFC 0005). It references each.
 
 7. **Capability/version gating keys off `surfaces{}` and `contract_version`, never
    off `build_features` (P0).** The `AgentClass` contract pin is a `contract_version`
-   **range** (agentd RFC 0014 §6.3) plus a **required-surfaces** set (the
-   `surfaces{}` keys the class needs the agent to advertise, agentd RFC 0014 §6.2).
+   **range** (agent RFC 0014 §6.3) plus a **required-surfaces** set (the
+   `surfaces{}` keys the class needs the agent to advertise, agent RFC 0014 §6.2).
    `build_features` is opaque/informational and MUST NOT be a gate (agentctl RFC 0003
    §6.1). The CRD `apiVersion` and the agent `contract_version` move on **independent
    clocks** (agentctl RFC 0005).
@@ -159,9 +159,9 @@ spec:
   imagePullPolicy: IfNotPresent
   imagePullSecrets: [{ name: acme-pull }]
   contractVersionRange: ">=1.0 <2.0"     # the contract MAJOR.MINOR range this class accepts
-                                         #   (agentd RFC 0014 §6.3: refuse unknown major, tolerate additive minor)
+                                         #   (agent RFC 0014 §6.3: refuse unknown major, tolerate additive minor)
   requiredSurfaces: [management, metrics, events]   # surfaces{} keys the class REQUIRES the agent to advertise
-                                                    #   (P0-clean capability gate — agentd RFC 0014 §6.2; NOT build_features)
+                                                    #   (P0-clean capability gate — agent RFC 0014 §6.2; NOT build_features)
 
   # --- substrate + tenancy: the field RFC 0002 §5 reads, RFC 0007 enforces (§3.3) ---
   substrate:
@@ -177,7 +177,7 @@ spec:
     resources:                           # k8s pod resources (NOT the contract limits box below)
       requests: { cpu: "500m", memory: 512Mi }
       limits:   { cpu: "2",    memory: 2Gi }
-    limits:                              # the CONTRACT agentic limits box (agentd RFC 0015 §5.2) — deep-merged
+    limits:                              # the CONTRACT agentic limits box (agent RFC 0015 §5.2) — deep-merged
       maxSteps: 200
       maxDepth: 4
       maxTokens: 2000000
@@ -221,16 +221,16 @@ status:                                  # operator-written (single writer, agen
 | Field | Type | Owner-only? | Contract anchor | Notes |
 |---|---|---|---|---|
 | `image` / `imagePullPolicy` / `imagePullSecrets` | image spec | ops | — | the conformant agent image for this class. An `Agent` that sets `classRef` MUST NOT also set `spec.image` (CEL, agentctl RFC 0003 §7); a classless `Agent` names `spec.image` inline instead (RFC 0003 §3.1). The class is the image's home **when referenced**, not the only way to specify one. |
-| `contractVersionRange` | semver range | ops | agentd RFC 0014 §6.3 | the negotiated `contract_version` major.minor window (§3.4). |
-| `requiredSurfaces` | `[]string` | ops | agentd RFC 0014 §6.2 | `surfaces{}` keys the agent MUST advertise; the P0-clean capability gate. Absent surface ⇒ admission/condition failure, not silent. |
+| `contractVersionRange` | semver range | ops | agent RFC 0014 §6.3 | the negotiated `contract_version` major.minor window (§3.4). |
+| `requiredSurfaces` | `[]string` | ops | agent RFC 0014 §6.2 | `surfaces{}` keys the agent MUST advertise; the P0-clean capability gate. Absent surface ⇒ admission/condition failure, not silent. |
 | `substrate.tier` | enum `stock-unix\|kata-hybrid\|sidecar-emptydir` | ops | agentctl RFC 0002 §4 | **the field the §5 binding rule reads** (§3.3). |
 | `substrate.tenancy` | enum `single\|hostile` | ops | agentctl RFC 0002 §5 | the posture this class is for; the **effective** tenancy is `max(namespace label, this)` (§3.3). |
 | `substrate.runtimeClassName` | string | ops | agentctl RFC 0002 §5 | required for `kata-hybrid`; the cluster's Kata `RuntimeClass`. |
-| `defaultIntelligenceRef` | `{name}` | ops | agentd RFC 0018 | the `IntelligenceService` used when the `Agent` sets no `intelligenceRef`/inline (§4.5). |
+| `defaultIntelligenceRef` | `{name}` | ops | agent RFC 0018 | the `IntelligenceService` used when the `Agent` sets no `intelligenceRef`/inline (§4.5). |
 | `defaults.resources` | k8s ResourceRequirements | ops | — | pod CPU/memory requests+limits. Distinct from `defaults.limits`. |
-| `defaults.limits` | contract limits box | ops | agentd RFC 0015 §5.2 | the **agentic** limits (`maxSteps`/`maxDepth`/`maxTokens`/`treeTokenBudget`/`maxTotalSubagents`/`deadlineSeconds`); deep-merged with `Agent.spec.limits`. |
-| `defaults.drain` / `defaults.podGraceSeconds` | `{timeoutSeconds}` / int | ops | agentd RFC 0011 §3.3/§4.2 | drain budget + grace; the `drain<grace` CEL holds on the merged result. |
-| `defaults.security` | `{allowTrifecta,enableExec,attachPolicy}` | ops | agentd RFC 0012 §3.2/§3.6 | security floor; `allowTrifecta`/`enableExec` are **floors an `Agent` may not loosen without elevated RBAC** (§5.3, agentctl RFC 0007). |
+| `defaults.limits` | contract limits box | ops | agent RFC 0015 §5.2 | the **agentic** limits (`maxSteps`/`maxDepth`/`maxTokens`/`treeTokenBudget`/`maxTotalSubagents`/`deadlineSeconds`); deep-merged with `Agent.spec.limits`. |
+| `defaults.drain` / `defaults.podGraceSeconds` | `{timeoutSeconds}` / int | ops | agent RFC 0011 §3.3/§4.2 | drain budget + grace; the `drain<grace` CEL holds on the merged result. |
+| `defaults.security` | `{allowTrifecta,enableExec,attachPolicy}` | ops | agent RFC 0012 §3.2/§3.6 | security floor; `allowTrifecta`/`enableExec` are **floors an `Agent` may not loosen without elevated RBAC** (§5.3, agentctl RFC 0007). |
 | `placement.*` | nodeSelector/tolerations/affinity/spread | ops | — | rendered into the pod template; merge per §6.1. |
 | `reclaimPolicy` | enum `Retain\|Delete` | ops | — | informational in v1 (children are owned by the `Agent`, GC'd with it). |
 
@@ -308,11 +308,11 @@ agent **image** and the `contract_version` **range** it binds — an `Agent` wit
 agentctl RFC 0003 §7). A **classless** `Agent` instead names its own
 `spec.image` inline (agentctl RFC 0003 §3.1) and carries **no** contract-range
 pin: the operator negotiates against whatever major the image advertises and
-manages by understood-major / graceful degradation (agentd RFC 0014 §6.3/§8). The
+manages by understood-major / graceful degradation (agent RFC 0014 §6.3/§8). The
 class exists to make the image + pin an ops-reviewed, RBAC-scoped decision, not to
 be the *only* way to name an image. Resolution and negotiation for the
 class-referenced case (owned by the operator, agentctl RFC 0006; the negotiation
-rule is agentd RFC 0014 §6.3):
+rule is agent RFC 0014 §6.3):
 
 1. The operator resolves `spec.image` to a digest and runs the one-shot
    `CapabilityProbe` (cached by `(digest + feature-set)`, agentctl RFC 0006 §3.1) to
@@ -321,7 +321,7 @@ rule is agentd RFC 0014 §6.3):
    `contractVersionRange` and understood; an unknown major ⇒ `ContractCompatible:
    False / MajorUnknown` and degrade to liveness+exit-code management (agentctl RFC
    0003 §6.2). An additive **minor** above the range's ceiling is **tolerated**
-   (additive-by-minor, agentd RFC 0014 §6.3), not rejected.
+   (additive-by-minor, agent RFC 0014 §6.3), not rejected.
 3. It checks every `requiredSurfaces` key is present in `surfaces{}` (P0-clean,
    §2 point 7); a missing required surface ⇒ a `Degraded`/admission failure, not silent.
 4. It projects the negotiated version into `Agent.status.contract.version` (agentct
@@ -335,8 +335,8 @@ references**, and `Agent.status.contract` records the result for *that* class. T
 is no cluster-global contract version; there is one per class, negotiated per
 instance.
 
-The image+pin belonging to ops is also a P0 hygiene win: the agentd-branded
-contract surfaces (`--capabilities`, the `agentd://` scheme, the `agentd_` metric
+The image+pin belonging to ops is also a P0 hygiene win: the agent-branded
+contract surfaces (`--capabilities`, the `agent://` scheme, the `agent_` metric
 prefix) are resolved through **this one object's image**, so swapping in a
 second-vendor conformant agent — or the neutralized contract surfaces (P0) — is a
 single `AgentClass.image` edit, not a fleet-wide change.
@@ -349,14 +349,14 @@ single `AgentClass.image` edit, not a fleet-wide change.
 **ordered list of endpoints (pools)** that the operator resolves into the contract's
 ordered `--intelligence` failover list. A "pool" is a set of **interchangeable
 backends** serving the same model(s); the **egress proxy** (agentctl RFC 0012)
-load-balances **within** a pool, while the agent's own resilience machinery (agentd
+load-balances **within** a pool, while the agent's own resilience machinery (agent
 RFC 0018) fails over **across** pools. The two-level division is deliberate and maps
 exactly onto the data/control split:
 
 ```
    Agent pod (NO provider secret)                 IntelligenceService (this CRD)
    ┌───────────────────────────┐                  ┌──────────────────────────────┐
-   │ agentd RFC 0018:           │  --intelligence  │ endpoints (ORDERED = failover)│
+   │ agent RFC 0018:           │  --intelligence  │ endpoints (ORDERED = failover)│
    │  ACROSS pools = failover,  │◀───ordered list──│  [0] primary  (pool)          │
    │  sticky-primary, breaker   │  over substrate  │  [1] fallback (pool)          │
    │  (NEVER load-balances)     │   socket/vsock   │  …                            │
@@ -380,12 +380,12 @@ metadata:
   name: anthropic-pool
   namespace: agents
 spec:
-  # ordered: index 0 is primary, the rest are agentd RFC 0018 failover fallbacks (across-pool)
+  # ordered: index 0 is primary, the rest are agent RFC 0018 failover fallbacks (across-pool)
   endpoints:
     - name: opus-primary                 # STABLE per-endpoint NAME → metric label (contract ask P7);
                                          #   survives list reorder (NOT a list index, NOT a moving URI)
       models: [claude-opus-4]            # served models (model-aware placement, §4.4) — P7
-      dialect: anthropic                 # openai | anthropic (agentd RFC 0006 §4); proxy may translate to openai
+      dialect: anthropic                 # openai | anthropic (agent RFC 0006 §4); proxy may translate to openai
       backends:                          # interchangeable replicas the PROXY load-balances across (in-pool)
         - { service: anthropic-gw.models.svc, port: 443, weight: 1 }
         - { service: anthropic-gw-2.models.svc, port: 443, weight: 1 }
@@ -401,18 +401,18 @@ spec:
       backends: [{ service: bedrock-gw.models.svc, port: 443 }]
       credentialRef: { secretRef: { name: bedrock-key, key: api-key } }
 
-  # ACROSS-pool failover/breaker → the agent's own agentd RFC 0018 knobs (the ordered list above).
-  # The CRD field names (breakerThreshold, …) are NEUTRAL; the AGENTD_INTEL_* env they map to is the
+  # ACROSS-pool failover/breaker → the agent's own agent RFC 0018 knobs (the ordered list above).
+  # The CRD field names (breakerThreshold, …) are NEUTRAL; the AGENT_INTEL_* env they map to is the
   # reference impl's BRANDED spelling — flagged for contract-neutralization (intro blockquote, RFC 0001 §9).
   failover:
-    stickyPrimary: true                  # agentd RFC 0018 §3.3 (always true; documented, not tunable in v1)
-    breakerThreshold: 3                  # → AGENTD_INTEL_BREAKER_THRESHOLD (agentd RFC 0018 §4.2) [branded; flagged]
-    breakerCooldownSeconds: 5            # → AGENTD_INTEL_BREAKER_COOLDOWN [branded; flagged]
-    breakerCooldownMaxSeconds: 60        # → AGENTD_INTEL_BREAKER_COOLDOWN_MAX [branded; flagged]
-    allDownBackoff: "1s..30s"            # → AGENTD_INTEL_ALLDOWN_BACKOFF (agentd RFC 0018 §6) [branded; flagged]
+    stickyPrimary: true                  # agent RFC 0018 §3.3 (always true; documented, not tunable in v1)
+    breakerThreshold: 3                  # → AGENT_INTEL_BREAKER_THRESHOLD (agent RFC 0018 §4.2) [branded; flagged]
+    breakerCooldownSeconds: 5            # → AGENT_INTEL_BREAKER_COOLDOWN [branded; flagged]
+    breakerCooldownMaxSeconds: 60        # → AGENT_INTEL_BREAKER_COOLDOWN_MAX [branded; flagged]
+    allDownBackoff: "1s..30s"            # → AGENT_INTEL_ALLDOWN_BACKOFF (agent RFC 0018 §6) [branded; flagged]
 
   # hot-swap INTENT — the CRD records the policy; the operator+proxy EXECUTE it (§4.5)
-  swapPolicy: finish-on-old              # finish-on-old | restart-turn → agentd --model-swap (RFC 0018 §5.3)
+  swapPolicy: finish-on-old              # finish-on-old | restart-turn → agent --model-swap (RFC 0018 §5.3)
 
   # where the egress proxy runs (the field is OURS; the proxy data path is agentctl RFC 0012)
   proxy:
@@ -436,10 +436,10 @@ status:
 Two corrections from the brainstorm (§6.2, D3) are normative in the CRD's shape:
 
 - **The proxy MUST NOT be co-located in the node-agent.** Both pool endpoints
-  terminating on one per-node process makes agentd's inter-pool failover (agentd
+  terminating on one per-node process makes agent's inter-pool failover (agent
   RFC 0018) shared-fate, and because the agentic loop **blocks** on the model call,
   a per-node proxy crash stalls inference on **every** local pod. `proxy.topology`
-  is therefore `sidecar` (per-pod, `unix:/run/intel.sock`, agentd RFC 0006) or
+  is therefore `sidecar` (per-pod, `unix:/run/intel.sock`, agent RFC 0006) or
   `node-local` (a separate Deployment) — **never** the Tier-A node-agent (agentct
   RFC 0008). The proxy's *implementation* (deployment, LB, dialect translation,
   cost metering) is agentctl RFC 0012; this CRD owns only the **declaration** of
@@ -455,25 +455,25 @@ Two corrections from the brainstorm (§6.2, D3) are normative in the CRD's shape
 
 The load-bearing security property: **the provider credential is resolved at the
 proxy and never enters the agent pod.** This rides three contract facts —
-secrets are env/file only behind the `resolve()` front door (agentd RFC 0006 §6),
+secrets are env/file only behind the `resolve()` front door (agent RFC 0006 §6),
 the `Secret` newtype is structurally unserializable so it cannot reach the manifest
-(agentd RFC 0012 §3.7), and on the keyless tier the agent dials a substrate-local
+(agent RFC 0012 §3.7), and on the keyless tier the agent dials a substrate-local
 socket with no key (agentctl RFC 0002 §10 correction 1). The resolution table:
 
 | `proxy.topology` | Provider credential lives in | Agent pod sees | Agent's `--intelligence` points at | Allowed under hostile tenancy? |
 |---|---|---|---|---|
 | `sidecar` | the **sidecar proxy** (mounts `credentialRef`) | **no provider secret** | `unix:/run/intel.sock` (substrate-local) | **yes** (the zero-secret path) |
 | `node-local` | the **node-local proxy Deployment** | **no provider secret** | the proxy endpoint over the substrate | **yes** |
-| `none` (direct dial) | the **agent pod** (env `AGENTD_INTELLIGENCE_TOKEN[_n]`/`_FILE`) | the provider secret | the provider endpoint directly | **no** — rejected by admission (RFC 0007) |
+| `none` (direct dial) | the **agent pod** (env `AGENT_INTELLIGENCE_TOKEN[_n]`/`_FILE`) | the provider secret | the provider endpoint directly | **no** — rejected by admission (RFC 0007) |
 
-So in the default (proxy-fronted) topology the operator renders `AGENTD_INTELLIGENCE`
+So in the default (proxy-fronted) topology the operator renders `AGENT_INTELLIGENCE`
 = the proxy endpoints over the substrate and injects **no**
-`AGENTD_INTELLIGENCE_TOKEN*` into the agent pod; the `credentialRef` is mounted into
+`AGENT_INTELLIGENCE_TOKEN*` into the agent pod; the `credentialRef` is mounted into
 the proxy (agentctl RFC 0012). Only `proxy.topology: none` injects the credential as
-the contract's `AGENTD_INTELLIGENCE_TOKEN[_n]`/`_FILE` env (agentd RFC 0014 §6.4) —
+the contract's `AGENT_INTELLIGENCE_TOKEN[_n]`/`_FILE` env (agent RFC 0014 §6.4) —
 the explicitly non-zero-secret, single-tenant-only path. The `credentialRef` is a
 reference to a `Secret`; the **value never appears in this CRD, in the manifest, or
-in `Agent.status`** (agentd RFC 0012 §3.7).
+in `Agent.status`** (agent RFC 0012 §3.7).
 
 ### 4.4 Model-aware placement + stable endpoint names (P7)
 
@@ -482,7 +482,7 @@ manifest + stable operator-assigned endpoint **names**):
 
 - **Stable names for metric labels.** Each `endpoints[].name` is the **bounded,
   stable label** the operator passes via the reference impl's `--intelligence-names`
-  (agentd RFC 0018 §4.3/§11, contract ask P7) so the `agentd_intel_endpoint_*`
+  (agent RFC 0018 §4.3/§11, contract ask P7) so the `agent_intel_endpoint_*`
   series survive a list reorder. Without P7 the contract labels endpoints by **list
   index** (`"0"`,`"1"`), which shifts when a fallback is inserted ahead of the
   primary — exactly the dashboard-breaking churn the names solve. The CRD always
@@ -490,7 +490,7 @@ manifest + stable operator-assigned endpoint **names**):
   and degrades to index labels otherwise.
 - **Model-aware placement.** `endpoints[].models` (P7) lets the operator route an
   `Agent` whose `model` (or whose pool's model) is `claude-opus-4` onto a pod whose
-  bound endpoint **serves** opus (agentd RFC 0018 §5.4 surfaces discovered models
+  bound endpoint **serves** opus (agent RFC 0018 §5.4 surfaces discovered models
   into `intelligence.models`). With `placement.modelAware: true` the renderer
   (agentctl RFC 0006) adds the corresponding node/endpoint affinity; without P7 it
   assumes only the configured `model` and skips model-aware affinity.
@@ -509,9 +509,9 @@ pool may supply the model when the `Agent` omits it (agentctl RFC 0003 §3.1).
 
 A **backend move is a one-object edit**: the operator edits the
 `IntelligenceService` (repoint a `backends[]` address, swap a `credentialRef`),
-re-renders the proxy + the agent's `AGENTD_INTELLIGENCE` list, and signals a hot
-reload (agentd RFC 0017); the agent executes the **quiesce → switch → resume**
-primitive per `swapPolicy` (agentd RFC 0018 §5) with no restart and no dropped
+re-renders the proxy + the agent's `AGENT_INTELLIGENCE` list, and signals a hot
+reload (agent RFC 0017); the agent executes the **quiesce → switch → resume**
+primitive per `swapPolicy` (agent RFC 0018 §5) with no restart and no dropped
 in-flight work. The CRD records the **intent** (`swapPolicy`, the new endpoints);
 the operator+proxy **execute** it. *Deciding* to swap (cost/latency policy) is
 agentctl RFC 0012, not this CRD.
@@ -523,13 +523,13 @@ agentctl RFC 0012, not this CRD.
 `MCPServerSet` is **namespaced** and bundles MCP servers with their
 operator-declared **trifecta/capability tags** so a set of tools is defined,
 tagged, and reviewed **once** and referenced by many `Agent`s. It is the dev-facing
-counterpart to the contract's per-server tag config (agentd RFC 0012 §3.1) and the
-`--mcp`/`--mcp-config` surface (agentd RFC 0017 §3.3).
+counterpart to the contract's per-server tag config (agent RFC 0012 §3.1) and the
+`--mcp`/`--mcp-config` surface (agent RFC 0017 §3.3).
 
 > **Tag shape (canonical, shared with `Agent.spec.mcp.servers[]`).** `tags` is a
 > **per-tool glob map** — *tool-name-glob → legs* (`{ "*": [untrusted_input],
 > "read_*": [sensitive] }`, first-match / longest-glob-wins) — the faithful
-> rendering of the contract's per-tool glob tagging (agentd RFC 0012 §3.1). This is
+> rendering of the contract's per-tool glob tagging (agent RFC 0012 §3.1). This is
 > the same field shape on both `MCPServerSet.spec.servers[]` (here) and
 > `Agent.spec.mcp.servers[]` (agentctl RFC 0003 §3.1); a bare list `tags: [legs]`
 > is accepted **shorthand** for `{ "*": [legs] }`. The map form here is the
@@ -547,9 +547,9 @@ metadata:
 spec:
   servers:
     - name: fs                           # the MCP server name (unique within the resolved Agent set, §5.2)
-      transport: stdio                   # stdio (default — confinement win, agentd RFC 0012 §3.4) | unix
-      command: ["mcp-fs", "--root", "/watch"]   # operator config ONLY — never model/server-derived (agentd RFC 0012 §3.4)
-      tags:                              # per-tool glob; first-match, longest-glob-wins (agentd RFC 0012 §3.1)
+      transport: stdio                   # stdio (default — confinement win, agent RFC 0012 §3.4) | unix
+      command: ["mcp-fs", "--root", "/watch"]   # operator config ONLY — never model/server-derived (agent RFC 0012 §3.4)
+      tags:                              # per-tool glob; first-match, longest-glob-wins (agent RFC 0012 §3.1)
         "*":      [untrusted_input]      # default leg for every tool of this server
         "read_*": [untrusted_input]      # a read subset
     - name: incidents
@@ -568,7 +568,7 @@ status:
 An `Agent` composes tools from `mcp.serverSetRefs` (zero or more `MCPServerSet`s,
 in the same namespace) **plus** `mcp.servers` (inline additions). They **ADD
 (union)**, mirroring the contract's `--mcp` deviation where refs and inline compose
-rather than replace (agentd RFC 0017 §3.3, agentctl RFC 0003 §3.1):
+rather than replace (agent RFC 0017 §3.3, agentctl RFC 0003 §3.1):
 
 ```
 resolved servers = ⋃(serverSetRefs[*].spec.servers) ⊎ Agent.spec.mcp.servers
@@ -589,7 +589,7 @@ fetched server binary (the servers are the real ASI01 surface, brainstorm §10.2
 
 Tags compose by **union across the whole resolved set**, computed **at the `Agent`**
 (not per `MCPServerSet`): the lethal-trifecta legs (`untrusted_input` + `sensitive`
-+ `egress`, agentd RFC 0012 §3.1) are OR-ed across `serverSetRefs` + inline. Two
++ `egress`, agent RFC 0012 §3.1) are OR-ed across `serverSetRefs` + inline. Two
 individually-"safe" sets (one `sensitive`-only, one `untrusted_input`+`egress`) can
 compose the **full trifecta** on one `Agent` — which is why the union must be an
 `Agent`-level computation and why no single `MCPServerSet` can be judged safe in
@@ -602,7 +602,7 @@ Two consumers of the union, and the **deliberate split** between them (brainstor
    the union and checks it against `security.allowTrifecta`, but emits a
    **warning/observational** condition rather than refusing — because the contract
    already enforces Rule-of-Two **per subagent at the spawn chokepoint** over each
-   child's *narrowed* grant (agentd RFC 0012 §3.2), and the canonical **safe**
+   child's *narrowed* grant (agent RFC 0012 §3.2), and the canonical **safe**
    pattern is a reader/actor split across servers that a naive blocking
    `Agent`-level union would wrongly refuse (training operators to flip
    `allowTrifecta` routinely — the anti-pattern). The **real** control is gating the
@@ -610,13 +610,13 @@ Two consumers of the union, and the **deliberate split** between them (brainstor
    agentctl RFC 0009), and `AgentClass.defaults.security.allowTrifecta` is a **floor**
    an `Agent` may not loosen without that RBAC.
 2. **The contract enforces the budget at runtime.** The resolved tags render into
-   the agent's per-server config (agentd RFC 0012 §3.1); the supervisor computes the
+   the agent's per-server config (agent RFC 0012 §3.1); the supervisor computes the
    tag union over each granted child scope and **refuses/warns at every spawn**
-   (agentd RFC 0012 §3.2). agentctl **surfaces operator-declared tags**; the agent
+   (agent RFC 0012 §3.2). agentctl **surfaces operator-declared tags**; the agent
    **enforces** the granted-MCP-subset trust budget. agentctl never re-implements
    the per-spawn check.
 
-`enableExec` (agentd RFC 0012 §3.6, tagged `egress`+`sensitive`) is likewise a
+`enableExec` (agent RFC 0012 §3.6, tagged `egress`+`sensitive`) is likewise a
 class **floor**: a set or inline server may request `exec`, but the agent only
 registers it under `--enable-exec`, which `AgentClass.defaults.security.enableExec`
 gates.
@@ -732,9 +732,9 @@ spec:
   subscribe: ["fs:file:///watch/inbox/*.json"]
   limits: { maxSteps: 120 }               # deep-merged over class default (maxDepth/treeTokenBudget inherited)
   security: { attachPolicy: deny }        # tightens the class floor (allowed); cannot loosen allowTrifecta
-# Resolution: tier=kata-hybrid (hostile, enforced); image+contract from class; AGENTD_INTELLIGENCE → sidecar
+# Resolution: tier=kata-hybrid (hostile, enforced); image+contract from class; AGENT_INTELLIGENCE → sidecar
 # proxy (no key in pod); tag union = {untrusted_input, sensitive, egress} → FULL TRIFECTA → admission emits an
-# ADVISORY warning (allowTrifecta=false floor unchanged); the agent's per-spawn Rule-of-Two (agentd RFC 0012
+# ADVISORY warning (allowTrifecta=false floor unchanged); the agent's per-spawn Rule-of-Two (agent RFC 0012
 # §3.2) is the real control — the safe pattern is a reader(inbox)/actor(mailer) split, which it permits.
 ```
 
@@ -807,7 +807,7 @@ live* — and the trifecta on this `Agent` is surfaced (advisory) at admission a
    `backends[]` could be a KServe `InferenceService` ref, letting agentctl reuse
    KServe's model-serving, autoscaling, and canarying instead of modelling backends
    directly. The tension: KServe owns the *serving* topology, but the **zero-secret-
-   in-pod / egress-proxy / dialect-translation** posture (§4.2/§4.3) and the agentd
+   in-pod / egress-proxy / dialect-translation** posture (§4.2/§4.3) and the agent
    RFC 0018 **across-pool failover** are agentctl's and have no KServe equivalent.
    Leaning: keep the `IntelligenceService` shape, allow a `backends[].inferenceServiceRef`
    as an alternative to a raw `service` so the two compose rather than compete.
@@ -825,12 +825,12 @@ live* — and the trifecta on this `Agent` is surfaced (advisory) at admission a
 5. **`requiredSurfaces` vs a richer capability predicate.** §2 point 7 gates on the
    presence of `surfaces{}` keys (P0-clean). A class may eventually want to require a
    **minimum sub-schema version** (e.g. `metrics_schema >= 1.1`) — additive, but it
-   needs the contract to version sub-schemas independently (agentd RFC 0014 §6.3,
+   needs the contract to version sub-schemas independently (agent RFC 0014 §6.3,
    which it does). Decide whether `requiredSurfaces` grows value predicates or stays
    key-presence-only.
 6. **Per-endpoint credential keying under P7.** §4.3 maps `credentialRef` onto the
-   contract's index-keyed `AGENTD_INTELLIGENCE_TOKEN_<n>` env on the direct-dial
-   path; agentd RFC 0018 §11 flags that name-keyed (not index-keyed) credentials may
+   contract's index-keyed `AGENT_INTELLIGENCE_TOKEN_<n>` env on the direct-dial
+   path; agent RFC 0018 §11 flags that name-keyed (not index-keyed) credentials may
    be preferable once stable endpoint names (P7) land. Align the direct-dial keying
    with whatever P7 freezes so there is one mental model.
 7. **Deep-merge vs replace for `affinity`/`topologySpread`** specifically. §6.1
@@ -843,7 +843,7 @@ live* — and the trifecta on this `Agent` is surfaced (advisory) at admission a
 
 **Sibling agentctl RFCs**
 
-- **agentctl RFC 0001** — stack & Contract-as-Schema (P0): the contract-not-agentd
+- **agentctl RFC 0001** — stack & Contract-as-Schema (P0): the contract-not-agent
   framing these CRDs' field neutralization follows; the `agent-contract-client` the
   renderer reads to resolve a pool/class into contract surfaces.
 - **agentctl RFC 0002** — substrate & transport abstraction: the `stock-unix`/
@@ -867,40 +867,40 @@ live* — and the trifecta on this `Agent` is surfaced (advisory) at admission a
 - **agentctl RFC 0015** — security & multi-tenancy: the hostile-tenancy mandate and
   RBAC behind the `allowTrifecta` override and the tenancy authority (OQ3/OQ4).
 
-**Contract spec (the reference implementation, agentd RFCs)**
+**Contract spec (the reference implementation, agent RFCs)**
 
-- **agentd RFC 0014** — control-plane contract umbrella: the manifest spine (§5),
+- **agent RFC 0014** — control-plane contract umbrella: the manifest spine (§5),
   `surfaces{}` as the single discovery point (§6.2), contract versioning/negotiation
-  (§6.3), the downward-API env convention incl. `AGENTD_INTELLIGENCE_TOKEN[_n]`/`_FILE`
+  (§6.3), the downward-API env convention incl. `AGENT_INTELLIGENCE_TOKEN[_n]`/`_FILE`
   (§6.4) — the negotiation §3.4 keys off and the env §4.3 injects.
-- **agentd RFC 0015** — management & control surface: the manifest's `limits` box
+- **agent RFC 0015** — management & control surface: the manifest's `limits` box
   (§5.2) `AgentClass.defaults.limits` defaults, `surfaces{}` keys `requiredSurfaces`
   gates on.
-- **agentd RFC 0006** — intelligence transport & wire: the `parse_intelligence_uri`
+- **agent RFC 0006** — intelligence transport & wire: the `parse_intelligence_uri`
   the endpoint list parses to, the dialects (openai/anthropic), the `resolve()`
   secrets front door (§6) and `{{secret:NAME}}` posture the zero-secret rule (§4.3)
   rides.
-- **agentd RFC 0018** — intelligence transport resilience: the ordered `--intelligence`
+- **agent RFC 0018** — intelligence transport resilience: the ordered `--intelligence`
   failover list, sticky-primary, the breaker knobs (§4.2), all-down backoff (§6),
   hot-swap quiesce-switch-resume + `--model-swap` (§5.3), model discovery + the
   per-endpoint model arrays and stable endpoint **names** (§4.3/§11 — contract ask P7).
-- **agentd RFC 0012** — security posture: the trifecta tag vocabulary + per-tool
+- **agent RFC 0012** — security posture: the trifecta tag vocabulary + per-tool
   glob tagging (§3.1), the spawn-chokepoint Rule-of-Two trust-budget check (§3.2),
   the `exec` gate (§3.6), and the `Secret`-has-no-`Serialize` invariant (§3.7) the
   zero-secret-in-pod rule (§4.3) depends on.
-- **agentd RFC 0017** — declarative config & hot reload: the `--mcp`/`--mcp-config`
+- **agent RFC 0017** — declarative config & hot reload: the `--mcp`/`--mcp-config`
   refs+inline ADD deviation (§3.3) `MCPServerSet` composition mirrors, and the reload
   trigger the backend-move one-object edit (§4.5) signals.
-- **agentd RFC 0016** — telemetry & lifecycle contract: the frozen `agentd_intel_*`
+- **agent RFC 0016** — telemetry & lifecycle contract: the frozen `agent_intel_*`
   metric series the stable endpoint **names** (P7) label.
 
 **Contract asks raised or cited by this RFC** (agentctl brainstorm §14): **P7**
 (per-endpoint model arrays in the manifest + stable operator-assigned endpoint names
 for metric labels — §4.4), **P-cost** (a clean budget-exhausted signal for cost
-governance — deferred to agentctl RFC 0012, §Non-goals). The agentd-branded
-contract surfaces these CRDs resolve into (`AGENTD_INTELLIGENCE`,
-`AGENTD_INTELLIGENCE_TOKEN[_n]`, the `AGENTD_INTEL_BREAKER_*` /
-`AGENTD_INTEL_ALLDOWN_BACKOFF` failover env family, `agentd_intel_*`, `agentd://`,
+governance — deferred to agentctl RFC 0012, §Non-goals). The agent-branded
+contract surfaces these CRDs resolve into (`AGENT_INTELLIGENCE`,
+`AGENT_INTELLIGENCE_TOKEN[_n]`, the `AGENT_INTEL_BREAKER_*` /
+`AGENT_INTEL_ALLDOWN_BACKOFF` failover env family, `agent_intel_*`, `agent://`,
 `--model-swap`) are flagged for the **P0 contract-extraction** open question
 (agentctl RFC 0001 §9).
 

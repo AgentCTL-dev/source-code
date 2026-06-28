@@ -7,13 +7,13 @@
 
 > **The collapse point (the load-bearing fact of this RFC).** A conformant agent
 > **re-verifies nothing.** Its management/A2A transport is gated by *reachability*,
-> not a credential (the reference impl's agentd RFC 0015 §7: the operator profile is
-> selected by `PeerOrigin`, which is reachability; agentd RFC 0012 §3.8: the transport
+> not a credential (the reference impl's agent RFC 0015 §7: the operator profile is
+> selected by `PeerOrigin`, which is reachability; agent RFC 0012 §3.8: the transport
 > *is* the boundary). Therefore **reachability of the transport == full authority over
 > the agent**, and **agentctl owns 100% of authn/authz** at a small set of
 > policy-enforcement points (PEPs). A forwarded request crosses the substrate to the
 > agent with **no in-band auth**; the authority was decided *before* the crossing. This
-> single asymmetry — the agent exposes primitives, agentctl owns policy (agentd RFC
+> single asymmetry — the agent exposes primitives, agentctl owns policy (agent RFC
 > 0014 §3) — is what makes the security model tractable and is what every section below
 > elaborates.
 
@@ -29,7 +29,7 @@
 > correction 2), and the **namespace tenancy-label ownership** (RFC 0004 OQ4). The
 > agent's *own* security mechanisms — Rule-of-Two at the spawn chokepoint, the
 > reader/actor distillate firewall, SSRF guards, gated `exec`, the `Secret`-unserializable
-> invariant — live in the contract (the reference impl's agentd RFC 0012) and agentctl
+> invariant — live in the contract (the reference impl's agent RFC 0012) and agentctl
 > **surfaces and depends on** them; it does not re-implement them. The single conditional
 > agent ask this posture *wants* is **P-attach-gate** (the no-puppeting gate, §4.4),
 > already carried by agentctl RFC 0009; this RFC is its requirement-home.
@@ -73,10 +73,10 @@ every red-team finding the brainstorm folded in:
    (§5).
 
 4. **The injection boundary — the reader/actor distillate firewall.** Prompt injection
-   is unsolved and not patchable (agentd RFC 0012 §1). The only structural defense is the
+   is unsolved and not patchable (agent RFC 0012 §1). The only structural defense is the
    agent's CaMeL-style split: an untrusted-content reader with *no* sensitive/egress tools
    returns a low-bandwidth distillate to an actor that never sees the raw content. This
-   boundary lives **inside the agent** (agentd RFC 0012 §3.3); agentctl's job is to *not
+   boundary lives **inside the agent** (agent RFC 0012 §3.3); agentctl's job is to *not
    defeat it* (do not co-locate the trifecta) and to *surface* it (the CRD tags + advisory
    admission, §8).
 
@@ -103,7 +103,7 @@ access-path routing, the card field-mapping). It cross-references them and fills
 ## 2. Decision — the cross-cutting security model (nine principles)
 
 1. **The transport is the boundary; agentctl owns all authz at the PEPs.** The agent
-   re-verifies nothing (agentd RFC 0012 §3.8). There are exactly **four caller→agent
+   re-verifies nothing (agent RFC 0012 §3.8). There are exactly **four caller→agent
    authority PEPs** (§3): admission (agentctl RFC 0007), the management access path (RFC
    0009 + the node-agent internal chokepoint RFC 0008), and the A2A gateway (RFC 0013). A
    forwarded request crosses with no in-band auth. One further enforcement point governs
@@ -131,7 +131,7 @@ access-path routing, the card field-mapping). It cross-references them and fills
 5. **Keep every secret off the agent pod; where it must be in-pod, it is a mounted-Secret
    ref, never the config file.** Provider creds resolve at the proxy (agentctl RFC 0012
    §5); A2A/webhook creds live in the gateway (RFC 0013); the agent's
-   `Secret`-unserializable invariant (agentd RFC 0012 §3.7) guarantees no secret reaches
+   `Secret`-unserializable invariant (agent RFC 0012 §3.7) guarantees no secret reaches
    the manifest, `.status`, a log, or a trace (§5.1).
 
 6. **The intelligence/model channel is the one irreducible egress; everything else is
@@ -168,7 +168,7 @@ One further enforcement point governs the **opposite direction** — the agent's
 egress — the intelligence/egress proxy (§5.6, §6.2); it is called out separately because it
 decides `peer→Agent→allowed-pools` (agent→pool authority), not caller→agent authority, but
 it is enumerated, hardened, and audited under the same exhaustiveness discipline (§3.2.1).
-What is **not** an enforcement point: **the agent itself** (it has no auth model — agentd
+What is **not** an enforcement point: **the agent itself** (it has no auth model — agent
 RFC 0012 §2/§3.8), and **NetworkPolicy** (it gates IP reachability, never caller identity —
 agentctl RFC 0002 §10 correction 2, RFC 0008 §7.4).
 
@@ -218,14 +218,14 @@ reachable peer. Three consequences are normative and load-bearing:
    classes.
 
 2. **The same primitive reachable through two PEPs must be gated at both.** Warm-session
-   steering (`subagent.send`, the reference impl's agentd RFC 0015 §4.5) is reachable via
+   steering (`subagent.send`, the reference impl's agent RFC 0015 §4.5) is reachable via
    the management transport (PEP-2/3, as `attach`) **and** via A2A multi-turn (PEP-4). A
    "no-puppeting" guarantee enforced at only one is no guarantee (agentctl RFC 0009 §6.1,
    RFC 0013 §4.2). §4.4 resolves this with the contract gate.
 
 3. **Descriptive identity, never re-verified.** The caller identity a PEP forwards to the
    agent (`_meta`, the contract's P-meta convention) is **descriptive only** — the agent
-   *records* who asked but never makes an authz decision on it (agentd RFC 0015 §6, RFC
+   *records* who asked but never makes an authz decision on it (agent RFC 0015 §6, RFC
    0012 §3.8; agentctl RFC 0008 §7.3). Authority lives entirely in the PEPs; the agent's
    echo of it exists for audit (§9), not enforcement.
 
@@ -287,7 +287,7 @@ Normative for this RFC's model: attestation failure MUST set `attestation.verifi
 **withhold the descriptor from all management-capable consumers**, emit the
 `security.attestation_failed` audit event (§9), and **never silently degrade** (agentctl
 RFC 0002 §7). The node-agent re-attests on every reconnect (the reconnect = clean re-read
-correlated by `identity.uid`, agentd RFC 0015 §8).
+correlated by `identity.uid`, agent RFC 0015 §8).
 
 ### 4.4 The no-puppeting gate (P-attach-gate)
 
@@ -306,7 +306,7 @@ because RBAC alone is insufficient (agentctl RFC 0009 §6, RFC 0013 §4.2):
   the Management profile** to omit `inject`/`subagent.send` from the management transport
   **without dropping** `drain`/`cancel`/observe. With it, "no live-puppeting for tenant X"
   is **structural** — the surface simply does not present steering, so even a front-side
-  RBAC bug cannot reach it (capability-absence-not-error, agentd RFC 0015 §2.5).
+  RBAC bug cannot reach it (capability-absence-not-error, agent RFC 0015 §2.5).
 
 > **This RFC is the requirement-home of P-attach-gate** (agentctl RFC 0009 §6.1.2, RFC
 > 0013 §4.2 both name it and point here). Until it lands, the honest v1 posture is: the
@@ -412,7 +412,7 @@ home for all five.
 The agent guarantees secrets are env/file-only behind a `resolve()` front door, **never
 read from the config file**, and that the credential carrier is **structurally
 unserializable** (no `Serialize`, so it cannot reach the manifest, `.status`, a log, or a
-trace — the reference impl's agentd RFC 0006 §6 / RFC 0012 §3.7). agentctl preserves and
+trace — the reference impl's agent RFC 0006 §6 / RFC 0012 §3.7). agentctl preserves and
 exploits this: in the default proxy-fronted topologies the operator injects **no** provider
 token env into the agent pod (agentctl RFC 0012 §5.2), and admission (PEP-1) **rejects** a
 cross-namespace `Secret`/pool reference without an explicit grant and rejects the in-pod
@@ -523,8 +523,8 @@ the agent pod** in the default topologies — is the plane's load-bearing one (�
 ### 6.1 "No network" never closed egress (the honesty correction, carried forward)
 
 The intelligence/model channel is an **irreducible egress leg**: the reasoning loop blocks
-on an LLM call that *must* leave the trust boundary (agentd RFC 0006), and in the
-lethal-trifecta model that channel is the *dangerous* one (agentd RFC 0012 §1). Removing the
+on an LLM call that *must* leave the trust boundary (agent RFC 0006), and in the
+lethal-trifecta model that channel is the *dangerous* one (agent RFC 0012 §1). Removing the
 cluster netns (the microVM) removes **IP-layer reachability**; it does **not** remove
 egress — guest→host vsock is itself a live egress channel a compromised agent can write out
 over (agentctl RFC 0002 §10 correction 1). The egress posture must therefore be explicit,
@@ -561,7 +561,7 @@ callers:
 - **Block** the cloud metadata endpoint (`169.254.169.254`), link-local, loopback, and (by
   default) RFC-1918 ranges; **resolve-then-pin** the destination IP to defeat DNS rebinding;
   enforce a **per-tenant allow-list of destination hosts**. These are exactly the SSRF
-  guards the agent's own HTTP client applies (agentd RFC 0012 §3.5); agentctl applies the
+  guards the agent's own HTTP client applies (agent RFC 0012 §3.5); agentctl applies the
   *same* guards at its two egress points that POST to client-supplied/peer URLs:
   1. **Webhook delivery** — the gateway POSTs task-status notifications to client-supplied
      callback URLs (agentctl RFC 0013 §4.4): the one component that POSTs to client-supplied
@@ -619,10 +619,10 @@ agent image (§7.1). Two consequences:
 
 - **Bake MCP servers into the verified agent image** (or pin them by digest within it); do
   not fetch server binaries at runtime from an unverified source (the agent already forbids
-  the *model* from naming a launch command — agentd RFC 0012 §3.4 — but the *operator* must
+  the *model* from naming a launch command — agent RFC 0012 §3.4 — but the *operator* must
   also not introduce an unverified server binary).
 - **Wire the rug-pull detector to alerting.** A tool whose description hash changes between
-  connections logs `mcp.tool.description_changed` at `warn` (agentd RFC 0012 §3.4,
+  connections logs `mcp.tool.description_changed` at `warn` (agent RFC 0012 §3.4,
   TOCTOU/tool-poisoning ASI01); agentctl routes this into the management-action/security
   alerting path (agentctl RFC 0010), because the MCP server surface is the real ASI01 attack
   surface and image verification alone does not catch a post-deploy description swap.
@@ -638,13 +638,13 @@ supply-chain input:
   **signed/hash-pinned** (brainstorm §11.2) — the codegen input is supply-chain-controlled
   exactly like a runtime image.
 - The client is pinned by `(contract major.minor + feature-set)` and **refuses an unknown
-  contract major** (agentd RFC 0014 §6.3, agentctl RFC 0001 §4.4) — version-negotiation is
+  contract major** (agent RFC 0014 §6.3, agentctl RFC 0001 §4.4) — version-negotiation is
   itself a supply-chain integrity control: an agent advertising a major agentctl does not
   understand is degraded to liveness+exit-code management, never spoken to with assumptions.
 
-> **P0 / contract-neutralization note.** The agentd-branded contract surfaces this RFC
-> cites in passing — `--capabilities`, the `agentd://` scheme, the `agentd_` metric prefix,
-> `AGENTD_*` env, the `a2a.*` strings — are the **reference impl's** spellings of
+> **P0 / contract-neutralization note.** The agent-branded contract surfaces this RFC
+> cites in passing — `--capabilities`, the `agent://` scheme, the `agent_` metric prefix,
+> `AGENT_*` env, the `a2a.*` strings — are the **reference impl's** spellings of
 > contract-normative surfaces, flagged for neutralization under the P0 contract-extraction
 > open question (owned by agentctl RFC 0018 / RFC 0001 §9). A second-vendor conformant agent
 > with neutralized surfaces is verified, managed, and secured by the **same** PEPs and the
@@ -654,7 +654,7 @@ supply-chain input:
 
 Two control-plane steps execute the **tenant's own image** *before/around* the agent serves
 traffic: the per-digest **`CapabilityProbe` Job** that runs `--capabilities` (agentctl RFC
-0006 §5) and the **`agentd --validate-config` init-container** ground-truth rung (agentctl
+0006 §5) and the **`agent --validate-config` init-container** ground-truth rung (agentctl
 RFC 0007 §3.3 / §2.4). Running an untrusted tenant binary inside the control plane is itself a
 neighbour→platform attack surface (the brainstorm §3.3 warning against "running tenant
 binaries in the control plane"), and §7.1's image-verification story is undercut if the
@@ -681,17 +681,17 @@ runtime is an operator concern (agentctl RFC 0006 §5) and tracked at OQ #8.
 ### 8.1 The agent owns the real control; agentctl declares, advises, and gates the override
 
 The lethal-trifecta defense (an agent that simultaneously reads untrusted content, holds
-sensitive data/tools, and can egress is a one-injected-prompt exfiltration tool — agentd
+sensitive data/tools, and can egress is a one-injected-prompt exfiltration tool — agent
 RFC 0012 §1) is enforced **inside the agent, per spawn**: the supervisor evaluates the tag
 union over each child's **narrowed grant** at the `subagent.spawn` chokepoint and refuses
-any *single* subagent that would hold all three legs without `--allow-trifecta` (agentd RFC
+any *single* subagent that would hold all three legs without `--allow-trifecta` (agent RFC
 0012 §3.2). This is the real, unforgeable, correctly-grained control (one isolation unit =
 one process). agentctl adds **three composing layers**, none of which is a blocking union:
 
 1. **Declaration (CRD).** MCP servers carry operator-declared trifecta **tags**
    (`untrusted_input`/`sensitive`/`egress`) on the `Agent`/`MCPServerSet` (agentctl RFC
    0003/0004) — the operator-declared tags the agent's check consumes, never server-declared
-   metadata (agentd RFC 0012 §3.4).
+   metadata (agent RFC 0012 §3.4).
 2. **Advisory detection (PEP-1).** Admission computes the **Agent-level union** across
    inline servers + all `serverSetRefs` and, when it spans the full trifecta with
    `allowTrifecta: false`, **admits with a warning** + a standalone `TrifectaUnionObserved`
@@ -701,7 +701,7 @@ one process). agentctl adds **three composing layers**, none of which is a block
    operators to flip the override routinely (agentctl RFC 0007 §3.1).
 3. **Override gating (PEP-1).** The dangerous act is turning the per-spawn guard *off*.
    `allowTrifecta: true` (which renders the contract's `--allow-trifecta`, flipping the
-   spawn chokepoint from `Refuse` to `Warn`, and is **process-global** today — agentd RFC
+   spawn chokepoint from `Refuse` to `Warn`, and is **process-global** today — agent RFC
    0012 §6 open item) is **rejected** unless **both** an explicit override annotation
    (justification/ticket) **and** an elevated-RBAC `override-trifecta` SAR pass; on admit,
    the override is written to the apiserver audit log via `auditAnnotations` (agentctl RFC
@@ -709,14 +709,14 @@ one process). agentctl adds **three composing layers**, none of which is a block
 
 ### 8.2 The structural injection defense is the firewall — agentctl's job is not to defeat it
 
-The load-bearing structural control is the **reader/actor distillate firewall** (agentd RFC
+The load-bearing structural control is the **reader/actor distillate firewall** (agent RFC
 0012 §3.3): untrusted content is quarantined in a no-sensitive/no-egress reader that returns
 a ~1–2k-token distillate; the actor that holds sensitive/egress tools never ingests the raw
 bytes. agentctl's contribution is **to not co-locate the trifecta** (the advisory union
 nudges toward the split) and **to not market "no network = safe"** (the firewall + the
 kernel boundary are the real wins, §6.3, agentctl RFC 0002 §10 correction 3). agentctl
 **does not** add a policy engine, a content classifier, or a "is this injection?" model call
-— the agent consciously rejected those (agentd RFC 0012 §2/§5) and agentctl does not
+— the agent consciously rejected those (agent RFC 0012 §2/§5) and agentctl does not
 reintroduce them (Non-goals).
 
 ---
@@ -727,7 +727,7 @@ Multiple RFCs emit to "the agentctl RFC 0015 audit vocabulary" (agentctl RFC 000
 0008 §7.3, RFC 0009 §5.3, RFC 0010 §10.2). **This RFC owns the vocabulary; agentctl RFC
 0010 §10.2 owns the sink** (the `agentctl_*` self-observability path, scraped/logged on a
 path independent of the data plane). The vocabulary is **closed** (a fixed set, mirroring
-the contract's closed event vocabulary discipline, agentd RFC 0010) so audit queries are
+the contract's closed event vocabulary discipline, agent RFC 0010) so audit queries are
 stable across versions and vendors.
 
 | Event | Emitted by | Fields | Pairs with |
@@ -735,7 +735,7 @@ stable across versions and vendors.
 | `mgmt.invoked` | the node-agent PEP-3 on every `drain`/`lame-duck`/`cancel`/steer (and `pause`/`resume` once **P-pause** lands). This is the **agentctl-side** record; once the contract's **P-audit** `mgmt.invoked{tool,caller?}` lands a conformant *agent* additionally echoes its own contract event — a distinct, third record | `{tool, target(ns/name/uid), caller, forwarded_user?, trace_id}` (the agentctl spelling uses `tool`, matching the P-audit / RFC 0008/0009/0010 vocabulary) | the kube/aggregated-APIServer audit "who asked" record (agentctl RFC 0009 §5.2) — two independent records of one act |
 | `mgmt.denied` | PEP-2/PEP-3 on an authz failure | `{verb, target, caller, reason}` | the per-target-namespace re-check (agentctl RFC 0009 §5.3) |
 | `attach.inject` | the node-agent per inject (durable, independent of the lossy events ring — the only complete steering record until P-inject) | `{target, caller, session, digest}` | agentctl RFC 0008 §7.3 |
-| `trifecta.override_admitted` | PEP-1 on an `allowTrifecta` admit (the apiserver writes the `auditAnnotations`) | `{user, namespace, name, annotation, legs}` | agentd's runtime `scope.trifecta_grant` warn (agentd RFC 0012 §3.2) — admission boundary + runtime boundary |
+| `trifecta.override_admitted` | PEP-1 on an `allowTrifecta` admit (the apiserver writes the `auditAnnotations`) | `{user, namespace, name, annotation, legs}` | agent's runtime `scope.trifecta_grant` warn (agent RFC 0012 §3.2) — admission boundary + runtime boundary |
 | `image.verify_failed` | PEP-1 on an image-signature reject (§7.1) | `{class, image, digest, policy}` | the supply-chain trust policy |
 | `security.attestation_failed` | the node-agent on pod→socket attestation failure (§4.3) | `{node, pod_uid, expected_uid, tier, method}` | agentctl RFC 0002 §7 |
 | `security.egress_denied` | the gateway/proxy on an SSRF/allow-list refusal (§6.3) | `{caller_tenant, dest_host, reason}` | agentctl RFC 0013 §4.4/§8 |
@@ -774,7 +774,7 @@ above.
 | T4 | **Live puppeting** of a neighbour (steer it, not just observe) | per-verb RBAC (`agents/attach`) + the P-attach-gate contract gate (both PEPs) | PEP-2/PEP-4 / agentctl RFC 0009 §6, RFC 0013 §4.2, §4.4 |
 | T5 | **Cross-tenant task / webhook-cred data leak** via the shared store | tenant = row-level predicate + per-tenant DB role + per-tenant gateway | PEP-4 / agentctl RFC 0013 §4.2/§4.5, §4.6 |
 | T6 | **Provider credential / model-budget theft** by a pod dialing another tenant's pool | zero-secret-in-pod + proxy `peer→Agent→allowed-pools` authz map (attested peer) | proxy / agentctl RFC 0012 §5, §5.6 |
-| T7 | **Prompt-injection exfiltration** (lethal trifecta) | reader/actor distillate firewall + per-spawn Rule-of-Two + advisory tags/override-gating | agent + PEP-1 / agentd RFC 0012, agentctl RFC 0007 §3, §8 |
+| T7 | **Prompt-injection exfiltration** (lethal trifecta) | reader/actor distillate firewall + per-spawn Rule-of-Two + advisory tags/override-gating | agent + PEP-1 / agent RFC 0012, agentctl RFC 0007 §3, §8 |
 | T8 | **SSRF / cloud-metadata** via webhook delivery or delegation-out | one egress allow-list (block `169.254.169.254`/link-local/loopback/RFC-1918; resolve-then-pin; per-tenant host allow-list) | gateway / agentctl RFC 0013 §4.4/§8, §6.3 |
 | T9 | **Data exfiltration over the model channel / guest→host vsock** | NetworkPolicy default-deny (IP) + host-side vsock port allow-list (HARDENED) + the firewall | node-agent / agentctl RFC 0002 §10, §6 |
 | T10 | **Forged cross-org Agent Card** | central card signing + JWKS pinned out-of-band (ignore in-card `jku`); gateway serves pre-signed only | card-signer / agentctl RFC 0014 §4, §5.4 |
@@ -794,11 +794,11 @@ above.
 - **Re-implementing the agent's own security mechanisms.** Rule-of-Two at the spawn
   chokepoint, the reader/actor distillate firewall, the SSRF guards in the agent's HTTP
   client, gated `exec`, the `Secret`-unserializable invariant, self-MCP hardening — all live
-  in the contract (the reference impl's agentd RFC 0012). agentctl **surfaces, composes, and
+  in the contract (the reference impl's agent RFC 0012). agentctl **surfaces, composes, and
   depends on** them; it adds no in-agent security surface (the lone conditional ask is
   P-attach-gate, §4.4).
 - **A policy engine / DSL in the loop, a prompt-injection classifier, or request signing on
-  the agent.** The agent consciously reversed "governance is the moat" (agentd RFC 0012 §2);
+  the agent.** The agent consciously reversed "governance is the moat" (agent RFC 0012 §2);
   agentctl does **not** reintroduce a regorus/JWT/x509-in-the-loop layer. Authority is the
   PEPs + Kubernetes RBAC + the card `securitySchemes`, not an injectable in-loop engine.
 - **The mechanics owned by the per-PEP RFCs.** The admission ladder (agentctl RFC 0007), the
@@ -846,7 +846,7 @@ above.
    signing identity (and per-tenant internal sub-CA?) strengthens isolation and cleans
    per-tenant federation, at the cost of N keys/CAs to rotate. Settle before federation
    (agentctl RFC 0014 §7) is built on.
-7. **Per-route / per-spawn `allowTrifecta` override (§8 / agentd RFC 0012 §6 open).** The
+7. **Per-route / per-spawn `allowTrifecta` override (§8 / agent RFC 0012 §6 open).** The
    override is process-global today, so its blast radius is the whole daemon. A per-route
    override is a contract refinement; until then the admission gate (§8) + the runtime audit
    are the interim controls. Track as a contract ask candidate.
@@ -902,20 +902,20 @@ above.
 **Contract (the reference implementation's spec — where the contract is presently written
 down, not a dependency, P0)**
 
-- **agentd RFC 0012 (the reference impl's contract spec)** — security posture: §1 the lethal
+- **agent RFC 0012 (the reference impl's contract spec)** — security posture: §1 the lethal
   trifecta; §2 no-policy-engine/no-auth-as-core (the conscious reversal this RFC honours);
   §3.1–3.2 tool tags + the per-spawn Rule-of-Two (§8); §3.3 the distilled-return injection
   firewall (§1.1/§8.2); §3.4 all-MCP-content-untrusted + the rug-pull detector (§7.3); §3.5
   SSRF guards (the egress posture mirrors, §6.3); §3.7 secrets / `Secret`-unserializable
   (§5.1); §3.8 self-MCP-over-unix = filesystem-perms, not in-band auth.
-- **agentd RFC 0015 (the reference impl's contract spec)** — management & control surface:
+- **agent RFC 0015 (the reference impl's contract spec)** — management & control surface:
   §3.4/§7 `PeerOrigin` = reachability (the collapse point); §4.5 `subagent.send` steering
   (the no-puppeting target, §4.4); §6 descriptive downward-API identity, never re-verified;
   §8 reconnect = clean re-read (re-attest, §4.3).
-- **agentd RFC 0014 (the reference impl's contract spec)** — control-plane contract: §3
+- **agent RFC 0014 (the reference impl's contract spec)** — control-plane contract: §3
   primitives-not-policy; §6.3 contract-version negotiation / refuse-unknown-major (the
   supply-chain integrity control, §7.4).
-- **agentd RFC 0020 (the reference impl's contract spec)** — A2A interop: the A2A method
+- **agent RFC 0020 (the reference impl's contract spec)** — A2A interop: the A2A method
   surface PEP-4 fronts; the descriptive `_meta` caller/tenant convention (P-meta).
 
 **Contract asks (the cross-repo critical path, brainstorm §14)** — this RFC is the

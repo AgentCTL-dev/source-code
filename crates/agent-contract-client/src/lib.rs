@@ -21,16 +21,13 @@
 //! | `surfaces.shard` | `string \| null` | `Option<String>` |
 //! | `intelligence.healthy` | `"unknown" \| bool` | [`Health`] |
 //!
-//! Two invariants from the contract's version-negotiation rules are enforced
+//! One invariant from the contract's version-negotiation rules is enforced
 //! structurally:
 //!
 //! * **Additive tolerance** — every struct ignores unknown fields (no
 //!   `deny_unknown_fields`), so a newer agent that adds manifest keys, surface
 //!   keys, or operator tools still parses. A consumer refuses only an unknown
 //!   **major** (see [`Manifest::negotiate`]).
-//! * **De-branding** — the manifest version key is read as the neutral
-//!   `agent_version` *or* the reference alias `agentd_version`
-//!   ([`Manifest::version`]).
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
@@ -53,15 +50,10 @@ pub struct Manifest {
     /// [`Manifest::negotiate`].
     pub contract_version: String,
 
-    /// Neutral agent-version key (de-branding canonical) — the spelling the
-    /// rebranded reference agent emits. Pre-rebrand agents used the legacy
-    /// [`Manifest::agentd_version`] alias instead (still accepted).
+    /// The agent-version key the reference agent emits (descriptive metadata;
+    /// resolve via [`Manifest::version`]).
     #[serde(default)]
     pub agent_version: Option<String>,
-    /// Reference-impl agent-version alias (`agentd_version`). Prefer
-    /// [`Manifest::version`], which resolves neutral-then-alias.
-    #[serde(default)]
-    pub agentd_version: Option<String>,
 
     /// Compiled-in build features. **OPAQUE / agent-defined — never branch on a
     /// value here.** Capability discovery keys exclusively off [`Surfaces`].
@@ -122,16 +114,13 @@ impl Manifest {
         Ok(v)
     }
 
-    /// The agent version, resolving the neutral `agent_version` first, then the
-    /// branded `agentd_version` alias (de-branding, P0).
+    /// The agent version, from the neutral `agent_version` key.
     pub fn version(&self) -> Option<&str> {
-        self.agent_version
-            .as_deref()
-            .or(self.agentd_version.as_deref())
+        self.agent_version.as_deref()
     }
 }
 
-/// Downward-API instance identity (agentd RFC 0014 §6.4 / contract
+/// Downward-API instance identity (agent RFC 0014 §6.4 / contract
 /// `env-convention`). All optional — descriptive, not load-bearing.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {

@@ -2,34 +2,26 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentctl.dev/contract/v1/env-convention.json",
   "title": "Agent Control Contract — Kubernetes Downward-API Env Convention",
-  "description": "The environment-variable convention of the Agent Control Contract: the Kubernetes downward-API identity vars, drain-vs-grace hint, sharding vars, and per-endpoint intelligence credentials. Authority: agentd RFC 0014 §6.4 (the downward-API env table), RFC 0015 §6 (identity from downward API, env-only), RFC 0011 §3.3/§10 (drain-vs-grace, AGENTD_POD_GRACE_SECONDS), RFC 0019 §4.2 (sharding K/N). Reference source of truth: crates/agentd/src/identity.rs (from_env, var() empty=>unset), config.rs (lifecycle env), cluster/shard.rs (AGENTD_SHARD parse + label), intel/endpoints.rs (TOKEN_ENV per-endpoint). Read from env ONLY (valueFrom.fieldRef); the agent NEVER calls the kube API. ALL vars are OPTIONAL; absence is never a config error. Identity is DESCRIPTIVE, never load-bearing (no placement/scheduling decision). Secrets travel ONLY the *_TOKEN[_FILE] env-secret path; the config file never carries a credential.",
+  "description": "The environment-variable convention of the Agent Control Contract: the Kubernetes downward-API identity vars, drain-vs-grace hint, sharding vars, and per-endpoint intelligence credentials. Authority: agent RFC 0014 §6.4 (the downward-API env table), RFC 0015 §6 (identity from downward API, env-only), RFC 0011 §3.3/§10 (drain-vs-grace, AGENT_POD_GRACE_SECONDS), RFC 0019 §4.2 (sharding K/N). Reference source of truth: crates/agent/src/identity.rs (from_env, var() empty=>unset), config.rs (lifecycle env), cluster/shard.rs (AGENT_SHARD parse + label), intel/endpoints.rs (TOKEN_ENV per-endpoint). Read from env ONLY (valueFrom.fieldRef); the agent NEVER calls the kube API. ALL vars are OPTIONAL; absence is never a config error. Identity is DESCRIPTIVE, never load-bearing (no placement/scheduling decision). Secrets travel ONLY the *_TOKEN[_FILE] env-secret path; the config file never carries a credential.",
   "type": "object",
   "additionalProperties": true,
   "required": ["env_vars", "rules"],
 
   "x-contract-version": "1.0",
 
-  "x-debranding": {
-    "rule": "Neutral token is canonical; the reference-impl spelling is the CURRENT ALIAS, accepted until a GA cutover decision. Both MUST be accepted by a consumer until GA — agents in the field emit the branded AGENTD_* forms today. Branded spellings are NOT dropped.",
-    "env_prefix": { "neutral": "AGENT_", "reference_alias": "AGENTD_", "cutover": "GA (P0)" },
-    "scheme": { "neutral": "agent://", "reference_alias": "agentd://", "cutover": "GA (P0)" },
-    "metric_prefix": { "neutral": "agent_", "reference_alias": "agentd_", "cutover": "GA (P0)" }
-  },
-
   "env_vars": {
     "identity": {
       "description": "Identity block — Identity{run_id,instance,uid,namespace,node} (identity.rs from_env). An empty value is coerced to UNSET (var() filter), not Some(\"\"). run_id is always present (minted by config when AGENT_RUN_ID is unset).",
-      "AGENT_RUN_ID":       { "alias": "AGENTD_RUN_ID",       "source": "minted ULID if unset; stable across a retried Job", "type": "string", "maps_to": "identity.run_id", "owner": "RFC-0011", "note": "always present; the ONE identity field that is never absent" },
-      "AGENT_POD_NAME":      { "alias": "AGENTD_POD_NAME",      "source": "metadata.name",      "fieldRef": "metadata.name",      "type": "string", "maps_to": "identity.instance",  "owner": "RFC-0015" },
-      "AGENT_POD_UID":       { "alias": "AGENTD_POD_UID",       "source": "metadata.uid",       "fieldRef": "metadata.uid",       "type": "string", "maps_to": "identity.uid",       "owner": "RFC-0015" },
-      "AGENT_POD_NAMESPACE": { "alias": "AGENTD_POD_NAMESPACE", "source": "metadata.namespace", "fieldRef": "metadata.namespace", "type": "string", "maps_to": "identity.namespace", "owner": "RFC-0015" },
-      "AGENT_NODE_NAME":     { "alias": "AGENTD_NODE_NAME",     "source": "spec.nodeName",      "fieldRef": "spec.nodeName",      "type": "string", "maps_to": "identity.node",      "owner": "RFC-0015" }
+      "AGENT_RUN_ID":       { "source": "minted ULID if unset; stable across a retried Job", "type": "string", "maps_to": "identity.run_id", "owner": "RFC-0011", "note": "always present; the ONE identity field that is never absent" },
+      "AGENT_POD_NAME":      { "source": "metadata.name",      "fieldRef": "metadata.name",      "type": "string", "maps_to": "identity.instance",  "owner": "RFC-0015" },
+      "AGENT_POD_UID":       { "source": "metadata.uid",       "fieldRef": "metadata.uid",       "type": "string", "maps_to": "identity.uid",       "owner": "RFC-0015" },
+      "AGENT_POD_NAMESPACE": { "source": "metadata.namespace", "fieldRef": "metadata.namespace", "type": "string", "maps_to": "identity.namespace", "owner": "RFC-0015" },
+      "AGENT_NODE_NAME":     { "source": "spec.nodeName",      "fieldRef": "spec.nodeName",      "type": "string", "maps_to": "identity.node",      "owner": "RFC-0015" }
     },
 
     "drain_grace": {
       "description": "Drain-vs-grace hint (RFC 0011 §3.3 / §10).",
       "AGENT_POD_GRACE_SECONDS": {
-        "alias": "AGENTD_POD_GRACE_SECONDS",
         "source": "= terminationGracePeriodSeconds",
         "fieldRef": "(operator-injected; mirrors spec.terminationGracePeriodSeconds)",
         "type": "integer (seconds)",
@@ -38,13 +30,12 @@
         "also_settable": "--pod-grace",
         "provisional": "NOT read in current source (config.rs has no getenv for it; only comments reference 'pod grace'). RFC 0011 §10 flags the exact name as an unsettled doc convention. Included, marked provisional/may-be-absent-in-impl."
       },
-      "AGENT_DRAIN_TIMEOUT": { "alias": "AGENTD_DRAIN_TIMEOUT", "type": "duration/integer", "owner": "RFC-0011", "note": "drain budget; also a --drain-timeout flag; lifecycle (config.rs)" }
+      "AGENT_DRAIN_TIMEOUT": { "type": "duration/integer", "owner": "RFC-0011", "note": "drain budget; also a --drain-timeout flag; lifecycle (config.rs)" }
     },
 
     "sharding": {
       "description": "Sharding (RFC 0019 §4.2). agentctl owns K via the StatefulSet ordinal; the agent does NOT discover its own shard.",
       "AGENT_SHARD": {
-        "alias": "AGENTD_SHARD",
         "source": "\"K/N\" derived from StatefulSet ordinal (K=ordinal, N=replicas)",
         "type": "string (\"K/N\", 0 <= K < N, N >= 1)",
         "validation": "shard.rs parse() rejects N==0 / K>=N => EXIT_USAGE(2)",
@@ -52,24 +43,24 @@
         "owner": "RFC-0019",
         "provisional": "P3 DEFECT — a literal \"K/N\" cannot be produced per-pod from one StatefulSet pod template (the downward API cannot compute it). The proposed fix --shard auto/N (derive K from the AGENT_POD_NAME ordinal) is UNBUILT; current source only parses an explicit K/N. Recorded as the current token + the defect."
       },
-      "AGENT_SHARD_TIMER": { "alias": "AGENTD_SHARD_TIMER", "type": "enum(\"shard0\"|\"keyed\")", "default": "shard0", "owner": "RFC-0019", "note": "timer-route shard behaviour (shard.rs TimerShard::parse); shard0 => only K==0 (or N==1) fires; keyed => every replica fires" },
-      "AGENT_STANDBY": { "alias": "AGENTD_STANDBY", "type": "boolean", "owner": "RFC-0019", "note": "standby surface toggle (config.rs); maps to surfaces.standby" }
+      "AGENT_SHARD_TIMER": { "type": "enum(\"shard0\"|\"keyed\")", "default": "shard0", "owner": "RFC-0019", "note": "timer-route shard behaviour (shard.rs TimerShard::parse); shard0 => only K==0 (or N==1) fires; keyed => every replica fires" },
+      "AGENT_STANDBY": { "type": "boolean", "owner": "RFC-0019", "note": "standby surface toggle (config.rs); maps to surfaces.standby" }
     },
 
     "credentials": {
       "description": "Per-endpoint intelligence credentials (intel/endpoints.rs TOKEN_ENV, RFC 0014 §6.4). 1-indexed by endpoint list position; endpoint 1 uses the unsuffixed form. Each has a _FILE variant (mounted-secret path, rotation-friendly). NEVER logged; the reference Secret newtype has no Serialize (RFC 0012 §3.7). Credentials use ONLY this env-secret path — never the identity downward-API path and never the config file.",
-      "AGENT_INTELLIGENCE_TOKEN":         { "alias": "AGENTD_INTELLIGENCE_TOKEN",         "type": "secret(string)", "endpoint": 1,   "owner": "RFC-0006/0018" },
-      "AGENT_INTELLIGENCE_TOKEN_FILE":    { "alias": "AGENTD_INTELLIGENCE_TOKEN_FILE",    "type": "path",           "endpoint": 1,   "owner": "RFC-0006/0018" },
-      "AGENT_INTELLIGENCE_TOKEN_{N}":     { "alias": "AGENTD_INTELLIGENCE_TOKEN_{N}",     "type": "secret(string)", "endpoint": "N (2,3,...)", "owner": "RFC-0006/0018", "note": "per-endpoint, 1-indexed (N=1 == the unsuffixed form)" },
-      "AGENT_INTELLIGENCE_TOKEN_{N}_FILE":{ "alias": "AGENTD_INTELLIGENCE_TOKEN_{N}_FILE","type": "path",           "endpoint": "N", "owner": "RFC-0006/0018" }
+      "AGENT_INTELLIGENCE_TOKEN":         { "type": "secret(string)", "endpoint": 1,   "owner": "RFC-0006/0018" },
+      "AGENT_INTELLIGENCE_TOKEN_FILE":    { "type": "path",           "endpoint": 1,   "owner": "RFC-0006/0018" },
+      "AGENT_INTELLIGENCE_TOKEN_{N}":     { "type": "secret(string)", "endpoint": "N (2,3,...)", "owner": "RFC-0006/0018", "note": "per-endpoint, 1-indexed (N=1 == the unsuffixed form)" },
+      "AGENT_INTELLIGENCE_TOKEN_{N}_FILE":{ "type": "path",           "endpoint": "N", "owner": "RFC-0006/0018" }
     },
 
     "lifecycle": {
       "description": "Other control/lifecycle env (config.rs). Restart-only (env/flag, never a config-file key).",
-      "AGENT_SERVE_MCP":     { "alias": "AGENTD_SERVE_MCP",     "type": "string (transport addr) | absent", "owner": "RFC-0015", "note": "management transport address; serve_mcp:Option<String>; drives surfaces.management" },
-      "AGENT_INTELLIGENCE":  { "alias": "AGENTD_INTELLIGENCE",  "type": "string (transport/endpoint)", "owner": "RFC-0006", "note": "intelligence primary endpoint; restart-only" },
-      "AGENT_MODE":          { "alias": "AGENTD_MODE",          "type": "enum(once|loop|reactive|schedule)", "owner": "RFC-0011", "note": "restart-only; also --mode" },
-      "AGENT_MODEL":         { "alias": "AGENTD_MODEL",         "type": "string", "owner": "RFC-0014", "note": "operator-declared model; never a secret; reloadable via config file too" }
+      "AGENT_SERVE_MCP":     { "type": "string (transport addr) | absent", "owner": "RFC-0015", "note": "management transport address; serve_mcp:Option<String>; drives surfaces.management" },
+      "AGENT_INTELLIGENCE":  { "type": "string (transport/endpoint)", "owner": "RFC-0006", "note": "intelligence primary endpoint; restart-only" },
+      "AGENT_MODE":          { "type": "enum(once|loop|reactive|schedule)", "owner": "RFC-0011", "note": "restart-only; also --mode" },
+      "AGENT_MODEL":         { "type": "string", "owner": "RFC-0014", "note": "operator-declared model; never a secret; reloadable via config file too" }
     }
   },
 
@@ -91,7 +82,6 @@
 
   "x-provisional": {
     "p_grace": "AGENT_POD_GRACE_SECONDS is RFC-specified but not read in current source; name unsettled (RFC 0011 §10).",
-    "p3_shard": "AGENT_SHARD \"K/N\" literal is unimplementable from one StatefulSet pod template; --shard auto/N fix is unbuilt.",
-    "debranding_cutover": "Neutral AGENT_* tokens are canonical; branded AGENTD_* spellings are aliases accepted until a GA cutover decision; branded forms are NOT dropped."
+    "p3_shard": "AGENT_SHARD \"K/N\" literal is unimplementable from one StatefulSet pod template; --shard auto/N fix is unbuilt."
   }
 }

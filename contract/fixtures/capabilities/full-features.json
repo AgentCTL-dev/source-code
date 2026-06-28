@@ -5,7 +5,7 @@
       "transport": "vsock"
     }
   ],
-  "agentd_version": "2.5.0",
+  "agent_version": "2.5.0",
   "allow_trifecta": true,
   "build_features": [
     "tls",

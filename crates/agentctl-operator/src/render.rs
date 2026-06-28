@@ -295,9 +295,8 @@ fn pod_template(
 }
 
 /// The downward-API instance-identity env (contract `env-convention`, RFC
-/// 0014 §6.4). Emitted with the **neutral** `AGENT_*` spelling the rebranded
-/// reference agent reads; the legacy `AGENTD_*` alias is still accepted by the
-/// agent for back-compat (contract `README` de-branding map).
+/// 0014 §6.4). Emitted with the `AGENT_*` spelling the reference agent reads
+/// (contract `env-convention` / README map).
 fn downward_env() -> Vec<EnvVar> {
     let field = |name: &str, path: &str| EnvVar {
         name: name.to_string(),

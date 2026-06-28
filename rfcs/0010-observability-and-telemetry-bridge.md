@@ -8,13 +8,13 @@
 > **agentctl invents zero telemetry — it transports, relabels, aggregates, and
 > authors Kubernetes policy against the frozen contract.** Every metric name,
 > label key, event string, run-report field, exit code, and trace field this RFC
-> consumes is **frozen by the contract** (the reference implementation's agentd RFC
-> 0016 metrics/report/event schemas, agentd RFC 0010 log/health/trace, agentd RFC
+> consumes is **frozen by the contract** (the reference implementation's agent RFC
+> 0016 metrics/report/event schemas, agent RFC 0010 log/health/trace, agent RFC
 > 0011 §5 exit codes). agentctl adds **no new telemetry mechanism** and **defines no
 > new series**; it owns the *Kubernetes-facing* side — the scrape topology, the
 > relabeling, the dashboards/alerts/recording rules, the run-outcome durability, the
 > fleet rollups, and the control plane's own self-observability. Where this RFC
-> names a concrete series it cites the **reference implementation** (agentd RFCs) as
+> names a concrete series it cites the **reference implementation** (agent RFCs) as
 > *where the contract is presently written down*, never as a dependency (P0).
 
 > **The agent is never on the network, so nothing scrapes it directly — the
@@ -24,7 +24,7 @@
 > bridge in node-agent Tier A scrapes each local agent's metrics and tails its event
 > resource **over the discovered, attested socket** (agentctl RFC 0002 §3) and
 > re-exposes them on the node-agent's own network endpoint. The agent serves *one
-> instance's* telemetry; **fleet aggregation is exclusively agentctl's** (agentd RFC
+> instance's* telemetry; **fleet aggregation is exclusively agentctl's** (agent RFC
 > 0016 §7.3, §12 non-goals) — the agent never learns it is in a fleet, never rolls
 > up, and never learns a price.
 
@@ -34,13 +34,13 @@
 
 The contract gives agentctl a complete, frozen, *self-contained* telemetry surface
 per instance: a hand-written Prometheus 0.0.4 text exposition over a versioned
-`metrics_schema` (agentd RFC 0016 §4), a closed JSON-lines log schema + a closed
-27-name `event` vocabulary on stderr (agentd RFC 0010 §3.2/§3.3), a subscribable
-`agentd://events` live-tail resource backed by a bounded lossy ring (agentd RFC 0016
-§7), a machine-readable run-outcome report at `--report-file` / `agentd://run/{run_id}`
-(agentd RFC 0016 §6), W3C trace-context propagated through every log line, MCP call,
-LLM call, and spawn payload (agentd RFC 0010 §3.6), and a frozen exit-code table
-(agentd RFC 0011 §5). All of it was designed for an operator reading **one**
+`metrics_schema` (agent RFC 0016 §4), a closed JSON-lines log schema + a closed
+27-name `event` vocabulary on stderr (agent RFC 0010 §3.2/§3.3), a subscribable
+`agent://events` live-tail resource backed by a bounded lossy ring (agent RFC 0016
+§7), a machine-readable run-outcome report at `--report-file` / `agent://run/{run_id}`
+(agent RFC 0016 §6), W3C trace-context propagated through every log line, MCP call,
+LLM call, and spawn payload (agent RFC 0010 §3.6), and a frozen exit-code table
+(agent RFC 0011 §5). All of it was designed for an operator reading **one**
 instance.
 
 A control plane reads a **fleet**, and three facts make that non-trivial in exactly
@@ -56,23 +56,23 @@ the way this RFC exists to resolve:
    seam every other plane uses to reach in. There is **no second path** on a
    networkless pod.
 
-2. **The agent aggregates nothing — by contract.** agentd serves one instance's
-   `/metrics`, one instance's event ring, one instance's run report (agentd RFC 0016
-   §7.3: "fan-out is the subscriber's job"; agentd RFC 0014 §6 non-goals: no
+2. **The agent aggregates nothing — by contract.** agent serves one instance's
+   `/metrics`, one instance's event ring, one instance's run report (agent RFC 0016
+   §7.3: "fan-out is the subscriber's job"; agent RFC 0014 §6 non-goals: no
    cross-instance aggregation, no fleet event bus, no long-term storage, no price
    table). A `kubectl agents top` over a 200-pod fleet, a per-tenant cost rollup, a
    fleet-wide refusal alert, a "show me every pod in this flow" trace view — **none
    of those exist until agentctl builds them.** The asymmetry is the architecture
-   (agentd RFC 0014 §3): the agent exposes primitives; agentctl owns policy.
+   (agent RFC 0014 §3): the agent exposes primitives; agentctl owns policy.
 
 3. **Everything agentctl builds couples to an exact spelling.** A dashboard keys off
-   `agentd_pending_events`, an alert off `agentd_refusals_total{reason="trifecta"}`,
+   `agent_pending_events`, an alert off `agent_refusals_total{reason="trifecta"}`,
    a `podFailurePolicy` off exit code `2`, a `kubectl agents results` off the run
    report's `status` field. The contract froze and versioned every one of these
-   precisely so the control plane does not break silently on an agent upgrade (agentd
+   precisely so the control plane does not break silently on an agent upgrade (agent
    RFC 0016 §1). agentctl's job is to **author against the frozen names and negotiate
    on the manifest** — never to hand-transcribe a name (the brainstorm §11.2 caught a
-   real transcription bug: `agentd_reactive_backlog` does not exist in the frozen
+   real transcription bug: `agent_reactive_backlog` does not exist in the frozen
    schema; see §5.4).
 
 This RFC owns: the node-agent **telemetry bridge** (the metrics scrape-proxy + the
@@ -126,36 +126,36 @@ backend those commands read).
 
 3. **Flag the P4 contract conflict: the in-socket metrics resource is undefined and
    is a *hard* dependency for networkless pods.** Whether the frozen metrics text is
-   reachable **over the management/vsock socket** (`agentd://metrics`) is presently
-   inconsistent — agentd RFC 0005/0015 do **not** list it; agentd RFC 0019 assumes
+   reachable **over the management/vsock socket** (`agent://metrics`) is presently
+   inconsistent — agent RFC 0005/0015 do **not** list it; agent RFC 0019 assumes
    it. On a networked pod there is a TCP `/metrics` fallback (`--health-http ADDR`);
    on a **networkless** pod there is **none**, so the in-socket resource is the only
    path and the whole scrape-proxy is blocked there until **contract ask P4** defines
-   `agentd://metrics` (byte-identical Prometheus 0.0.4 text, pinned `mimeType`) and
-   `agentd://capacity` (agentctl RFC 0002 §13(h); brainstorm §14). The exposition
-   format is pinned: **Prometheus 0.0.4 text** (agentd RFC 0010 §3.8) (§4.4).
+   `agent://metrics` (byte-identical Prometheus 0.0.4 text, pinned `mimeType`) and
+   `agent://capacity` (agentctl RFC 0002 §13(h); brainstorm §14). The exposition
+   format is pinned: **Prometheus 0.0.4 text** (agent RFC 0010 §3.8) (§4.4).
 
-4. **Events vs logs: bulk logs ride container stderr → Loki; `agentd://events` is
+4. **Events vs logs: bulk logs ride container stderr → Loki; `agent://events` is
    live-tail only.** Container stdout/stderr is captured by the kubelet/CRI **locally,
    independent of pod networking** (the "stderr assumes a network" premise is false —
    brainstorm §9.2). So the **bulk** event stream is the normal stderr → node log
    agent → Loki path, which already works on a networkless pod and never drops lines
-   under load. The lossy bounded `agentd://events` ring (agentd RFC 0016 §7) is
+   under load. The lossy bounded `agent://events` ring (agent RFC 0016 §7) is
    reserved for **live tail** (`kubectl agent logs -f`), tailed by Tier A over the
    socket. Routing bulk through the ring would be redundant and strictly worse (§6).
 
 5. **Run-outcome capture is a first-class Tier A responsibility, not an afterthought
    — and it races pod GC.** A `once`/Job pod is gone seconds after it exits, taking
-   `agentd://run/{run_id}` with it. Tier A **subscribes the run resource at pod-up**,
+   `agent://run/{run_id}` with it. Tier A **subscribes the run resource at pod-up**,
    **reads on the terminal transition while the process is still alive**, persists
    the report to a durable store, and feeds the operator a curated
    `Agent.status.lastRun`; `--report-file` on an emptyDir/PVC is the backstop. This
    needs **contract ask P5** (a read-before-exit guarantee / short post-terminal
-   linger + re-read by handle) — agentd delivers the distillate **once** and a
+   linger + re-read by handle) — agent delivers the distillate **once** and a
    `once`-mode agent exits immediately, so a blinking collector loses the result (§7).
 
 6. **The exit-code → `podFailurePolicy` mapping is read from the contract; the
-   *render* is the operator's, the *alerting* is this RFC's.** agentd RFC 0016 §5.2
+   *render* is the operator's, the *alerting* is this RFC's.** agent RFC 0016 §5.2
    freezes the per-code control-plane intent; agentctl RFC 0006 §8.6 compiles the
    `onExitCodes` rules at render time. This RFC owns the **observability** half:
    surfacing the rich report behind the coarse code, and the **infra-code alerts**
@@ -166,15 +166,15 @@ backend those commands read).
 7. **Trace correlation is W3C trace-context, rooted at the A2A gateway, stitched by
    `trace_id` — never by `agent_path`.** The gateway (agentctl RFC 0013) is the trace
    root: it sets `_meta.traceparent` on the inbound frame (or the operator sets
-   `AGENTD_TRACEPARENT` at pod start), and agentd adopts-or-mints and carries
+   `AGENT_TRACEPARENT` at pod start), and agent adopts-or-mints and carries
    `trace_id` through logs, events, the report, every MCP/LLM call, and the spawn
-   payload (agentd RFC 0010 §3.6). Cross-pod correlation is **`trace_id` + the span
+   payload (agent RFC 0010 §3.6). Cross-pod correlation is **`trace_id` + the span
    tree**; `agent_path` resets to `0` per pod and is valid **only within one pod's
    tree** (§8). Gateway traceparent ingest is **contract ask P-trace**.
 
 8. **Fleet aggregation is exclusively agentctl's, and the agent never does it.**
    Rollups (recording rules `sum by (namespace/agentclass/fleet/tenant)`), cost
-   (`tokens × a price table agentctl owns` — agentd emits tokens, never currency),
+   (`tokens × a price table agentctl owns` — agent emits tokens, never currency),
    the fleet event bus (Loki), the fleet trace view (by `trace_id`), the run-outcome
    history, and the `kubectl agents top/results` backends (agentctl RFC 0016) all
    live here. The agent serves one instance and is told nothing (§9).
@@ -182,7 +182,7 @@ backend those commands read).
 9. **The control plane observes itself, on a path that does not depend on the data
    plane.** The operator, both node-agent tiers, the gateway, the KEDA scaler, the
    coordination server, and the webhook each emit `agentctl_*` metrics/traces/logs
-   (a distinct namespace from `agentd_*`), scraped **directly** (these components are
+   (a distinct namespace from `agent_*`), scraped **directly** (these components are
    networked). The node-agent-bridge SPOF, reconcile health, webhook latency, and
    scrape-proxy success are first-class SLOs; the management-action audit
    (`mgmt.invoked`, P-meta/P-audit) is part of self-observability (§10).
@@ -199,14 +199,14 @@ a surface is absent or a contract ask is unmet (§11).
 
 | Concern | Owner | This RFC's role |
 |---|---|---|
-| Prometheus exposition mechanism (0.0.4 text, hand-written) | **agentd RFC 0010 §3.8** | reuse; scrape it via the bridge, re-expose byte-identical |
-| Frozen metric name/label set + `metrics_schema` version | **agentd RFC 0016 §4** | author dashboards/alerts/recording rules against it; branch on the major |
-| JSON-lines log schema + closed `event` vocabulary | **agentd RFC 0010 §3.2/§3.3** | reuse verbatim; ship stderr→Loki; tail the ring projection live |
-| `agentd://events` live-tail ring + `events_schema` | **agentd RFC 0016 §7** | tail for `logs -f`; **not** the bulk path (§6) |
-| Run-outcome report + `--report-file` + `report_schema` | **agentd RFC 0016 §6** | **capture before GC**, persist, feed `status.lastRun` (§7) |
-| Exit-code table + `podFailurePolicy` intent + `exit_codes` | **agentd RFC 0011 §5 / RFC 0016 §5** | observability reading + infra alerts; render is agentctl RFC 0006 §8.6 |
-| W3C trace-context propagation | **agentd RFC 0010 §3.6** | stitch a multi-pod flow by `trace_id`; gateway is the root (§8) |
-| Health surface (`/healthz`/`/readyz`/`--health-file`/exec verb) | **agentd RFC 0010 §3.7 / agentctl RFC 0002 §8 (P1)** | wire probes per tier; surface `up`/`ready` + reachability (§4.5) |
+| Prometheus exposition mechanism (0.0.4 text, hand-written) | **agent RFC 0010 §3.8** | reuse; scrape it via the bridge, re-expose byte-identical |
+| Frozen metric name/label set + `metrics_schema` version | **agent RFC 0016 §4** | author dashboards/alerts/recording rules against it; branch on the major |
+| JSON-lines log schema + closed `event` vocabulary | **agent RFC 0010 §3.2/§3.3** | reuse verbatim; ship stderr→Loki; tail the ring projection live |
+| `agent://events` live-tail ring + `events_schema` | **agent RFC 0016 §7** | tail for `logs -f`; **not** the bulk path (§6) |
+| Run-outcome report + `--report-file` + `report_schema` | **agent RFC 0016 §6** | **capture before GC**, persist, feed `status.lastRun` (§7) |
+| Exit-code table + `podFailurePolicy` intent + `exit_codes` | **agent RFC 0011 §5 / RFC 0016 §5** | observability reading + infra alerts; render is agentctl RFC 0006 §8.6 |
+| W3C trace-context propagation | **agent RFC 0010 §3.6** | stitch a multi-pod flow by `trace_id`; gateway is the root (§8) |
+| Health surface (`/healthz`/`/readyz`/`--health-file`/exec verb) | **agent RFC 0010 §3.7 / agentctl RFC 0002 §8 (P1)** | wire probes per tier; surface `up`/`ready` + reachability (§4.5) |
 | Substrate, descriptor, discovery, attestation | **agentctl RFC 0002 / RFC 0008** | consume descriptors; the bridge lives in Tier A |
 | CRD `.status` schema | **agentctl RFC 0003** | feed curated `status.lastRun`; do not redefine `.status` |
 | `podFailurePolicy` render; reconcile | **agentctl RFC 0006** | feed; do not duplicate |
@@ -224,12 +224,12 @@ rules + price table (§9), and the `agentctl_*` self-observability surface (§10
 
 ```
         ┌──────────────────────────── networkless agent pod (Kata microVM / off-pod) ─────────────┐
-        │  conformant agent (reference impl: agentd) — NO pod IP, NO shell, scratch image          │
+        │  conformant agent (reference impl: agent) — NO pod IP, NO shell, scratch image          │
         │                                                                                          │
         │   stderr (NDJSON, 27-name closed vocab) ──────────────────┐  (CRI captures locally,     │
-        │   agentd://metrics  (Prom 0.0.4 text)        [P4]          │   independent of pod net)   │
-        │   agentd://events   (bounded lossy ring)     [live tail]   │                             │
-        │   agentd://run/{run_id} (report, once-mode, ONE delivery)  │                             │
+        │   agent://metrics  (Prom 0.0.4 text)        [P4]          │   independent of pod net)   │
+        │   agent://events   (bounded lossy ring)     [live tail]   │                             │
+        │   agent://run/{run_id} (report, once-mode, ONE delivery)  │                             │
         │   --report-file PATH  (emptyDir/PVC backstop)              │                             │
         │   --health-file / exec-health verb           [P1]          │                             │
         └───────────┬───────────────────────────────────────────────┼─────────────────────────────┘
@@ -237,8 +237,8 @@ rules + price table (§9), and the `agentctl_*` self-observability surface (§10
                     ▼  (vsock→per-VM uds  |  hostPath uds  |  emptyDir uds)    ▼
    ┌──────────────── node-agent Tier A (DaemonSet, the ONLY networked bridge) ─────────────────────┐
    │  scrape-proxy   : GET /proxy/<uid>/metrics → read(metrics surface) → BYTE-IDENTICAL text       │
-   │  events tail    : subscribe agentd://events → fan to `kubectl agent logs -f` (live only)       │
-   │  run collector  : subscribe agentd://run/{uid} @pod-up → read @terminal → persist (P5)      │
+   │  events tail    : subscribe agent://events → fan to `kubectl agent logs -f` (live only)       │
+   │  run collector  : subscribe agent://run/{uid} @pod-up → read @terminal → persist (P5)      │
    │  reachability   : synth up / bridge-reachable series (disambiguate dead-pod vs gapped-bridge)  │
    └───────┬───────────────────────────┬───────────────────────────────┬───────────────────────────┘
            │ /proxy/<uid>/metrics       │ container stderr (kubelet)     │ captured run reports
@@ -323,15 +323,15 @@ fleet's scrape target list must not vanish during an operator rollout.
   spoofing hole. Identity comes from SD, never from the wire.
 - **`metricRelabelings` labeldrop the forbidden cardinality keys** —
   `run_id`, `agent_id`, `agent_path`, `call_id`, `session_id`, resource `uri`. The
-  contract already forbids these as metric labels (agentd RFC 0016 §4.2), so this is
+  contract already forbids these as metric labels (agent RFC 0016 §4.2), so this is
   **defence in depth** against a non-conformant or second-vendor agent that violates
   the discipline; per-run granularity lives in the run report (§7) and traces (§8),
   never in a series.
 - **Do NOT stamp `model` or `metrics_schema` as a per-target label.** `model` is
-  already a *bounded series label* agentd emits (agentd RFC 0016 §4.3), and a
+  already a *bounded series label* agent emits (agent RFC 0016 §4.3), and a
   multi-endpoint pod serves multiple models — a per-target `model` collides and
   churns. Version hints (`metrics_schema`, `contract_version`, agent build) ride a
-  dedicated `agentd_build_info{...} 1`-style series, never the target identity.
+  dedicated `agent_build_info{...} 1`-style series, never the target identity.
 - **Per-pod identity on `once`/Job metrics is a cardinality blowup.** A short-lived
   Job churns `pod` label values endlessly; for fleets, scrape **aggregate** series
   and read **per-run cost/outcome from the run report** (§7), not from a per-pod
@@ -341,7 +341,7 @@ fleet's scrape target list must not vanish during an operator rollout.
 
 `GET /proxy/<uid>/metrics` reads the agent's exposition over the descriptor and
 returns it **unchanged** — same `# HELP`/`# TYPE` lines, same `name{labels} value`,
-**Prometheus 0.0.4 text** (agentd RFC 0010 §3.8, agentd RFC 0016 §4.1). The proxy
+**Prometheus 0.0.4 text** (agent RFC 0010 §3.8, agent RFC 0016 §4.1). The proxy
 does no parsing, no rewriting, no aggregation, and **injects no `agentctl_*` series
 of its own** (relabeling is Prometheus's job, §4.2); keeping it byte-identical means a
 future `metrics_schema` minor (a new additive series) flows through with **zero proxy
@@ -352,7 +352,7 @@ into `/proxy/<uid>/metrics`. The upstream read is descriptor-typed:
 
 | Tier | Metrics descriptor `dial` | Hard dependency |
 |---|---|---|
-| stock-unix (networked) | TCP `:9090` (`--health-http ADDR`, agentd RFC 0010 §3.7) | none |
+| stock-unix (networked) | TCP `:9090` (`--health-http ADDR`, agent RFC 0010 §3.7) | none |
 | stock-unix / Kata / off-pod (networkless) | in-socket metrics resource over the management socket | **P4** (undefined today) |
 | sidecar-emptydir | the sidecar dials the emptyDir socket pod-locally, re-exposes | none (sidecar is on the netns, agentctl RFC 0002 §4.3) |
 
@@ -374,8 +374,8 @@ gapped (agentctl RFC 0002 §8):
   distinct from "pod dead." This is *not* injected into `/proxy/<uid>/metrics` (which
   stays byte-identical, §4.4); a pod whose socket is unreachable simply yields an empty
   proxy body. Liveness/readiness still derive from the contract health surface (the
-  `--health-file`/exec-health verb, agentd RFC 0010 §3.7, agentctl RFC 0002 §8 P1) —
-  a dropped management/scrape connection is **not** a liveness signal (agentd RFC
+  `--health-file`/exec-health verb, agent RFC 0010 §3.7, agentctl RFC 0002 §8 P1) —
+  a dropped management/scrape connection is **not** a liveness signal (agent RFC
   0015 §8).
 - `up == 0` ⇒ the **node-agent** is unscrapeable (its own SPOF, §10), not a verdict
   on any agent.
@@ -394,7 +394,7 @@ tenant's** metrics on one node-agent endpoint, and the node-agent runs
 locked down. The RFC carefully attests the proxy→agent *read* (§4.1) but that says
 nothing about the **caller→proxy** hop — an ungated multiplexing proxy is a
 cross-tenant metrics-exfiltration hole (per-tenant token counts via
-`agentd_tokens_total`, refusal reasons, model names, backlog all carry tenant-sensitive
+`agent_tokens_total`, refusal reasons, model names, backlog all carry tenant-sensitive
 signal). So the caller→proxy hop is **normatively gated**, two layers (matching
 RFC 0002 §10's IP-layer-vs-identity distinction):
 
@@ -424,7 +424,7 @@ scrape gate.
 ## 5. The frozen metrics schema → dashboards, alerts, recording rules
 
 agentctl authors all three artifact classes against the **exact frozen spelling**
-(agentd RFC 0016 §4.3) and branches on `surfaces.metrics_schema` major (§11). It
+(agent RFC 0016 §4.3) and branches on `surfaces.metrics_schema` major (§11). It
 never mints a name. This section enumerates what agentctl builds; the series
 themselves are the contract's.
 
@@ -433,36 +433,36 @@ themselves are the contract's.
 The standard fleet dashboard panels, each a query over frozen names grouped by the
 SD-relabeled identity (`namespace`/`agentclass`/`tier`/`tenant`):
 
-- **Terminal-status histogram** — `sum by (status) (agentd_runs_total)` (`status`
-  is the agentd RFC 0007 §3.4 closed set: `completed`/`refused`/`exhausted_steps`/…).
-- **Token throughput / cost** — `sum by (model,type) (rate(agentd_tokens_total[5m]))`,
+- **Terminal-status histogram** — `sum by (status) (agent_runs_total)` (`status`
+  is the agent RFC 0007 §3.4 closed set: `completed`/`refused`/`exhausted_steps`/…).
+- **Token throughput / cost** — `sum by (model,type) (rate(agent_tokens_total[5m]))`,
   joined to the price table (§9.2) for currency.
-- **Safety** — `sum by (reason) (rate(agentd_refusals_total[5m]))` and
-  `agentd_limit_exceeded_total{limit}` (the headline safety panels).
-- **Reliability** — `agentd_subagent_stuck_kills_total{signal}`,
-  `agentd_subagent_restarts_total{reason}`, `agentd_reactor_stalls_total`.
-- **Dependency health** — `agentd_intel_up`, `agentd_intel_errors_total{reason}`,
-  `agentd_mcp_up{server}`, `agentd_mcp_connect_failures_total{server}`.
-- **Lifecycle** — `agentd_drains_total{phase}` (clean `completed` vs `forced`),
-  `agentd_restarts_total`.
-- **Reactive backlog** — `agentd_pending_events`, `agentd_reaction_lag_ms`,
-  `agentd_inflight_reactions`, `agentd_subscriptions_active` (§5.4).
+- **Safety** — `sum by (reason) (rate(agent_refusals_total[5m]))` and
+  `agent_limit_exceeded_total{limit}` (the headline safety panels).
+- **Reliability** — `agent_subagent_stuck_kills_total{signal}`,
+  `agent_subagent_restarts_total{reason}`, `agent_reactor_stalls_total`.
+- **Dependency health** — `agent_intel_up`, `agent_intel_errors_total{reason}`,
+  `agent_mcp_up{server}`, `agent_mcp_connect_failures_total{server}`.
+- **Lifecycle** — `agent_drains_total{phase}` (clean `completed` vs `forced`),
+  `agent_restarts_total`.
+- **Reactive backlog** — `agent_pending_events`, `agent_reaction_lag_ms`,
+  `agent_inflight_reactions`, `agent_subscriptions_active` (§5.4).
 
 ### 5.2 Alert rules (off the frozen names + the exit-code/drain distinction)
 
 | Alert | Expression (frozen names) | Why |
 |---|---|---|
-| `AgentTrifectaRefusals` | `increase(agentd_refusals_total{reason="trifecta"}[15m]) > 0` | a Rule-of-Two/trifecta scope refusal fired (agentd RFC 0012) |
-| `AgentForcedDrain` | `increase(agentd_drains_total{phase="forced"}[10m]) > 0` | SIGTERM forced past the drain budget ⇒ `terminationGracePeriodSeconds` too tight vs `AGENTD_DRAIN_TIMEOUT` (a **config** fix, not a retry) — pairs with exit `143` (§7) |
-| `AgentReactorWedged` | `increase(agentd_reactor_stalls_total[5m]) > 0` | the supervisor reactor is wedged (a live PID is not a live agent, agentd RFC 0016 §10) |
-| `AgentIntelDown` | `agentd_intel_up == 0` for 5m | model endpoint unreachable (agentd RFC 0018) |
-| `AgentMCPDown` | `agentd_mcp_up == 0` for 5m | a declared MCP dependency is down (agentd RFC 0004) |
-| `AgentStuckKills` | `increase(agentd_subagent_stuck_kills_total[15m]) > 0` | the reliability headline — a subagent had to be killed |
+| `AgentTrifectaRefusals` | `increase(agent_refusals_total{reason="trifecta"}[15m]) > 0` | a Rule-of-Two/trifecta scope refusal fired (agent RFC 0012) |
+| `AgentForcedDrain` | `increase(agent_drains_total{phase="forced"}[10m]) > 0` | SIGTERM forced past the drain budget ⇒ `terminationGracePeriodSeconds` too tight vs `AGENT_DRAIN_TIMEOUT` (a **config** fix, not a retry) — pairs with exit `143` (§7) |
+| `AgentReactorWedged` | `increase(agent_reactor_stalls_total[5m]) > 0` | the supervisor reactor is wedged (a live PID is not a live agent, agent RFC 0016 §10) |
+| `AgentIntelDown` | `agent_intel_up == 0` for 5m | model endpoint unreachable (agent RFC 0018) |
+| `AgentMCPDown` | `agent_mcp_up == 0` for 5m | a declared MCP dependency is down (agent RFC 0004) |
+| `AgentStuckKills` | `increase(agent_subagent_stuck_kills_total[15m]) > 0` | the reliability headline — a subagent had to be killed |
 | `AgentOOMKilled` | `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1` (kube-state-metrics; §7.4) | OOM kill ⇒ raise `resources.limits.memory` |
 | `AgentForcedKill` | `kube_pod_container_status_last_terminated_reason{reason="Error"}` + terminated `exitCode==143`, or the `DisruptionTarget` pod condition (§7.4) | SIGTERM forced past grace ⇒ grace too tight / eviction |
 | `BridgeGapped` | `agentctl_bridge_reachable == 0` for 2m | a node-agent cannot reach a live pod's socket (§4.5) — distinct from pod-dead |
 
-`137`/`143` are **OS-set**, never returned by agentd (agentd RFC 0011 §5.1), and a
+`137`/`143` are **OS-set**, never returned by agent (agent RFC 0011 §5.1), and a
 process killed by signal **never writes a run report** — so they are read from
 **Kubernetes pod/container status** (kube-state-metrics + the `DisruptionTarget`
 condition, brainstorm §3.2), **not** from `exit_code` in the run report. They have
@@ -471,7 +471,7 @@ precisely because the workload layer cannot express them (§7.3/§7.4).
 
 ### 5.3 Recording rules (fleet rollups — the aggregation the agent never does)
 
-agentd serves per-instance counters; agentctl pre-aggregates fleet rollups as
+agent serves per-instance counters; agentctl pre-aggregates fleet rollups as
 recording rules so dashboards and `kubectl agents top` read a cheap series:
 
 ```yaml
@@ -479,31 +479,31 @@ groups:
   - name: agentctl-fleet-rollups
     rules:
       - record: agentctl:runs:rate5m
-        expr: sum by (namespace, agentclass, agent) (rate(agentd_runs_total[5m]))
+        expr: sum by (namespace, agentclass, agent) (rate(agent_runs_total[5m]))
       - record: agentctl:tokens:rate5m
-        expr: sum by (namespace, tenant, model, type) (rate(agentd_tokens_total[5m]))
+        expr: sum by (namespace, tenant, model, type) (rate(agent_tokens_total[5m]))
       - record: agentctl:refusals:rate15m
-        expr: sum by (namespace, tenant, reason) (rate(agentd_refusals_total[15m]))
+        expr: sum by (namespace, tenant, reason) (rate(agent_refusals_total[15m]))
       - record: agentctl:fleet_backlog
-        expr: sum by (namespace, agent) (agentd_pending_events)   # fleet sum of a per-pod gauge
+        expr: sum by (namespace, agent) (agent_pending_events)   # fleet sum of a per-pod gauge
 ```
 
 These rollups are the **policy** layer; the per-pod gauges are the contract's
-**primitives** (agentd RFC 0016 §4.3). The agent is never aware its series are being
-summed across a fleet (agentd RFC 0014 §3).
+**primitives** (agent RFC 0016 §4.3). The agent is never aware its series are being
+summed across a fleet (agent RFC 0014 §3).
 
 ### 5.4 The autoscaling signal set — and the P10 metric-name defect
 
 The reactive-backlog gauges are the autoscaling inputs the scaling plane (agentctl
-RFC 0011) consumes. **Only the agentd RFC 0016 §4.3 frozen set is real:**
+RFC 0011) consumes. **Only the agent RFC 0016 §4.3 frozen set is real:**
 
-- **Frozen (author against these):** `agentd_pending_events`,
-  `agentd_reaction_lag_ms`, `agentd_inflight_reactions`, `agentd_subscriptions_active`.
-- **NOT frozen (do not author against these):** `agentd_reactive_backlog`,
-  `agentd_saturation`, `agentd_tokens_per_sec`, `agentd_claims_lost_total` — agentd
+- **Frozen (author against these):** `agent_pending_events`,
+  `agent_reaction_lag_ms`, `agent_inflight_reactions`, `agent_subscriptions_active`.
+- **NOT frozen (do not author against these):** `agent_reactive_backlog`,
+  `agent_saturation`, `agent_tokens_per_sec`, `agent_claims_lost_total` — agent
   RFC 0019 §5 names these and falsely calls them frozen; they are **not** in the
   schema. This is **contract ask P10**: reconcile the two name sets into one and add
-  `agentd_saturation` to the frozen schema if it is to be a scaling signal.
+  `agent_saturation` to the frozen schema if it is to be a scaling signal.
 
 > **Binding for this RFC and agentctl RFC 0011.** Dashboards, alerts, and KEDA
 > triggers MUST be authored against the **frozen** names only; `saturation`/`backlog`
@@ -515,17 +515,17 @@ RFC 0011) consumes. **Only the agentd RFC 0016 §4.3 frozen set is real:**
 
 ### 5.5 Histograms, quantiles, and SLOs — blocked on P-hist
 
-The `*_duration_ms` histograms (`agentd_run_duration_ms`,
-`agentd_intel_call_duration_ms`, `agentd_tool_call_duration_ms`) have **two
+The `*_duration_ms` histograms (`agent_run_duration_ms`,
+`agent_intel_call_duration_ms`, `agent_tool_call_duration_ms`) have **two
 problems** agentctl must not paper over: the histogram name set **conflicts** between
-agentd RFC 0010 §3.8 (otel-only `gen_ai.*`/`*_duration_ms`) and agentd RFC 0016 §4.3
+agent RFC 0010 §3.8 (otel-only `gen_ai.*`/`*_duration_ms`) and agent RFC 0016 §4.3
 (frozen `*_duration_ms`), and the **bucket boundaries are unspecified**. A
 quantile/SLO dashboard authored on unspecified buckets is meaningless across agent
 versions. This is **contract ask P-hist** (reconcile the name set + freeze the
 bucket boundaries).
 
 > **Binding.** Until P-hist lands, agentctl authors latency SLOs as **counter
-> ratios** (`success / total`, e.g. `agentd_runs_total{status="completed"} / sum`),
+> ratios** (`success / total`, e.g. `agent_runs_total{status="completed"} / sum`),
 > **not** histogram quantiles, and ships no `histogram_quantile(...)` panel against
 > the unspecified buckets.
 
@@ -543,23 +543,23 @@ the known `metrics_schema` major — so an operator sees "this agent build adver
 more than we drive" rather than silently ignoring it (brainstorm §11.2). The
 flow-through proxy stays dumb; only this side analyzer parses, and it never rewrites
 what Prometheus scrapes from `/proxy/<uid>/metrics`. This is observe-only; agentctl
-never errors on additive drift (agentd RFC 0016 §8.3).
+never errors on additive drift (agent RFC 0016 §8.3).
 
 ---
 
-## 6. The events pipeline — stderr→Loki (bulk) + `agentd://events` (live tail)
+## 6. The events pipeline — stderr→Loki (bulk) + `agent://events` (live tail)
 
 ### 6.1 The split, and why bulk is stderr (not the ring)
 
-The contract gives two views of the **same** closed-vocabulary event stream (agentd
-RFC 0016 §7.1): the durable source of truth on **stderr** (NDJSON, agentd RFC 0010
-§3.2), and a live **`agentd://events`** projection backed by a bounded, **lossy**
-in-memory ring (agentd RFC 0016 §7.2). agentctl uses each for what it is good at:
+The contract gives two views of the **same** closed-vocabulary event stream (agent
+RFC 0016 §7.1): the durable source of truth on **stderr** (NDJSON, agent RFC 0010
+§3.2), and a live **`agent://events`** projection backed by a bounded, **lossy**
+in-memory ring (agent RFC 0016 §7.2). agentctl uses each for what it is good at:
 
 | View | Path | Use | Loss model |
 |---|---|---|---|
 | **Bulk** (durable, searchable, alerting source) | container **stderr** → node log agent → **Loki** | history, LogQL, security/limit-line alerting | **lossless** (CRI captures every line) |
-| **Live tail** (interactive) | `agentd://events?after=<seq>` over the socket → Tier A → `kubectl agent logs -f` | `logs -f`, the live `tree -w` event feed | **lossy** (ring drops oldest, bumps `dropped`) |
+| **Live tail** (interactive) | `agent://events?after=<seq>` over the socket → Tier A → `kubectl agent logs -f` | `logs -f`, the live `tree -w` event feed | **lossy** (ring drops oldest, bumps `dropped`) |
 
 The brainstorm correction is load-bearing (§9.2): **the "stderr assumes a network"
 premise is false.** Container stdout/stderr is captured by the kubelet/CRI
@@ -570,7 +570,7 @@ through the lossy vsock ring would be redundant with a path that already works a
 under load). So:
 
 > **Normative.** Bulk events = container stderr → node log agent → Loki.
-> `agentd://events` is **live-tail only** (the `kubectl agent logs -f` / `tree -w`
+> `agent://events` is **live-tail only** (the `kubectl agent logs -f` / `tree -w`
 > convenience). agentctl MUST NOT use the ring as the durable/alerting event store.
 
 ### 6.2 Live tail over the socket (Tier A)
@@ -578,13 +578,13 @@ under load). So:
 For interactive `logs -f` / `tree -w`, the ring is the right surface even though the
 bulk stream is stderr (§6.1): it gives a cursor, a `dropped` signal, and cheap
 server-side prefix filtering that re-deriving a live view from Loki cannot. Tier A
-subscribes `agentd://events` (notify-then-read, agentd RFC
-0005 §3.3): on each `notifications/resources/updated{uri:"agentd://events"}` it
-`resources/read("agentd://events?after=<seq>")`, advances the cursor, honours the
+subscribes `agent://events` (notify-then-read, agent RFC
+0005 §3.3): on each `notifications/resources/updated{uri:"agent://events"}` it
+`resources/read("agent://events?after=<seq>")`, advances the cursor, honours the
 `dropped` counter (surfacing a "tail fell behind, N lines dropped" marker to the
 client), and applies the contract's cheap server-side prefix filter
 (`?level=warn`, `?event=security.,limit.,subagent.`). The fan-out to multiple
-viewers and the cursor bookkeeping are Tier A's; the agent serves one ring (agentd
+viewers and the cursor bookkeeping are Tier A's; the agent serves one ring (agent
 RFC 0016 §7.3). The `kubectl agent logs -f` CLI surface that consumes this is
 agentctl RFC 0016.
 
@@ -593,9 +593,9 @@ agentctl RFC 0016.
 The node log agent labels Loki streams with the **same** SD-derived identity the
 metrics path uses (`namespace`/`agent`/`pod`/`node`/`agentclass`/`tier`/`tenant`),
 so a LogQL query joins to a metrics panel and a trace by shared identity + `trace_id`
-(§8). The raw NDJSON line schema (agentd RFC 0010 §3.2) is preserved verbatim into
+(§8). The raw NDJSON line schema (agent RFC 0010 §3.2) is preserved verbatim into
 Loki — agentctl does not reshape it — so `agent_path` prefix subtree queries work in
-LogQL exactly as agentd intended (within one pod's tree; §8).
+LogQL exactly as agent intended (within one pod's tree; §8).
 
 ---
 
@@ -604,10 +604,10 @@ LogQL exactly as agentd intended (within one pod's tree; §8).
 ### 7.1 The race: a once/Job result outlives its pod by seconds
 
 `kubectl agents results` needs the **full** terminal outcome — which terminal status
-(agentd RFC 0007 §3.4), tokens/steps, duration, a pointer to the distillate, the
-per-run refusal roll-up, the `trace_id` (agentd RFC 0016 §6.2) — not the coarse exit
+(agent RFC 0007 §3.4), tokens/steps, duration, a pointer to the distillate, the
+per-run refusal roll-up, the `trace_id` (agent RFC 0016 §6.2) — not the coarse exit
 code. But a `once`/Job pod is **gone seconds after it exits**, taking
-`agentd://run/{run_id}` (served only while the process is alive, agentd RFC 0016
+`agent://run/{run_id}` (served only while the process is alive, agent RFC 0016
 §6.3) with it. So the outcome MUST be captured to a durable place **at exit**, never
 inferred from a vanished pod.
 
@@ -615,10 +615,10 @@ inferred from a vanished pod.
 
 ```
 run-outcome capture (node-agent Tier A, per local once/Job pod):
-  1. @pod-up      : subscribe agentd://run/{run_id}     (notify-then-read, agentd RFC 0005 §3.3)
+  1. @pod-up      : subscribe agent://run/{run_id}     (notify-then-read, agent RFC 0005 §3.3)
   2. @terminal    : on the terminal notifications/resources/updated, resources/read the report
                     WHILE THE PROCESS IS STILL ALIVE  (the P5 window)
-  3. persist      : write the report (report_schema, agentd RFC 0016 §6.2) to the durable store
+  3. persist      : write the report (report_schema, agent RFC 0016 §6.2) to the durable store
   4. feed status  : hand the curated outcome to the operator → Agent.status.lastRun
                     (the node-agent NEVER writes Agent.status — agentctl RFC 0006 §2.3;
                      single DeepEqual-guarded writer — §2.6)
@@ -636,15 +636,15 @@ and "works when the pod is gone" is scoped to **the store**, not to a vanished
 
 ### 7.3 The P5 window — the result is delivered exactly once
 
-agentd delivers the distillate **exactly once** as a status notification and serves
-`agentd://run/{run_id}` only for a **live** run (agentd RFC 0016 §6.3, agentd RFC
+agent delivers the distillate **exactly once** as a status notification and serves
+`agent://run/{run_id}` only for a **live** run (agent RFC 0016 §6.3, agent RFC
 0020 §6). A `once`-mode agent **exits immediately** on completion. So if the
 collector is not draining at the terminal transition — a Tier A bounce, a slow read
 — the final artifact is **gone**. This is a must-not-miss consumer, and it needs a
 contract primitive:
 
 > **Contract ask (P5).** A **read-before-exit guarantee** (or a short
-> post-terminal *linger* with a read-ack) for `agentd://run/{run_id}`, **and** a way
+> post-terminal *linger* with a read-ack) for `agent://run/{run_id}`, **and** a way
 > to **re-read a terminal distillate by run handle** after the linger — so a
 > networkless `once`-mode result is not lost if the collector blinks. Absent P5,
 > the `--report-file` emptyDir/PVC backstop is the only durable copy, and the
@@ -655,17 +655,17 @@ contract primitive:
 
 ### 7.4 Exit code → `podFailurePolicy`: the observability reading
 
-The exit-code table (agentd RFC 0011 §5) and its `podFailurePolicy` intent (agentd
+The exit-code table (agent RFC 0011 §5) and its `podFailurePolicy` intent (agent
 RFC 0016 §5.2) are frozen and versioned (`surfaces.exit_codes`). The **render** of
 `onExitCodes` rules is agentctl RFC 0006 §8.6; this RFC owns the **reading**. Two
-distinct sources, and the split is load-bearing: the codes agentd itself **returns**
+distinct sources, and the split is load-bearing: the codes agent itself **returns**
 (`0,1,2,3,4,5,6,7,124`) are read from the **run report's `exit_code` field** (§7.2);
 the OS-set signal-kill codes (`137`/`143`) are read from **Kubernetes pod/container
 status**, because a signal-killed process never writes a report:
 
 | Code | Name | Source | Observability action (this RFC) |
 |---|---|---|---|
-| `0` | `EXIT_OK` | run report | success (incl. clean SIGTERM drain → `0`, not `143`); pairs with `agentd_drains_total{phase="completed"}` |
+| `0` | `EXIT_OK` | run report | success (incl. clean SIGTERM drain → `0`, not `143`); pairs with `agent_drains_total{phase="completed"}` |
 | `2`,`5` | `EXIT_USAGE`/`EXIT_SEMANTIC` | run report | deterministic failure; no retry alert |
 | `1`,`4`,`6` | failure/intel/mcp | run report | retriable; dependency-health panels (§5.1) |
 | `3`,`7` | partial/budget | run report | budget panel; respects `--budget-exit-code` remap |
@@ -684,30 +684,30 @@ status**, because a signal-killed process never writes a report:
 This RFC does **not** reproduce or re-derive the table; it reads it. All gated on the
 `surfaces.exit_codes` major — agentctl refuses to *interpret* an exit-code report
 from a major it does not understand (it still records the raw code), exactly as it
-refuses to *render* a `podFailurePolicy` for one (agentctl RFC 0006 §8.6, agentd RFC
+refuses to *render* a `podFailurePolicy` for one (agentctl RFC 0006 §8.6, agent RFC
 0016 §5.1).
 
 ---
 
 ## 8. Trace correlation across the gateway↔socket↔agent boundary
 
-### 8.1 The gateway is the trace root; agentd carries the trace through
+### 8.1 The gateway is the trace root; agent carries the trace through
 
 W3C trace-context propagation is **on by default** in the contract and free (a few
-JSON/header fields; export is the only heavy, gated part — agentd RFC 0010 §3.6/§3.9).
+JSON/header fields; export is the only heavy, gated part — agent RFC 0010 §3.6/§3.9).
 agentctl invents nothing; it sets the root and stitches by `trace_id`:
 
 - **Root.** The A2A gateway (agentctl RFC 0013) is the trace root for an inbound
   flow: it adopts the caller's `traceparent` (or mints one) and sets
   `_meta.traceparent` on the frame it forwards over the socket to the agent. For an
-  operator-initiated run, the operator sets `AGENTD_TRACEPARENT` at pod start (agentd
+  operator-initiated run, the operator sets `AGENT_TRACEPARENT` at pod start (agent
   RFC 0010 §3.6). The agent **adopts-or-mints** and from then on carries `trace_id`
   through every log line, event-stream entry, the run report, every outbound MCP/LLM
-  call, and the spawn payload (agentd RFC 0010 §3.6) — so a multi-pod, multi-hop flow
-  is one trace with **no agentd change**.
+  call, and the spawn payload (agent RFC 0010 §3.6) — so a multi-pod, multi-hop flow
+  is one trace with **no agent change**.
 - **The boundary primitive that is missing.** Whether the agent **ingests** an
   inbound `traceparent` *on the A2A method surface* (vsock frame) is unspecified —
-  agentd RFC 0020 / RFC 0010 §3.6 define ingest on the self-MCP request and via the
+  agent RFC 0020 / RFC 0010 §3.6 define ingest on the self-MCP request and via the
   env var, but not on the A2A surface the gateway uses. This is **contract ask
   P-trace**; until it lands, a gateway-rooted trace cannot be *claimed*, only the
   self-MCP/env-rooted one.
@@ -718,14 +718,14 @@ The fleet correlation key is the tuple **`{trace_id, run_id, pod uid, span tree}
 
 - **`trace_id`** → "all pods in this flow." This is the **only** valid cross-pod key.
 - **`run_id`** → "all telemetry for this unit of work" (stable across one pod's tree,
-  agentd RFC 0010 §3.2).
+  agent RFC 0010 §3.2).
 - **pod `uid`** → the descriptor join key (agentctl RFC 0002 §3) tying logs, metrics
   identity, and the captured report to one instance.
 - **span tree** (`span_id`/`parent_span_id`) → the within- and cross-pod call shape.
 
 > **Normative.** Cross-pod correlation MUST be `trace_id` + the span tree, **NOT**
 > `agent_path` prefix. `agent_path` resets to `0` in each pod's own process tree
-> (agentd RFC 0010 §3.2/§3.5: depth/path are supervisor-minted *per pod*), so it is
+> (agent RFC 0010 §3.2/§3.5: depth/path are supervisor-minted *per pod*), so it is
 > valid **only within a single pod's subtree**. Using `agent_path` across pods
 > silently mis-joins unrelated subtrees. Within one pod, `agent_path` prefix remains
 > the cheap no-join subtree query (in Loki and in `kubectl agent tree`).
@@ -736,7 +736,7 @@ The gateway, the node-agent bridge, and the operator reconcile are **control-pla
 spans** that join the same trace by `trace_id` (§10) — so a
 `kubectl agent … → gateway → socket → agent → MCP backing service → Job pod` flow
 renders as one span tree spanning the control and data planes. Span **export** stays
-gated behind the `otel` feature on the agent side (agentd RFC 0010 §3.9); in the
+gated behind the `otel` feature on the agent side (agent RFC 0010 §3.9); in the
 default build agentctl correlates **logs + reports + events by `trace_id` alone**,
 with no OTLP collector required. Provisioning the collector/backend is infra
 agentctl deploys, not an agent feature (§12).
@@ -745,8 +745,8 @@ agentctl deploys, not an agent feature (§12).
 
 ## 9. Fleet aggregation — what the operator rolls up (the agent never does)
 
-The agent serves one instance and is told nothing about the fleet (agentd RFC 0016
-§7.3, agentd RFC 0014 §6). Every fleet view is agentctl's:
+The agent serves one instance and is told nothing about the fleet (agent RFC 0016
+§7.3, agent RFC 0014 §6). Every fleet view is agentctl's:
 
 ### 9.1 The rollups
 
@@ -759,17 +759,17 @@ The agent serves one instance and is told nothing about the fleet (agentd RFC 00
   spanning every pod a flow touched.
 - **Run-outcome history** — the durable run-report store (§7) is the fleet results
   ledger `kubectl agents results` reads, collapsing retried Jobs by a stable
-  `run_id` (agentd RFC 0016 §6.3).
+  `run_id` (agent RFC 0016 §6.3).
 
 ### 9.2 Cost is a rollup × a price table agentctl owns
 
-agentd emits **tokens, never currency** (agentd RFC 0016 §4.3: "cost = tokens × a
-price table agentctl owns; agentd never learns a price"). agentctl computes cost
+agent emits **tokens, never currency** (agent RFC 0016 §4.3: "cost = tokens × a
+price table agentctl owns; agent never learns a price"). agentctl computes cost
 **only** at the rollup layer:
 
 - **Key the price by `{model, type}`** — input vs output pricing differ — and account
   for cache-read/cache-write tiers where the source provides them (brainstorm §9.2).
-- **Pick ONE authoritative token source.** The two candidates — `agentd_tokens_total`
+- **Pick ONE authoritative token source.** The two candidates — `agent_tokens_total`
   (the agent's own counter) and the egress proxy's per-backend metering (agentctl RFC
   0012) — MUST NOT be double-counted. In the keyless-dial tier the proxy is the
   egress chokepoint and may be the cleaner meter; this RFC names the choice as a
@@ -782,7 +782,7 @@ price table agentctl owns; agentd never learns a price"). agentctl computes cost
 
 Cost **governance/enforcement** (budgets, kill-switch, chargeback) is agentctl RFC
 0012 and needs the `EXIT_BUDGET`/back-pressure signal (P-cost); this RFC provides the
-**observability** substrate enforcement reads. (`agentd_intel_*` health metrics in
+**observability** substrate enforcement reads. (`agent_intel_*` health metrics in
 the proxy tier measure the **pod↔proxy hop**, not the model — the proxy re-exports
 per-backend health on its own series, agentctl RFC 0012; dashboards must label which
 is which, and intel endpoint metric labels survive list-reorder only with stable
@@ -802,7 +802,7 @@ The operator, both node-agent tiers, the A2A gateway, the KEDA external scaler, 
 reference coordination server, and the admission webhook are ordinary networked Rust
 services (the `kube-rs`/`tonic` stack, agentctl RFC 0001). Each exposes its own
 `/metrics`, structured logs, and traces under the **`agentctl_*`** namespace
-(deliberately distinct from `agentd_*`, so a query never confuses control-plane and
+(deliberately distinct from `agent_*`, so a query never confuses control-plane and
 data-plane series), and is scraped **directly** (no bridge — these components have
 network). The headline SLO series:
 
@@ -840,7 +840,7 @@ network). The headline SLO series:
 
 ### 11.1 Telemetry never blocks the data plane (inherited + restated)
 
-The contract guarantees telemetry never takes down the agent (agentd RFC 0016 §8.4):
+The contract guarantees telemetry never takes down the agent (agent RFC 0016 §8.4):
 stderr write errors are swallowed, the events ring is lossy/bounded and never
 back-pressures, the report write is best-effort-but-loud (the **exit code is the
 floor**, never gated on the report landing), and `/metrics`/`events`/`--report-file`
@@ -853,7 +853,7 @@ is read-only; a Tier A bounce is a control/telemetry gap, not a data-plane outag
 ### 11.2 Versioning — branch on the manifest, degrade on absence (P0)
 
 agentctl reads the manifest **first** on every instance and branches per surface
-(agentd RFC 0016 §8.3), exactly as the operator does (agentctl RFC 0006 §6.1):
+(agent RFC 0016 §8.3), exactly as the operator does (agentctl RFC 0006 §6.1):
 
 | Surface | Manifest key | Major match | Major newer | Surface absent |
 |---|---|---|---|---|
@@ -863,7 +863,7 @@ agentctl reads the manifest **first** on every instance and branches per surface
 | exit codes | `surfaces.exit_codes` | interpret + alert | record raw code; **do not interpret** | exit code is opaque; alert only on `137`/`143` (OS-set, version-free) |
 
 A surface absent is **never an error** — the bridge re-exposes what the agent can
-serve and manages the rest by liveness + exit code + logs (agentd RFC 0014 §8). The
+serve and manages the rest by liveness + exit code + logs (agent RFC 0014 §8). The
 in-socket metrics path additionally gates on **P4**, live tail on the `events`
 feature, and networkless probes on the exec-health verb (**P1**, agentctl RFC 0002
 §8). **A second-vendor conformant agent is observed unchanged** the moment it passes
@@ -877,7 +877,7 @@ binary. That is the telemetry-plane expression of P0.
   central `http_sd` + relabeling; stderr→Loki bulk events; the dashboard/alert/
   recording-rule corpus against the frozen schema; run-outcome capture + the
   `results` backend; `kubectl agents top`. **Blocking contract asks: P4** (define
-  `agentd://metrics`/`agentd://capacity`) for networkless metrics; **P5** for
+  `agent://metrics`/`agent://capacity`) for networkless metrics; **P5** for
   robust `once`-mode results. Networked stock-unix metrics (TCP `/metrics` through the
   proxy) ship without P4.
 - **Later phases:** P-trace gates gateway-rooted traces (lands with the A2A gateway,
@@ -892,10 +892,10 @@ binary. That is the telemetry-plane expression of P0.
 ## 12. Non-goals (these live in other planes, in the agent, or in infra)
 
 - **Any new telemetry mechanism or series.** agentctl defines no metric, event,
-  report field, or trace field — it consumes the frozen contract (agentd RFC
+  report field, or trace field — it consumes the frozen contract (agent RFC
   0010/0011/0016). Adding a series is the contract's job.
 - **The metrics exposition format / the agent's `/metrics` implementation.** The
-  hand-written Prometheus 0.0.4 text is the agent's (agentd RFC 0010 §3.8); the proxy
+  hand-written Prometheus 0.0.4 text is the agent's (agent RFC 0010 §3.8); the proxy
   re-exposes it byte-identical.
 - **The substrate, descriptor, discovery, attestation, node-agent structure.**
   agentctl RFC 0002 / RFC 0008. The bridge lives inside Tier A and consumes
@@ -923,10 +923,10 @@ binary. That is the telemetry-plane expression of P0.
 
 ## 13. Open questions
 
-1. **Networkless metrics (P4) — the single hard blocker.** `agentd://metrics` must be
+1. **Networkless metrics (P4) — the single hard blocker.** `agent://metrics` must be
    defined as byte-identical Prometheus 0.0.4 text with a pinned `mimeType` and
-   confirmed reachable over the management socket (agentd RFC 0005/0015 omit it, RFC
-   0019 assumes it). Plus `agentd://capacity` (frozen schema) for victim selection.
+   confirmed reachable over the management socket (agent RFC 0005/0015 omit it, RFC
+   0019 assumes it). Plus `agent://capacity` (frozen schema) for victim selection.
    Until P4, networkless metrics are unshippable (§4.4). (agentctl RFC 0002 §13(h).)
 2. **Run-report durability (P5) + the history store.** The read-before-exit
    guarantee / post-terminal linger + re-read-by-handle (§7.3), **and** the
@@ -959,13 +959,13 @@ binary. That is the telemetry-plane expression of P0.
    are frozen and the RFC 0010-§3.8-vs-RFC-0016-§4.3 name conflict is resolved, SLO
    dashboards are counter-ratios, not quantiles (§5.5). Which histograms become frozen
    (non-`otel`) series?
-7. **Authoritative token source for cost.** `agentd_tokens_total` vs the egress
+7. **Authoritative token source for cost.** `agent_tokens_total` vs the egress
    proxy's per-backend metering (§9.2) — pick one per deployment to avoid
    double-counting; owned jointly with agentctl RFC 0012. Price-table freshness and
    ownership (cache-tier pricing) ride here too.
 8. **Trace ingest on the A2A surface (P-trace).** Gateway-rooted traces cannot be
    claimed until the agent ingests `traceparent` on the A2A method surface, not only
-   the self-MCP request / `AGENTD_TRACEPARENT` (§8.1). Owned with agentctl RFC 0013.
+   the self-MCP request / `AGENT_TRACEPARENT` (§8.1). Owned with agentctl RFC 0013.
 9. **Loki vs CRI-only for bulk on a no-stdout substrate.** §6 assumes the kubelet/CRI
    captures stderr on every tier; confirm this holds for the off-pod/sidecar variants
    (agentctl RFC 0002 §4.3) where the agent's stderr routing may differ, and define
@@ -1012,48 +1012,48 @@ binary. That is the telemetry-plane expression of P0.
   the durable store option for run-report history (§13.2), the gateway SLOs (§10.1).
 - **agentctl RFC 0016** — CLI & kubectl-plugin grammar: `kubectl agents top` (reads
   metrics/rollups), `results` (reads the captured run-report store, §7), `logs -f`
-  (consumes the `agentd://events` live tail, §6.2) — the consumers of this backend.
+  (consumes the `agent://events` live tail, §6.2) — the consumers of this backend.
 - **agentctl RFC 0017** — Release & lifecycle engineering: retention/DR for the
   telemetry stores (§12 non-goal, §13.2 open question).
 
-**Contract spec (the reference implementation, agentd RFCs)**
+**Contract spec (the reference implementation, agent RFCs)**
 
-- **agentd RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle
+- **agent RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle
   contract: the **frozen metrics schema** (§4) this RFC authors against, the
   exit-code→`podFailurePolicy` intent (§5), the **run-outcome report** + `--report-file`
-  (§6) this RFC captures, the **`agentd://events`** ring (§7) tailed for live, the
+  (§6) this RFC captures, the **`agent://events`** ring (§7) tailed for live, the
   version-surfacing this RFC branches on (§8), the cost-is-tokens×price rule (§4.3).
-- **agentd RFC 0010 (the reference impl's contract spec)** — observability, health &
+- **agent RFC 0010 (the reference impl's contract spec)** — observability, health &
   telemetry: the **JSON-lines log schema + closed event vocabulary** (§3.2/§3.3) shipped
   to Loki, the **Prometheus 0.0.4 exposition** (§3.8) the proxy re-exposes, the **W3C
   trace propagation** (§3.6) this RFC stitches by `trace_id`, the **health surface**
   (§3.7) the probes wire, `agent_path` validity scope (§3.5).
-- **agentd RFC 0011 (the reference impl's contract spec)** §5 — the **exit-code table**
+- **agent RFC 0011 (the reference impl's contract spec)** §5 — the **exit-code table**
   (§7.4) and the clean-drain-returns-`0`-not-`143` distinction the forced-drain alert
   keys off; §4.2 the drain choreography.
-- **agentd RFC 0007 (the reference impl's contract spec)** §3.4 — the closed
-  `TerminalStatus` vocabulary used as `report.status` and the `agentd_runs_total{status}`
+- **agent RFC 0007 (the reference impl's contract spec)** §3.4 — the closed
+  `TerminalStatus` vocabulary used as `report.status` and the `agent_runs_total{status}`
   label domain.
-- **agentd RFC 0005 (the reference impl's contract spec)** — the `agentd://` scheme,
-  notify-then-read, and `agentd://run/{run_id}` (§7.2) the run collector subscribes;
+- **agent RFC 0005 (the reference impl's contract spec)** — the `agent://` scheme,
+  notify-then-read, and `agent://run/{run_id}` (§7.2) the run collector subscribes;
   the in-socket metrics-resource ambiguity (P4, §4.4).
-- **agentd RFC 0014 (the reference impl's contract spec)** §3 — primitives-not-policy
+- **agent RFC 0014 (the reference impl's contract spec)** §3 — primitives-not-policy
   (the agent serves one instance, agentctl aggregates the fleet, §9); §5/§6.2/§8 —
   the manifest + `surfaces{}` + graceful degradation the §11.2 branching keys off.
-- **agentd RFC 0015 (the reference impl's contract spec)** — the management profile
+- **agent RFC 0015 (the reference impl's contract spec)** — the management profile
   the bridge multiplexes alongside telemetry; §8 reconnect = clean re-read (a dropped
   connection is not a liveness signal, §4.5).
-- **agentd RFC 0018 (the reference impl's contract spec)** — the intelligence-health
-  metrics (`agentd_intel_up`/`_errors_total`) and the per-endpoint model/name stability
+- **agent RFC 0018 (the reference impl's contract spec)** — the intelligence-health
+  metrics (`agent_intel_up`/`_errors_total`) and the per-endpoint model/name stability
   (P7) the cost/health panels (§9.2) read.
-- **agentd RFC 0019 (the reference impl's contract spec)** — horizontal scaling: the
-  source of the P10 metric-name defect (§5.4) and the `agentd://capacity` (P4) ask.
-- **agentd RFC 0020 (the reference impl's contract spec)** — A2A over the substrate:
+- **agent RFC 0019 (the reference impl's contract spec)** — horizontal scaling: the
+  source of the P10 metric-name defect (§5.4) and the `agent://capacity` (P4) ask.
+- **agent RFC 0020 (the reference impl's contract spec)** — A2A over the substrate:
   the surface P-trace adds traceparent ingest to (§8.1) and the exactly-once
   distillate delivery that forces P5 (§7.3).
 
 **Contract asks raised or cited by this RFC** (agentctl brainstorm §14): **P4**
-(define `agentd://metrics`/`agentd://capacity` — §3/§4.4, the networkless blocker),
+(define `agent://metrics`/`agent://capacity` — §3/§4.4, the networkless blocker),
 **P5** (run-report read-before-exit/linger + re-read by handle — §7.3), **P-trace**
 (traceparent ingest on the A2A surface — §8.1), **P-hist** (reconcile histogram names +
 freeze buckets — §5.5), **P10** (reconcile the autoscaling metric names — §5.4),

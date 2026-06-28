@@ -18,10 +18,10 @@
 > **Verb *visibility* renders from the manifest, never from a hardcoded list or
 > `build_features` (P0) — with one honest bound.** Which subcommands a target exposes
 > is computed from that agent's advertised `surfaces{}` / `surfaces.operator_tools`
-> (agentd RFC 0015 §5.2): a conformant agent that does not advertise a surface simply
+> (agent RFC 0015 §5.2): a conformant agent that does not advertise a surface simply
 > does not get the verb, and capability *absence is graceful degradation, not an error*
-> (agentd RFC 0014 §8). **The bound, stated plainly:** `operator_tools` is a bare
-> **name list with no per-tool input schema** (agentd RFC 0015 §5.2) and `clap`
+> (agent RFC 0014 §8). **The bound, stated plainly:** `operator_tools` is a bare
+> **name list with no per-tool input schema** (agent RFC 0015 §5.2) and `clap`
 > subcommands are compile-time — so the CLI **subtracts** (hides a verb the agent
 > omits) and surfaces the *contract-defined* vocabulary with typed grammar, but it
 > cannot synthesize bespoke flags for a *novel* second-vendor verb outside
@@ -31,9 +31,9 @@
 > `kubectl agent <x> tool <name> [--arg …]` passthrough (§3.2), with per-tool typed
 > grammar awaiting a contract ask for per-tool input schemas in the manifest.
 
-> **The data plane is any conformant agent.** This RFC names **agentd** only as the
+> **The data plane is any conformant agent.** This RFC names **agent** only as the
 > reference implementation in examples and when citing where a contract surface is
-> currently specified. The `agentd://` URIs, the `agentd_` metric prefix, and the
+> currently specified. The `agent://` URIs, the `agent_` metric prefix, and the
 > `--capabilities` entrypoint are the **reference spelling** of contract-normative
 > surfaces, flagged for neutralization (the P0 contract-extraction open question,
 > agentctl RFC 0001 §9 / RFC 0018).
@@ -54,12 +54,12 @@ Three properties make this more than "wrap an API in a CLI":
 
 1. **The surface is contract-negotiated, per agent.** The verbs are not invented
    here and are not uniform across agents. They are the agent's *operator profile*
-   (agentd RFC 0015 §4), discovered from `surfaces.operator_tools` in the
-   capabilities manifest (agentd RFC 0015 §5.2), plus the read surfaces
-   (`surfaces.management`/`metrics`/`events`, the `agentd://inventory`/`status`
+   (agent RFC 0015 §4), discovered from `surfaces.operator_tools` in the
+   capabilities manifest (agent RFC 0015 §5.2), plus the read surfaces
+   (`surfaces.management`/`metrics`/`events`, the `agent://inventory`/`status`
    resources). A binary built without a surface does not advertise it, and the CLI
    MUST then **not** offer the verb — graceful degradation is the default posture,
-   not an exception (agentd RFC 0014 §8). The CLI therefore plans its subcommand and
+   not an exception (agent RFC 0014 §8). The CLI therefore plans its subcommand and
    column set **from the manifest projected into `Agent.status`** (agentctl RFC 0006
    §4.2 / RFC 0003 §6), never from the agent's name and never from `build_features`.
 
@@ -74,7 +74,7 @@ Three properties make this more than "wrap an API in a CLI":
 
 3. **`attach` is a genuinely new interactive UX** with no Kubernetes precedent —
    live steering of a warm agent session, multi-viewer, leased, audited. It is
-   `subagent.send` (agentd RFC 0015 §4.5) under the hood, but the terminal UX, the
+   `subagent.send` (agent RFC 0015 §4.5) under the hood, but the terminal UX, the
    single-writer lease, and the multi-viewer echo are agentctl's to design (§5).
 
 This RFC owns: the three faces and their packaging (§2), the command grammar and
@@ -187,15 +187,15 @@ kubectl agent <name> card                         # the agent's A2A card (gatewa
 |---|---|---|---|
 | `agents get [-o wide]` | `Agent.status` curated projection + CRD `additionalPrinterColumns` (agentctl RFC 0003 §6.3, RFC 0006 §4.2) | kube-apiserver **CRD list** (`agents.x-k8s.io`) | **COLD** |
 | `agent <x> describe` | `Agent.status` (full curated projection; optional one-shot live enrich) | kube-apiserver CRD get (+ optional `agents/inventory` read) | **COLD** (+opt live) |
-| `agent <x> tree [-w]` | `agentd://inventory` — live subagent tree (agentd RFC 0015 §5.3) | `agents/inventory` **`get`** connect subresource (RFC 0009 §5.1) | **LIVE** (`-w`) |
-| `agent <x> logs [-f]` | **bulk** stderr→Loki (agentctl RFC 0010 §6.1); **live tail** `agentd://events` ring (agentd RFC 0016 §7) | bulk: Loki / `kubectl logs`; live: `agents/log` **`get`** connect | **LIVE** (`-f`) |
-| `agent <x> top [-w]`, `agents top` | metrics `agentd_*` / `agentd://metrics` (ask **P4**); fleet rollups + recording rules (agentctl RFC 0010 §5/§9) | static: Prometheus/recording-rule read (cold); live: `agents/metrics` **`get`** connect | COLD static / **LIVE** (`-w`) |
+| `agent <x> tree [-w]` | `agent://inventory` — live subagent tree (agent RFC 0015 §5.3) | `agents/inventory` **`get`** connect subresource (RFC 0009 §5.1) | **LIVE** (`-w`) |
+| `agent <x> logs [-f]` | **bulk** stderr→Loki (agentctl RFC 0010 §6.1); **live tail** `agent://events` ring (agent RFC 0016 §7) | bulk: Loki / `kubectl logs`; live: `agents/log` **`get`** connect | **LIVE** (`-f`) |
+| `agent <x> top [-w]`, `agents top` | metrics `agent_*` / `agent://metrics` (ask **P4**); fleet rollups + recording rules (agentctl RFC 0010 §5/§9) | static: Prometheus/recording-rule read (cold); live: `agents/metrics` **`get`** connect | COLD static / **LIVE** (`-w`) |
 | `agents results`, `agent <x> results` | persisted run-report store, `report_schema` (agentctl RFC 0010 §7; ask **P5**) | kube-apiserver / store read | **COLD** (store) |
-| `agent <x> drain` | `drain` tool (agentd RFC 0015 §4.1 — ≡ SIGTERM ≡ clean exit 0) | `agents/drain` **`create`** connect (RFC 0009 §5.1) | **LIVE / mutating** |
-| `agent <x> lame-duck` | `lame-duck` tool (agentd RFC 0015 §4.2 — reversible readiness flip) | `agents/lame-duck` **`create`** connect | **LIVE / mutating** |
-| `agent <x> pause`/`resume` | `pause`/`resume` (agentd RFC 0015 §4.3 — **ask P-pause**) | `agents/pause` **`create`** connect | **LIVE / mutating** |
-| `agent <x> cancel <handle>` | `cancel` tool (agentd RFC 0015 §4.4 — wraps `subagent.cancel`) | `agents/cancel` **`create`** connect | **LIVE / mutating** |
-| `agent <x> attach` | **`subagent.send`** (agentd RFC 0015 §4.5 — `ctrl/inject` into a warm session) | `agents/attach` **`create`/stream** connect — **gated, §5/§RFC 0009 §6** | **LIVE / steer** |
+| `agent <x> drain` | `drain` tool (agent RFC 0015 §4.1 — ≡ SIGTERM ≡ clean exit 0) | `agents/drain` **`create`** connect (RFC 0009 §5.1) | **LIVE / mutating** |
+| `agent <x> lame-duck` | `lame-duck` tool (agent RFC 0015 §4.2 — reversible readiness flip) | `agents/lame-duck` **`create`** connect | **LIVE / mutating** |
+| `agent <x> pause`/`resume` | `pause`/`resume` (agent RFC 0015 §4.3 — **ask P-pause**) | `agents/pause` **`create`** connect | **LIVE / mutating** |
+| `agent <x> cancel <handle>` | `cancel` tool (agent RFC 0015 §4.4 — wraps `subagent.cancel`) | `agents/cancel` **`create`** connect | **LIVE / mutating** |
+| `agent <x> attach` | **`subagent.send`** (agent RFC 0015 §4.5 — `ctrl/inject` into a warm session) | `agents/attach` **`create`/stream** connect — **gated, §5/§RFC 0009 §6** | **LIVE / steer** |
 | `agents tasks`, `agent <x> card`, `agent <x> tasks` | A2A gateway: `tasks/list`, projected Agent Card (agentctl RFC 0013 §3.2, RFC 0014) | **A2A gateway** (third path; own auth + durability) | gateway |
 
 ### 3.2 The verb set is rendered, not hardcoded (the P0 mechanism)
@@ -207,11 +207,11 @@ verbs from the advertised surfaces**:
 ```
 plan_verbs(status) =
   always:  describe, get, results                 # cold paths — always offered (degrade per back-end §6.3)
-  if status.contract.compatible == false:         # major not understood (agentd RFC 0014 §8)
+  if status.contract.compatible == false:         # major not understood (agent RFC 0014 §8)
       → offer ONLY cold reads + `logs` (stderr) ; everything else hidden as "contract-incompatible"
   if surfaces.management present:                  # the live management transport exists
       tree, logs -f                               # streaming reads off inventory/events
-      for v in surfaces.operator_tools:           # ← the AUTHORITATIVE list (agentd RFC 0015 §5.2)
+      for v in surfaces.operator_tools:           # ← the AUTHORITATIVE list (agent RFC 0015 §5.2)
           if v ∈ contract-vocab {drain,lame-duck,pause,resume,cancel}:
               expose typed   kubectl agent <v>    #   contract-fixed flag grammar (pause/resume IFF advertised)
           else:                                    #   novel/additive vendor tool — no per-tool schema today
@@ -226,7 +226,7 @@ plan_verbs(status) =
 Two consequences the house style insists on. **First, `pause`/`resume` are a
 manifest call, not a CLI call.** The reference implementation's
 `OPERATOR_TOOLS` is `["drain","lame-duck","cancel"]` today — `pause`/`resume` are
-contract-specified (agentd RFC 0015 §4.3) but **not yet implemented** (ask
+contract-specified (agent RFC 0015 §4.3) but **not yet implemented** (ask
 **P-pause**). Because the verb set renders from `surfaces.operator_tools`, a `pause`
 verb on a binary that does not advertise it is simply **not exposed** — no special
 case, the same capability-absence-not-error posture as everywhere (agentctl RFC
@@ -295,7 +295,7 @@ against already-persisted state, but they span **four** back-ends with *differen
   ordinary `get/list/watch agents` RBAC. **These are the only cold reads that strictly
   reuse the human's kubeconfig and are strictly pod-gone-safe by construction.**
 - **`results`** reads the **persisted run-report store** (agentctl RFC 0010 §7), not
-  a vanished `--report-file` and not the live `agentd://run/{run_id}` (which the pod
+  a vanished `--report-file` and not the live `agent://run/{run_id}` (which the pod
   takes with it). "Works when the pod is gone" is scoped to the **store** — a
   red-team correction baked in (brainstorm §8.2): the store is what survives, the
   pod is not. Robust once-mode capture depends on ask **P5**. The CLI reaches the
@@ -372,10 +372,10 @@ those are backed today versus gated behind contract asks.
 
 ### 5.1 Design framing — it is `subagent.send`, leased and viewed
 
-`attach` adds **no new agent tool**. It is `subagent.send` (agentd RFC 0015 §4.5),
-which delivers an `InjectEvent` into a warm session via `ctrl/inject` (agentd RFC
+`attach` adds **no new agent tool**. It is `subagent.send` (agent RFC 0015 §4.5),
+which delivers an `InjectEvent` into a warm session via `ctrl/inject` (agent RFC
 0005 §4.3). agentctl wraps it with three things the agent deliberately does not
-have (the agent has no session-ownership, no auth, no multi-viewer model — agentd
+have (the agent has no session-ownership, no auth, no multi-viewer model — agent
 RFC 0012 §3.8):
 
 1. a **read-many / write-one lease** so two operators do not fight over one session;
@@ -391,15 +391,15 @@ front's connect-upgrade machinery (the same machinery that carries `kubectl
 exec`-style verbs for aggregated APIs — agentctl RFC 0009 §3.4): the **uplink**
 carries steer events (`--send TEXT`, or interactive lines in a TTY), each becoming
 one `subagent.send{session, event}`; the **downlink** is the merged tail of
-`agentd://events` (agentd RFC 0016 §7) and `agentd://session/{session_id}` `updated`
-notifications (agentd RFC 0005 §3.4), re-framed to the client as SSE/line frames.
+`agent://events` (agent RFC 0016 §7) and `agent://session/{session_id}` `updated`
+notifications (agent RFC 0005 §3.4), re-framed to the client as SSE/line frames.
 The exact upgrade shape (SPDY vs WebSocket vs SSE) is the aggregated APIServer's to
 fix (agentctl RFC 0009 OQ / §3.4); the CLI consumes whatever that connect handler
 negotiates.
 
 > **v1 scope (backed today) vs gated (contract asks).** v1 `attach` is **one-shot
 > `--send` + a read-only event tail** — both fully backed by today's contract
-> (`subagent.send` + `agentd://events`). **Full interactive multi-viewer steering**
+> (`subagent.send` + `agent://events`). **Full interactive multi-viewer steering**
 > — a TTY where every keystroke steers and every viewer sees a clean steer-echo —
 > needs new primitives (P-inject, P-session below) and is **gated behind a contract
 > minor bump**. The CLI offers the interactive TTY mode only when the manifest
@@ -412,21 +412,21 @@ negotiates.
 
 A correctness subtlety the brainstorm (§8.2) flags and this RFC must not get wrong:
 `subagent.send` targets a warm **session**, addressed by `session_id` off
-`agentd://session/{session_id}` (agentd RFC 0005 §3.4) — **not** a subagent
-**handle** off `agentd://subagent/{handle}` (which addresses tree nodes for
+`agent://session/{session_id}` (agent RFC 0005 §3.4) — **not** a subagent
+**handle** off `agent://subagent/{handle}` (which addresses tree nodes for
 `cancel`/`tree`). The two key spaces are different and must not be conflated.
-Today `agentd://status` exposes only a **`warm_sessions` count** (agentd RFC 0015
+Today `agent://status` exposes only a **`warm_sessions` count** (agent RFC 0015
 §5.4), not an enumerable list — so the CLI **cannot enumerate steerable sessions**.
 
 - **v1 behavior:** if `warm_sessions == 1`, `attach` targets that session
   implicitly; if `> 1`, the CLI **requires** an explicit `--session S` and **fails
   with a clear error** rather than guessing (no silent wrong-session steer). **The
   honest limitation this exposes:** with `warm_sessions > 1` there is *no* v1 contract
-  surface from which a user obtains a valid `session_id` — `agentd://status` exposes
+  surface from which a user obtains a valid `session_id` — `agent://status` exposes
   only the *count*, and inventory/tree key by subagent *handle* (a different key
   space, §below). So interactive attach is **effectively single-warm-session-only
   until P-session**. The CLI MAY accept a `session_id` that surfaced incidentally in
-  the `agentd://events` tail (or a future `describe` field) if the user supplies it,
+  the `agent://events` tail (or a future `describe` field) if the user supplies it,
   but it never manufactures or guesses one.
 - **Contract ask P-session:** warm-session/handle **enumeration** with a
   `steerable` flag, so the CLI (and tab-completion) can list sessions and the user
@@ -439,7 +439,7 @@ Today `agentd://status` exposes only a **`warm_sessions` count** (agentd RFC 001
 The "every viewer sees every steer" guarantee is **bounded by two contract facts**
 the CLI must design around, not paper over:
 
-1. `agentd://events` is a **lossy in-memory ring** with a `dropped` counter (agentd
+1. `agent://events` is a **lossy in-memory ring** with a `dropped` counter (agent
    RFC 0016 §7) — a viewer that falls behind misses frames, and the read returns
    `dropped > 0` so the CLI can surface "(N events dropped)" rather than silently
    lie.
@@ -482,7 +482,7 @@ CLI inherits the two-layer gate agentctl RFC 0009 §6 owns and surfaces it clean
 ### 5.6 The lease (read-many / write-one)
 
 A single-writer **advisory lease** per `(pod, session)` lives in **agentctl**, not
-the agent (the agent has no session/auth model — agentd RFC 0012 §3.8):
+the agent (the agent has no session/auth model — agent RFC 0012 §3.8):
 
 - **read-many:** any number of `--read-only` viewers attach concurrently.
 - **write-one:** at most one writer holds the lease; a second `attach` without
@@ -520,7 +520,7 @@ fixed regardless.
 |---|---|---|
 | *(default)* | the CRD's **priority-0** `additionalPrinterColumns` (agentctl RFC 0003 §6.3) | a compact human table the CLI renders from the streamed/structured result |
 | `wide` | priority-0 **plus** priority>0 columns — `-o wide` is *additive* per kubectl semantics (RFC 0003 §6.3 puts Model, Build, Substrate, Node at priority>0); the apiserver's job, not the client's | extra columns where the surface provides them |
-| `json` / `yaml` | the apiserver's own serialization (the CRD object) | the structured result (`CallToolResult.structuredContent`, `agentd://inventory` body) serialized verbatim |
+| `json` / `yaml` | the apiserver's own serialization (the CRD object) | the structured result (`CallToolResult.structuredContent`, `agent://inventory` body) serialized verbatim |
 | `name` | `agent/<name>` | n/a |
 | `jsonpath` / `go-template` | kubectl's own templating over the cold object | the CLI applies the same templating over the structured live result |
 
@@ -542,7 +542,7 @@ The CLI negotiates against the **manifest projected into status**, not the agent
 identity (P0). The discipline, in priority order:
 
 1. **Contract major.** If `status.contract.compatible == false` (the agent's
-   `contract_version` major is one the control plane does not understand — agentd
+   `contract_version` major is one the control plane does not understand — agent
    RFC 0014 §6.3 / agentctl RFC 0006 §6.1), the CLI offers **only** cold reads +
    `logs` (stderr) and labels everything else "contract-incompatible (major N)." It
    never tries a live verb it cannot frame.
@@ -554,7 +554,7 @@ identity (P0). The discipline, in priority order:
    way: a `top` table for a metrics-less agent is not rendered empty, it is not
    offered.
 3. **Additive tolerance.** An unknown *additive* field/tool/metric (a higher minor,
-   or a second-vendor extension) is **tolerated**, never an error (agentd RFC 0014
+   or a second-vendor extension) is **tolerated**, never an error (agent RFC 0014
    §6.3); the CLI renders what it understands and can `--show-unknown` to dump the
    rest verbatim. This mirrors the lenient-but-typed posture agentctl RFC 0001 §4.4
    and the additive-drift report agentctl RFC 0010 §5.6 take.
@@ -571,7 +571,7 @@ agent didn't advertise" is a conformance assertion, not a hope.
 ### 6.3 Exit codes (the CLI's own, distinct from the agent's)
 
 The **CLI process exit code** is the agentctl/`kubectl-agent` binary's own status —
-**not** the agent's exit-code contract (agentd RFC 0011 §5 / RFC 0016 §5), which is
+**not** the agent's exit-code contract (agent RFC 0011 §5 / RFC 0016 §5), which is
 data surfaced *by* `results`. Keeping them distinct avoids the trap of a human
 reading a `4` from `kubectl agent … results` and thinking the CLI failed.
 
@@ -587,7 +587,7 @@ reading a `4` from `kubectl agent … results` and thinking the CLI failed.
 | `7` | gateway path error (`card`/`tasks` — gateway unreachable / auth failed) |
 
 `kubectl agent x results` exits `0` even when the *run it reports* failed — the
-run's failure is in the report's `status`/`exit_code` fields (agentd RFC 0016 §6.2),
+run's failure is in the report's `status`/`exit_code` fields (agent RFC 0016 §6.2),
 faithfully surfaced; the CLI's `0` means "I successfully fetched the outcome." A
 caller that wants to gate a pipeline on the *run's* outcome inspects the reported
 fields (or uses `--exit-on-failure` to remap the run's terminal status onto the CLI
@@ -612,8 +612,8 @@ exit), never the bare CLI exit code.
   what those define; `-o wide` is the apiserver's columns.
 - **The A2A gateway, card projection, and their auth.** agentctl RFC 0013 / RFC
   0014. `card`/`tasks` are queries against them.
-- **Defining or adding auth to agent tools.** agentd RFC 0015 owns the tools;
-  agentd RFC 0012 §3.8 keeps the agent auth-free. The CLI never asks the agent to
+- **Defining or adding auth to agent tools.** agent RFC 0015 owns the tools;
+  agent RFC 0012 §3.8 keeps the agent auth-free. The CLI never asks the agent to
   authenticate.
 - **The contract client + codegen.** agentctl RFC 0001 §4 / RFC 0018 — the CLI
   imports the generated `agent-contract-client`; it hand-rolls no wire types.
@@ -657,7 +657,7 @@ exit), never the bare CLI exit code.
    is best-effort (§5.4).
 9. **Per-tool input schemas in the manifest (a candidate contract ask).** Today
    `surfaces.operator_tools` is a bare name list with **no per-tool input schema**
-   (agentd RFC 0015 §5.2), so a *novel* second-vendor operator tool is reachable only
+   (agent RFC 0015 §5.2), so a *novel* second-vendor operator tool is reachable only
    through the generic `kubectl agent <x> tool <name> [--arg …]` passthrough (§3.2) —
    typed `clap` grammar for it is impossible without a code change. Should the contract
    add an optional per-tool input-schema member to the manifest (a candidate for
@@ -696,7 +696,7 @@ exit), never the bare CLI exit code.
   client-side (§3.2/§6.2).
 - **agentctl RFC 0010** — observability & telemetry bridge: §5/§9 the metric series +
   recording-rule rollups behind `top`; §6.1 stderr→Loki (bulk `logs`) + the live
-  `agentd://events` tail; §7 the persisted run-report store behind `results` (+ ask
+  `agent://events` tail; §7 the persisted run-report store behind `results` (+ ask
   P5); §10.2 the management-action audit sink behind the attach audit record (§5.4).
 - **agentctl RFC 0013 / RFC 0014** — A2A gateway & task store / agent mesh identity:
   the gateway path behind `card`/`tasks` (§4.4), its own `securitySchemes` auth, and
@@ -712,26 +712,26 @@ exit), never the bare CLI exit code.
   negotiation / additive-tolerance discipline (§6.2), and the P3b golden manifest
   corpus the verb-rendering negotiation is conformance-tested against.
 
-**Contract spec (the reference implementation, agentd RFCs)**
+**Contract spec (the reference implementation, agent RFCs)**
 
-- **agentd RFC 0015 (the reference impl's contract spec)** — management & control
+- **agent RFC 0015 (the reference impl's contract spec)** — management & control
   surface: §4 the operator tools (`drain`/`lame-duck`/`pause`/`resume`/`cancel`);
   §4.5 **`attach` == `subagent.send`**; §5.2 the manifest + **`surfaces.operator_tools`**
-  the verb set renders from (§3.2); §5.3 `agentd://inventory` behind `tree`; §5.4
-  `agentd://status` (and the `warm_sessions` count gap → P-session, §5.3); P-pause.
-- **agentd RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle:
-  §7 the `agentd://events` lossy ring + cursor/`dropped` behind `logs -f` and the
+  the verb set renders from (§3.2); §5.3 `agent://inventory` behind `tree`; §5.4
+  `agent://status` (and the `warm_sessions` count gap → P-session, §5.3); P-pause.
+- **agent RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle:
+  §7 the `agent://events` lossy ring + cursor/`dropped` behind `logs -f` and the
   attach downlink (§5.4); §6 the run-report `report_schema` behind `results`; §5 the
   exit-code contract `results` surfaces (distinct from the CLI's own exit codes,
   §6.3).
-- **agentd RFC 0005 (the reference impl's contract spec)** — self-MCP & control
-  protocol: `agentd://session/{session_id}` (session-addressed steering) vs
-  `agentd://subagent/{handle}` (handle-addressed tree) — the §5.3 keying
+- **agent RFC 0005 (the reference impl's contract spec)** — self-MCP & control
+  protocol: `agent://session/{session_id}` (session-addressed steering) vs
+  `agent://subagent/{handle}` (handle-addressed tree) — the §5.3 keying
   distinction; `ctrl/inject` + the `InjectEvent` shape (ask P-inject, §5.4).
-- **agentd RFC 0014 (the reference impl's contract spec)** — contract umbrella:
+- **agent RFC 0014 (the reference impl's contract spec)** — contract umbrella:
   §6.3 contract_version negotiation (additive-by-minor, refuse-unknown-major); §8
   graceful degradation off `surfaces{}` — the basis of §6.2.
-- **agentd RFC 0012 (the reference impl's contract spec)** — security posture: §3.8
+- **agent RFC 0012 (the reference impl's contract spec)** — security posture: §3.8
   the agent has no session/auth model (why the lease and multi-viewer fan-out live
   in agentctl, §5.1/§5.6).
 
@@ -740,7 +740,7 @@ exit), never the bare CLI exit code.
 steer-echo — §5.4); **P-session** (warm-session enumeration + `steerable` flag —
 §5.3); **P-attach-gate** (per-tool management gate so steering can be omitted
 without dropping drain/cancel/observe — §5.5; home agentctl RFC 0009/0015);
-**P-pause** (the unbuilt `pause`/`resume` tools — §3.2); **P4** (`agentd://metrics`
+**P-pause** (the unbuilt `pause`/`resume` tools — §3.2); **P4** (`agent://metrics`
 for live `top -w` — §3.1); **P5** (run-report durability so `results` works
 pod-gone — §4.1); **P-meta/P-audit** (caller `_meta` + the management-action audit
 event behind the attach audit record — §5.4); **P3b** (golden manifest corpus the
