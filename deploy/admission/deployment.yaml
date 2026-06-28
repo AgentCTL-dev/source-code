@@ -36,7 +36,7 @@ spec:
               value: "info"
             # Image-registry allow-list (CSV prefixes); empty would allow all.
             - name: ALLOWED_REGISTRIES
-              value: "mock-agent,agentctl/,gcr.io/,registry.k8s.io/"
+              value: "mock-agent,agent:,agentctl/,gcr.io/,registry.k8s.io/"
           volumeMounts:
             - { name: tls, mountPath: /etc/agentctl-admission/tls, readOnly: true }
           securityContext:
