@@ -115,7 +115,7 @@ fn management_bridge_drives_the_wire() {
     let manifest = client.read_capabilities().expect("read capabilities");
     let v = manifest.negotiate().expect("negotiate");
     assert_eq!((v.major, v.minor), (1, 0));
-    assert_eq!(manifest.version(), Some("2.5.0"));
+    assert_eq!(manifest.version(), Some("1.0.0"));
     assert_eq!(
         manifest.surfaces.operator_tools,
         ["drain", "lame-duck", "pause", "resume", "cancel"]

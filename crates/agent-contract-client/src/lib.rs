@@ -6,7 +6,7 @@
 //! agent implements (see `contract/` and agentctl RFC 0018).
 //!
 //! **Principle P0:** agentctl depends on the *contract*, never on a specific
-//! agent. `agent` is the reference implementation only. This crate therefore
+//! agent. `agentd` is the reference implementation only. This crate therefore
 //! models the contract's wire shapes — it does not import any agent's types.
 //!
 //! Most of the manifest is plain serde. The load-bearing exceptions are the
@@ -120,7 +120,7 @@ impl Manifest {
     }
 }
 
-/// Downward-API instance identity (agent RFC 0014 §6.4 / contract
+/// Downward-API instance identity (agentd RFC 0014 §6.4 / contract
 /// `env-convention`). All optional — descriptive, not load-bearing.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {

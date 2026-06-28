@@ -19,7 +19,7 @@ async runtime, no HTTP server, no Kubernetes coupling). It deliberately exposes
 
 `agentctl` is the **control plane** — everything Kubernetes-shaped. The split is
 the whole architecture, and it is already specified from agent's side in the
-**agentctl control-plane RFC track, agent RFCs 0014–0020**. agentctl is the
+**agentctl control-plane RFC track, agentd RFCs 0014–0020**. agentctl is the
 *consumer* of those contracts:
 
 | agent contract (RFC) | What agentctl does with it |
@@ -33,7 +33,7 @@ the whole architecture, and it is already specified from agent's side in the
 | **0020** A2A over vsock (manifest = Agent Card; run = Task) | the **A2A gateway** + the agent mesh |
 
 **The rule we never break:** no Kubernetes/CRD/dashboard logic ever leaks into
-agent. If agentctl wants something, it asks for a *primitive* in an agent RFC;
+agent. If agentctl wants something, it asks for a *primitive* in an agentd RFC;
 the cluster-facing translation lives here.
 
 ---
@@ -187,7 +187,7 @@ behind a sidecar.
 - **Layout (monorepo):** `cmd/agentctl`, `cmd/kubectl-agent`, `cmd/node-agent`,
   `operator/` (api/v1 CRDs + controllers), `gateway/` (A2A bridge),
   `pkg/agent/` (the typed client for the manifest/operator-tools/A2A vsock wire —
-  generated from the agent RFC schemas so the two repos can't drift), `deploy/`
+  generated from the agentd RFC schemas so the two repos can't drift), `deploy/`
   (Helm/Kustomize: CRDs, operator, DaemonSet, RBAC).
 - **The contract is generated, not hand-copied.** `pkg/agent/` is the single typed
   client for: the capabilities manifest (RFC 0015 §5.2), the operator tool/resource
@@ -203,7 +203,7 @@ behind a sidecar.
    surface (RFC 0015) → the node-agent management bridge → `kubectl agent
    get/describe/tree/logs/drain/lame-duck/cancel`. The `Agent` CRD + operator
    rendering `once`/`reactive` pods with vsock + downward-API env. This is usable
-   on day one against the shipped agent v2.2.0.
+   on day one against the shipped agentd v1.0.0.
 2. **Observe.** Telemetry collector + dashboards/alerts off the frozen metrics
    schema (RFC 0016); `top`/`results`.
 3. **Config & reconfigure.** ConfigMap-driven config + the admission webhook
@@ -230,6 +230,6 @@ behind a sidecar.
 
 ---
 
-*See the agent repo's `rfcs/0014`–`0020` for the binding contracts this design
-consumes. Where this doc and an agent RFC disagree on the wire, the RFC wins and
+*See the agentd repo's `rfcs/0014`–`0020` for the binding contracts this design
+consumes. Where this doc and an agentd RFC disagree on the wire, the RFC wins and
 this doc is corrected.*

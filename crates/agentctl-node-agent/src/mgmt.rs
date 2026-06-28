@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! The management-profile client: NDJSON JSON-RPC over a unix socket.
 //!
-//! Implements the consumer half of the contract management wire (agent RFC
+//! Implements the consumer half of the contract management wire (agentd RFC
 //! 0005 §3.6 / RFC 0015): a blocking, thread-per-connection-friendly client that
 //! `initialize`s, lists tools, reads `agent://` resources, and calls operator
 //! tools. It is the only thing that needs the per-pod socket; the operator and

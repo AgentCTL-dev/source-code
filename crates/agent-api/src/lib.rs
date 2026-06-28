@@ -4,7 +4,7 @@
 //! The agentctl custom-resource types — `Agent` and `AgentFleet` — per agentctl
 //! RFC 0003. These are **contract-shaped**: a CR describes contract-level intent
 //! (mode, surfaces to expose, intelligence/MCP bindings, substrate), not any
-//! agent's internals (principle P0). `agent` (the reference agent binary; repo
+//! agent's internals (principle P0). `agentd` (the reference agent binary; repo
 //! `agentd-dev`) is the reference implementation; these types never reference it.
 //!
 //! Generated as kube-rs [`kube::CustomResource`]s. CRD YAML is produced via
@@ -131,7 +131,7 @@ pub struct AgentSpec {
     pub model_pool: Option<String>,
 }
 
-/// The run shape (RFC 0003 §5 / agent RFC 0008).
+/// The run shape (RFC 0003 §5 / agentd RFC 0008).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {

@@ -10,7 +10,7 @@
 > language-neutral contract — the capabilities manifest, the management MCP
 > profile, the frozen metrics + exit-code contract, the config schema, A2A over
 > the substrate, and the downward-API env convention. The reference
-> implementation (the agent whose contract is currently authored in agent RFCs
+> implementation (the agent whose contract is currently authored in agentd RFCs
 > 0014–0020) is the **first** conformant agent, **not a dependency**. This RFC
 > chooses agentctl's *own* implementation stack; it deliberately does **not**
 > choose, constrain, or couple to the data plane's stack.
@@ -274,7 +274,7 @@ machine-readable artifacts it consumes:
 - the **management MCP profile** — the operator tool and resource names (RFC
   0015 §4/§5: `drain` / `lame-duck` / `cancel`, `agent://capabilities` /
   `inventory` / `status` / `events`);
-- the **A2A method set** and the Task/Message/Part shapes (agent RFC 0020) —
+- the **A2A method set** and the Task/Message/Part shapes (agentd RFC 0020) —
   **flagged as a *pending* artifact, not a ready one.** The contract has not yet
   frozen the A2A wire-method strings (the reference impl still cites the 0.2.x
   spelling `SendMessage`/`GetTask`/…, while A2A v1.0 renames them
@@ -623,20 +623,20 @@ node-agent-only hybrid is therefore **rejected**, not deferred.
 - agentctl RFC 0016 — CLI & kubectl-plugin grammar (the three CLI faces / Krew)
 - agentctl RFC 0018 — Codegen & contract conformance (owns the §4 pipeline and the
   CC schema corpus)
-- agent RFC 0014 (the reference impl's contract umbrella) — manifest spine §5,
+- agentd RFC 0014 (the reference impl's contract umbrella) — manifest spine §5,
   `surfaces{}` discovery §6.2, versioning/negotiation §6.3, downward-API env
   §6.4, graceful degradation §8
-- agent RFC 0015 (the reference impl's contract spec) — management & control
+- agentd RFC 0015 (the reference impl's contract spec) — management & control
   surface; manifest schema §5.2, operator tools §4
-- agent RFC 0016 (the reference impl's contract spec) — frozen metrics schema +
+- agentd RFC 0016 (the reference impl's contract spec) — frozen metrics schema +
   exit-code contract
-- agent RFC 0017 (the reference impl's contract spec) — declarative config,
+- agentd RFC 0017 (the reference impl's contract spec) — declarative config,
   `--validate-config` / `--config-schema` (the CC precondition surface)
-- agent RFC 0018 (the reference impl's contract spec) — intelligence transport
+- agentd RFC 0018 (the reference impl's contract spec) — intelligence transport
   resilience
-- agent RFC 0020 (the reference impl's contract spec) — A2A over the substrate
+- agentd RFC 0020 (the reference impl's contract spec) — A2A over the substrate
   (the A2A method set; wire strings not yet frozen — contract ask P2, §4.5)
-- agent RFC 0012 §3.7 (the reference impl) — the `Secret`-has-no-`Serialize`
+- agentd RFC 0012 §3.7 (the reference impl) — the `Secret`-has-no-`Serialize`
   invariant that makes the manifest deliberately untyped (§2.4 / §4.5)
 - `crates/agent-conformance` (the reference impl) — the black-box,
   never-link-the-library conformance pattern agentctl's `crates/conformance`

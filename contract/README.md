@@ -6,7 +6,7 @@ agent** implements. It is published as a set of JSON Schemas (draft 2020-12) plu
 fixtures and frozen data catalogues.
 
 This directory is the **working home** for the contract while it is extracted out of the
-reference implementation's RFCs (agent RFCs 0014–0020). It is structured to later lift into
+reference implementation's RFCs (agentd RFCs 0014–0020). It is structured to later lift into
 its own neutral repository — see *Open question P0* at the bottom.
 
 ---
@@ -14,15 +14,16 @@ its own neutral repository — see *Open question P0* at the bottom.
 ## P0 — agentctl depends on the CONTRACT, never on a specific agent
 
 The foundational principle: **agentctl consumes only this contract; it never depends on a
-specific agent implementation.** The reference `agent` binary is the *reference*
+specific agent implementation.** The reference `agentd` binary is the *reference*
 implementation — the first agent to satisfy the ACC — but it is not privileged. Any binary
 that emits a conformant capabilities manifest, honors the exit-code table, serves the declared
 surfaces, and speaks the declared wire protocols is a conformant agent that agentctl can drive.
 
 The contract is **fully neutral**: it defines only the neutral tokens (`agent_*` env and
 metric prefix, `AGENT_*` env vars, the `agent://` URI scheme, the `agent/*` `_meta`
-namespace). ("agentd" was the pre-rebrand name of the reference agent; the de-brand is
-complete and no branded spellings survive — see *De-branding map*.)
+namespace). Because these tokens are **vendor-neutral**, any agent can implement the
+contract; the reference implementation is **agentd v1.0.0**, which speaks this neutral
+contract (and keeps `agentd://` as a legacy alias of `agent://`) — see *Neutral-wire map*.
 
 ---
 
@@ -31,7 +32,7 @@ complete and no branded spellings survive — see *De-branding map*.)
 ```
 contract/
   VERSION                                  # the contract version: 1.0
-  README.md                                # this file — the ACC overview + P0 + de-branding
+  README.md                                # this file — the ACC overview + P0 + neutral-wire map
   SPEC.md                                  # the spec-level companion: cross-cutting laws, frozen catalogues, sum types, gotchas
   schemas/                                 # CANONICAL finalized schema set (draft 2020-12)
     manifest.schema.json                   # capabilities manifest — the discovery spine
@@ -105,10 +106,11 @@ need a hand-written deserializer:
 
 ---
 
-## De-branding map (P0)
+## Neutral-wire map (P0)
 
-The de-brand is **complete**: the contract defines only the neutral canonical spellings.
-("agentd" was the pre-rebrand name of the reference agent; no branded alias survives.)
+The contract defines only the **neutral** canonical spellings, so any agent can implement it.
+The reference implementation is **agentd v1.0.0**, which speaks this neutral contract (and
+keeps `agentd://` as a legacy alias of `agent://`).
 
 | concern | neutral (canonical) |
 |---|---|
@@ -180,7 +182,7 @@ behavioral conformance suite. Codegen notes:
    bool|string|object discriminations (RFC 0018 §3.3).
 3. **Tolerate unknown additive content** (open objects, unknown surface keys, unknown operator
    tools/metrics). Refuse only an unknown `contract_version` MAJOR.
-4. Target the **neutral spellings** — the contract is fully neutral (see de-branding map).
+4. Target the **neutral spellings** — the contract is fully neutral (see neutral-wire map).
 5. Treat `build_features` as opaque diagnostic metadata — branch on `surfaces{}`, never on a
    feature token.
 
@@ -200,8 +202,8 @@ A new agent is conformant by **behavior**, not by sharing code with the referenc
    naming.
 5. Pass the behavioral conformance suite. The golden fixtures in `fixtures/capabilities/` are
    the validation ground-truth: `default.json` and `full-features.json` are **real captures**
-   from the reference binary (emitting `agent_version`) and together exercise both branches of
-   every sum-type surface key.
+   from the reference `agentd` binary (carrying `agent_version` with value `1.0.0`) and together
+   exercise both branches of every sum-type surface key.
 
 ---
 

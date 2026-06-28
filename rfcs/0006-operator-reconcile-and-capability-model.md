@@ -9,11 +9,11 @@
 > **any agent that conforms to the Agent Control Contract**. It learns what an
 > image can do from the contract's **capabilities manifest** (`--capabilities` /
 > `agent://capabilities`), keys every rendering decision off the manifest's
-> `surfaces{}` discovery block (agent RFC 0014 §6.2), and **drives only what is
+> `surfaces{}` discovery block (agentd RFC 0014 §6.2), and **drives only what is
 > advertised** — never a private flag, file layout, or assumed feature of one
 > binary. A surface absent ⇒ not driven. A contract major it does not understand ⇒
-> managed by liveness + exit codes + logs only (agent RFC 0014 §8). Where this RFC
-> cites a concrete value it names the **reference implementation** (agent RFCs
+> managed by liveness + exit codes + logs only (agentd RFC 0014 §8). Where this RFC
+> cites a concrete value it names the **reference implementation** (agentd RFCs
 > 0014–0020) as *where the contract is presently written down*, not as a dependency.
 
 > **The operator is the single writer of `.status`, and it is level-triggered and
@@ -55,8 +55,8 @@ Three forces shape every decision here, and they are in tension:
    `config_validate`, cannot render an HTTP probe for a networkless pod (agentctl RFC
    0002 §8). Every such decision must be **driven off the manifest's `surfaces{}`**,
    the contract's
-   single discovery point (agent RFC 0014 §6.2), and degrade gracefully when a
-   surface is absent (agent RFC 0014 §8).
+   single discovery point (agentd RFC 0014 §6.2), and degrade gracefully when a
+   surface is absent (agentd RFC 0014 §8).
 
 3. **Reconcile correctness is unforgiving.** A controller that requeues on its own
    status writes hot-loops the apiserver; one that wakes on the wrong edge never
@@ -110,17 +110,17 @@ coordination server (agentctl RFC 0011); CRD versioning/conversion (agentctl RFC
 
 4. **Rendering is manifest-driven: drive only advertised surfaces.** Every
    workload/config/probe/substrate decision keys off the manifest's **`surfaces{}`**
-   discovery block — the contract's single discovery point (agent RFC 0014 §6.2) —
+   discovery block — the contract's single discovery point (agentd RFC 0014 §6.2) —
    and **never** off `build_features`, whose values are opaque/agent-defined and MUST
    NOT be a branch condition (agentctl RFC 0003 §6.1). A surface the image cannot
    serve is **not wired**; an unknown contract major degrades to liveness + exit
-   codes + logs (agent RFC 0014 §8). The capability→render decision map is §6.
+   codes + logs (agentd RFC 0014 §8). The capability→render decision map is §6.
 
 5. **The `CapabilityProbe` is a one-shot, side-effect-free image probe, cached by
    `(digest + feature-set)`.** The operator obtains a manifest for an unseen image
    by running the contract's `--capabilities` entrypoint (a short-lived Job; an
    init-container variant for the same-pod case), which is contractually side-effect
-   free and exits `0` (agent RFC 0015 §5.2). The cache stores **only digest-stable
+   free and exits `0` (agentd RFC 0015 §5.2). The cache stores **only digest-stable
    facts**; per-CR surface *values* are derived from the rendered config, never the
    probe (§5).
 
@@ -139,7 +139,7 @@ coordination server (agentctl RFC 0011); CRD versioning/conversion (agentctl RFC
 
 8. **Finalizers choreograph a clean drain on delete, and never depend on the
    webhook.** A CR finalizer runs lame-duck → drain → clean exit `0` on CR deletion
-   (agent RFC 0011/0015); per-pod scale-down drain is the **pod's** SIGTERM path,
+   (agentd RFC 0011/0015); per-pod scale-down drain is the **pod's** SIGTERM path,
    not the CR finalizer (§7). The operator's own finalizer writes are exempted from
    the fail-closed admission webhook (agentctl RFC 0007) so a webhook outage never
    strands an object in `Terminating` (§7.3).
@@ -265,7 +265,7 @@ node-agent can).
                        ┌─────────────────────────────────────────────────────────┐
    STATIC path         │  IMAGE (by digest) — "what CAN this build do?"            │
    (render time)       │  obtained by: CapabilityProbe Job → `--capabilities`      │
-                       │  (side-effect free, exits 0; agent RFC 0015 §5.2)        │
+                       │  (side-effect free, exits 0; agentd RFC 0015 §5.2)        │
                        │  cached by (digest + feature-set); DIGEST-STABLE facts:   │
                        │   contract_version, build_features, config_schema,        │
                        │   the build-gated surface KEY SET, operator_tools         │
@@ -300,7 +300,7 @@ key-set (never inferred from a `build_features` value), and the operator gets th
 from the
 `CapabilityProbe` (§5): a one-shot `--capabilities` run that is contractually
 side-effect free, runs before any MCP connect / LLM call / socket bind, and emits
-the manifest with live fields at their pre-connect/unknown values (agent RFC 0015
+the manifest with live fields at their pre-connect/unknown values (agentd RFC 0015
 §5.2). The operator deserializes the probe output through the generated
 `agent-contract-client` (agentctl RFC 0001 §4.2), validates it against the published
 manifest schema, and renders against it.
@@ -320,8 +320,8 @@ Once a pod runs, the **node-agent** (the only socket-adjacent component, agentct
 0002 §3 / RFC 0008) holds the attested management connection and reads
 `agent://capabilities` (re-read on hot-reload/model-swap via the `updated`
 notification), `agent://inventory` (the live subagent tree), and `agent://status`
-(identity + lifecycle flags) — agent RFC 0015 §5.2–5.4. It publishes an **observed
-snapshot** correlated to the pod by `identity.uid` (agent RFC 0015 §6). The operator
+(identity + lifecycle flags) — agentd RFC 0015 §5.2–5.4. It publishes an **observed
+snapshot** correlated to the pod by `identity.uid` (agentd RFC 0015 §6). The operator
 **reads** that snapshot and projects the curated `.status` (RFC 0003 §6): the
 *advertised* `surfaces{}` (vs the *intended* `spec.surfaces`), the negotiated
 `contract.version`, the `health` flags, the `Ready` condition reasons
@@ -347,7 +347,7 @@ A single path is tempting and wrong in both directions:
   pod).
 - **"Just use the static manifest for everything"** is wrong for status: the static
   manifest reports live fields (`intelligence.healthy`, subagent counts,
-  `draining`/`paused`) at their unknown/zero values (agent RFC 0015 §5.2), so it
+  `draining`/`paused`) at their unknown/zero values (agentd RFC 0015 §5.2), so it
   cannot describe a *running* instance. Status needs the LIVE read.
 
 The two paths answer two genuinely different questions — *what can this image do* vs
@@ -367,9 +367,9 @@ it runs the contract's static capabilities entrypoint and reads the result:
   Job (`restartPolicy: Never`, tight `activeDeadlineSeconds`, the exact target image,
   no intelligence binding, no MCP servers, no network) whose command is the
   contract's static-capabilities invocation — reference impl: `agent --capabilities`
-  (agent RFC 0015 §5.2). The contract guarantees this is **side-effect free, binds
-  no socket, makes no LLM call, and exits `0`** (agent RFC 0011 §3.3 discipline,
-  agent RFC 0015 §5.2). The operator captures the JSON (from the pod's logs or a
+  (agentd RFC 0015 §5.2). The contract guarantees this is **side-effect free, binds
+  no socket, makes no LLM call, and exits `0`** (agentd RFC 0011 §3.3 discipline,
+  agentd RFC 0015 §5.2). The operator captures the JSON (from the pod's logs or a
   shared `emptyDir` file), validates it against the published manifest schema
   (agentctl RFC 0001 §4.1), and caches it. The probe Job carries an `ownerReference`
   to the **singleton cache object** (or, absent one, the operator `Deployment`) — a
@@ -402,7 +402,7 @@ populates the cache out of band.
   "surfaceKeySet":   ["management","operator_tools","metrics","metrics_schema",
                       "events","hot_reload","config_validate","exit_codes"],
                                              // the surface KEYS this BUILD can ever advertise
-  "operatorTools":   ["drain","lame-duck","cancel"], // surfaces.operator_tools (agent RFC 0015 §5.2)
+  "operatorTools":   ["drain","lame-duck","cancel"], // surfaces.operator_tools (agentd RFC 0015 §5.2)
   "exitCodesTag":    "RFC-0011-§5",          // the exit-code table version → podFailurePolicy (§6)
   "execHealthVerb":  false,                  // P1 advertisement (agentctl RFC 0002 §8); false until P1
   "probedAt":        "2026-06-27T09:40:00Z",
@@ -449,20 +449,20 @@ sharing the digest.
 This is the operative meaning of "manifest-driven, never agent-assumed." The renderer
 (agentctl RFC 0003 §5 specifies the *table*; this RFC *implements* it) keys every
 decision off the cached STATIC capability (§5) and degrades gracefully where a
-surface is absent (agent RFC 0014 §8). It **drives only what is advertised**.
+surface is absent (agentd RFC 0014 §8). It **drives only what is advertised**.
 
 ### 6.1 The capability → rendering decision map
 
 | Capability fact (STATIC, from the manifest) | If present | If absent (graceful degradation) |
 |---|---|---|
-| `contract_version` **major** understood | render full management wiring + status projection | render workload **only**; `ContractCompatible=False`; manage by **liveness + exit codes + logs** (agent RFC 0014 §8) |
+| `contract_version` **major** understood | render full management wiring + status projection | render workload **only**; `ContractCompatible=False`; manage by **liveness + exit codes + logs** (agentd RFC 0014 §8) |
 | `surfaces.management` key present in the manifest key-set | wire the management socket + substrate descriptor (RFC 0002 §6); node-agent discovers + attests | no management socket; `surfaces.management:false` in status; lifecycle via SIGTERM only (§7) |
 | `surfaces.hot_reload` (RFC 0017) | render **two ConfigMaps** — stable-named reloadable + content-hashed restart-only (§6.4) | render **one** content-hashed immutable ConfigMap; reload = pod recreate |
 | `surfaces.config_validate` / `config_schema` (RFC 0017, P6) | render the `--validate-config` **init-container** (ground-truth, RFC 0007); admission validates against cached schema | skip the init-container; rely on the webhook JSON-schema rung only; `ConfigValidatedAtRuntime` unset |
 | exec-health verb advertised (P1, agentctl RFC 0002 §8) | render **`exec`** liveness/readiness probes invoking the verb (the only option on networkless tiers) | networkless tier **not shippable** (RFC 0002 §8); networked tier falls back to `httpGet /readyz` only if an HTTP health surface is advertised |
 | `surfaces.metrics` (addr / `false`) | render metrics scrape wiring (agentctl RFC 0010); TCP or in-socket per RFC 0002 §3 (P4) | no scrape target; metrics columns/`top` empty |
 | `surfaces.operator_tools` ⊇ `drain`/`lame-duck`/`cancel` | finalizer choreography uses the management tools (§7) | finalizer falls back to **SIGTERM-only** drain (pod delete) |
-| fleet ownership: `work.claim` references a coordination MCP server (claim mode, agentctl RFC 0003 §4.2 / agent RFC 0019 §3) **or** shard config + the `--shard auto/N` ask (shard mode, P3) | render fleet ownership wiring + KEDA `ScaledObject` (agentctl RFC 0011) | reject the fleet at admission (RFC 0007) — a fleet needs an ownership regime (claim coordination server or shard config) |
+| fleet ownership: `work.claim` references a coordination MCP server (claim mode, agentctl RFC 0003 §4.2 / agentd RFC 0019 §3) **or** shard config + the `--shard auto/N` ask (shard mode, P3) | render fleet ownership wiring + KEDA `ScaledObject` (agentctl RFC 0011) | reject the fleet at admission (RFC 0007) — a fleet needs an ownership regime (claim coordination server or shard config) |
 | `surfaces.a2a` (P2 — **not in the frozen manifest**) | wire the A2A surface (agentctl RFC 0013) | **inert**; set `A2AUnsupported`; do not wire A2A (RFC 0003 §3.3) |
 
 The rule is uniform: **the renderer asks the manifest, not the binary's name.** A
@@ -487,11 +487,11 @@ the renderer only ever asserts the first two.
 
 ### 6.3 The downward-API env and substrate wiring
 
-The renderer injects the contract's downward-API env convention (agent RFC 0014 §6.4,
+The renderer injects the contract's downward-API env convention (agentd RFC 0014 §6.4,
 the exact set in agentctl RFC 0003 §9) — `*_POD_NAME`/`_UID`/`_NAMESPACE`/`_NODE_NAME`,
 `*_POD_GRACE_SECONDS` (= `terminationGracePeriodSeconds`, preserving `drain < grace`),
-and the per-endpoint intelligence credential env (agent RFC 0014 §6.4). These are
-**descriptive, never load-bearing** (agent RFC 0015 §6). The substrate wiring (the
+and the per-endpoint intelligence credential env (agentd RFC 0014 §6.4). These are
+**descriptive, never load-bearing** (agentd RFC 0015 §6). The substrate wiring (the
 per-pod hostPath socket subdir via `subPathExpr`, or the Kata `runtimeClassName`, or
 the sidecar) is rendered per the tier the `AgentClass`/`spec.substrate` selects
 (agentctl RFC 0002 §6, RFC 0003 §3.2). The renderer carries the **`AGENT_SHARD`
@@ -504,7 +504,7 @@ non-scratch image.
 
 A single content-hashed immutable ConfigMap is **never re-projected** into a running
 pod, so inotify/SIGHUP hot-reload cannot fire from it (brainstorm §3.2). When the
-image advertises `hot_reload` (agent RFC 0017), the renderer partitions the rendered
+image advertises `hot_reload` (agentd RFC 0017), the renderer partitions the rendered
 config into **two** ConfigMaps:
 
 ```
@@ -520,7 +520,7 @@ This is the mechanically correct way to make "edit config, agent reloads without
 restart" work and "edit a restart-only field, agent rolls" work — and it is **gated
 on the `hot_reload` surface** (an agent without it gets one immutable ConfigMap and
 reload-by-restart). The reloadable-vs-restart partition itself is the contract's
-(agent RFC 0017); the renderer reads it and lays out the two objects.
+(agentd RFC 0017); the renderer reads it and lays out the two objects.
 
 ---
 
@@ -531,7 +531,7 @@ reload-by-restart). The reloadable-vs-restart partition itself is the contract's
 | Trigger | Path | Mechanism |
 |---|---|---|
 | **CR deletion** (`kubectl delete agent …`) | **CR finalizer** | the operator runs lame-duck → drain → clean exit `0` via the management tools, then removes the finalizer (§7.2) |
-| **Fleet scale-down** (KEDA deletes a replica pod) | **the POD's SIGTERM path** | `terminationGracePeriodSeconds` + SIGTERM → the agent's own drain choreography → claim-release (agent RFC 0019 §6); the CR finalizer does **not** fire (no CR deletion) |
+| **Fleet scale-down** (KEDA deletes a replica pod) | **the POD's SIGTERM path** | `terminationGracePeriodSeconds` + SIGTERM → the agent's own drain choreography → claim-release (agentd RFC 0019 §6); the CR finalizer does **not** fire (no CR deletion) |
 
 A CR finalizer fires only on CR deletion, so it is the wrong tool for per-pod
 scale-down; that drain rides the pod's grace + the agent's SIGTERM handling (agent
@@ -543,13 +543,13 @@ brainstorm §3.2 trap.
 ### 7.2 The CR-delete finalizer choreography
 
 On `deletionTimestamp` set, the `AgentReconciler` runs the graceful sequence (built on
-the contract's lifecycle tools, agent RFC 0015 §4) **before** removing the finalizer
+the contract's lifecycle tools, agentd RFC 0015 §4) **before** removing the finalizer
 that releases the object to GC:
 
 ```
 handleFinalizer(agent):
   1. lame-duck the instance(s)  → flip readiness NotReady WITHOUT exiting
-     (agent RFC 0015 §4.2); new reactive triggers stop routing, in-flight bleeds off.
+     (agentd RFC 0015 §4.2); new reactive triggers stop routing, in-flight bleeds off.
      [via the node-agent management API; tolerate unreachable → fall through to (3)]
   2. wait for in-flight to drain (watch agent://inventory active count / agent_active_subagents),
      bounded by the CR's drain budget.
@@ -557,7 +557,7 @@ handleFinalizer(agent):
        • RECREATING kinds (Deployment / StatefulSet / CronJob): scale the workload to 0
          (or delete the controller object / suspend the CronJob) BEFORE/AS the drain, so
          the controller cannot start a replacement; the resulting pod SIGTERM IS the drain
-         trigger → clean exit 0 (agent RFC 0015 §4.1, agent RFC 0011 §4.2/§5). A bare
+         trigger → clean exit 0 (agentd RFC 0015 §4.1, agentd RFC 0011 §4.2/§5). A bare
          management "drain → exit 0" on a still-live controller would be UNDONE — the
          controller recreates the lame-ducked pod, un-drained, possibly processing work.
        • NON-RECREATING kinds (once/Job): the management "drain → exit 0" IS the primary
@@ -575,7 +575,7 @@ not just a fallback** (brainstorm §4.2): for any recreating controller, "delete
 the workload before draining" is required precisely because SIGTERM≡drain≡exit-0 on a
 pod whose controller is still live would be reverted by an un-drained replacement.
 
-`drain` is **idempotent and monotonic** (agent RFC 0015 §8): a second `drain`, or a
+`drain` is **idempotent and monotonic** (agentd RFC 0015 §8): a second `drain`, or a
 SIGTERM arriving after the tool call, re-reports the snapshot — so the finalizer is
 safe to re-run on requeue, exactly as a level-triggered loop requires.
 
@@ -680,7 +680,7 @@ For an elastic fleet (claim mode, agentctl RFC 0003 §4.3), the KEDA-generated H
 ### 8.6 `podFailurePolicy` is compiled from the exit-code contract — and unmatched codes retry
 
 For `once`/`schedule` (Job-backed) workloads the renderer compiles `podFailurePolicy`
-from the exit-code table the build honours (agent RFC 0011 §5, cache `exitCodesTag`):
+from the exit-code table the build honours (agentd RFC 0011 §5, cache `exitCodesTag`):
 
 | Exit code(s) | Action | Why |
 |---|---|---|
@@ -712,7 +712,7 @@ AgentReconciler.reconcile(agent):                          [level-triggered; ide
         └─ miss ▶ run CapabilityProbe Job (`--capabilities`, side-effect free) → cache → requeue-soon
   6. contractMajor understood?  ──no──▶ render workload-only;
                                          status.ContractCompatible=False; manage liveness+exitcodes+logs
-                                         (agent RFC 0014 §8); goto 11
+                                         (agentd RFC 0014 §8); goto 11
  ──────────────────────────────── resolve refs (RFC 0004) ──────────────────────────────
   7. class  := resolve(AgentClass)        // substrate tier, contractVersionRange, default limits
      intel  := resolve(IntelligenceService/ModelPool)  // ordered endpoint list (RFC 0018)
@@ -779,7 +779,7 @@ nothing. That is the whole point of level-triggering.
   cluster for the management-by-unix-socket path.
 - **Graceful degradation is the default, not an edge case.** An image advertising a
   partial `surfaces{}` is rendered to exactly what it can serve (§6.1); an unknown
-  contract major is managed by liveness + exit codes + logs (agent RFC 0014 §8). The
+  contract major is managed by liveness + exit codes + logs (agentd RFC 0014 §8). The
   operator never refuses to render because a surface is missing — it renders *less*.
 - **Capability-affecting contract asks gate specific render branches**, not the loop:
   P6 (`--config-schema`/`--validate-config`) gates the validate-config init-container
@@ -818,7 +818,7 @@ nothing. That is the whole point of level-triggering.
 5. **Drain-budget vs grace coupling in the finalizer (§7.2).** The finalizer's bounded
    drain deadline must be ≤ the pod grace; confirm the precedence when the CR's
    `drain.timeoutSeconds`, the `AgentClass` default, and the contract's
-   `drain_timeout_ms` (agent RFC 0015 §5.2) disagree.
+   `drain_timeout_ms` (agentd RFC 0015 §5.2) disagree.
 6. **Resolve-on-class-change fan-out (§3.3).** An `AgentClass` default change wakes every
    dependent `Agent`; on a large fleet this is a reconcile storm. Rate-limit/debounce
    policy for the `.watches(AgentClass)` mapper (owned with agentctl RFC 0004).
@@ -866,32 +866,32 @@ nothing. That is the whole point of level-triggering.
 - **agentctl RFC 0013** — A2A gateway & task store: the A2A surface §6.1 holds inert
   until contract ask P2.
 
-**Contract spec (the reference implementation, agent RFCs)**
+**Contract spec (the reference implementation, agentd RFCs)**
 
-- **agent RFC 0014** — control-plane contract umbrella: the capabilities-manifest
+- **agentd RFC 0014** — control-plane contract umbrella: the capabilities-manifest
   spine (§5), `surfaces{}` as the single discovery point (§6.2), contract versioning
   /negotiation (§6.3), the downward-API env convention (§6.4), graceful degradation
   (§7/§8) — the spine the whole manifest-driven model keys off.
-- **agent RFC 0015** — management & control surface: the manifest schema and its
+- **agentd RFC 0015** — management & control surface: the manifest schema and its
   static-vs-live emission (§5.2), `agent://inventory`/`status` (§5.3/§5.4), the
   operator tools `drain`/`lame-duck`/`cancel` (§4) the finalizer uses, reconnect = a
   clean re-read (§8) that makes the LIVE path idempotent.
-- **agent RFC 0016** — telemetry & lifecycle contract: the frozen metrics schema +
+- **agentd RFC 0016** — telemetry & lifecycle contract: the frozen metrics schema +
   exit-code table the `podFailurePolicy` compiles from (§8.6) and the scrape surface
   status projects.
-- **agent RFC 0017** — declarative config & hot reload: the config-file schema the
+- **agentd RFC 0017** — declarative config & hot reload: the config-file schema the
   two-ConfigMap partition (§6.4) lays out, `--validate-config`/`--config-schema`
   (contract ask P6), the reloadable-vs-restart allowlist.
-- **agent RFC 0011** — cloud-native contract: the exit-code table (§5) and the drain
+- **agentd RFC 0011** — cloud-native contract: the exit-code table (§5) and the drain
   state machine / clean exit `0` (§4.2) the §7 choreography invokes; the
   validate-at-startup discipline the `CapabilityProbe` relies on for side-effect-free
   `--capabilities`.
-- **agent RFC 0019** — horizontal scaling: claim/shard ownership, the claim-release
+- **agentd RFC 0019** — horizontal scaling: claim/shard ownership, the claim-release
   drain (§6) the pod-SIGTERM path runs, the `AGENT_SHARD` defect (§4.2, contract ask
   P3).
-- **agent RFC 0008** — execution modes & reactive routing: the `mode` vocabulary and
+- **agentd RFC 0008** — execution modes & reactive routing: the `mode` vocabulary and
   the internal-cron-vs-CronJob mutual exclusion the §8.5 render enforces.
-- **agent RFC 0012** — security posture: the trifecta tags the renderer carries and
+- **agentd RFC 0012** — security posture: the trifecta tags the renderer carries and
   the `Secret`-has-no-`Serialize` invariant that keeps the probed manifest secret-free.
 
 **Contract asks raised or cited by this RFC** (agentctl brainstorm §14): **P1**

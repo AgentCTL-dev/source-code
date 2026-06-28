@@ -11,7 +11,7 @@
 > its own release cadence). Three independent clocks therefore tick under this
 > RFC: the **agentctl release** (its component images + CRDs), the **CRD
 > `apiVersion`** (agentctl RFC 0005, Axis A), and the agent **`contract_version`**
-> (agent RFC 0014 §6.3, Axis B — the reference impl's contract spec). Every
+> (agentd RFC 0014 §6.3, Axis B — the reference impl's contract spec). Every
 > lifecycle operation below is precise about *which clock* is moving, because the
 > single most expensive lifecycle mistake is letting one clock drag the others.
 
@@ -66,7 +66,7 @@ many clusters. Four lifecycle concerns fall out of that shape, and the brainstor
 
 This RFC owns the **policy and choreography** for all four. It does **not**
 redefine the machinery the siblings already own — it *sequences* it: the drain
-contract (agent RFC 0011 §4 / agent RFC 0015 §4), the digest-keyed
+contract (agentd RFC 0011 §4 / agentd RFC 0015 §4), the digest-keyed
 `CapabilityProbe` capability model (RFC 0006 §4/§5), the conversion-webhook + SVM
 mechanics (RFC 0005 §5), the durable-store + relay model (RFC 0013), the
 coordination server (RFC 0011), the card-signer key lifecycle (RFC 0014 §4.3),
@@ -99,7 +99,7 @@ work or strand a fleet. The unit of the roll is an **image digest**: changing
 `AgentClass.image` (the common case — one edit rolls every Agent pinned to that
 class) or an Agent's inline `spec.image` (RFC 0003 §3.1) from `sha256:OLD` to
 `sha256:NEW`. Because the agent holds **no durable state** (distillate-only;
-agent RFC 0009 / RFC 0020 §6), the roll is a pod-replacement problem with a
+agentd RFC 0009 / RFC 0020 §6), the roll is a pod-replacement problem with a
 contract-renegotiation problem layered on top — *not* a data-migration problem.
 
 ```
@@ -125,9 +125,9 @@ AgentClass.image  sha256:OLD ──► sha256:NEW   (one edit; reconcile, RFC 00
       A dropped OPTIONAL surface degrades gracefully; a dropped REQUIRED surface already HELD at step 3
       ("degrade, never assume" applies to OPTIONAL surfaces only; RFC 0006 §6, 0014 §8)
    5. PARTITIONED roll (canary, §3.3). Per replaced pod:
-        lame-duck (NotReady; stop taking new work)         agent RFC 0015 §4.2
+        lame-duck (NotReady; stop taking new work)         agentd RFC 0015 §4.2
           └► drain (SIGTERM) → wind down at turn boundary → bleed in-flight
-             → release claims → flush → exit 0             agent RFC 0011 §4.2 / agentctl RFC 0011 §3.3
+             → release claims → flush → exit 0             agentd RFC 0011 §4.2 / agentctl RFC 0011 §3.3
           └► NEW pod up → node-agent re-`initialize` + re-attest + re-read manifest
              (LIVE re-negotiation)                          RFC 0008 §3.3 / RFC 0002 §7
    6. gate on health → PROMOTE (finish) | ROLLBACK (revert digest, §3.4)
@@ -139,13 +139,13 @@ Replacing a pod cleanly is a **two-step** sequence, and conflating the steps is
 the classic error. The contract gives agentctl two distinct primitives (agent
 RFC 0015 §4):
 
-- **`lame-duck`** is *stay-resident, flip readiness to NotReady* (agent RFC 0015
+- **`lame-duck`** is *stay-resident, flip readiness to NotReady* (agentd RFC 0015
   §4.2). It does **not** exit. It removes the pod from Service endpoints and from
   the work it would newly accept, while letting in-flight work finish.
-- **`drain` ≡ SIGTERM ≡ clean exit `0`** (agent RFC 0015 §4.1 / agent RFC 0011
+- **`drain` ≡ SIGTERM ≡ clean exit `0`** (agentd RFC 0015 §4.1 / agentd RFC 0011
   §4.2). The management `drain` tool *is* SIGTERM; it is **not** a
   drain-without-delete. A clean drain returns **`0`, not `143`** — the load-bearing
-  exit-code fact (agent RFC 0011 §5) that makes a rolled reactive/loop
+  exit-code fact (agentd RFC 0011 §5) that makes a rolled reactive/loop
   Deployment look like success in dashboards instead of a `143` failure.
 
 So the operator-driven graceful replacement is: **lame-duck (optional, for
@@ -154,11 +154,11 @@ zero-drop) → SIGTERM the pod → the agent's bounded drain runs inside
 hard couplings carry over verbatim:
 
 - **`drain.timeoutSeconds` < `terminationGracePeriodSeconds`** (the RFC 0003 CEL
-  invariant; agent RFC 0011 §3.3). If the kubelet's SIGKILL lands before the
+  invariant; agentd RFC 0011 §3.3). If the kubelet's SIGKILL lands before the
   drain budget elapses, the clean exit is lost (becomes `137`/`143`) and
   in-flight work is dropped — the internal budget is always the smaller number.
 - **claim-mode fleets drain → bleed → release** (agentctl RFC 0011 §3.3; the
-  agent-side claim-release contract is agent RFC 0019 §6): a rolled claim-mode pod
+  agent-side claim-release contract is agentd RFC 0019 §6): a rolled claim-mode pod
   MUST release its held claims so the item is re-offered rather than orphaned until a
   lease TTL elapses. This is the pod's SIGTERM path, **not** a CR finalizer (RFC 0006
   §8) — the roll deletes individual replica pods, not the CR.
@@ -186,7 +186,7 @@ config schema. The roll therefore re-runs the **two-path capability model**
 1. **STATIC, pre-pod (the gate).** The `CapabilityProbe` re-probes the new digest
    (a cache **miss** by construction — the cache is digest-keyed; the *old* digest
    stays cached, which is what makes rollback a cache hit, §3.4). agentctl reads
-   the new manifest and negotiates per agent RFC 0014 §6.3: it **refuses an
+   the new manifest and negotiates per agentd RFC 0014 §6.3: it **refuses an
    instance whose major it does not know** and reads minor + the independently
    versioned sub-schemas (`metrics_schema`, `report_schema`, `config_schema`,
    `exit_codes`) to branch. The gate is **two-part, both keyed off the contract**:
@@ -238,7 +238,7 @@ control plane already produces — agentctl invents no new telemetry for it:
 
 - `ContractCompatible=True` and `Ready=True` on the canary pods (RFC 0003 §6.2);
 - the frozen liveness/exit signals — canary pods exiting **`0` cleanly** (a clean
-  drain is `0`, **not** `143`; §3.1, agent RFC 0011 §5). **`143` is a NEGATIVE
+  drain is `0`, **not** `143`; §3.1, agentd RFC 0011 §5). **`143` is a NEGATIVE
   signal**, alongside `2` (config/usage — non-retriable, a sign the new build rejects
   the rendered config), `4` (intelligence), and `6` (MCP): a canary that consistently
   exits `143` is failing to drain within budget and dropping in-flight work (§3.1), so
@@ -675,7 +675,7 @@ short, enumerable list of fetch points, each given an offline mode.
 ## Non-goals
 
 - **Redefining the machinery the siblings own.** This RFC *sequences* the drain
-  contract (agent RFC 0011 / RFC 0015 §4), the capability model (RFC 0006), the
+  contract (agentd RFC 0011 / RFC 0015 §4), the capability model (RFC 0006), the
   conversion/SVM mechanics (RFC 0005 §5), the durable store (RFC 0013), the
   coordination server (RFC 0011), the card-signer key lifecycle (RFC 0014 §4.3),
   the internal PKI/egress trust model (RFC 0015), and the codegen/conformance
@@ -796,24 +796,24 @@ short, enumerable list of fetch points, each given an offline mode.
   schema pinning + conformance suite (the §8.2 air-gap-clean contract path; the
   §6.3 restore-drill chaos lane); the P0 neutral-contract extraction home.
 
-**Contract spec (the reference implementation, agent RFCs)**
+**Contract spec (the reference implementation, agentd RFCs)**
 
-- **agent RFC 0011** — cloud-native contract: §3.3 (`drain_timeout` <
+- **agentd RFC 0011** — cloud-native contract: §3.3 (`drain_timeout` <
   `terminationGracePeriodSeconds`), §4 (the drain choreography — disarm → wind
   down at turn boundary → ladder → flush → exit), §5 (the exit-code table; clean
   drain = `0` not `143`; `2` non-retriable; the canary gate's signals) — the
   reference impl's spec.
-- **agent RFC 0014** — control-plane contract umbrella: §6.2 (`surfaces{}` as the
+- **agentd RFC 0014** — control-plane contract umbrella: §6.2 (`surfaces{}` as the
   single discovery point the re-render keys off), §6.3 (`contract_version`
   negotiation — refuse-unknown-major, read minor + sub-schemas — the §3.2 STATIC
   re-negotiation), §8 (graceful degradation) — the reference impl's spec.
-- **agent RFC 0015** — management & control surface: §4.1 (`drain` ≡ SIGTERM ≡
+- **agentd RFC 0015** — management & control surface: §4.1 (`drain` ≡ SIGTERM ≡
   exit 0), §4.2 (`lame-duck` = stay-resident NotReady), §4.3 (`pause`/`resume` are
   *specified* here), §8 (reconnect = clean re-read) — the reference impl's spec. That
   the reference impl's `OPERATOR_TOOLS = [drain, lame-duck, cancel]` ships **without**
   `pause`/`resume` (the P-pause gap) is an *implementation* fact verified against
-  agent source in **brainstorm §0.6**, not something agent RFC 0015 §4 states.
-- **agent RFC 0009 / RFC 0020 §6** — distillate-only statelessness (why the agent
+  agent source in **brainstorm §0.6**, not something agentd RFC 0015 §4 states.
+- **agentd RFC 0009 / RFC 0020 §6** — distillate-only statelessness (why the agent
   roll is a pod-replacement, not a data-migration, problem) — the reference impl's
   spec.
 

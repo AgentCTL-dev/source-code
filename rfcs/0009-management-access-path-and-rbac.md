@@ -13,9 +13,9 @@
 > **aggregated APIServer** (an `APIService`/extension-apiserver) so per-verb RBAC
 > (`SubjectAccessReview`) and end-user identity **survive** to the node-agent.
 
-> **Reachability == authority is the entire problem (agent RFC 0015 §7).** A
+> **Reachability == authority is the entire problem (agentd RFC 0015 §7).** A
 > conformant agent has *no in-band auth*: whoever can reach the management
-> transport may call `drain`/`lame-duck`/`cancel`/`subagent.send` (agent RFC
+> transport may call `drain`/`lame-duck`/`cancel`/`subagent.send` (agentd RFC
 > 0015 §3.4/§7). The node-agent holds an attested management connection to **every
 > local pod** (agentctl RFC 0002/0008). So the node-agent is a single,
 > all-tenants-reaching PEP, and agentctl owns **100% of authn/authz at the access
@@ -38,12 +38,12 @@
 agentctl turns lifecycle intent into action on a running conformant agent through
 exactly one socket-adjacent component: the **node-agent** (agentctl RFC 0008),
 which holds an *attested* management connection (agentctl RFC 0002 §7) to each
-local agent pod and speaks the agent's self-MCP management profile (agent RFC
+local agent pod and speaks the agent's self-MCP management profile (agentd RFC
 0015 §3/§4). Two completely different callers need that same set of verbs:
 
 1. **The operator** — leader-elected, autonomous, high-volume, in-cluster
    (agentctl RFC 0006). It reads the live capability snapshot every reconcile
-   (agent RFC 0015 §5.2–5.4 → agentctl RFC 0006 §4.2), drives drain choreography
+   (agentd RFC 0015 §5.2–5.4 → agentctl RFC 0006 §4.2), drives drain choreography
    on finalizer/scale-down, and reflects status. It is **one machine identity**,
    it needs **low, predictable latency decoupled from human traffic**, and it
    authenticates with a client certificate, not a human credential.
@@ -57,25 +57,25 @@ local agent pod and speaks the agent's self-MCP management profile (agent RFC
    when, landed in the cluster audit log).
 
 The verbs themselves are not invented here — they are the agent's **operator
-profile** (agent RFC 0015 §4), discovered from `surfaces.operator_tools` in the
-manifest (agent RFC 0015 §5.2) and driven only as advertised (graceful
-degradation, agent RFC 0014 §8):
+profile** (agentd RFC 0015 §4), discovered from `surfaces.operator_tools` in the
+manifest (agentd RFC 0015 §5.2) and driven only as advertised (graceful
+degradation, agentd RFC 0014 §8):
 
-| Verb (kubectl agent) | Underlying agent surface (agent RFC 0015) | Shape |
+| Verb (kubectl agent) | Underlying agent surface (agentd RFC 0015) | Shape |
 |---|---|---|
 | `drain` | `drain` tool (§4.1) — ≡ SIGTERM ≡ clean exit 0 | mutating |
 | `lame-duck` | `lame-duck` tool (§4.2) — readiness flip, reversible | mutating |
 | `pause` / `resume` | `pause`/`resume` (§4.3) — **flagged P-pause** (below) | mutating |
 | `cancel <handle>` | `cancel` tool (§4.4) — wraps `subagent.cancel` | mutating |
 | `attach` | **`subagent.send`** (§4.5) — live steering; **gated** (§6) | mutating (steer) |
-| `logs -f` (live tail) | `agent://events` (agent RFC 0016) | streaming read |
+| `logs -f` (live tail) | `agent://events` (agentd RFC 0016) | streaming read |
 | `tree -w` (live) | `agent://inventory` (§5.3) | streaming read |
-| `top -w` (live) | `agent://metrics` / `agent_*` (ask **P4** — to be defined in agent RFC 0005/0015) | streaming read |
+| `top -w` (live) | `agent://metrics` / `agent_*` (ask **P4** — to be defined in agentd RFC 0005/0015) | streaming read |
 | `describe`/`get`/`results`/static `top`/`card` | `Agent.status` / persisted store / gateway | **cold** (no access-path hop) |
 
 > **P-pause caveat (verified against the reference impl, brainstorm §0.6).** The
 > reference implementation's `OPERATOR_TOOLS` is `["drain","lame-duck","cancel"]`
-> today — `pause`/`resume` are specified by the contract (agent RFC 0015 §4.3)
+> today — `pause`/`resume` are specified by the contract (agentd RFC 0015 §4.3)
 > but **not yet implemented** (contract ask **P-pause**). Because the access path
 > renders its verb set from `surfaces.operator_tools`, not from a hardcoded list,
 > a `pause` verb on a binary that does not advertise it is simply **not exposed**
@@ -85,7 +85,7 @@ degradation, agent RFC 0014 §8):
 
 **The structural fact that organizes the whole design:** a conformant agent
 exposes its management surface with **no auth** — the transport *is* the boundary
-(agent RFC 0015 §3.3/§7, agent RFC 0012 §3.8). "Whoever can reach the
+(agentd RFC 0015 §3.3/§7, agentd RFC 0012 §3.8). "Whoever can reach the
 management transport may call the operator tools." The node-agent is precisely
 the principal that can reach it — for *every* pod on its node, across *every*
 tenant namespace. That makes the node-agent's management API a single
@@ -179,7 +179,7 @@ node-agent (D5).
                                                   │    (descriptor + SO_PEERCRED/uds — RFC 0002 §7) │
                                                   └───────────────────────┬─────────────────────────┘
                                        reachability == authority          │ unix:PATH | vsock:PORT
-                                       (agent RFC 0015 §7)               ▼ PeerOrigin::Management
+                                       (agentd RFC 0015 §7)               ▼ PeerOrigin::Management
                                                   ┌──────────────────────────────────────────────┐
                                                   │  conformant agent pod (the reference impl: agent)│
                                                   │  self-MCP operator profile: drain · lame-duck ·  │
@@ -455,16 +455,16 @@ distinct, aggregation-owned GroupVersion of §4.4 — *not* the CRD's
 set of **connect subresources** — the thing a CRD cannot do (§3.1) but an
 extension-apiserver can:
 
-| Aggregated subresource | RBAC verb | Backs (agent RFC 0015) | Kind |
+| Aggregated subresource | RBAC verb | Backs (agentd RFC 0015) | Kind |
 |---|---|---|---|
 | `agents/drain` | `create` | `drain` tool (§4.1) | mutating (connect) |
 | `agents/lame-duck` | `create` | `lame-duck` tool (§4.2) | mutating (connect) |
 | `agents/pause` | `create` | `pause`/`resume` (§4.3, **P-pause**) | mutating (connect) |
 | `agents/cancel` | `create` | `cancel` tool (§4.4) | mutating (connect) |
 | `agents/attach` | `create` | **`subagent.send`** (§4.5) — **gated, §6** | mutating (connect/stream) |
-| `agents/log` | `get` | `agent://events` (agent RFC 0016) | streaming read |
+| `agents/log` | `get` | `agent://events` (agentd RFC 0016) | streaming read |
 | `agents/inventory` | `get` | `agent://inventory` (§5.3) — backs `tree -w` | streaming read |
-| `agents/metrics` | `get` | `agent://metrics` (ask **P4** — to be defined in agent RFC 0005/0015; referenced by RFC 0019) — backs live `top` | streaming read |
+| `agents/metrics` | `get` | `agent://metrics` (ask **P4** — to be defined in agentd RFC 0005/0015; referenced by RFC 0019) — backs live `top` | streaming read |
 
 The **verb-on-subresource** choice mirrors kubelet idiom precisely: **mutating /
 write-stream** verbs use `create` (as `pods/exec`, `pods/attach` do); **read /
@@ -577,7 +577,7 @@ Kubernetes authz wholesale (the explicitly-rejected alternative, brainstorm D5):
 
 The descriptive caller/tenant identity the node-agent forwards onto the agent's
 `_meta` (agent ask **P-meta**) is **never re-verified by the agent** — exactly
-like the downward-API identity (agent RFC 0015 §6). Authority lives entirely in
+like the downward-API identity (agentd RFC 0015 §6). Authority lives entirely in
 agentctl's two PEPs; the agent only *records* who asked.
 
 ### 5.4 RBAC examples
@@ -636,7 +636,7 @@ stock RBAC (group-qualified per §4.4.1).
 `attach` is categorically different from every other verb, and hostile tenancy
 makes the difference load-bearing. `drain`/`cancel`/`lame-duck`/observe are
 *lifecycle and read* operations; **`attach` is live puppeting** — it is
-`subagent.send` (agent RFC 0015 §4.5), injecting free-text steering into a warm
+`subagent.send` (agentd RFC 0015 §4.5), injecting free-text steering into a warm
 session via `ctrl/inject`. The contract ask is exactly the brainstorm's
 **P-attach-gate**: *a caller must be able to `drain`/`cancel`/observe a neighbour
 under a shared PEP, but not steer it* (brainstorm §0.6 tenancy row (c), §10.2).
@@ -652,10 +652,10 @@ passes through that gate.
 
 **Layer 2 — a contract per-tool gate on the management transport
 (P-attach-gate).** RBAC at the front is **not** sufficient by itself, for two
-contract-level reasons (agent RFC 0015 §10.2, brainstorm §10.2):
+contract-level reasons (agentd RFC 0015 §10.2, brainstorm §10.2):
 
 1. **`subagent.send` is a *work* tool, not an operator tool.** It is listed to
-   **both** `Stdio` and `Management` peers (agent RFC 0015 §3.4 / §4.5) — it is
+   **both** `Stdio` and `Management` peers (agentd RFC 0015 §3.4 / §4.5) — it is
    not gated by `PeerOrigin` the way `drain` is. So at the node-agent PEP, *any*
    principal that can reach the management transport can call it — i.e.
    reachability == steering, not just reachability == lifecycle. Under a
@@ -674,7 +674,7 @@ requirement is agentctl RFC 0015). With it, "no live-puppeting for tenant X" is
 **structural** at the PEP — the node-agent, configured for a no-puppeting tenant,
 serves a management surface on which steering is *not present*, so even a
 front-side RBAC bug cannot reach it. This is the same capability-absence-not-error
-shape the contract uses everywhere (agent RFC 0015 §2.5).
+shape the contract uses everywhere (agentd RFC 0015 §2.5).
 
 ### 6.2 The honest v1 posture (until P-attach-gate lands)
 
@@ -700,7 +700,7 @@ exposure rather than papering over it:
 This RFC governs the **authorization** of attach, not its UX. For completeness and
 to bound scope:
 
-- `attach` is **not a new agent tool** — it is `subagent.send` (agent RFC 0015
+- `attach` is **not a new agent tool** — it is `subagent.send` (agentd RFC 0015
   §4.5). agentctl adds nothing to the agent here; it *names and gates* the
   primitive.
 - v1 `kubectl agent attach` is scoped to **one-shot `--send` + a read-only event
@@ -737,7 +737,7 @@ to bound scope:
    tenant-acme/triage → attested descriptor it holds (✓, §5.3.2); re-checks target ns ==
    authorized ns (✓, §5.3.3); emits mgmt-action audit (§5.3.4).
 6. node-agent calls `drain` on the agent's self-MCP (PeerOrigin::Management). Agent runs
-   the SIGTERM choreography → clean exit 0 (agent RFC 0015 §4.1). Snapshot returned.
+   the SIGTERM choreography → clean exit 0 (agentd RFC 0015 §4.1). Snapshot returned.
 7. Stream/result flows back: node-agent → aggregated APIServer → kube-apiserver → kubectl.
 ```
 
@@ -757,7 +757,7 @@ to bound scope:
 2. Operator → node-agent over direct mTLS (operator client cert). [§2.1]
 3. node-agent: client is the known operator cert (✓, §5.3.1); target is a node-local
    attested descriptor the operator manages (✓, §5.3.2). Emits mgmt-action audit.
-4. node-agent calls `drain`. (Identical agent-side effect as 7.1 — same tool, agent RFC 0015 §4.1.)
+4. node-agent calls `drain`. (Identical agent-side effect as 7.1 — same tool, agentd RFC 0015 §4.1.)
    Latency is on the operator's own listener, decoupled from any human stream. [§2.1]
 ```
 
@@ -789,8 +789,8 @@ Install selects the pods/proxy stopgap (no aggregated APIServer). [§3.5]
   and the P-attach-gate home.** agentctl RFC 0015. This RFC enforces the
   management-PEP half; the A2A-gateway PEP and the cross-cutting trust model are
   there.
-- **Defining the agent's operator tools or adding auth to the agent.** agent RFC
-  0015 owns the tools; the contract is deliberately auth-free (agent RFC 0012
+- **Defining the agent's operator tools or adding auth to the agent.** agentd RFC
+  0015 owns the tools; the contract is deliberately auth-free (agentd RFC 0012
   §3.8). agentctl never asks the agent to authenticate — authority is the two PEPs.
 - **The admission-time `override-trifecta` SAR.** agentctl RFC 0007 §3.3 — a
   distinct, *admission-only* synthetic-verb gate (it works by RBAC string match,
@@ -904,30 +904,30 @@ Install selects the pods/proxy stopgap (no aggregated APIServer). [§3.5]
   `kubectl agent[s]` faces, the cold/live split (§2.3), and the attach UX + lease
   whose *authorization* (not mechanics) this RFC owns (§6.3).
 
-**Contract spec (the reference implementation, agent RFCs)**
+**Contract spec (the reference implementation, agentd RFCs)**
 
-- **agent RFC 0015 (the reference impl's contract spec)** — management & control
+- **agentd RFC 0015 (the reference impl's contract spec)** — management & control
   surface: §4 the operator tools (`drain`/`lame-duck`/`pause`/`resume`/`cancel`)
   this RFC authorizes; §4.5 **`attach` == `subagent.send`** (the gated verb, §6);
   §3.4 `PeerOrigin::Management` gating; §5.2 `surfaces.operator_tools` (the verb set
   is manifest-driven, P-pause); **§7 reachability == operator authority** (the
   premise of this whole RFC); §6 the descriptive downward-API identity the agent
   never re-verifies (the P-meta analogue, §5.3).
-- **agent RFC 0014 (the reference impl's contract spec)** — contract umbrella:
+- **agentd RFC 0014 (the reference impl's contract spec)** — contract umbrella:
   primitives-not-policy (§3); §8 graceful degradation off `surfaces{}` (drive only
   advertised verbs).
-- **agent RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle
+- **agentd RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle
   contract: `agent://events` (live `logs -f`) backing the `agents/log` streaming-read
   subresource (§5.1). `agent://metrics` (live `top`) is **not yet a defined resource**
-  — ask **P4** defines it in agent RFC 0005/0015 (RFC 0019 references it); cited as an
+  — ask **P4** defines it in agentd RFC 0005/0015 (RFC 0019 references it); cited as an
   unbuilt primitive, not an RFC 0016 resource.
-- **agent RFC 0012 (the reference impl's contract spec)** — security posture: §3.8
+- **agentd RFC 0012 (the reference impl's contract spec)** — security posture: §3.8
   the transport-is-the-boundary, **no-auth-in-the-agent** model that forces all authz
   into agentctl's PEPs.
-- **agent RFC 0010 (the reference impl's contract spec)** — observability/health:
+- **agentd RFC 0010 (the reference impl's contract spec)** — observability/health:
   liveness = supervisor heartbeat, independent of the management connection (why a
   bounced access path is a control gap, not a data-plane outage).
-- **agent RFC 0020 (the reference impl's contract spec)** — A2A over the substrate:
+- **agentd RFC 0020 (the reference impl's contract spec)** — A2A over the substrate:
   the gateway-PEP reachability of warm-session steering (§6.1.2).
 
 **Contract asks raised or cited by this RFC** (brainstorm §14): **P-attach-gate**

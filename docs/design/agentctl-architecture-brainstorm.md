@@ -4,7 +4,7 @@
 > against BEFORE writing agentctl RFCs. It is deliberately opinionated and
 > deliberately long. Where it disagrees with `ideas.md`, this document is the
 > newer thinking and `ideas.md` should be revised (see §13). Where it disagrees
-> with an agent RFC on the *wire*, the agent RFC wins and we file a primitive
+> with an agentd RFC on the *wire*, the agentd RFC wins and we file a primitive
 > ask (§14).
 >
 > **Inputs synthesized here:** the agent control-plane contract track (RFCs
@@ -29,7 +29,7 @@
   "**Red-team correction:**" callouts.
 - **§13** consolidates what the analysis CONFIRMS / REVISES / ADDS versus
   `ideas.md`.
-- **§14** is the consolidated agent RFC ask list (the cross-repo critical path).
+- **§14** is the consolidated agentd RFC ask list (the cross-repo critical path).
 - **§15–§17** are the proposed agentctl RFC track, the phased roadmap with an
   explicit MVP cut line, and the top open questions needing a human decision.
 
@@ -54,7 +54,7 @@ conformance suite**, not a shared Rust type; (b) agentctl codegens its client
 from the **contract schemas**, never from a data-plane binary's source; (c) every
 RFC is written against "a conformant agent" / "the contract," naming agent only
 as the reference implementation in examples. **Open question P0 raises:** the
-contract is presently authored inside the agent repo (agent RFCs 0014–0020). It
+contract is presently authored inside the agent repo (agentd RFCs 0014–0020). It
 should be **extracted into a neutral "Agent Control Contract" spec** (own home +
 published JSON Schemas) so neither side owns the other — recommended; see agentctl
 RFC 0001/0018.
@@ -120,7 +120,7 @@ Kubernetes-shaped — CRDs, operator, admission, node-agent bridge, A2A gateway,
 scaling, observability, security policy, CLI. The asymmetry —
 **agent exposes primitives; agentctl owns policy** — is the entire architecture
 (RFC 0014 §3). The rule we never break: if agentctl needs something, it asks for
-a *primitive* in an agent RFC; the cluster-facing translation lives here.
+a *primitive* in an agentd RFC; the cluster-facing translation lives here.
 
 That contract is real and largely frozen. But the cross-cutting analyses surface
 a sharper, more uncomfortable truth that the rest of this document is organized
@@ -473,7 +473,7 @@ spec:
 status:
   observedGeneration: 4
   phase: Running
-  contract: { version: "1.0", agentVersion: "2.2.0", compatible: true }
+  contract: { version: "1.0", agentVersion: "1.0.0", compatible: true }
   buildFeatures: [serve-mcp, vsock, metrics, events, hot-reload]
   manifest:                           # CURATED projection (not the churny full doc)
     mode: reactive
@@ -1312,11 +1312,11 @@ RFCs or explicit deferral; flagging them now prevents late rework:
   positioning, air-gap, chaos testing, PKI lifecycle, data residency).
 - **An explicit substrate compatibility matrix** and the exec-probe-on-scratch
   problem.
-- **The consolidated agent RFC ask list with milestone gating** (§14).
+- **The consolidated agentd RFC ask list with milestone gating** (§14).
 
 ---
 
-## 14. New agent RFC asks (the cross-repo critical path)
+## 14. New agentd RFC asks (the cross-repo critical path)
 
 These are primitives agentctl needs that agent does not yet expose. Each notes
 which milestone it gates and whether it is a NEW ask or a CONTRACT DEFECT/FIX.
@@ -1509,7 +1509,7 @@ multi-tenancy; release/upgrade/DR/GitOps/air-gap; chaos testing; PKI lifecycle.
 ---
 
 *This brainstorm consumes the agent `rfcs/0014`–`0020` contracts and the
-upstream RFCs they extend. Where this document and an agent RFC disagree on the
+upstream RFCs they extend. Where this document and an agentd RFC disagree on the
 wire, the RFC wins and this document is corrected; where this document identifies
-a missing or defective primitive, it becomes an agent RFC ask (§14), never a
+a missing or defective primitive, it becomes an agentd RFC ask (§14), never a
 leak of cluster logic into agent.*

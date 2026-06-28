@@ -9,7 +9,7 @@
 > The gateway re-envelopes A2A frames to and from whatever A2A version + address the agent
 > advertises in `surfaces.a2a` (contract ask **P2**), maps the agent's run/Task handles, and
 > projects the agent's capabilities manifest into an Agent Card. Where this RFC cites a
-> concrete A2A wire surface it names the **reference implementation** (agent RFC 0020) as
+> concrete A2A wire surface it names the **reference implementation** (agentd RFC 0020) as
 > *where the contract is presently written down*, not as a dependency. The agent-branded
 > spellings it touches (`a2a.*`/`agent://run|subagent`, the `agent/…` `_meta` keys) are
 > contract-normative-but-branded and flagged for neutralization (the P0 contract-extraction
@@ -18,11 +18,11 @@
 > **The agent is never on the network; the gateway carries everything network-shaped.** A
 > conformant agent serves *real* A2A over the substrate (vsock/unix) and deliberately omits
 > the heavy machinery — TLS, OAuth/OIDC/mTLS, SSE, webhooks, durable history, `tasks/list`,
-> version negotiation (agent RFC 0020 §1/§7). The gateway is a **dumb transport bridge + a
-> policy-enforcement point (PEP)**, not a protocol translator (agent RFC 0020 §1): it re-frames
+> version negotiation (agentd RFC 0020 §1/§7). The gateway is a **dumb transport bridge + a
+> policy-enforcement point (PEP)**, not a protocol translator (agentd RFC 0020 §1): it re-frames
 > A2A JSON-RPC between HTTP/SSE and the substrate, enforces auth, and serves the durable surface
 > from the store. The strongest posture this preserves: an agent pod with **no cluster network
-> at all** — substrate-in for management + A2A, substrate-out for the model (agent RFC 0020 §4).
+> at all** — substrate-in for management + A2A, substrate-out for the model (agentd RFC 0020 §4).
 
 > **The ownership seam with agentctl RFC 0008.** RFC 0008 owns **node-locality and the relay**:
 > *why* the live A2A leg is on the agent's node, *that* the relay must own the live task stream
@@ -41,21 +41,21 @@
 A conformant agent is already **task-shaped**: a run is an A2A Task, the capabilities manifest is
 an Agent Card, and the agent serves the live A2A core (`SendMessage`/`GetTask`/`CancelTask`/the
 same-id streaming response) over the substrate it already speaks — JSON-RPC over vsock/unix, with
-the existing thread-per-connection listener and codec (agent RFC 0020 §2/§5, RFC 0004). What the
+the existing thread-per-connection listener and codec (agentd RFC 0020 §2/§5, RFC 0004). What the
 agent **does not** carry, by deliberate design, is everything that makes A2A a *network* protocol
-(agent RFC 0020 §1/§4/§7):
+(agentd RFC 0020 §1/§4/§7):
 
 - an **HTTP server** and **SSE** framing;
 - **enforced auth** — OAuth2 / OIDC / mTLS / API key — and TLS termination;
 - **webhooks** (`tasks/pushNotificationConfig/*`) and their delivery;
 - **durable task history** and `tasks/list` (the agent serves only **live** tasks from an
-  ephemeral registry and delivers the final distillate **exactly once** — agent RFC 0020 §4/§5,
+  ephemeral registry and delivers the final distillate **exactly once** — agentd RFC 0020 §4/§5,
   RFC 0009 §7/§8);
 - **A2A version negotiation** and the public `/.well-known/agent-card.json` endpoint.
 
 That is the gateway's entire job: add the heavy network machinery **around** the agent without
-putting the agent on the network. agent RFC 0020 §1 states the boundary the whole control-plane
-track uses — *primitives in the agent, the network surface in the gateway* (agent RFC 0014 §3):
+putting the agent on the network. agentd RFC 0020 §1 states the boundary the whole control-plane
+track uses — *primitives in the agent, the network surface in the gateway* (agentd RFC 0014 §3):
 
 > **The agent serves real A2A over the substrate; an on-node bridge re-envelopes HTTP↔substrate.**
 
@@ -71,7 +71,7 @@ version (the unresolved **P2**, §3.4). Three forces shape this RFC:
    (brainstorm D4).
 
 2. **The distillate is delivered once, so durability is a must-not-miss property, not a
-   convenience.** The agent is stateless and distillate-only (agent RFC 0011, RFC 0020 §6); the
+   convenience.** The agent is stateless and distillate-only (agentd RFC 0011, RFC 0020 §6); the
    relay must own the live stream for the full lifecycle or the final artifact is lost — acute for
    `once`-mode agents that exit immediately on delivery. The store is the durable truth the relay
    writes into; the gateway reads it. The contract gap this rides is **P5** (terminal-distillate
@@ -123,7 +123,7 @@ The A2A surface is **three parts with three reliability classes**, two of which 
                     │  §4.2); opens its own A2A conn per │               │  push_config · delivery_outbox│
                     │  local agent over the substrate    │               │  · rate_state · ListTasks idx │
                     └───────────────┬───────────────────┘               └──────────────────────────────┘
-       A2A conn (vsock/unix; point- │ PeerOrigin::Management; a2a feature (agent RFC 0020 §2)
+       A2A conn (vsock/unix; point- │ PeerOrigin::Management; a2a feature (agentd RFC 0020 §2)
        to-point ⇒ relay on the node)▼
                     ┌───────────────────────────────────────────────────────────┐
                     │  conformant agent pod (reference impl: agent) — NO network │
@@ -157,7 +157,7 @@ The A2A surface is **three parts with three reliability classes**, two of which 
    in etcd) — brainstorm D4.
 
 5. **The relay owns the live stream for the full lifecycle; the gateway never assumes a live
-   client is attached (§6.4).** Because the distillate is delivered once (agent RFC 0020 §5), the
+   client is attached (§6.4).** Because the distillate is delivered once (agentd RFC 0020 §5), the
    durable record must be written by the relay regardless of any SSE client — agentctl RFC 0008
    §4.2 makes the relay the must-not-miss consumer; this RFC defines what it writes and how the
    store recovers on owner loss (§6.5/§6.6).
@@ -170,7 +170,7 @@ The A2A surface is **three parts with three reliability classes**, two of which 
 7. **Identity is descriptive past the PEP.** The gateway authenticates the client, then stamps the
    caller/tenant + `traceparent` into the frame's `_meta` (contract asks **P-meta**/**P-trace**);
    the relay carries it unchanged (RFC 0008 §4.4); the agent records but **never re-verifies** it
-   (agent RFC 0015 §6, RFC 0012 §3.8). Authority lives entirely in the gateway PEP.
+   (agentd RFC 0015 §6, RFC 0012 §3.8). Authority lives entirely in the gateway PEP.
 
 ---
 
@@ -191,7 +191,7 @@ from `surfaces.a2a`, version per P2) — *not* any binary's internal verbs. How 
 conformant agent realizes a Task internally (the reference impl maps it to its
 run/subagent machinery — `subagent.spawn`/`subagent.send`/`subagent.cancel`,
 `agent://run|subagent/{handle}`) is the **agent's private concern, documented in the
-contract** (agent RFC 0020 §4/§5), and the gateway has no business naming it. A
+contract** (agentd RFC 0020 §4/§5), and the gateway has no business naming it. A
 second-vendor agent that realizes A2A without a "subagent" concept satisfies this table
 unchanged:
 
@@ -206,7 +206,7 @@ unchanged:
 
 The agent emits Task **status** transitions (and the final artifact = the distillate) as
 line-framed JSON-RPC notifications with the **same id** as the originating request
-(`StreamResponse`), terminated by `statusUpdate.final == true` (agent RFC 0020 §5). The relay
+(`StreamResponse`), terminated by `statusUpdate.final == true` (agentd RFC 0020 §5). The relay
 drains these; the gateway re-frames them into SSE (§3.3). The gateway adds **no** semantics it did
 not receive — it re-envelopes bytes, stamps `_meta` (§2 principle 7), and enforces policy. The
 **distillate-only invariant holds**: the agent streams *status*, never partial artifacts (agent
@@ -236,13 +236,13 @@ store; only live operations need the owning node's relay (§3.5).
 
 The gateway turns the relay's substrate stream into a **text/event-stream** SSE response for
 `message/stream` and `tasks/resubscribe`. Each substrate status frame becomes one SSE event; the
-gateway **closes the SSE stream on `statusUpdate.final == true`** (agent RFC 0020 §5), having
+gateway **closes the SSE stream on `statusUpdate.final == true`** (agentd RFC 0020 §5), having
 emitted the final artifact (the distillate) as the last event.
 
 **Resumability** is where honesty matters. A2A clients reconnect a dropped SSE with
 `Last-Event-ID`. To honor it the gateway needs a **monotonic per-frame sequence** on the agent's
 streaming notifications — which the contract does **not** emit today (contract ask **P-seq**,
-parallel to the events-ring seq, agent RFC 0016 §7.2). Therefore:
+parallel to the events-ring seq, agentd RFC 0016 §7.2). Therefore:
 
 - **Until P-seq lands**, the gateway scopes replay to **terminal-state reconstruction**: on
   `Last-Event-ID`, it re-sends the current task **status** + the final artifact (if terminal) from
@@ -268,7 +268,7 @@ v1.0 outward" as compatible without resolving the wire strings.** And the proble
   `agent/getAuthenticatedExtendedCard` — and has done so **since 0.2.x**. The **PascalCase**
   `SendMessage`/`GetTask`/`CancelTask`/`SubscribeToTask` names are the **gRPC/protobuf
   service-method binding**, *not* a JSON-RPC version.
-- The reference implementation (agent RFC 0020 §5) carries PascalCase method names inside a
+- The reference implementation (agentd RFC 0020 §5) carries PascalCase method names inside a
   **JSON-RPC-over-vsock** envelope — which does **not** match A2A's JSON-RPC binding in **either**
   version. So committing the agent to slash-form JSON-RPC strings is a real **wire change** in the
   `a2a` feature, not a relabel — and even a "0.2.x" agent should already be emitting slash-form
@@ -292,7 +292,7 @@ JSON-RPC binding (slash-form)**, decoupled from the `protocolVersion` bump:
 surface to real, third-party A2A clients, so it negotiates the way conformant clients expect:
 it advertises `protocolVersion` in the **served Agent Card** and selects transport per the card's
 `preferredTransport`/`additionalInterfaces` (§5). The non-standard `A2A-Version` /
-`VersionNotSupported` mechanism (agent RFC 0020 §6) is confined to the **internal** gateway↔relay /
+`VersionNotSupported` mechanism (agentd RFC 0020 §6) is confined to the **internal** gateway↔relay /
 agent-facing leg, where it is fine; it is **not** the public negotiation mechanism. The served
 version + the agent-advertised version are both surfaced in the Agent Card and in `agentctl_a2a_*`
 metrics labels (agentctl RFC 0010 §10). **Contract ask: P2** — and until it lands, the gateway reads
@@ -334,7 +334,7 @@ management enforcement point reached two ways (operator → node-agent direct mT
 aggregated APIServer), and names this A2A gateway as the **other** PEP through which the
 `subagent.send` steering primitive is reachable (agentctl RFC 0009 §6.1). The management PEP fronts
 the management transport for the operator + humans; the A2A gateway fronts the A2A transport for
-**off-cluster, untrusted** peers. The agent re-verifies nothing (agent RFC 0012 §3.8), so the
+**off-cluster, untrusted** peers. The agent re-verifies nothing (agentd RFC 0012 §3.8), so the
 gateway owns **100%** of authn/authz at the A2A access path — the same posture agentctl RFC 0009
 establishes for management, applied to a hostile-input-facing surface.
 
@@ -342,7 +342,7 @@ establishes for management, applied to a hostile-input-facing surface.
 
 A2A auth is declared in the Agent Card. The gateway authenticates every inbound request against the
 card's `securitySchemes` (§5) and rejects an unauthenticated/unmatched request **before** any byte
-reaches the relay (agent RFC 0020 §6). Supported schemes:
+reaches the relay (agentd RFC 0020 §6). Supported schemes:
 
 | Scheme | Mechanism | Notes |
 |---|---|---|
@@ -441,7 +441,7 @@ signing key**; key custody + the fleet/mesh `/.well-known` publication is agentc
 ## 5. The Agent Card projection
 
 The Agent Card is the **capabilities manifest, re-serialized into A2A's schema** — one builder, no
-second source of truth (agent RFC 0020 §3, RFC 0015 §5.2). The gateway serves a **single Agent's**
+second source of truth (agentd RFC 0020 §3, RFC 0015 §5.2). The gateway serves a **single Agent's**
 card at `/.well-known/agent-card.json` (the v1.0 path; the v0.2.x `/.well-known/agent.json` is
 served as an alias while P2 is unresolved). The **fleet-level** card, the cross-fleet mesh
 identity, and the signed cross-org publication are agentctl RFC 0014.
@@ -481,10 +481,10 @@ card):
 Two honesty rules are normative (brainstorm §7.2):
 
 - **`capabilities.streaming: true` means STATUS-level streaming only** — status transitions plus a
-  single final artifact (the distillate), **not** incremental artifact streaming (agent RFC 0009
+  single final artifact (the distillate), **not** incremental artifact streaming (agentd RFC 0009
   §8, RFC 0020 §6). The card MUST NOT imply token-by-token artifact streaming the agent does not do.
 - **Interaction modes are declared truthfully.** The agent is fire-and-distill; multi-turn is
-  `contextId` → a warm session (`subagent.send`, agent RFC 0015 §4.5), and `input-required` /
+  `contextId` → a warm session (`subagent.send`, agentd RFC 0015 §4.5), and `input-required` /
   `auth-required` interaction states are supported only insofar as the warm-session model allows.
   `pushNotifications` and `stateTransitionHistory` are **gateway-provided** (the agent has neither),
   and the card advertises them as gateway capabilities, not agent capabilities. This MUST be
@@ -499,7 +499,7 @@ Two honesty rules are normative (brainstorm §7.2):
 Three contract requirements **cannot** be satisfied per-node (brainstorm D4):
 
 - **`tasks/list` aggregates across many pods on many nodes** for an Agent/AgentFleet.
-- **Durability must survive node/pod loss** — the agent is stateless, distillate-only (agent RFC
+- **Durability must survive node/pod loss** — the agent is stateless, distillate-only (agentd RFC
   0020 §6).
 - **The webhook registry must survive the task's node** and fire even if the owning pod
   reschedules.
@@ -548,7 +548,7 @@ CREATE TABLE task (
   owner_node     text,                          -- CACHE, not truth (§6.6)
   owner_pod_uid  text,                          -- CACHE, not truth (§6.6)
   state          text NOT NULL,                 -- submitted|working|input-required|completed|failed|canceled|rejected
-  idempotency_key text,                         -- the run_id (agent RFC 0011 §6): dedupes side effects WITHIN a
+  idempotency_key text,                         -- the run_id (agentd RFC 0011 §6): dedupes side effects WITHIN a
                                                 --   single run only — it does NOT make whole-task RE-DRIVE safe
                                                 --   (a re-drive starts a fresh run_id); re-drive safety is the
                                                 --   per-fleet idempotency opt-in (§6.5), not this key
@@ -566,7 +566,7 @@ CREATE TABLE status_history (                   -- the stateTransitionHistory + 
   epoch    int    NOT NULL,                     -- = task.redrive_epoch at write time (stale-cursor rejection)
   state    text   NOT NULL,
   message  jsonb,                               -- the A2A status payload (final carries the distillate ref)
-  final    boolean NOT NULL DEFAULT false,      -- statusUpdate.final (agent RFC 0020 §5)
+  final    boolean NOT NULL DEFAULT false,      -- statusUpdate.final (agentd RFC 0020 §5)
   at       timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (task_id, seq)
 );
@@ -610,7 +610,7 @@ The relay (agentctl RFC 0008) **writes** `task` state transitions + `status_hist
 agentctl RFC 0008 §4.2 establishes the must-not-miss property; this RFC defines the store contract
 it satisfies. The relay drains the substrate task stream for the **full lifecycle independent of any
 HTTP client** and writes each transition to `status_history`, culminating in the final transition
-that carries the **distillate** (delivered **once**, agent RFC 0020 §5). So:
+that carries the **distillate** (delivered **once**, agentd RFC 0020 §5). So:
 
 - A `tasks/get` for a terminal task is answered from the store **even after the pod exits** — the
   durability the whole design exists for (acute for `once`-mode, §1).
@@ -619,7 +619,7 @@ that carries the **distillate** (delivered **once**, agent RFC 0020 §5). So:
 - The store is the truth; the relay holds **no** durable state of its own (RFC 0008 §4.3).
 
 This rides contract ask **P5** (a short post-terminal **linger** / read-before-exit / re-read of
-the terminal distillate by run handle, agent RFC 0016/0020) — the window in which the relay must
+the terminal distillate by run handle, agentd RFC 0016/0020) — the window in which the relay must
 capture the once-delivered distillate. **Until P5**, the lost-window contract is §6.5.
 
 ### 6.5 Owner loss — FAILED by default, idempotent re-drive only by opt-in
@@ -660,13 +660,13 @@ place a cross-org request enters the platform, so:
 - It **adopts the caller's `traceparent`** (W3C trace-context) if present, or **mints** one, and
   sets **`_meta.traceparent`** on the frame it forwards over the live-op hop to the relay → agent.
   The agent then **adopts-or-mints** and carries `trace_id` through every log line, event, the run
-  report, every outbound MCP/LLM call, and the spawn payload (agent RFC 0010 §3.6) — so a
+  report, every outbound MCP/LLM call, and the spawn payload (agentd RFC 0010 §3.6) — so a
   multi-pod, multi-hop flow (`A2A client → gateway → relay → agent → MCP backing service → delegated
   A2A peer`) is **one trace** with no agent change.
 - **The missing primitive is P-trace.** Whether the agent **ingests** an inbound `traceparent` *on
   the A2A method surface* (a substrate frame) is unspecified — the contract defines ingest on the
   self-MCP request and via `AGENT_TRACEPARENT`, but not on the A2A surface the gateway uses
-  (agent RFC 0020 / RFC 0010 §3.6). Until **P-trace** lands, a gateway-rooted trace cannot be
+  (agentd RFC 0020 / RFC 0010 §3.6). Until **P-trace** lands, a gateway-rooted trace cannot be
   *claimed* — only the self-MCP/env-rooted one — and the gateway records the trace as a
   **control-plane span** that joins by `trace_id` regardless (agentctl RFC 0010 §8.3).
 - The gateway emits `agentctl_a2a_requests_total{method,code}` /
@@ -678,10 +678,10 @@ place a cross-org request enters the platform, so:
 
 ## 8. Delegation-out — the agent dials A2A out over the substrate (contract ask P-a2a-out)
 
-agent RFC 0020 §3 adds a **remote-A2A delegation backend** beside the local subagent: a
+agentd RFC 0020 §3 adds a **remote-A2A delegation backend** beside the local subagent: a
 coordinator can spin up sub-work on a remote agent, and the agent becomes an A2A **client**. But the
 agent has **no cluster network** — so, symmetrically to intelligence egress (the inverse of A2A
-ingress, agent RFC 0020 §4), the agent dials A2A **out over the substrate**, and a node-local
+ingress, agentd RFC 0020 §4), the agent dials A2A **out over the substrate**, and a node-local
 egress bridge carries it to the mesh:
 
 ```
@@ -692,7 +692,7 @@ egress bridge carries it to the mesh:
                                             the target agent's A2A gateway (the mesh)
 ```
 
-- **The flag schema + dial grammar is contract ask P-a2a-out** — `--a2a-peer` (agent RFC 0020 §3)
+- **The flag schema + dial grammar is contract ask P-a2a-out** — `--a2a-peer` (agentd RFC 0020 §3)
   needs a concrete flag schema and an outbound-dial grammar (how the agent names a remote peer over
   the substrate). agentctl renders it from the Agent/AgentFleet spec but **cannot define the wire**;
   that is the contract's.
@@ -821,7 +821,7 @@ status:
   RFC 0020 §7 / RFC 0012 §3.8 — all of it is the gateway's, by construction.
 - **Any data-plane internals.** The gateway bridges the contract A2A surface; it MUST NOT branch on
   one binary's flags, file layout, or `build_features` *values* — only on `surfaces.a2a` and the
-  negotiated A2A/contract version (agent RFC 0014 §6.2, P0).
+  negotiated A2A/contract version (agentd RFC 0014 §6.2, P0).
 
 ---
 
@@ -920,36 +920,36 @@ store (the cluster's existing object storage vs a managed bucket), the threshold
 - **agentctl RFC 0016** — CLI & kubectl-plugin grammar: `kubectl agents tasks` / `kubectl agent card`
   as cold/A2A reads off this RFC's store + projection.
 
-**Contract spec (the reference implementation's current home — agent RFCs)**
+**Contract spec (the reference implementation's current home — agentd RFCs)**
 
-- **agent RFC 0020 (the reference impl's contract spec)** — A2A over the substrate: A2A served over
+- **agentd RFC 0020 (the reference impl's contract spec)** — A2A over the substrate: A2A served over
   vsock/unix (§2), the gateway as a dumb HTTP↔substrate bridge + PEP (§1/§2), manifest = Agent Card
   (§3), run/subagent = Task + the `a2a.*` method mapping (§4/§5), status-level same-id streaming +
   `statusUpdate.final` + distillate-only (§5/§6), the delegation-out backend + `--a2a-peer` (§3,
   **P-a2a-out**), gateway-held `tasks/list`/history/push-notification (§4/§7), descriptive
   caller/tenant `_meta` (§5, **P-meta**), stateless-agent / stateful-gateway re-drive (§6).
-- **agent RFC 0015 (the reference impl's contract spec)** — management & control surface: the
+- **agentd RFC 0015 (the reference impl's contract spec)** — management & control surface: the
   manifest = Agent Card source (§5.2), `surfaces.a2a` (the **P2** ask), the warm-session
   `subagent.send` that multi-turn / steering maps onto (§4.5), `PeerOrigin::Management` over the
   substrate listener (§3), the descriptive downward-API identity the agent never re-verifies (§6).
-- **agent RFC 0007 (the reference impl's contract spec)** — agentic loop & terminal status: the
+- **agentd RFC 0007 (the reference impl's contract spec)** — agentic loop & terminal status: the
   TerminalStatus → A2A Task-state mapping (§3.4 → `completed`/`failed`/`canceled`/`rejected`).
-- **agent RFC 0005/0009 (the reference impl's contract spec)** — self-MCP surface + subagent model:
+- **agentd RFC 0005/0009 (the reference impl's contract spec)** — self-MCP surface + subagent model:
   `agent://run|subagent/{handle}` (= a Task), the async-subagent machinery a `message/send` starts,
   `subagent.cancel` (= `tasks/cancel`), the distillate (= the final artifact), delivered once.
-- **agent RFC 0011 (the reference impl's contract spec)** — idempotency & exit codes:
+- **agentd RFC 0011 (the reference impl's contract spec)** — idempotency & exit codes:
   side-effect dedupe by `run_id` (= `task.idempotency_key`, §6.3/§6.5) — re-drive dedupes side
   effects, it does **not** make whole-task re-execution safe.
-- **agent RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle: the events-ring
+- **agentd RFC 0016 (the reference impl's contract spec)** — telemetry & lifecycle: the events-ring
   seq/`dropped` semantics the SSE seq (**P-seq**) parallels, the run-report / terminal-distillate
   read window (**P5**).
-- **agent RFC 0010 (the reference impl's contract spec)** — observability/health: W3C trace-context
+- **agentd RFC 0010 (the reference impl's contract spec)** — observability/health: W3C trace-context
   on by default, ingest on the self-MCP request + `AGENT_TRACEPARENT` but **not** the A2A surface
   (the **P-trace** gap, §7).
-- **agent RFC 0012 (the reference impl's contract spec)** — security posture: the
+- **agentd RFC 0012 (the reference impl's contract spec)** — security posture: the
   transport-is-the-boundary / no-auth-in-the-agent model (§3.8) that forces all A2A authz into the
   gateway PEP (§4).
-- **agent RFC 0014 (the reference impl's contract spec)** — control-plane contract umbrella:
+- **agentd RFC 0014 (the reference impl's contract spec)** — control-plane contract umbrella:
   primitives-not-policy (§3), `surfaces{}` as the single discovery point (§6.2), version negotiation
   (§6.3), graceful degradation (§8).
 

@@ -25,7 +25,7 @@
 
 > **Trifecta is advisory; the *override* is gated, not the safe pattern.** A
 > lethal-trifecta tag *union* across an `Agent`'s MCP servers is **not** a rejection —
-> the agent already enforces Rule-of-Two **per-spawn** (agent RFC 0012 §3.2), and the
+> the agent already enforces Rule-of-Two **per-spawn** (agentd RFC 0012 §3.2), and the
 > canonical safe shape (a reader/actor split) composes a union the admission layer must
 > not refuse. The real control is gating the `allowTrifecta` **override** behind an
 > explicit, audited annotation + elevated RBAC (§3).
@@ -49,7 +49,7 @@ optional:
 
 1. **Cross-object trifecta-tag union.** Two individually-"safe" `MCPServerSet`s
    (agentctl RFC 0004) can compose the full lethal trifecta (`untrusted_input` +
-   `sensitive` + `egress`, agent RFC 0012 §3.1) on one `Agent` once
+   `sensitive` + `egress`, agentd RFC 0012 §3.1) on one `Agent` once
    `mcp.serverSetRefs` + inline `mcp.servers` are unioned. **CEL cannot fetch and
    union referenced objects.**
 
@@ -58,7 +58,7 @@ optional:
    dereference the sets to detect it.**
 
 3. **Config-schema validation.** The rendered config file must validate against the
-   contract's config JSON Schema (agent RFC 0017 §4.2). **CEL cannot express a JSON
+   contract's config JSON Schema (agentd RFC 0017 §4.2). **CEL cannot express a JSON
    Schema check**, and the schema is per-image, runtime-negotiated by contract major.
 
 So "CEL is enough, no webhook" is false advertising (agentctl RFC 0003 §7). But the
@@ -66,7 +66,7 @@ honest converse is equally true: **the webhook is not enough either.** It cannot
 exec the tenant's binary (P0 + apply-path latency), so its config check is only as
 good as a *published, possibly version-skewed, possibly cache-missed* schema; and it
 cannot see the **runtime env layer** the agent will actually resolve against —
-downward-API identity, mounted secrets, and the `AGENT_SHARD` ordinal (agent RFC
+downward-API identity, mounted secrets, and the `AGENT_SHARD` ordinal (agentd RFC
 0014 §6.4) are not present at admission, so env/identity/shard/secret coherence is
 structurally undecidable at apply time (brainstorm §3.3). The authoritative check is
 the **exact image, with the exact env, in the pod**.
@@ -186,8 +186,8 @@ two-pass `--dry-run` retry for bundles that violate it.
 
 ### 2.3 Rung C — config-schema validation (cached; never exec, never link)
 
-The rendered config file (the `spec.config` projection, agent RFC 0017 §3) must
-validate against the contract's **config JSON Schema** (agent RFC 0017 §4.2,
+The rendered config file (the `spec.config` projection, agentd RFC 0017 §3) must
+validate against the contract's **config JSON Schema** (agentd RFC 0017 §4.2,
 `--config-schema`). The webhook does this **against the published schema, in-process**,
 and **never** by execing the tenant image (the red-team's load-bearing correction,
 brainstorm §3.3 / §10.2):
@@ -203,11 +203,11 @@ brainstorm §3.3 / §10.2):
   `(image digest + feature-set)`, populated by the `CapabilityProbe` one-shot Job that
   ran `--config-schema` once per unseen digest. The webhook selects the schema whose
   `x-agent-contract-version` major matches the negotiated contract for the image
-  (agent RFC 0014 §6.3); a config validating against a major agentctl does not
+  (agentd RFC 0014 §6.3); a config validating against a major agentctl does not
   understand is rejected (`ContractMajorUnknown`).
 - **It validates the file+flag layers only.** The schema check decides the *structural*
   validity of the rendered config; it cannot run the binary's full `Config::validate()`
-  semantic pipeline (agent RFC 0011 §3.3) and cannot see the env layer. Those are rung D.
+  semantic pipeline (agentd RFC 0011 §3.3) and cannot see the env layer. Those are rung D.
 
 **Cache miss ⇒ defer to D, do not probe synchronously.** If the image digest is unseen
 (no cached schema — a brand-new build, or a second-vendor agent whose schema has never
@@ -222,10 +222,10 @@ rung C.
 `--validate-config` (rung D) are **unbuilt in the reference implementation today**
 (agent ask **P6**). Until P6 lands and the schema corpus is published (agentctl RFC
 0001 §4.5), rung C is inert: the ladder runs A + B, admits, and config validity degrades
-to the contract's **validate-at-startup → exit 2** (agent RFC 0011 §3.3) caught at pod
+to the contract's **validate-at-startup → exit 2** (agentd RFC 0011 §3.3) caught at pod
 start — i.e. a bad config still fast-fails, just at runtime (rung D's fallback), not
 pre-schedule. This is graceful degradation off `surfaces.config_schema`/`config_validate`
-(agent RFC 0014 §6.2), the same posture the whole control plane takes against an
+(agentd RFC 0014 §6.2), the same posture the whole control plane takes against an
 unadvertised surface.
 
 ### 2.4 Rung D — init-container ground truth (the exact image)
@@ -240,12 +240,12 @@ initContainers:
   - name: validate-config
     image: <the agent image, by digest>          # the EXACT target image — version-skew-proof
     args: ["<config-validate invocation>"]        # RENDERER-RESOLVED per image (RFC 0006). Reference impl
-                                                  #   spelling: --validate-config (agent RFC 0017 §4.1; exit 0
+                                                  #   spelling: --validate-config (agentd RFC 0017 §4.1; exit 0
                                                   #   valid / exit 2 invalid) — a BRANDED contract surface,
                                                   #   flagged for neutralization; a 2nd-vendor agent may spell
                                                   #   it differently. NOT a frozen flag in normative YAML.
     envFrom: [ ... ]                              # the SAME downward-API + secret env the agent gets
-    env:                                          # downward-API identity (agent RFC 0014 §6.4)
+    env:                                          # downward-API identity (agentd RFC 0014 §6.4)
       - { name: AGENT_POD_UID, valueFrom: { fieldRef: { fieldPath: metadata.uid } } }
       # … AGENT_POD_NAME / _NAMESPACE / _NODE / _GRACE_SECONDS / AGENT_SHARD as rendered
     volumeMounts: [ { name: config, mountPath: /etc/agent } ]   # the rendered ConfigMap(s)
@@ -254,7 +254,7 @@ initContainers:
 
 **The config-validate invocation is renderer-resolved, not a frozen flag (P0).** The
 `--validate-config` / `--config-schema` (§2.3) spellings are the **reference impl's
-branding** of two contract surfaces (agent RFC 0017, contract ask **P6**); a second
+branding** of two contract surfaces (agentd RFC 0017, contract ask **P6**); a second
 conformant agent may spell config validation as a different flag or subcommand. The
 **renderer (agentctl RFC 0006)** owns the per-image spelling — it reads the surface from
 the image's manifest and emits the right token, exactly as RFC 0002 §6.1 and RFC 0001
@@ -273,14 +273,14 @@ Why rung D is necessary even with rungs A–C:
   conformant agent whose schema the operator has never probed — the binary is its own
   authority.
 - **The env layer.** It is the **only** rung that sees downward-API identity, mounted
-  secrets, and the `AGENT_SHARD` ordinal (agent RFC 0014 §6.4 — the per-replica
+  secrets, and the `AGENT_SHARD` ordinal (agentd RFC 0014 §6.4 — the per-replica
   `K/N`, itself a contract defect tracked as ask **P3**, agentctl RFC 0003 §9.1). So
   env/identity/shard/secret coherence — undecidable at admission — is decided here.
 
 **Failure surfaces as a condition, not a silent crash.** A rung-D `exit 2` fails the
 init-container; the operator (RFC 0006) reads the failed init-container status and writes
 `Degraded` with reason `ConfigValidatedAtRuntimeFailed` (agentctl RFC 0003 §6.2),
-surfacing the agent's structured `config.invalid` diagnostics (agent RFC 0017 §4.1) into
+surfacing the agent's structured `config.invalid` diagnostics (agentd RFC 0017 §4.1) into
 `.status` and events for `kubectl agents describe`. The init-container's `restartPolicy`
 backoff is the natural fast-fail (a config that cannot validate never burns a Ready agent
 container).
@@ -322,19 +322,19 @@ gate the *override*, never the safe pattern.**
 ### 3.1 Why a blocking union is wrong
 
 The instinct is "if an `Agent`'s MCP servers collectively span all three trifecta legs
-(`untrusted_input` + `sensitive` + `egress`, agent RFC 0012 §3.1), reject it unless
+(`untrusted_input` + `sensitive` + `egress`, agentd RFC 0012 §3.1), reject it unless
 `allowTrifecta: true`." That is wrong, for two contract-level reasons:
 
 1. **The agent already enforces Rule-of-Two — per spawn, not per Agent.** agent checks
    the trifecta budget at the `subagent.spawn` chokepoint over **each child's narrowed
-   grant** (agent RFC 0012 §3.2), refusing any *single* subagent that would hold all
+   grant** (agentd RFC 0012 §3.2), refusing any *single* subagent that would hold all
    three legs. The enforcement is real, unforgeable, and at the right granularity (one
    isolation unit = one process).
 
 2. **The canonical *safe* shape composes an Agent-level union.** The blessed pattern is a
    **reader/actor split**: a no-sensitive/no-egress reader subagent that quarantines
    untrusted content and returns a distilled summary, and a no-untrusted-input actor that
-   consumes the summary and holds the sensitive/egress tools (agent RFC 0012 §3.3). That
+   consumes the summary and holds the sensitive/egress tools (agentd RFC 0012 §3.3). That
    Agent *declares* servers spanning all three legs — its tag union **is** a full trifecta
    — yet **no single spawn ever holds all three**. A blocking Agent-level union would
    **refuse this exact safe configuration**, and would train operators to flip
@@ -347,7 +347,7 @@ So the union, by itself, is **not** an error. It is a fact worth surfacing, noth
 
 The webhook computes the union across inline `mcp.servers` + all `mcp.serverSetRefs`
 (agentctl RFC 0004), using the **operator-declared** tags (never server-declared metadata
-— agent RFC 0012 §3.4):
+— agentd RFC 0012 §3.4):
 
 ```
 union(tags) = ⋃ { server.tags : server ∈ inline ∪ resolved(serverSetRefs) }
@@ -367,8 +367,8 @@ not blocking.
 
 The dangerous thing is not the union — it is **turning the per-spawn guard off**.
 `security.allowTrifecta: true` renders the contract's `--allow-trifecta`, which flips the
-spawn chokepoint from `Refuse` to `Warn` (agent RFC 0012 §3.2) so a *single* subagent may
-hold all three legs. And that flag is **process-global** today (agent RFC 0012 §6 open
+spawn chokepoint from `Refuse` to `Warn` (agentd RFC 0012 §3.2) so a *single* subagent may
+hold all three legs. And that flag is **process-global** today (agentd RFC 0012 §6 open
 item — a per-route/per-spawn override is deferred), so its blast radius is the whole
 daemon. That is precisely the decision that warrants friction. The webhook gates it:
 
@@ -405,7 +405,7 @@ Two reasons this shape is right and minimal:
   annotation is the intent + audit trail. Both, together.
 
 This composes with the agent's own audit: agent logs `scope.trifecta_grant` at `warn` on
-each overridden spawn (agent RFC 0012 §3.2), so the override is auditable at *both* the
+each overridden spawn (agentd RFC 0012 §3.2), so the override is auditable at *both* the
 admission boundary (who turned it on) and the runtime boundary (which spawns used it).
 
 ### 3.4 Worked union computation
@@ -668,7 +668,7 @@ Both use `admission.k8s.io/v1`. Requests are abridged to the load-bearing fields
     "uid": "f10a-…",
     "allowed": true,
     "warnings": [
-      "trifecta override ACTIVE: this Agent disables the per-spawn Rule-of-Two guard (allowTrifecta=true), permitting a SINGLE subagent to hold untrusted_input + sensitive + egress. Override authorized for user 'alice' via annotation 'JIRA-4412…' and the override-trifecta grant; audited. The reader/actor split (agent RFC 0012 §3.3) remains the safe alternative."
+      "trifecta override ACTIVE: this Agent disables the per-spawn Rule-of-Two guard (allowTrifecta=true), permitting a SINGLE subagent to hold untrusted_input + sensitive + egress. Override authorized for user 'alice' via annotation 'JIRA-4412…' and the override-trifecta grant; audited. The reader/actor split (agentd RFC 0012 §3.3) remains the safe alternative."
     ]
   }
 }
@@ -682,7 +682,7 @@ Both use `admission.k8s.io/v1`. Requests are abridged to the load-bearing fields
     "allowed": false,
     "status": {
       "code": 403, "reason": "Forbidden",
-      "message": "TrifectaOverrideUngated: security.allowTrifecta=true disables the per-spawn lethal-trifecta guard and requires BOTH the annotation 'agents.x-k8s.io/allow-trifecta-override' (a justification) AND the 'override-trifecta' RBAC grant for the requesting user. Missing: override-trifecta authorization for 'alice'. Prefer the reader/actor split (a no-sensitive/no-egress reader returning a distilled summary to a no-untrusted-input actor) which needs NO override — see agent RFC 0012 §3.2/§3.3."
+      "message": "TrifectaOverrideUngated: security.allowTrifecta=true disables the per-spawn lethal-trifecta guard and requires BOTH the annotation 'agents.x-k8s.io/allow-trifecta-override' (a justification) AND the 'override-trifecta' RBAC grant for the requesting user. Missing: override-trifecta authorization for 'alice'. Prefer the reader/actor split (a no-sensitive/no-egress reader returning a distilled summary to a no-untrusted-input actor) which needs NO override — see agentd RFC 0012 §3.2/§3.3."
     }
   }
 }
@@ -730,7 +730,7 @@ because the safe reader/actor split must pass.
    negotiated instance major disagree (e.g. an `AgentClass` image pinned to a major agentctl's
    cached schema predates), does the webhook reject (`ContractMajorUnknown`) or admit-and-defer
    to rung D? Leaning **admit-and-defer** for an *unknown-newer* major (rung D is authoritative)
-   and **reject** for a *removed-older* major. Confirm against agent RFC 0014 §6.3.
+   and **reject** for a *removed-older* major. Confirm against agentd RFC 0014 §6.3.
 3. **`override-trifecta` verb modelling.** Is the `SubjectAccessReview` issued against a real
    subresource (`agents/allow-trifecta`, which needs the aggregated APIServer of agentctl RFC
    0009 to be *callable*, though RBAC string-matching works without it) or a synthetic
@@ -786,23 +786,23 @@ because the safe reader/actor split must pass.
 - **agentctl RFC 0015** — security & multi-tenancy: the management-action audit vocabulary the
   override-admit event (§3.3) joins.
 
-**Contract spec (the reference implementation, agent RFCs)**
+**Contract spec (the reference implementation, agentd RFCs)**
 
-- **agent RFC 0014 (the reference impl's contract spec)** — contract-version negotiation
+- **agentd RFC 0014 (the reference impl's contract spec)** — contract-version negotiation
   (§6.3, the major the config schema is keyed to), the `surfaces{}` single discovery point
   (§6.2, graceful degradation off `config_schema`/`config_validate`), the downward-API env
   convention (§6.4, the env layer rung D resolves; the `AGENT_SHARD` defect).
-- **agent RFC 0017 (the reference impl's contract spec)** — `--validate-config` (§4.1, rung D;
+- **agentd RFC 0017 (the reference impl's contract spec)** — `--validate-config` (§4.1, rung D;
   exit 0/2 with structured diagnostics) and `--config-schema` (§4.2, the published JSON Schema
   rung C validates against) — **both unbuilt today (contract ask P6)**; the config-file shape
   the operator renders.
-- **agent RFC 0012 (the reference impl's contract spec)** — the trifecta tag vocabulary
+- **agentd RFC 0012 (the reference impl's contract spec)** — the trifecta tag vocabulary
   (§3.1), the **per-spawn Rule-of-Two chokepoint** that makes a blocking Agent-level union
   wrong (§3.2), the reader/actor distillate firewall (§3.3), the process-global
   `--allow-trifecta` blast radius and the deferred per-route override (§6) — the basis of §3.
-- **agent RFC 0011 (the reference impl's contract spec)** — validate-at-startup → **exit 2**
+- **agentd RFC 0011 (the reference impl's contract spec)** — validate-at-startup → **exit 2**
   (§3.3) that is rung C's degradation backstop until P6, and the exit-code contract.
-- **agent RFC 0015 (the reference impl's contract spec)** — reachability == operator authority
+- **agentd RFC 0015 (the reference impl's contract spec)** — reachability == operator authority
   (§7), the management audit vocabulary the override-admit event references.
 
 **Contract asks raised or cited by this RFC** (brainstorm §14): **P6** (`--config-schema` +

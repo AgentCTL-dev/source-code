@@ -3,13 +3,13 @@
 The normative, human-readable companion to the JSON Schemas in `schemas/`. The
 schemas are authoritative for *shape*; this document explains the **rules,
 nuances, and frozen catalogues** a conformant agent and any consumer must honour.
-For the principle (P0), the de-branding map, and the codegen-consumption notes,
+For the principle (P0), the neutral-wire map, and the codegen-consumption notes,
 see [`README.md`](README.md); for the anti-drift pipeline see agentctl RFC 0018.
 
 > **One-line model.** agentctl drives *any* binary that emits a conformant
 > capabilities **manifest**, honours the frozen **exit-code table**, serves the
 > surfaces it **declares**, and speaks the declared **wire protocols** — never a
-> specific agent. The reference `agent` binary is the *reference* implementation, not a dependency.
+> specific agent. The reference `agentd` binary is the *reference* implementation, not a dependency.
 
 ---
 
@@ -62,9 +62,10 @@ All version keys are `major.minor` (`^\d+\.\d+$`). **Additive growth ⇒ MINOR b
 unknown major).** Sub-schemas (`metrics_schema`, `report_schema`, `config_schema`)
 version independently within a known contract major. See [§6](#6-version-keys).
 
-### L4 — De-branding (P0): fully neutral (de-brand complete)
-The contract defines only the **neutral** spellings; the de-brand is complete and no branded
-alias survives. ("agentd" was the pre-rebrand name of the reference agent.)
+### L4 — Neutral wire (P0): fully vendor-neutral
+The contract defines only the **neutral** spellings, so any agent can implement it. The
+reference implementation is **agentd v1.0.0**, which speaks this neutral contract (and keeps
+`agentd://` as a legacy alias of `agent://`).
 
 | concern | neutral (canonical) |
 |---|---|

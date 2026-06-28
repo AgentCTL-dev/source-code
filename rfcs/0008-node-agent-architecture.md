@@ -11,8 +11,8 @@
 > relay A2A — it does over the **published control contract** (the self-MCP management
 > profile, the `agent://` resource scheme, the frozen metrics surface, A2A-over-the-
 > substrate). It learns *what* a local agent can do from that agent's `surfaces{}` block
-> and **drives only what is advertised** (agent RFC 0014 §6.2/§8). Where this RFC cites a
-> concrete surface it names the **reference implementation** (agent RFCs 0014–0020) as
+> and **drives only what is advertised** (agentd RFC 0014 §6.2/§8). Where this RFC cites a
+> concrete surface it names the **reference implementation** (agentd RFCs 0014–0020) as
 > *where the contract is presently written down*, not as a dependency. The agent-branded
 > spellings it touches (`agent://…`, `AGENT_*`, the `agent_` metric prefix) are
 > contract-normative-but-branded and flagged for neutralization (the P0 contract-extraction
@@ -50,32 +50,32 @@ the single component that:
 
 - **is on the agent's node** — because the substrate transports are point-to-point
   guest↔host (vsock) or filesystem-local (unix hostPath), so reaching a local agent's socket
-  is physically a node-local act (agent RFC 0015 §3.3, agentctl RFC 0002 §4);
+  is physically a node-local act (agentd RFC 0015 §3.3, agentctl RFC 0002 §4);
 - **holds privilege the rest of agentctl deliberately lacks** — CRI-socket access for
   discovery (node-root in the threat model, RFC 0002 §6), a hostPath mount onto the
   per-pod socket tree (RFC 0002 §6.1), and — for the A2A path — node-local secrets and a
   store credential;
 - **is the management peer** — over the discovered socket it connects as
-  `PeerOrigin::Management` (agent RFC 0015 §3.3/§3.4), which is precisely the reachability
+  `PeerOrigin::Management` (agentd RFC 0015 §3.3/§3.4), which is precisely the reachability
   that *grants the operator profile* (the operator tools the agent advertises in
   `surfaces.operator_tools` — `drain`/`lame-duck`/`cancel` in the reference impl today;
   `pause`/`resume` are contract-specified but **not yet implemented**, contract ask
   **P-pause** — plus the `agent://capabilities`/`inventory`/`status`/`events` resources).
-  Reachability **is** authority (agent RFC 0015 §7): the node-agent is therefore the
+  Reachability **is** authority (agentd RFC 0015 §7): the node-agent is therefore the
   highest-value trust principal in the data path.
 
 Three forces shape every decision here, and they are in tension:
 
 1. **Node-locality is forced; one-process-ness is not.** vsock/unix pins the host side of
    every agent connection to the agent's node. But the agent's listener is **blocking,
-   thread-per-connection** (agent RFC 0015 §3.2: "one reader thread per accepted
+   thread-per-connection** (agentd RFC 0015 §3.2: "one reader thread per accepted
    connection"), so *independent host processes can each open their own connection* to each
    local agent. Node-locality is a placement constraint, not a single-binary constraint. The
    monolith conflates the two.
 
 2. **The keystone-safety claim is only conditionally true.** The load-bearing safety claim —
    "the node-agent is *not* in the data path; a crash = zero data-plane impact" — is **true
-   for management + telemetry** (agent RFC 0015 §8: a dropped management connection is not a
+   for management + telemetry** (agentd RFC 0015 §8: a dropped management connection is not a
    liveness signal; reconnect is a clean re-read) and **false for A2A** (the relay owns the
    only live ingress/egress for node-local agent-to-agent work, and the agent delivers the
    final distillate *exactly once* — RFC 0020 §5). One claim cannot cover both.
@@ -119,13 +119,13 @@ for the socket-adjacent parts.
 **Argument 1 — the agent's per-connection listener makes the split free.** The temptation to
 fold everything into one process is "vsock is point-to-point, so it must be one on-node
 thing." That conflates *node-locality* with *single-process*. The agent serves a **blocking,
-thread-per-connection** listener (agent RFC 0015 §3.2); each accepted connection gets its
+thread-per-connection** listener (agentd RFC 0015 §3.2); each accepted connection gets its
 own reader thread and is independent of every other. So **Tier A and Tier B can each open
 their own connection to each local agent** at no cost to the agent — `serve_peer(…,
 PeerOrigin::Management, …)` runs once per connection regardless of how many host processes
 connect. Node-locality says *be on the node*; it does not say *be one process*. (The node-
 agent holds **one** long-lived management connection per local agent per tier; fan-in stays
-trivial — agent RFC 0015 §3.2.) The single fact that demolishes the monolith is that the
+trivial — agentd RFC 0015 §3.2.) The single fact that demolishes the monolith is that the
 data plane does not care how many host processes connect to it.
 
 **Argument 2 — incompatible reliability classes cannot share a rollout cadence or a blast
@@ -146,7 +146,7 @@ each role roll on its own clock at its own blast radius.
 **Argument 3 — concentration of secrets and authority is a liability.** A monolith holds, in
 one address space: every node-local secret the A2A path needs (webhook tokens, the durable-
 store credential), **god-mode over every local pod** (drain / cancel / steer with no in-band
-auth — reachability *is* authority, agent RFC 0015 §7), the descriptor table (which *is* the
+auth — reachability *is* authority, agentd RFC 0015 §7), the descriptor table (which *is* the
 cross-tenant access-control table, RFC 0002 §6.2), *and* the parser for **untrusted external
 A2A input**. Splitting the untrusted-input-facing A2A PEP (Tier B gateway) from the
 privileged bridge (Tier A) gives the untrusted parser its own, *less*-privileged failure
@@ -171,12 +171,12 @@ the safety invariant true *and* keeps CRI-root in one place.
 
 2. **Tier A is bounce-safe; the invariant is scoped to Tier A.** A Tier A crash/restart is a
    **control + observability gap on one node with zero data-plane impact** — the agent keeps
-   running (liveness = the supervisor heartbeat, agent RFC 0010 §3.7), and reconnect is a
-   **clean re-read** (agent RFC 0015 §8: no per-connection durable state). This is written
+   running (liveness = the supervisor heartbeat, agentd RFC 0010 §3.7), and reconnect is a
+   **clean re-read** (agentd RFC 0015 §8: no per-connection durable state). This is written
    down (§3.3) as scoped to *this* tier and explicitly **not** claimed of Tier B.
 
 3. **Tier B owns the live A2A task stream end-to-end and writes to the shared store.** The
-   distillate is delivered **once** (agent RFC 0020 §5 / RFC 0009 §7); the relay must own
+   distillate is delivered **once** (agentd RFC 0020 §5 / RFC 0009 §7); the relay must own
    the stream for the **full lifecycle independent of any HTTP client** or results are lost
    (§4.2). The relay writes durable status to the shared store; a **separate, replicated,
    stateless HTTP gateway** serves the public surface from that store. **This RFC owns
@@ -185,7 +185,7 @@ the safety invariant true *and* keeps CRI-root in one place.
 
 4. **The intelligence proxy is OUT of both tiers.** An embedded proxy would make the agentic
    loop's LLM call a per-node SPOF — a proxy crash stalls reasoning on *every* local pod
-   (§4.3 of agent RFC 0007: the loop blocks on the model call). It lives in the
+   (§4.3 of agentd RFC 0007: the loop blocks on the model call). It lives in the
    `IntelligenceService` / ModelPool plane (agentctl RFC 0004 / RFC 0012), never here (§6).
 
 5. **Discovery, not allocation.** The node-agent **discovers** each agent's host-reachable
@@ -289,24 +289,24 @@ Tier A node-agent Pod (DaemonSet, privileged for discovery)
 
 Over the discovered, attested socket (RFC 0002 §3) the connection manager holds **one**
 long-lived management connection per local agent and connects as `PeerOrigin::Management`
-(agent RFC 0015 §3.3) — the structural gate that lists the operator tools and operator
-resources to this peer and to no spawned subagent (agent RFC 0015 §3.4). The bridge:
+(agentd RFC 0015 §3.3) — the structural gate that lists the operator tools and operator
+resources to this peer and to no spawned subagent (agentd RFC 0015 §3.4). The bridge:
 
 - **caches the live read model.** It reads `agent://capabilities` (re-read on hot-reload /
   model-swap via the `updated` notification), `agent://inventory` (the live subagent tree),
-  and `agent://status` (identity + lifecycle flags) — agent RFC 0015 §5.2–5.4 — and
+  and `agent://status` (identity + lifecycle flags) — agentd RFC 0015 §5.2–5.4 — and
   publishes the **observed snapshot** correlated to the pod by `identity.uid` that agentctl
   RFC 0006 §4.2 consumes for the LIVE capability path. **The node-agent never writes
   `Agent.status`** — the operator is the single writer (RFC 0006 §2.6); the node-agent owns
   the *snapshot*, the operator owns the *projection*.
 - **invokes the operator tools on request** through the §7 API: each verb maps onto a
-  contract operator tool (agent RFC 0015 §4), and `attach` is `subagent.send` into a warm
-  session (agent RFC 0015 §4.5) — *not* a new tool. The reference impl's
+  contract operator tool (agentd RFC 0015 §4), and `attach` is `subagent.send` into a warm
+  session (agentd RFC 0015 §4.5) — *not* a new tool. The reference impl's
   `surfaces.operator_tools` is `drain`/`lame-duck`/`cancel` today; `pause`/`resume` are
-  contract-specified (agent RFC 0015 §4.3) but **not yet implemented** (contract ask
+  contract-specified (agentd RFC 0015 §4.3) but **not yet implemented** (contract ask
   **P-pause**, brainstorm §0.6) — so they are not a guaranteed 1:1 operator-tool set. The
   bridge renders its verb set from `surfaces.operator_tools`, not a hardcoded list, and
-  drives **only** the verbs the agent advertises (graceful degradation, agent RFC 0015
+  drives **only** the verbs the agent advertises (graceful degradation, agentd RFC 0015
   §5.2/§8); a verb the agent omits (including `pause`/`resume` on a binary that lacks them)
   is surfaced as unsupported, never invoked — capability-absence, not error.
 - **does not conflate the lifecycle verbs.** `drain` ≡ SIGTERM ≡ a clean exit `0` (agent
@@ -322,13 +322,13 @@ egress leg aside, RFC 0002 §10). It owns three responsibilities; the *schemas a
 are agentctl RFC 0010's, the *on-node collection* is this RFC's:
 
 - **metrics scrape-proxy.** Re-export each local agent's metrics as byte-identical Prometheus
-  text (`GET /proxy/<uid>/metrics` → `agent://metrics` / the `/metrics` surface, agent RFC
+  text (`GET /proxy/<uid>/metrics` → `agent://metrics` / the `/metrics` surface, agentd RFC
   0016). Whether `agent://metrics` is reachable over the management socket at all is the
   unresolved contract conflict **P4** (RFC 0002 open question (h)); on a networkless pod there
   is no TCP fallback, so the collector is *blocked* on P4 there.
 - **events ring tail.** Tail `agent://events` for live `kubectl agent logs -f` / event
   follow, using the ring's cursor (`?after=<seq>`, the `dropped` counter, oldest/newest seq —
-  agent RFC 0016 §7.2). The ring is **lossy by design**; the collector surfaces `dropped > 0`
+  agentd RFC 0016 §7.2). The ring is **lossy by design**; the collector surfaces `dropped > 0`
   rather than pretending completeness. **Bulk** event capture is *not* this path — it is the
   ordinary container-stderr → node log agent → Loki path, which already works on networkless
   pods (CRI captures stderr independent of pod networking); the ring is **live-tail only**
@@ -338,7 +338,7 @@ are agentctl RFC 0010's, the *on-node collection* is this RFC's:
   the terminal transition *while the process is still alive*, then hands the report to the
   durable run-outcome store (agentctl RFC 0010) that backs `kubectl agents results`. This is a
   real Tier A responsibility, not an afterthought, and it needs the **read-before-exit
-  guarantee / short post-terminal linger** the contract does not yet make (**P5**, agent RFC
+  guarantee / short post-terminal linger** the contract does not yet make (**P5**, agentd RFC
   0016) — without it, a once-mode result is lost if the collector blinks at the wrong instant.
 
 ### 3.3 The bounce-safe invariant (scoped to Tier A)
@@ -349,10 +349,10 @@ are agentctl RFC 0010's, the *on-node collection* is this RFC's:
 
 This is true by construction, and each clause has a contract citation:
 
-- **The agent keeps running.** Liveness is the supervisor heartbeat / health-file (agent RFC
+- **The agent keeps running.** Liveness is the supervisor heartbeat / health-file (agentd RFC
   0010 §3.7), independent of any management connection. A pod whose node-agent bounced is
   still alive; only its control + telemetry *reach* gapped.
-- **A dropped management connection is not a liveness signal** (agent RFC 0015 §8). The
+- **A dropped management connection is not a liveness signal** (agentd RFC 0015 §8). The
   kubelet probe is the contract's exec-health verb on a networkless pod (the **P1** ask, RFC
   0002 §8) or an HTTP probe on a networked one — never a dial to the node-agent.
 - **Reconnect is a clean re-read.** agent holds **no per-connection durable state** (agent
@@ -361,7 +361,7 @@ This is true by construction, and each clause has a contract citation:
   instance by `identity.uid`.
 - **Lifecycle still works without the bridge.** When the management `drain` tool is
   unreachable, `drain` is still reachable as **plain SIGTERM** (pod delete) — `drain` ≡
-  SIGTERM ≡ exit 0 (agent RFC 0015 §4.1). So the operator's finalizer drain (RFC 0006 §7.2)
+  SIGTERM ≡ exit 0 (agentd RFC 0015 §4.1). So the operator's finalizer drain (RFC 0006 §7.2)
   degrades to the pod's SIGTERM path, not to a stuck object.
 
 **The honest scope.** A Tier A bounce *does* gap: live `kubectl agent` interaction, the
@@ -404,7 +404,7 @@ structured to own that fact honestly. It is two workloads:
 
 ### 4.1 Why the live A2A leg is node-pinned
 
-A2A is served by the agent over vsock/unix (agent RFC 0020 §2), which is point-to-point
+A2A is served by the agent over vsock/unix (agentd RFC 0020 §2), which is point-to-point
 guest↔host. The **live** task stream — `message/send`, `message/stream`, live `tasks/get`,
 `tasks/cancel`, `tasks/resubscribe` — is therefore physically pinned to the node where the
 agent pod runs. So the relay is on-node, by the same physics that pins Tier A. The
@@ -433,7 +433,7 @@ the relevant fact here is that **the live leg is unavoidably on the agent's node
 
 This is the load-bearing correction the monolith hides. The agent delivers the final
 distillate as a status notification **exactly once** and serves only **live** tasks from its
-ephemeral registry (agent RFC 0020 §4/§5 / RFC 0009 §7/§8 — the distillate-only invariant).
+ephemeral registry (agentd RFC 0020 §4/§5 / RFC 0009 §7/§8 — the distillate-only invariant).
 For `once`-mode agents this is acute: the agent **exits immediately** after delivering. So:
 
 > **The relay MUST drain the vsock task stream for the full lifecycle, independent of any HTTP
@@ -445,7 +445,7 @@ Two contract-level consequences this RFC records and RFC 0013 must build on:
 
 - **It needs the terminal-distillate re-read primitive (P5).** The contract must guarantee a
   short **post-terminal linger** (or a re-read-by-run-handle after the fact) so a relay that
-  blinks at completion can still recover the distillate (the agent ask **P5**, agent RFC
+  blinks at completion can still recover the distillate (the agent ask **P5**, agentd RFC
   0016/0020). Until P5, the relay-loss window must be defined as **FAILED + idempotent
   re-drive**, gated behind an explicit per-fleet opt-in that asserts the composition is
   idempotent — re-drive is *not* free (RFC 0011 §6 dedupes side effects by `run_id`; it does
@@ -473,10 +473,10 @@ own, least-privileged failure domain (§2.1 Argument 3).
 ### 4.4 What the relay passes to the agent (descriptive, never re-verified)
 
 The gateway is the PEP; an unauthenticated / over-quota / forbidden client never reaches the
-relay (agent RFC 0020 §6). The relay passes the authenticated caller / tenant identity to the
-agent as **descriptive `_meta`** — the same posture as the downward-API identity (agent RFC
+relay (agentd RFC 0020 §6). The relay passes the authenticated caller / tenant identity to the
+agent as **descriptive `_meta`** — the same posture as the downward-API identity (agentd RFC
 0015 §6): the agent labels/scopes by it but **never re-verifies** it (the gateway already did,
-agent RFC 0012 §3.8). This needs the descriptive caller/tenant `_meta` convention the
+agentd RFC 0012 §3.8). This needs the descriptive caller/tenant `_meta` convention the
 contract does not yet define (the **P-meta** ask). The relay does **not** hold the card-
 signing key (central signing, RFC 0013) and scopes its store credential to least privilege —
 a per-node relay must not be able to forge cross-org cards or read other nodes' rows.
@@ -527,14 +527,14 @@ An embedded intelligence proxy is the one role that is **categorically wrong** i
 node-agent, and it is excluded from *both* tiers:
 
 - **It would be a per-node inference SPOF.** The agentic loop **blocks on the LLM call**
-  (agent RFC 0007 / RFC 0006) — reasoning cannot proceed until the model responds. An
+  (agentd RFC 0007 / RFC 0006) — reasoning cannot proceed until the model responds. An
   in-node-agent proxy crash therefore **stalls reasoning on every local pod on the node**,
   not merely the node-agent's own work. This is the exact opposite of the bounce-safe
   invariant Tier A is built to guarantee (§3.3): management/telemetry tolerate a node-agent
   bounce; *inference does not*. Co-locating them would poison the safe tier with the unsafe
   one's failure mode.
 - **It would make RFC 0018 inter-pool failover shared-fate.** The contract's resilience
-  machinery (failover / breaker / all-down / hot-swap, agent RFC 0018) operates *across*
+  machinery (failover / breaker / all-down / hot-swap, agentd RFC 0018) operates *across*
   pool endpoints; terminating multiple pool endpoints on one per-node process collapses that
   into a single shared-fate hop and blinds the frozen `agent_intel_endpoint_*` metrics (they
   would measure pod↔proxy, not pod↔model).
@@ -595,11 +595,11 @@ message InvokeRequest {
 }
 ```
 
-The mapping is mechanical and total: `Invoke{verb}` → the operator tool `verb` (agent RFC
+The mapping is mechanical and total: `Invoke{verb}` → the operator tool `verb` (agentd RFC
 0015 §4); `Steer` → `subagent.send` (§4.5); `Snapshot`/`Watch`/`Tail` → the `agent://`
 resource reads/subscriptions (§5); `ScrapeMetrics`/`Results` → the telemetry surfaces (agent
 RFC 0016). The node-agent invents **no new lifecycle verb** — it is a faithful, attested
-conduit to the contract's primitives, exactly as agent RFC 0014 §3 demands ("agent exposes
+conduit to the contract's primitives, exactly as agentd RFC 0014 §3 demands ("agent exposes
 primitives; agentctl owns policy").
 
 ### 7.2 The per-target-namespace internal authz hook (the chokepoint, not the policy)
@@ -626,7 +626,7 @@ authorize(caller_principal, target.namespace, verb) -> Allow | Deny     // BEFOR
 ### 7.3 Caller identity is descriptive; audit is in-band
 
 The authenticated caller is passed to the agent as **descriptive `_meta`** (`CallerPrincipal`,
-§7.1) — never re-verified by the agent (agent RFC 0015 §6, RFC 0012 §3.8). The node-agent
+§7.1) — never re-verified by the agent (agentd RFC 0015 §6, RFC 0012 §3.8). The node-agent
 additionally emits a **management-action audit record** on every `Invoke`/`Steer`
 independent of the lossy events ring — the closed-vocabulary `mgmt.invoked{tool, caller?}`
 event the contract does not yet define (the **P-audit** ask). For interactive `Steer`
@@ -663,7 +663,7 @@ listener and the chokepoint, RFC 0009 owns who gets through and the streaming br
 | **Tier A** (control + telemetry) | control + observability gap on one node; LIVE status → `ManagementUnreachable`; metrics/event/run-capture gap (P5 window) | **one node's control reach** | reconnect = clean re-read (RFC 0015 §8); drain degrades to SIGTERM (pod delete) | **none** (§3.3 invariant) |
 | **Tier B relay** | node-local **live** A2A streams dropped; in-flight distillates at risk (delivered once) | **one node's live A2A** | lease-expiry sweep → `failed/lost`; P5 re-read or FAILED + idempotent re-drive | live-task loss possible — **NOT bounce-safe** (§4.2) |
 | **Tier B gateway** | dropped A2A ingress on the failed replica | **fraction of A2A ingress** (replicated) | another replica serves; store is durable | none (stateless; durable record survives) |
-| **the agent itself** | the data plane — supervisor + kill ladder + cgroup bounds (agent RFC 0003) | one pod | kubelet restart on liveness fail | this *is* the data plane |
+| **the agent itself** | the data plane — supervisor + kill ladder + cgroup bounds (agentd RFC 0003) | one pod | kubelet restart on liveness fail | this *is* the data plane |
 
 The matrix is the whole argument for the split in one table: the bounce-safe column is **true
 only for Tier A**, and the relay's must-not-miss column is exactly the property the monolith
@@ -675,7 +675,7 @@ would have hidden behind Tier A's safety claim.
   `maxUnavailable` and a PDB; each node's control reach gaps for the restart window and
   self-heals on reconnect (§3.3). No drain of the data plane is required — the agents do not
   notice. Tier A's version-skew envelope is against (a) the operator (the §7 API + the RFC
-  0006 snapshot shape) and (b) the agent contract (`contract_version` negotiation, agent RFC
+  0006 snapshot shape) and (b) the agent contract (`contract_version` negotiation, agentd RFC
   0014 §6.3) — both additive-within-major.
 - **The Tier B relay rolls drain-aware.** Because it owns live streams (§4.2), a relay
   rollout must either drain in-flight live tasks to terminal/persisted state first or accept a
@@ -724,7 +724,7 @@ would have hidden behind Tier A's safety claim.
   record; the multiplexing/lease policy is the CLI plane's.
 - **Any data-plane internals.** The node-agent drives the contract; it MUST NOT branch on one
   binary's flags, file layout, or `build_features` *values* — only on `surfaces{}` and the
-  negotiated `contract_version` (agent RFC 0014 §6.2, P0).
+  negotiated `contract_version` (agentd RFC 0014 §6.2, P0).
 
 ---
 
@@ -754,7 +754,7 @@ Cloud-Hypervisor, and the minimum host privilege Tier A needs to open it — wit
 runtime-internal files. This bounds how much of the "node-root" privilege is truly required.
 
 (d) **The P5 contract shape the relay depends on.** Read-before-exit guarantee vs a short
-post-terminal linger vs re-read-by-run-handle (agent RFC 0016/0020). The relay's
+post-terminal linger vs re-read-by-run-handle (agentd RFC 0016/0020). The relay's
 must-not-miss property (§4.2) and Tier A's run-outcome capture (§3.2) **both** ride P5; until
 it lands, both degrade to a defined lost-window contract (FAILED + idempotent re-drive for
 A2A; best-effort capture for run reports). Which P5 variant the contract adopts changes the
@@ -814,38 +814,38 @@ phase? (Leaning: P4 is a hard dependency of the HARDENED tier's observability.)
 - **agentctl RFC 0017** — Release & lifecycle engineering: agentctl's own multi-component
   upgrade + skew matrix that the §8.2 per-tier cadences slot into.
 
-**Contract spec (the reference implementation's current home — agent RFCs)**
+**Contract spec (the reference implementation's current home — agentd RFCs)**
 
-- **agent RFC 0014** — control-plane contract umbrella: the data/control-plane split
+- **agentd RFC 0014** — control-plane contract umbrella: the data/control-plane split
   ("agent exposes primitives; agentctl owns policy", §3), `surfaces{}` as the single
   discovery point (§6.2), contract versioning/negotiation (§6.3), the downward-API env family
   (§6.4), graceful degradation (§8).
-- **agent RFC 0015** — management & control surface: `--serve-mcp` transports and the
+- **agentd RFC 0015** — management & control surface: `--serve-mcp` transports and the
   thread-per-connection listener (§3 — the basis of Argument 1), `PeerOrigin::Management`
   (§3.3/§3.4), the operator tools `drain`/`lame-duck`/`pause`/`resume`/`cancel` (§4) and
   `attach`=`subagent.send` (§4.5), the manifest/inventory/status resources (§5.2–5.4),
   reachability == operator authority (§7), reconnect = a clean re-read with no per-connection
   state (§8 — the basis of the §3.3 invariant), the downward-API identity (§6).
-- **agent RFC 0010** — observability, health & telemetry: liveness = the supervisor
+- **agentd RFC 0010** — observability, health & telemetry: liveness = the supervisor
   heartbeat / `--health-file` independent of any management connection (§3.7), the `agent_*`
   metric convention Tier A scrapes.
-- **agent RFC 0016** — telemetry & lifecycle contract: the `agent://events` lossy ring +
+- **agentd RFC 0016** — telemetry & lifecycle contract: the `agent://events` lossy ring +
   cursor/`dropped` semantics Tier A tails (§7.2), the run-report object + `--report-file` /
   `agent://run/{run_id}` the run-outcome capture reads, the frozen metrics surface.
-- **agent RFC 0020** — A2A over the substrate: A2A served over vsock/unix (§2), the
+- **agentd RFC 0020** — A2A over the substrate: A2A served over vsock/unix (§2), the
   distillate delivered once / live-only registry (§4/§5), the gateway-as-PEP and node-pinned
   topology (§5), descriptive caller/tenant `_meta` (§5), stateless-agent / stateful-gateway
   (§6) — the basis of Tier B.
-- **agent RFC 0006/0007** — intelligence transport and the agentic loop: the loop blocks on
+- **agentd RFC 0006/0007** — intelligence transport and the agentic loop: the loop blocks on
   the model call (the basis of the §6 per-node-inference-SPOF argument).
-- **agent RFC 0011** — idempotency & exit-code contract: no per-connection durable state and
+- **agentd RFC 0011** — idempotency & exit-code contract: no per-connection durable state and
   side-effect dedupe by `run_id` (§6/§7) — the basis of the §3.3 bounce-safe re-read invariant
   and the §4.2 FAILED + idempotent-re-drive contract (re-drive dedupes side effects by
   `run_id`; it does not make whole-task re-execution safe).
-- **agent RFC 0012** — security posture: the transport-is-the-boundary trust model (§3.8) the
+- **agentd RFC 0012** — security posture: the transport-is-the-boundary trust model (§3.8) the
   node-agent inherits as the management/A2A PEP-adjacent principal; the reader/actor
   distillate firewall.
-- **agent RFC 0018** — intelligence resilience: failover / breaker / all-down / hot-swap
+- **agentd RFC 0018** — intelligence resilience: failover / breaker / all-down / hot-swap
   *across* pool endpoints and the frozen `agent_intel_endpoint_*` metrics — the basis of the
   §6 argument that an embedded per-node intelligence proxy collapses inter-pool failover into
   a shared-fate hop.

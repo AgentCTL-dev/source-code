@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Validate the typed client against the GOLDEN capability fixtures in
 //! `contract/fixtures/capabilities/` — two of which are real `--capabilities`
-//! captures from the reference binary (agent 2.5.0). This is the behavioral
+//! captures from the reference binary (agentd 1.0.0; it resolves via
+//! `agent_version`). This is the behavioral
 //! ground-truth: if the client and the contract drift, these fail.
 
 use agent_contract_client::*;

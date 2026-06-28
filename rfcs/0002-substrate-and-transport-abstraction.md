@@ -11,7 +11,7 @@
 > that socket in its capabilities manifest's `surfaces.management` key, reads the
 > downward-API env convention, and honours the frozen exit-code/health contract.
 > Where this RFC needs a concrete value or a worked example it cites **the reference
-> implementation** (`agent`, whose contract is presently specified in agent RFCs
+> implementation** (`agent`, whose contract is presently specified in agentd RFCs
 > 0014–0020); none of those citations make the reference implementation a
 > dependency. The transport abstraction here is precisely the seam that lets a
 > future agent from another vendor drop in unchanged.
@@ -45,9 +45,9 @@ abstraction does not cover (§10, correction 1).
 
 The inbound planes above are largely the *same physical problem* for the
 **management** surface: **open a byte stream to a specific agent and speak the
-contract's NDJSON/JSON-RPC management profile over it** (the self-MCP, agent RFC
+contract's NDJSON/JSON-RPC management profile over it** (the self-MCP, agentd RFC
 0015 §3). The metrics/events surfaces are *not* identical — they speak a different
-protocol (Prometheus 0.0.4 text over HTTP / an events stream, agent RFC 0016) and
+protocol (Prometheus 0.0.4 text over HTTP / an events stream, agentd RFC 0016) and
 may live on a separate socket (§3). What unifies them is the *descriptor*
 abstraction, not the wire. The hard part is not the protocol — the contract froze
 that — it is that the byte stream crosses a boundary whose **isolation strength
@@ -57,13 +57,13 @@ differs by an order of magnitude between substrates**, and the strongest isolati
 The contract already anticipated this and made the abstraction clean. A conformant
 agent advertises its management surface in exactly one place — the manifest's
 `surfaces.management` key, whose value space is **`false | "vsock:PORT" |
-"unix:PATH"`** (agent RFC 0015 §5.2). And the agent's *serving* code is
-transport-agnostic by construction: agent RFC 0015 §3.2/§3.4 sets
+"unix:PATH"`** (agentd RFC 0015 §5.2). And the agent's *serving* code is
+transport-agnostic by construction: agentd RFC 0015 §3.2/§3.4 sets
 `PeerOrigin::Management` and uses identical NDJSON framing for the unix and vsock
 listeners — "the unix server with the socket type swapped." The agent does **not**
 know or care which substrate it runs on; it binds a socket and serves. Who
 provisions the device — the CID, the port, the host-side path — is explicitly *not
-the agent's concern* (agent RFC 0015 §3.3, RFC 0006). **That provisioning and
+the agent's concern* (agentd RFC 0015 §3.3, RFC 0006). **That provisioning and
 reach is this RFC's concern, and it is the whole of it.**
 
 The temptation the vision encodes — make vsock the default everywhere, run agents
@@ -121,7 +121,7 @@ on one node-agent code path.** The rest follows.
 
 6. **Pod→socket attestation is v1-blocking.** Because tenancy is hostile, the
    node-agent MUST prove which pod owns a discovered socket before it speaks the
-   management profile to it — reachability *is* full operator authority (agent RFC
+   management profile to it — reachability *is* full operator authority (agentd RFC
    0015 §7), so a squatted socket is a privilege grant. `SO_PEERCRED` + cgroup→pod
    mapping on stock-unix; the runtime-owned per-VM uds on Kata (§7).
 
@@ -147,7 +147,7 @@ caller knowing anything about substrates, CIDs, or hostPaths.
 // EndpointDescriptor — produced by the node-agent discovery loop (agentctl RFC 0008),
 // consumed by the operator, A2A relay, telemetry scraper, and CLI bridge.
 {
-  "agent": {                            // identity, from the downward API (agent RFC 0014 §6.4)
+  "agent": {                            // identity, from the downward API (agentd RFC 0014 §6.4)
     "uid":       "f3c1…-…-…",           // metadata.uid  — the join key for everything
     "instance":  "triage-abc",          // metadata.name
     "namespace": "agents",
@@ -178,10 +178,10 @@ The load-bearing fields and their invariants:
   code path for management (§4). The only tier-specific step is an optional
   `CONNECT <port>` line on hybrid-vsock (`connect_hint`, §4.2). **This unification
   is a management-surface property, not a universal one:** the metrics surface on a
-  *networked* pod is a **TCP** dial (`:9090`, Prometheus text per agent RFC 0016),
+  *networked* pod is a **TCP** dial (`:9090`, Prometheus text per agentd RFC 0016),
   not a unix connect — see the `surface` bullet below.
 - **`advertised` carries provenance, `dial` carries reachability.** The agent
-  reports `surfaces.management = "vsock:5005"` (its *in-guest* view, agent RFC 0015
+  reports `surfaces.management = "vsock:5005"` (its *in-guest* view, agentd RFC 0015
   §5.2); the node-agent records that verbatim for audit and translates it to the
   host-side `dial`. The agent's self-report is **descriptive, never load-bearing** —
   the node-agent MUST NOT dial `advertised` directly (a tenant controls it).
@@ -195,25 +195,25 @@ The load-bearing fields and their invariants:
   profile whose `advertised` derives from `surfaces.management` and whose `dial` is
   unix in all tiers (above). The other surfaces are genuinely different:
   - **metrics/events** speak **Prometheus 0.0.4 text over HTTP** (and an events
-    stream), not the management profile (agent RFC 0016); they may live on a
+    stream), not the management profile (agentd RFC 0016); they may live on a
     **separate socket** advertised via `surfaces.metrics` (not `surfaces.management`),
     and on a networked pod the metrics `dial` is **TCP** (`--health-http ADDR`, e.g.
     `:9090`), not unix. The descriptor abstraction is reused, but discovery must
     target `surfaces.metrics` and tolerate a second socket and a TCP dial.
     Furthermore, **whether `agent://metrics` is reachable over the management
-    socket at all is an unresolved contract conflict** (agent RFC 0005/0015 do not
-    list it, agent RFC 0019 does) — the contract **ask P4**, symmetric to the A2A
+    socket at all is an unresolved contract conflict** (agentd RFC 0005/0015 do not
+    list it, agentd RFC 0019 does) — the contract **ask P4**, symmetric to the A2A
     ambiguity below, and a *hard* dependency on networkless (HARDENED) pods where
     there is no TCP fallback (open question (h)).
-  - **A2A** (agent RFC 0020) reuses the descriptor shape, but whether it shares the
+  - **A2A** (agentd RFC 0020) reuses the descriptor shape, but whether it shares the
     management listener or gets its own `surfaces.a2a` address is a contract open
     item — the **ask P2** (open question (d)); `surfaces.a2a` is not yet in the
-    frozen manifest (agent RFC 0015 §5.2).
+    frozen manifest (agentd RFC 0015 §5.2).
 
 > **Contract-as-Schema (P0, agentctl RFC 0001).** The `surfaces.management` value
 > space and the downward-API identity keys this descriptor depends on are part of
 > the published control contract. They are presently authored inside the reference
-> implementation's repo (agent RFC 0014/0015); a live open question (§10) is to
+> implementation's repo (agentd RFC 0014/0015); a live open question (§10) is to
 > extract them into a neutral *Agent Control Contract* spec with published JSON
 > Schemas, so that agentctl validates a descriptor against the schema and any
 > conformant agent — not just the reference one — populates it.
@@ -244,7 +244,7 @@ and surfaced into each descriptor.
 
 The agent serves its management profile on the contract's bind-address
 instruction — reference impl: `--serve-mcp unix:/run/agent/mgmt.sock` (the unix
-serve form originates in agent RFC 0005 §3.6; agent RFC 0015 §3.1 generalizes it
+serve form originates in agentd RFC 0005 §3.6; agentd RFC 0015 §3.1 generalizes it
 to the vsock form) — where `/run/agent` is a per-pod directory on a hostPath
 volume the node-agent DaemonSet can also see (§6.1). The node-agent opens that
 socket host-side and holds the long-lived management connection. (The bind
@@ -255,8 +255,8 @@ This tier runs on **any** stock runc/containerd cluster that permits hostPath. T
 is **no CID-allocation problem** — it is a filesystem path with filesystem ACLs as
 access control, which is *exactly* the unix trust model the contract already
 documents ("a unix socket inherits filesystem permissions as its access control",
-agent RFC 0012 §3.8; "whoever can reach the management transport may call the
-operator tools", agent RFC 0015 §7). The agent holds no secrets in the keyless
+agentd RFC 0012 §3.8; "whoever can reach the management transport may call the
+operator tools", agentd RFC 0015 §7). The agent holds no secrets in the keyless
 configuration (agentctl RFC 0012), so the DaemonSet remains the only networked
 component. This is the day-one substrate (agentctl RFC 0001 roadmap, Phase 0): it
 requires *no* unbuilt contract primitive on a stock cluster.
@@ -271,7 +271,7 @@ forces §5.
 This is the premium isolation tier and the one the vision is really about. The agent
 runs inside a Kata microVM with a real guest kernel; it serves
 `--serve-mcp vsock:5005` and binds `VMADDR_CID_ANY` (accepts from its host;
-the node-agent connects from `VMADDR_CID_HOST = 2`, agent RFC 0015 §3.1). The agent
+the node-agent connects from `VMADDR_CID_HOST = 2`, agentd RFC 0015 §3.1). The agent
 is byte-for-byte unaware it is on Kata — it binds a vsock listener exactly as agent
 RFC 0015 §3.2 specifies, same NDJSON framing, same `PeerOrigin::Management`.
 
@@ -360,7 +360,7 @@ Mechanically, this is enforced at two points:
   refuses to render a tenant agent without it under hostile tenancy.
 
 The rationale is the security model's collapse point (agentctl RFC 0015):
-**reachability of the management transport == full operator authority** (agent RFC
+**reachability of the management transport == full operator authority** (agentd RFC
 0015 §7 — the operator profile is gated by `PeerOrigin`, which is reachability, not
 a credential). On stock-unix, "reachability" is filesystem-and-kernel-scoped; a
 container escape or a node-root compromise crosses it. Under hostile tenancy that is
@@ -396,7 +396,7 @@ spec:
     - name: agent
       # The contract's BIND-ADDRESS INSTRUCTION (where the agent exposes its
       # management socket). Reference impl spelling: the AGENT_SERVE_MCP env (or
-      # the --serve-mcp CLI flag, agent RFC 0015 §3.1). It is an agent-BRANDED
+      # the --serve-mcp CLI flag, agentd RFC 0015 §3.1). It is an agent-BRANDED
       # contract surface — a second conformant agent may take a different flag/env
       # to set its bind address — and is flagged for contract-neutralization in
       # open question (a). Prefer the ENV form (env-injectable, mirrors the
@@ -405,7 +405,7 @@ spec:
         - name: AGENT_SERVE_MCP
           value: "unix:/run/agent/mgmt.sock"             # contract: surfaces.management = "unix:/run/agent/mgmt.sock"
         - name: AGENT_POD_UID
-          valueFrom: { fieldRef: { fieldPath: metadata.uid } }   # agent RFC 0014 §6.4
+          valueFrom: { fieldRef: { fieldPath: metadata.uid } }   # agentd RFC 0014 §6.4
       volumeMounts:
         - name: agentctl-sockets
           mountPath: /run/agent
@@ -489,7 +489,7 @@ connected to is the pod UID it intended to manage** — i.e. that `dial` is owne
 Normative requirements:
 
 - The node-agent MUST perform attestation **before the first `tools/call`** (before
-  any `drain`/`cancel`/steer) and MUST re-attest on every reconnect (agent RFC 0015
+  any `drain`/`cancel`/steer) and MUST re-attest on every reconnect (agentd RFC 0015
   §8: reconnect is a clean re-read, correlated by `identity.uid` — attestation is
   part of that re-read).
 - On `stock-unix`, `SO_PEERCRED` returns the peer's credentials *as of `listen()`*,
@@ -523,7 +523,7 @@ a `scratch` image with no shell and no `cat`, so an `exec` probe cannot
 `["cat", "/healthz"]` a health file.
 
 The reference implementation ships `--health-file` (an on-disk readiness/liveness
-file, agent RFC 0010 §3.7), which is the right *state*, but a scratch image cannot
+file, agentd RFC 0010 §3.7), which is the right *state*, but a scratch image cannot
 *read* it via a probe. So the contract needs an **exec-health verb the agent binary
 itself answers**:
 
@@ -548,10 +548,10 @@ Normative:
   for any networkless agent; it MUST NOT render `httpGet`/`tcpSocket`/`grpc` probes
   for them (they would spuriously fail-CrashLoop the pod). This is compiled from the
   tier, gated on the agent advertising the exec-health verb in `surfaces` (graceful
-  degradation, agent RFC 0014 §6.2/§8).
-- Liveness MUST track the supervisor heartbeat / health-file (agent RFC 0010 §3.7,
+  degradation, agentd RFC 0014 §6.2/§8).
+- Liveness MUST track the supervisor heartbeat / health-file (agentd RFC 0010 §3.7,
   the source of the positive liveness signal), not the management connection — and a
-  dropped management connection is **not** a liveness signal (agent RFC 0015 §8
+  dropped management connection is **not** a liveness signal (agentd RFC 0015 §8
   supports only this negative point). A networkless pod whose node-agent bounced is
   still alive; only its control/telemetry reach gapped.
 - Until P1 lands, a networkless tier is **not shippable**; the stock-unix
@@ -595,8 +595,8 @@ RFC inherits the overclaim:
 
 1. **"No network ≠ nothing to attack."** The intelligence/model channel is an
    **irreducible egress leg** — the agent's reasoning loop blocks on an LLM call
-   that must leave the trust boundary (agent RFC 0006), and in the lethal-trifecta
-   model that channel is the *dangerous* one (agent RFC 0012 §1). Moreover,
+   that must leave the trust boundary (agentd RFC 0006), and in the lethal-trifecta
+   model that channel is the *dangerous* one (agentd RFC 0012 §1). Moreover,
    **guest→host vsock is itself a live egress channel**: a compromised agent can
    write out over the very vsock it serves/dials. Removing the cluster netns removes
    *IP-layer* reachability; it does not remove egress.
@@ -614,7 +614,7 @@ RFC inherits the overclaim:
    the absence of a NIC.** The two defences that actually matter are (a) the
    **microVM kernel boundary** (Kata-hybrid) — orthogonal to vsock, the thing that
    makes a neighbour-tenant compromise require a VM escape; and (b) the **agent-side
-   reader/actor distillate firewall** (agent RFC 0012 §3.3) — the structural
+   reader/actor distillate firewall** (agentd RFC 0012 §3.3) — the structural
    CaMeL-style split that quarantines untrusted content in a no-egress reader and
    passes only a low-bandwidth distillate to an actor. agentctl markets *those*, and
    surfaces the trifecta tags from the manifest (agentctl RFC 0015), rather than
@@ -628,7 +628,7 @@ RFC inherits the overclaim:
 ## 11. Non-goals (these live in other planes or in the agent)
 
 - **Provisioning the microVM / vsock device / host model service.** That is the
-  node-agent's and the platform's job (agent RFC 0015 §3.3 is explicit: the agent
+  node-agent's and the platform's job (agentd RFC 0015 §3.3 is explicit: the agent
   only *uses* the CID/port it is given). This RFC defines *discovery and reach*, not
   device setup.
 - **CID allocation.** Out of v1 by §4.4. There is no v1 path that allocates a vsock
@@ -643,7 +643,7 @@ RFC inherits the overclaim:
   agentctl RFC 0010. This RFC only states that telemetry reaches the agent via a
   descriptor and is gated by the same probe realities (§8).
 - **Defining the contract's `surfaces`/manifest/exit-code/exec-health schemas.**
-  Those are the contract's (agent RFC 0014–0016); this RFC consumes them and raises
+  Those are the contract's (agentd RFC 0014–0016); this RFC consumes them and raises
   the P1 exec-health ask. Schema-extraction is open question (a) below.
 - **Any per-tenant isolation that is not a substrate property.** Multi-tenancy is a
   substrate decision (§5), not a NetworkPolicy decision (§10, correction 2); the
@@ -654,10 +654,10 @@ RFC inherits the overclaim:
 ## 12. Rollout & compatibility
 
 - **The tier is additive and version-negotiated.** A conformant agent advertises
-  `surfaces.management = false | "vsock:PORT" | "unix:PATH"` (agent RFC 0015 §5.2);
+  `surfaces.management = false | "vsock:PORT" | "unix:PATH"` (agentd RFC 0015 §5.2);
   agentctl reads it, picks the tier from the `AgentClass` substrate selector, and
   degrades gracefully — an agent reporting `surfaces.management: false` is managed
-  by liveness + exit codes + logs only (agent RFC 0014 §8). No agent change is
+  by liveness + exit codes + logs only (agentd RFC 0014 §8). No agent change is
   required to add a tier on the agentctl side.
 - **stock-unix ships first, networkless tiers gate on P1.** The day-one,
   no-unbuilt-primitive path is stock-unix on a networked pod (agentctl RFC 0001
@@ -685,9 +685,9 @@ RFC inherits the overclaim:
 `surfaces.management` value space, the downward-API identity keys, the
 **bind-address instruction** (the mechanism by which the operator tells a conformant
 agent *where* to bind its management socket — reference impl: `AGENT_SERVE_MCP` /
-`--serve-mcp`, agent RFC 0015 §3.1, rendered in §6.1), and the exec-health verb
+`--serve-mcp`, agentd RFC 0015 §3.1, rendered in §6.1), and the exec-health verb
 this RFC depends on are presently authored inside the reference implementation's
-repo (agent RFC 0014–0016) and are agent-**branded**. Recommended: extract them
+repo (agentd RFC 0014–0016) and are agent-**branded**. Recommended: extract them
 into a language-neutral spec with published JSON Schemas so the endpoint descriptor
 (§3) validates against the schema and *any* conformant agent — taking whatever
 flag/env *it* defines for its bind address — populates it, neither side owning the
@@ -706,7 +706,7 @@ runtime-internal files (version-volatile).
 (d) **Does A2A share the management listener or get its own `surfaces.a2a`
 address?** The descriptor abstraction is identical either way, but the discovery
 target differs (one socket vs two). Blocked on the contract committing `surfaces.a2a`
-(the P2 contract ask; agent RFC 0015 §5.2 does not yet list it). agentctl RFC 0013.
+(the P2 contract ask; agentd RFC 0015 §5.2 does not yet list it). agentctl RFC 0013.
 
 (e) **`SO_PEERCRED` mapping robustness on exotic cgroup layouts.** The
 `pid → cgroup → pod-UID` resolution (§7) assumes a discoverable cgroup-v2 pod slice;
@@ -715,7 +715,7 @@ hierarchies, and define the failure mode when it does not (hard-fail, per §7).
 
 (f) **Multi-pod-per-VM.** §4 assumes one agent per guest. If a future deployment
 runs multiple agents in one microVM sharing one vsock device, port-per-pod
-allocation becomes the node-agent's responsibility (agent RFC 0015 §10 flags this
+allocation becomes the node-agent's responsibility (agentd RFC 0015 §10 flags this
 as a contract open item). Out of v1 scope; recorded so the descriptor's
 `connect_hint` can grow a per-pod port without a breaking change.
 
@@ -728,8 +728,8 @@ conflict, symmetric to P2/A2A.)** The metrics surface (§3) speaks Prometheus te
 over HTTP and may live on its own socket advertised via `surfaces.metrics`; on a
 *networkless* (HARDENED) pod there is no TCP fallback, so whether metrics is also
 exposed over the management/vsock socket is **load-bearing, not a detail**. The
-contract is presently inconsistent (agent RFC 0005/0015 do not list
-`agent://metrics`; agent RFC 0019 assumes it). Resolution is the contract ask
+contract is presently inconsistent (agentd RFC 0005/0015 do not list
+`agent://metrics`; agentd RFC 0019 assumes it). Resolution is the contract ask
 **P4**; until then the telemetry descriptor (agentctl RFC 0010) cannot rely on
 in-socket metrics on networkless pods.
 
@@ -763,28 +763,28 @@ in-socket metrics on networkless pods.
   threat model (§4.3), and the isolation of control-plane execution of tenant images
   (§7.5).
 
-**Contract spec (the reference implementation's current home — agent RFCs):**
+**Contract spec (the reference implementation's current home — agentd RFCs):**
 
-- **agent RFC 0014 (the reference impl's contract spec)** §2 (the data/control-plane
+- **agentd RFC 0014 (the reference impl's contract spec)** §2 (the data/control-plane
   split, vsock-as-management), §6.2 (`surfaces{}` is the single discovery point),
   §6.4 (the downward-API env convention this RFC keys descriptors on).
-- **agent RFC 0015 (the reference impl's contract spec)** §3 (`--serve-mcp
+- **agentd RFC 0015 (the reference impl's contract spec)** §3 (`--serve-mcp
   vsock:PORT`, the blocking thread-per-connection listener, `PeerOrigin::Management`
   identical for unix/vsock, the trust domain), §5.2 (the manifest;
   `surfaces.management = false | "vsock:PORT" | "unix:PATH"`), §7 (reachability ==
   operator authority), §8 (reconnect = clean re-read), §10 (the CID/multi-pod-per-VM
   open item).
-- **agent RFC 0006 (the reference impl's contract spec)** — the vsock transport
+- **agentd RFC 0006 (the reference impl's contract spec)** — the vsock transport
   (`vsock:<cid>:<port>`, `VMADDR_CID_HOST = 2`) the management listener mirrors; the
   intelligence dial-out egress leg.
-- **agent RFC 0012 (the reference impl's contract spec)** §3.3 (the reader/actor
+- **agentd RFC 0012 (the reference impl's contract spec)** §3.3 (the reader/actor
   distillate firewall — the real injection defence), §3.8 (the unix-socket
   transport-is-the-boundary trust model the stock tier inherits), §3.9 (sandboxing
   delegated to the deployment boundary).
-- **agent RFC 0010 / 0016 (the reference impl's contract spec)** — `--health-file`
+- **agentd RFC 0010 / 0016 (the reference impl's contract spec)** — `--health-file`
   and the health/readiness state the exec-health verb (§8, P1) must expose; the
   frozen metrics surface the telemetry descriptor scrapes.
-- **agent RFC 0020 (the reference impl's contract spec)** — A2A-over-vsock and the
+- **agentd RFC 0020 (the reference impl's contract spec)** — A2A-over-vsock and the
   node-agent-as-gateway posture (§3, descriptor reuse for the A2A surface).
 
 *Where this RFC and a contract spec disagree on the wire, the contract wins and this

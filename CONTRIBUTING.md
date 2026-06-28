@@ -35,7 +35,7 @@ matching the crate's license (see the map in [`LICENSE`](LICENSE)):
 
 agentctl drives **any** agent conforming to the Agent Control Contract
 (`contract/`, see `contract/SPEC.md`). Do not add a dependency on a specific agent
-implementation (e.g. agent) or branch on an agent's internals — code against the
+implementation (e.g. agentd) or branch on an agent's internals — code against the
 contract. New wire shapes belong in the contract + the generated client, not
 inline in a component.
 

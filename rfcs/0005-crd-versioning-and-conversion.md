@@ -9,7 +9,7 @@
 > (`v1alpha1 → v1beta1 → v1`) is agentctl's declarative contract with its *users*
 > — the shape of the object they `kubectl apply`. It is **independent** of the
 > agent contract (the runtime agentctl↔agent wire that P0 makes load-bearing).
-> The agent `contract_version` (agent RFC 0014 §6.3, the reference impl's contract
+> The agent `contract_version` (agentd RFC 0014 §6.3, the reference impl's contract
 > spec) is negotiated at runtime and lives in `.status` and the `AgentClass`; it
 > moves on its **own** clock. Conflating the two — bumping the CRD every time the
 > data plane ships a feature — is the anti-pattern this RFC exists partly to
@@ -292,7 +292,7 @@ them as one would be expensive and wrong.
 |---|---|---|
 | **What it versions** | the *shape of the declarative object* a user applies (`Agent`/`AgentFleet` `.spec`/`.status`) | the *runtime agentctl↔agent wire*: capabilities manifest, `surfaces{}`, metrics schema, exit-code table, config schema, A2A methods |
 | **Spelling** | `agents.x-k8s.io/v1alpha1 → v1beta1 → v1` | `1.0`, `1.1`, `2.0` (major.minor) |
-| **Owned by** | **agentctl** (this RFC) | **the contract** (currently agent RFC 0014 §6.3, the reference impl's spec) |
+| **Owned by** | **agentctl** (this RFC) | **the contract** (currently agentd RFC 0014 §6.3, the reference impl's spec) |
 | **Negotiated where** | resolved by the apiserver at apply/read time | negotiated at runtime per instance |
 | **Lives in** | the stored object's `apiVersion` | `.status.contract.version` (RFC 0003 §6.1) + `AgentClass.contractVersionRange` (RFC 0004) |
 | **Moves when** | agentctl makes a breaking schema change or graduates a stage | the contract adds (minor) or breaks (major) a wire surface |
@@ -617,7 +617,7 @@ the old version correct.
   agentctl RFC 0006. This RFC's `.status.storedVersions` patches are issued by that
   operator.
 - **The agent `contract_version` negotiation, graceful degradation, and the
-  codegen/conformance pipeline.** The contract's own versioning is agent RFC 0014
+  codegen/conformance pipeline.** The contract's own versioning is agentd RFC 0014
   §6.3 (the reference impl's spec); the Axis-B client regen + conformance is
   agentctl RFC 0018. This RFC only decouples Axis A from Axis B (§3).
 - **`AgentClass`/`IntelligenceService`/`MCPServerSet`.** agentctl RFC 0004. They
@@ -690,15 +690,15 @@ the old version correct.
   (client regen + conformance) that handles `contract_version` movement, decoupled
   from this RFC's Axis-A machinery (§3).
 
-**Contract spec (the reference implementation, agent RFCs)**
+**Contract spec (the reference implementation, agentd RFCs)**
 
-- **agent RFC 0014** — control-plane contract umbrella (the reference impl's
+- **agentd RFC 0014** — control-plane contract umbrella (the reference impl's
   contract spec): §6.3 (`contract_version` major.minor, additive-minor /
   breaking-major, runtime negotiation — the Axis-B clock §3 decouples from), §6.2
   (`surfaces{}` as the single discovery point — why runtime capability lives in
   `.status`, not the CRD `apiVersion`), §8 (graceful degradation on unknown
   surfaces).
-- **agent RFC 0015** — management & control surface: §5.2 (the capabilities
+- **agentd RFC 0015** — management & control surface: §5.2 (the capabilities
   manifest the curated `.status` projection — and thus Axis B — reads from).
 
 **Platform**

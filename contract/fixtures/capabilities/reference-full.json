@@ -1,6 +1,6 @@
 {
   "contract_version": "1.0",
-  "agent_version": "0.1.0",
+  "agent_version": "1.0.0",
   "build_features": ["tls", "vsock", "serve-mcp", "a2a", "cron", "metrics", "otel"],
   "identity": {
     "run_id": "01J8X9ABCDEF0123456789ABCD",

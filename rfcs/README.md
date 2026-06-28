@@ -1,11 +1,12 @@
 # agentctl RFCs — index
 
-> **Note (de-brand: COMPLETE):** these RFCs are now neutral-only. The reference
-> agent's pre-rebrand name was `agentd`; it has rebranded to **`agent`**, and this
-> corpus carries no legacy branded spellings — `agent_*` / `agent://` / `AGENT_*`
-> are the canonical forms the ACC makes authoritative. The design is unchanged
-> (the reference agent's repo dir is still `agentd-dev`). There are no accepted
-> branded aliases; see `contract/README.md` and `contract/SPEC.md` (L4).
+> **Note (contract is vendor-neutral):** the control contract these RFCs consume is
+> vendor-neutral, so **any** agent can implement it. The canonical wire forms are
+> `agent_*` (metric prefix) / `agent://` (URI scheme) / `AGENT_*` (env family) — these
+> are neutral, not brand names. The **reference implementation is `agentd` v1.0.0**,
+> which speaks exactly that neutral contract (and keeps `agentd://` as a legacy alias).
+> The reference implementation's repo dir is `agentd-dev`. See `contract/README.md` and
+> `contract/SPEC.md` (L4).
 
 This directory holds the agentctl RFC set. **agentctl is the Kubernetes control
 plane for *conformant agents*** — it provisions, reaches, scales, observes, and
@@ -47,7 +48,7 @@ agentctl codegens its client from the **contract schemas**, never from a data-pl
 binary's source; and every RFC is written against "a conformant agent" / "the
 contract," naming agent only as the reference implementation in worked examples.
 
-**The contract these RFCs consume is currently specified by agent RFCs
+**The contract these RFCs consume is currently specified by agentd RFCs
 0014–0020** (the reference implementation's control-plane track). That contract is
 implementation-neutral but is *presently authored inside the agent repo*.
 **Extracting it into a standalone, neutral "Agent Control Contract" spec — its own
