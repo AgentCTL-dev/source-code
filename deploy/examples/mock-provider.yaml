@@ -1,0 +1,68 @@
+# A mock model provider for the intelligence-plane e2e (RFC 0012): it REQUIRES an
+# Authorization header (proving the ModelGateway injected the pool credential —
+# the agent never sent one) and returns a canned completion with token usage.
+# Dev/test only.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-provider
+  namespace: default
+  labels:
+    app.kubernetes.io/name: mock-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mock-provider
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mock-provider
+    spec:
+      containers:
+        - name: provider
+          image: python:3.12-alpine
+          command:
+            - python3
+            - -c
+            - |
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+              import json
+              class H(BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      auth = self.headers.get('authorization')
+                      n = int(self.headers.get('content-length', 0))
+                      body = self.rfile.read(n)
+                      if not auth:
+                          print('PROVIDER 401 — no credential injected', flush=True)
+                          self.send_response(401); self.send_header('content-type','application/json'); self.end_headers()
+                          self.wfile.write(b'{"error":"missing credential"}'); return
+                      try: req = json.loads(body or b'{}')
+                      except Exception: req = {}
+                      model = req.get('model') or 'mock-model-v1'
+                      user = ''
+                      for m in req.get('messages', []):
+                          if m.get('role') == 'user': user = m.get('content', '')
+                      resp = {"model": model, "content": "mock completion for: " + user,
+                              "usage": {"prompt_tokens": 90, "completion_tokens": 10, "total_tokens": 100}}
+                      print('PROVIDER 200 auth=' + auth[:18] + '… model=' + model, flush=True)
+                      out = json.dumps(resp).encode()
+                      self.send_response(200); self.send_header('content-type','application/json'); self.end_headers(); self.wfile.write(out)
+                  def log_message(self, *a): pass
+              print('mock-provider listening on :8080', flush=True)
+              HTTPServer(('', 8080), H).serve_forever()
+          ports:
+            - { containerPort: 8080, name: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-provider
+  namespace: default
+  labels:
+    app.kubernetes.io/name: mock-provider
+spec:
+  selector:
+    app.kubernetes.io/name: mock-provider
+  ports:
+    - { port: 8080, targetPort: 8080, name: http }

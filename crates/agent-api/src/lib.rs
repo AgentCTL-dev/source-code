@@ -343,6 +343,82 @@ pub struct AgentFleetStatus {
     pub last_scale_time: Option<String>,
 }
 
+// ===========================================================================
+// ModelPool
+// ===========================================================================
+
+/// A pool of model access (RFC 0012, the intelligence plane). Agents are
+/// **networkless and hold NO provider secrets**; the control plane supplies
+/// model access through a credential-injecting, metering, budget-enforcing
+/// proxy (the `ModelGateway`) configured by this CRD. The pool names the
+/// provider, its endpoint, the `Secret` holding the provider API key, the
+/// allowed models, and an optional total token budget.
+#[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[kube(
+    group = "agents.x-k8s.io",
+    version = "v1alpha1",
+    kind = "ModelPool",
+    namespaced,
+    status = "ModelPoolStatus",
+    shortname = "mp",
+    printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".spec.provider"}"#,
+    printcolumn = r#"{"name":"Endpoint","type":"string","jsonPath":".spec.endpoint","priority":1}"#,
+    printcolumn = r#"{"name":"Budget","type":"integer","jsonPath":".spec.budget.maxTokens"}"#,
+    printcolumn = r#"{"name":"Used","type":"integer","jsonPath":".status.usedTokens"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPoolSpec {
+    /// Provider id, e.g. `"mock"` | `"anthropic"` | `"openai"` (free string).
+    pub provider: String,
+
+    /// Provider base URL, e.g. `http://mock-provider.default:8080`.
+    pub endpoint: String,
+
+    /// Reference to the `Secret` holding the provider API key. The gateway
+    /// injects it; the agent never sees it.
+    pub credential_secret_ref: SecretKeyRef,
+
+    /// Allowed model ids for this pool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+
+    /// Default model id, used when a request does not pin one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+
+    /// Total token budget for the pool (enforced by the gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
+}
+
+/// A reference to a specific key within a namespace-local `Secret`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretKeyRef {
+    /// The `Secret` name (same namespace as the `ModelPool`).
+    pub name: String,
+    /// The key within the `Secret`'s data holding the provider API key.
+    pub key: String,
+}
+
+/// A total token budget for a `ModelPool`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Budget {
+    /// Maximum total tokens the pool may consume.
+    pub max_tokens: i64,
+}
+
+/// `ModelPool.status` — running meter against the pool's budget.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPoolStatus {
+    /// Total tokens consumed against the pool so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_tokens: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +458,28 @@ mod tests {
         let crd = AgentFleet::crd();
         assert_eq!(crd.spec.names.kind, "AgentFleet");
         assert!(crd.spec.versions.iter().any(|v| v.name == "v1alpha1"));
+    }
+
+    #[test]
+    fn modelpool_crd_generates() {
+        let crd = ModelPool::crd();
+        assert_eq!(crd.spec.group, "agents.x-k8s.io");
+        assert_eq!(crd.spec.names.kind, "ModelPool");
+        assert!(crd
+            .spec
+            .names
+            .short_names
+            .as_ref()
+            .unwrap()
+            .contains(&"mp".to_string()));
+        assert!(crd.spec.versions.iter().any(|v| v.name == "v1alpha1"));
+        // status subresource is enabled
+        let v = &crd.spec.versions[0];
+        assert!(v
+            .subresources
+            .as_ref()
+            .and_then(|s| s.status.as_ref())
+            .is_some());
     }
 
     #[test]

@@ -30,17 +30,18 @@ default; Kata-hybrid vsock as the hardened multi-tenant tier), a **two-tier
 node-agent**, and **contract-as-schema** anti-drift (codegen + behavioral
 conformance, not a shared crate).
 
-## Workspace (9 crates)
+## Workspace (10 crates)
 
 | crate | role |
 |---|---|
 | `agent-contract-client` | typed client for the contract (manifest sum-types, version negotiation) |
-| `agent-api` | `Agent` / `AgentFleet` CRDs (kube-rs) |
+| `agent-api` | `Agent` / `AgentFleet` / `ModelPool` CRDs (kube-rs) |
 | `agentctl-operator` | render core + reconcile controllers (Agent & AgentFleet) |
 | `agentctl-crdgen` | emits `deploy/crds/*.yaml` |
 | `agentctl-node-agent` | on-node bridge: socket discovery, management client, HTTP API, metrics scrape-proxy |
 | `agentctl-apiserver` | aggregated APIServer: front-proxy auth + SAR + verb forwarding |
 | `agentctl-gateway` | A2A gateway: public A2A HTTP/JSON-RPC + Agent Card projection, bridging to the agent over the node-agent |
+| `agentctl-modelgateway` | intelligence proxy: `ModelPool`-driven credential injection, token metering, budget enforcement |
 | `agentctl-cli` | `agentctl get` / `describe` |
 | `mock-agent` | a conformant-agent stand-in (management profile) for dev/e2e/conformance |
 

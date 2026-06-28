@@ -81,6 +81,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentctl-modelgateway"
+version = "0.1.0"
+dependencies = [
+ "agent-api",
+ "axum",
+ "deadpool-postgres",
+ "k8s-openapi",
+ "kube",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentctl-node-agent"
 version = "0.1.0"
 dependencies = [

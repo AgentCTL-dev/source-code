@@ -18,15 +18,16 @@ implementation lands; the binding plan is `docs/design/agentctl-architecture-bra
 | **A2A durable task store** | 0013 | ✅ | Postgres-backed: `message/send` persists tasks, **`tasks/list`** returns history, `tasks/get` resolves from the store; **survives a gateway pod restart** (state in the DB, gateway stays stateless) |
 | **A2A push notifications** | 0013 | ✅ | `tasks/pushNotificationConfig/set·get·list·delete` (gateway-owned, since agents are networkless); on completion the gateway **delivers the task to the webhook** with retries + `Authorization: Bearer` (verified: sink received the task with `auth=Bearer …`) |
 | **A2A mesh: card signing + fleet card + federation** | 0014 | ✅ | Agent **+ fleet** Cards are **JWS-signed** (Ed25519); `GET /.well-known/jwks.json` serves the key — **a live card verifies against it**; `GET /agents` **federates** peer registries (`origin` per row); `tasks/resubscribe` replays a stored task over SSE |
+| **Intelligence plane** (ModelPool + ModelGateway) | 0012 | ✅ | networkless, **secretless** agent → ModelGateway injects the `ModelPool`'s provider credential (mock-provider 401s without it), **meters** tokens in Postgres (`/v1/usage`), and **enforces the budget** (3rd call → HTTP 429, provider saw only 2); CRD-driven (`kubectl get modelpools`) |
 | **Contract client + CRD gen + conformance fixture** | 0018 | ✅ (hand-written) | typed manifest client validated vs real golden `--capabilities` fixtures; `mock-agent` as a conformant stand-in |
 
-**Engineering:** 9 crates, 64 tests, `clippy -D warnings` clean, `cargo fmt` clean.
+**Engineering:** 10 crates, 79 tests, `clippy -D warnings` clean, `cargo fmt` clean.
 
 ## Remaining (roadmap)
 
 - **Observability** (rest of 0010): events pipeline (`agent://events`→logs), run-outcome capture (`kubectl agents results`), CLI `top`, trace correlation.
 - **A2A — protocol surface complete.** Done: `message/send`, **`message/stream`** (live SSE), `tasks/get`·`list`·`cancel`·**`resubscribe`**, **`pushNotificationConfig/*`** + webhook delivery (retry + bearer auth), per-agent **and fleet JWS-signed Agent Cards** + JWKS, the **`GET /agents` federated registry**, and the **Postgres durable task store**. Remaining is hardening/scale only: cross-cluster federation *trust* (verify peer card signatures + dedup), live in-flight stream resume (agents complete synchronously today), and push delivery for streaming tasks.
-- **Intelligence plane** (0012): the egress proxy / ModelPool; zero-secret-in-pod; cost governance.
+- **Intelligence plane** (rest of 0012): bridge identity assertion (node-agent→ModelGateway with attestation) so identity isn't header-asserted; ModelPool `status.usedTokens` write-back; real provider adapters (Anthropic/OpenAI) + streaming; per-agent (not just per-pool) budgets. (Done: ModelPool CRD, ModelGateway credential injection + metering + budget + `/v1/usage`.)
 - **Admission** (0007): CRD CEL invariants + the validating webhook (trifecta-override gate).
 - **Hardening** (0015): apiserver↔node-agent mTLS, pod→socket attestation (`SO_PEERCRED`, 0002 §7), per-tenant isolation, the Kata-hybrid substrate tier.
 - **Real agentd**: drive the reference runtime (vs `mock-agent`) — needs a serve-stable management invocation.
