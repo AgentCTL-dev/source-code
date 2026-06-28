@@ -9,8 +9,9 @@ bridge (node-agent), an aggregated APIServer, and an A2A gateway.
 > data plane is *any* agent that conforms to the **Agent Control Contract**
 > (`contract/`): the capabilities manifest, the management MCP profile, the
 > frozen metrics + exit-code contract, the config schema, A2A over the substrate,
-> and the downward-API env convention. `agentd` is the reference implementation,
-> not a dependency. agentctl is **Rust-only**.
+> and the downward-API env convention. `agent` (the reference agent binary; its
+> repo is `agentd-dev`) is the reference implementation, not a dependency.
+> agentctl is **Rust-only**.
 
 ## Architecture
 

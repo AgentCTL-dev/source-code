@@ -1,5 +1,12 @@
 # agentctl RFCs — index
 
+> **Note (rebrand):** these RFCs were authored when the reference agent was named
+> `agentd`; it has since rebranded to **`agent`** (binary + image + the neutral
+> `agent_*` / `agent://` / `AGENT_*` spellings the ACC makes canonical). The design
+> is unchanged — read `agentd` references here as the reference agent (its repo is
+> still `agentd-dev`). The branded `agentd_*` spellings remain accepted legacy
+> aliases; see `contract/README.md` and `contract/SPEC.md` (L4).
+
 This directory holds the agentctl RFC set. **agentctl is the Kubernetes control
 plane for *conformant agents*** — it provisions, reaches, scales, observes, and
 manages a fleet of agents, and exposes their public A2A surface. **RFCs 0001–0018

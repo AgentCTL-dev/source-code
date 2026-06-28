@@ -63,10 +63,11 @@ unknown major).** Sub-schemas (`metrics_schema`, `report_schema`, `config_schema
 version independently within a known contract major. See [§6](#6-version-keys).
 
 ### L4 — De-branding (P0): neutral canonical, branded alias, both accepted to GA
-The reference emits branded spellings; the contract canonicalizes neutral ones and
-keeps branded as **accepted aliases**, dropped only at a GA cutover:
+The reference (the `agent` binary) now emits the **neutral** spellings; the contract makes
+those canonical and **accepts** the legacy branded spellings as aliases (back-compat with
+pre-rebrand agents), dropped only at a GA cutover:
 
-| concern | neutral (canonical) | branded alias |
+| concern | neutral (canonical, emitted) | legacy alias (accepted) |
 |---|---|---|
 | env prefix | `AGENT_*` | `AGENTD_*` |
 | URI scheme | `agent://` | `agentd://` |

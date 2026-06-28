@@ -30,7 +30,7 @@ const API_VERSION: &str = "agents.x-k8s.io/v1alpha1";
 /// §6.1). Each pod mounts only its own `<pod-uid>/` subdir.
 const SOCKET_HOSTPATH_ROOT: &str = "/run/agentctl/sockets";
 /// In-pod mount point where the agent binds its management socket.
-const SOCKET_MOUNT: &str = "/run/agentd";
+const SOCKET_MOUNT: &str = "/run/agent";
 const SOCKET_VOLUME: &str = "agentctl-sockets";
 
 /// What the renderer produced. Boxed to keep the enum small (clippy).
@@ -267,7 +267,7 @@ fn pod_template(
             // Per RFC 0002 §6.1: the per-pod subdir is selected by the pod UID
             // via subPathExpr, so the path is unique WITHOUT the operator
             // knowing the UID at render time.
-            sub_path_expr: Some("$(AGENTD_POD_UID)".to_string()),
+            sub_path_expr: Some("$(AGENT_POD_UID)".to_string()),
             ..Default::default()
         }]),
         ..Default::default()
@@ -294,10 +294,10 @@ fn pod_template(
     }
 }
 
-/// The downward-API instance-identity env (contract `env-convention`, agentd RFC
-/// 0014 §6.4). Emitted with the reference-alias spelling (`AGENTD_*`) the
-/// reference agent reads today; moves to the neutral `AGENT_*` set at the
-/// de-branding GA cutover (contract `README` de-branding map).
+/// The downward-API instance-identity env (contract `env-convention`, RFC
+/// 0014 §6.4). Emitted with the **neutral** `AGENT_*` spelling the rebranded
+/// reference agent reads; the legacy `AGENTD_*` alias is still accepted by the
+/// agent for back-compat (contract `README` de-branding map).
 fn downward_env() -> Vec<EnvVar> {
     let field = |name: &str, path: &str| EnvVar {
         name: name.to_string(),
@@ -311,14 +311,14 @@ fn downward_env() -> Vec<EnvVar> {
         ..Default::default()
     };
     vec![
-        field("AGENTD_POD_NAME", "metadata.name"),
-        field("AGENTD_POD_UID", "metadata.uid"),
-        field("AGENTD_POD_NAMESPACE", "metadata.namespace"),
-        field("AGENTD_NODE_NAME", "spec.nodeName"),
+        field("AGENT_POD_NAME", "metadata.name"),
+        field("AGENT_POD_UID", "metadata.uid"),
+        field("AGENT_POD_NAMESPACE", "metadata.namespace"),
+        field("AGENT_NODE_NAME", "spec.nodeName"),
         // The management bind-address instruction (RFC 0002 §6.1): the agent
         // serves its self-MCP management profile on the per-pod hostPath socket.
         EnvVar {
-            name: "AGENTD_SERVE_MCP".to_string(),
+            name: "AGENT_SERVE_MCP".to_string(),
             value: Some(format!("unix:{SOCKET_MOUNT}/mgmt.sock")),
             ..Default::default()
         },
@@ -475,11 +475,11 @@ mod tests {
 
         let c = container_of(&pod);
         let mount = &c.volume_mounts.as_ref().unwrap()[0];
-        assert_eq!(mount.sub_path_expr.as_deref(), Some("$(AGENTD_POD_UID)"));
-        assert_eq!(mount.mount_path, "/run/agentd");
+        assert_eq!(mount.sub_path_expr.as_deref(), Some("$(AGENT_POD_UID)"));
+        assert_eq!(mount.mount_path, "/run/agent");
 
         let env = c.env.as_ref().unwrap();
-        let uid = env.iter().find(|e| e.name == "AGENTD_POD_UID").unwrap();
+        let uid = env.iter().find(|e| e.name == "AGENT_POD_UID").unwrap();
         assert_eq!(
             uid.value_from
                 .as_ref()
@@ -490,8 +490,8 @@ mod tests {
                 .field_path,
             "metadata.uid"
         );
-        let serve = env.iter().find(|e| e.name == "AGENTD_SERVE_MCP").unwrap();
-        assert_eq!(serve.value.as_deref(), Some("unix:/run/agentd/mgmt.sock"));
+        let serve = env.iter().find(|e| e.name == "AGENT_SERVE_MCP").unwrap();
+        assert_eq!(serve.value.as_deref(), Some("unix:/run/agent/mgmt.sock"));
     }
 
     #[test]

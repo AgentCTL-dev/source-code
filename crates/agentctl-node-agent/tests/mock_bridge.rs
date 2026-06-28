@@ -59,7 +59,7 @@ fn serve_one(stream: UnixStream, capabilities_json: String) {
                     .pointer("/params/uri")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                assert_eq!(uri, "agentd://capabilities", "unexpected resource read");
+                assert_eq!(uri, "agent://capabilities", "unexpected resource read");
                 json!({"contents": [{
                     "uri": uri,
                     "mimeType": "application/json",

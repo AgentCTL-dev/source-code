@@ -11,7 +11,7 @@
 //! — and demonstrates P0: agentctl manages *any* conformant agent.
 //!
 //! Bind address comes from the contract bind instruction
-//! `AGENT_SERVE_MCP` / `AGENTD_SERVE_MCP` (e.g. `unix:/run/agentd/mgmt.sock`),
+//! `AGENT_SERVE_MCP` / `AGENTD_SERVE_MCP` (e.g. `unix:/run/agent/mgmt.sock`),
 //! which the operator injects (RFC 0002 §6.1).
 
 use std::io::{BufRead, BufReader, Write};
@@ -39,7 +39,7 @@ agent_tool_calls_total 17
 fn main() {
     let serve = env::var("AGENT_SERVE_MCP")
         .or_else(|_| env::var("AGENTD_SERVE_MCP"))
-        .expect("AGENT_SERVE_MCP / AGENTD_SERVE_MCP must be set (e.g. unix:/run/agentd/mgmt.sock)");
+        .expect("AGENT_SERVE_MCP / AGENTD_SERVE_MCP must be set (e.g. unix:/run/agent/mgmt.sock)");
     let path = serve.strip_prefix("unix:").unwrap_or(&serve).to_string();
 
     let _ = fs::remove_file(&path); // clear a stale socket from a prior pod
@@ -244,7 +244,7 @@ fn manifest() -> Value {
     };
     json!({
         "contract_version": "1.0",
-        "agentd_version": format!("mock-agent-{}", env!("CARGO_PKG_VERSION")),
+        "agent_version": format!("mock-agent-{}", env!("CARGO_PKG_VERSION")),
         "build_features": [],
         "identity": {
             "run_id": "mock-run",

@@ -554,7 +554,7 @@ async fn metrics_handler(
             let mut client = ManagementClient::connect(&socket).map_err(|e| e.to_string())?;
             client.initialize().map_err(|e| e.to_string())?;
             client
-                .read_resource_text("agentd://metrics")
+                .read_resource_text("agent://metrics")
                 .map_err(|e| e.to_string())
         })
         .await;

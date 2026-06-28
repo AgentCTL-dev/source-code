@@ -33,9 +33,9 @@ implementation lands; the binding plan is `docs/design/agentctl-architecture-bra
 - **Intelligence plane** (rest of 0012): bridge identity assertion (node-agent→ModelGateway with attestation) so identity isn't header-asserted; ModelPool `status.usedTokens` write-back; real provider adapters (Anthropic/OpenAI) + streaming; per-agent (not just per-pool) budgets. (Done: ModelPool CRD, ModelGateway credential injection + metering + budget + `/v1/usage`.)
 - **Admission** (rest of 0007): mutating webhook (defaulting/injection), `ValidatingAdmissionPolicy` (in-tree CEL, webhook-free) for cross-object where it now suffices, per-tenant quota/policy. (Done: CRD CEL invariants + the validating webhook — trifecta gate, registry allow-list, cross-object `modelPool` existence.)
 - **Hardening** (rest of 0015): wire the **attested** pod identity into the intelligence path (route agent→node-agent→ModelGateway so `SO_PEERCRED`-attested identity replaces the header-asserted `X-Agent-*`); the **Kata-hybrid vsock** substrate tier (needs the Kata runtime); NetworkPolicy *enforcement* (manifests shipped; needs Calico/Cilium — kindnet ignores them); cert rotation (cert-manager/SPIFFE). (Done: node-agent control-API **mTLS**, **`SO_PEERCRED` socket attestation**, egress/tenant NetworkPolicy manifests.)
-- **Real agentd**: drive the reference runtime (vs `mock-agent`) — needs a serve-stable management invocation.
+- **Real agent**: drive the reference runtime — the `agent` binary/image (repo `agentd-dev`) — vs `mock-agent`; needs a serve-stable management invocation.
 - **CI/codegen** (0018): the contract-as-schema codegen pipeline (client is hand-written today); broaden conformance.
-- **P0**: extract the contract into a neutral repo + neutralize the `AGENTD_*`/`agentd://` spellings at GA.
+- **P0**: extract the contract into a neutral repo. (The reference rebranded agentd→`agent`, so the neutral `AGENT_*`/`agent://` spellings are now emitted — operator injects them, node-agent requests them; the branded forms remain accepted legacy aliases until GA.)
 
 ## Cross-repo contract asks
 

@@ -19,11 +19,12 @@ to satisfy the ACC — but it is not privileged. Any binary that emits a conform
 capabilities manifest, honors the exit-code table, serves the declared surfaces, and speaks
 the declared wire protocols is a conformant agent that agentctl can drive.
 
-Because the contract was first specified inside the reference repo, the reference impl emits
+The contract was first specified inside the reference repo, which originally emitted
 **branded spellings** (`agentd_*` env, `agentd://` URIs, `agentd_` metric prefix). The
-contract canonicalizes **neutral tokens** and keeps the branded spellings as accepted aliases
-until a GA cutover (see *De-branding map*). Neither form is silently dropped — fielded agents
-emit the branded form today.
+reference implementation (the `agent` binary) has since **rebranded to the neutral tokens**
+(`agent_*`, `agent://`, `AGENT_*`) — which the contract makes canonical. The legacy branded
+spellings remain **accepted aliases** (back-compat with pre-rebrand agents) and are not
+silently dropped, but new agents emit the neutral form (see *De-branding map*).
 
 ---
 
@@ -108,11 +109,12 @@ need a hand-written deserializer:
 
 ## De-branding map (P0)
 
-For each branded token the contract defines a neutral canonical token and keeps the branded
-spelling as the **current accepted alias**. Cutover to neutral-only is a **GA decision**;
-branded forms are NOT dropped while fielded agents emit them.
+For each token the contract defines a neutral canonical spelling and **accepts** the legacy
+branded spelling as an alias. The reference (the `agent` binary) now emits the neutral form;
+the branded forms are retained for back-compat with pre-rebrand agents and are NOT dropped
+(final removal is a GA decision).
 
-| concern | neutral (canonical) | reference alias (current) | cutover |
+| concern | neutral (canonical, emitted) | legacy alias (accepted) | drop ≥ |
 |---|---|---|---|
 | downward-API env prefix | `AGENT_*` | `AGENTD_*` | GA |
 | URI scheme | `agent://` | `agentd://` | GA |
@@ -123,8 +125,9 @@ branded forms are NOT dropped while fielded agents emit them.
 
 Compatibility rules enforced by the schemas:
 
-- The manifest root `anyOf`-requires **`agent_version` OR `agentd_version`** (the reference
-  emits the branded `agentd_version` today — confirmed by the golden fixtures).
+- The manifest root `anyOf`-requires **`agent_version` OR `agentd_version`** (the rebranded
+  reference emits the neutral `agent_version`; the golden fixtures are pre-rebrand captures
+  that emit `agentd_version`, exercising the back-compat alias).
 - `report.schema.json` `distillate_ref` accepts **`^(agent|agentd)://`** (bivalent).
 - Every metric in `metrics.registry.json` carries the neutral `name` plus the `reference_alias`
   (`agentd_…`). Every env var in `env-convention.json` carries the `AGENT_*` name plus the

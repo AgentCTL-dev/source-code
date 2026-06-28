@@ -17,12 +17,12 @@ use serde_json::{json, Value};
 /// The MCP protocol version this client speaks (contract baseline, MCP 2025-11-25).
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// The capabilities resource URI. Reference-impl spelling (`agentd://`); the
-/// neutral `agent://` becomes canonical at the de-branding GA cutover (contract
-/// `management-profile` / README de-branding map).
-pub const URI_CAPABILITIES: &str = "agentd://capabilities";
+/// The capabilities resource URI — the **neutral** `agent://` spelling the
+/// rebranded reference serves (the legacy `agentd://` alias is still accepted by
+/// the agent for back-compat; contract `management-profile` / README map).
+pub const URI_CAPABILITIES: &str = "agent://capabilities";
 /// The live subagent/inventory tree (operator-facing).
-pub const URI_INVENTORY: &str = "agentd://inventory";
+pub const URI_INVENTORY: &str = "agent://inventory";
 
 /// A management-bridge error.
 #[derive(Debug)]

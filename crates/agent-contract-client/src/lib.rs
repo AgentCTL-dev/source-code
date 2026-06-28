@@ -6,7 +6,7 @@
 //! agent implements (see `contract/` and agentctl RFC 0018).
 //!
 //! **Principle P0:** agentctl depends on the *contract*, never on a specific
-//! agent. `agentd` is the reference implementation only. This crate therefore
+//! agent. `agent` is the reference implementation only. This crate therefore
 //! models the contract's wire shapes — it does not import any agent's types.
 //!
 //! Most of the manifest is plain serde. The load-bearing exceptions are the
@@ -53,8 +53,9 @@ pub struct Manifest {
     /// [`Manifest::negotiate`].
     pub contract_version: String,
 
-    /// Neutral agent-version key (de-branding canonical). Absent on the
-    /// reference impl today, which emits [`Manifest::agentd_version`].
+    /// Neutral agent-version key (de-branding canonical) — the spelling the
+    /// rebranded reference agent emits. Pre-rebrand agents used the legacy
+    /// [`Manifest::agentd_version`] alias instead (still accepted).
     #[serde(default)]
     pub agent_version: Option<String>,
     /// Reference-impl agent-version alias (`agentd_version`). Prefer
