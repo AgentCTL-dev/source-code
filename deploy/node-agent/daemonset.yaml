@@ -23,6 +23,8 @@ spec:
         - name: node-agent
           image: agentctl/node-agent:dev
           imagePullPolicy: IfNotPresent
+          ports:
+            - { containerPort: 8080, name: http }
           env:
             - name: RUST_LOG
               value: "info"

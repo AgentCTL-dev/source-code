@@ -104,6 +104,7 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
         }
         "tools/call" => {
             let name = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+            eprintln!("mock-agent: tools/call {name} (operator tool invoked)");
             Ok(json!({ "content": [{ "type": "text", "text": format!("{name}: ok (mock)") }], "isError": false }))
         }
         other => Err((-32601, format!("method not found: {other}"))),

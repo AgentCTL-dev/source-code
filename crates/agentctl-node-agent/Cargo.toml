@@ -15,3 +15,7 @@ path = "src/bin/node-agent.rs"
 agent-contract-client = { path = "../agent-contract-client" }
 serde.workspace = true
 serde_json.workspace = true
+# The node-agent binary serves a small HTTP API (RFC 0009 backend) for the
+# aggregated apiserver to call; the ManagementClient itself stays blocking std.
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

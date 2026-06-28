@@ -24,6 +24,33 @@ subjects:
     name: agentctl-apiserver
     namespace: agentctl-system
 ---
+# Resolve Agent → pod → node-agent (the management-verb routing).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-apiserver-routing
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-apiserver-routing
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-apiserver-routing
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-apiserver
+    namespace: agentctl-system
+---
 # Read extension-apiserver-authentication (the requestheader / front-proxy CA).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

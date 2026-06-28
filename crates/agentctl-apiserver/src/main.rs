@@ -26,8 +26,8 @@ use axum::{Json, Router};
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SubjectAccessReview, SubjectAccessReviewSpec,
 };
-use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::PostParams;
+use k8s_openapi::api::core::v1::{ConfigMap, Pod};
+use kube::api::{ListParams, PostParams};
 use kube::{Api, Client};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -175,12 +175,20 @@ async fn handle_verb(
     match authorize(&state.client, &user, &groups, &ns, &name, &verb).await {
         Ok(true) => {
             tracing::info!(%user, %ns, agent = %name, %verb, "authorized management verb");
-            // Stage 2b: forward to the node-agent on the agent's node → agent.
-            status(
-                StatusCode::OK,
-                "Success",
-                &format!("{verb} authorized for {ns}/{name} by {user} (node-agent forward: stage 2b)"),
-            )
+            match forward_to_node_agent(&state.client, &ns, &name, &verb).await {
+                Ok(result) => {
+                    tracing::info!(%ns, agent = %name, %verb, "forwarded to node-agent");
+                    status(
+                        StatusCode::OK,
+                        "Success",
+                        &format!("{verb} {ns}/{name} by {user}; node-agent: {result}"),
+                    )
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "node-agent forward failed");
+                    status(StatusCode::BAD_GATEWAY, "Failure", &format!("forward failed: {e}"))
+                }
+            }
         }
         Ok(false) => {
             tracing::warn!(%user, %ns, agent = %name, %verb, "denied by SubjectAccessReview");
@@ -230,6 +238,65 @@ async fn authorize(
         .await
         .map_err(|e| format!("create SAR: {e}"))?;
     Ok(resp.status.map(|s| s.allowed).unwrap_or(false))
+}
+
+/// Resolve the Agent to its pod, find the node-agent on that pod's node, and
+/// POST the verb to it. Routing: Agent --(label)--> pod (uid, node) --> the
+/// node-agent DaemonSet pod on `node` --> `POST /v1/agents/<pod_uid>/<verb>`.
+async fn forward_to_node_agent(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    verb: &str,
+) -> Result<String, String> {
+    // The agent's pod, labelled by the operator (agentctl.dev/agent=<name>).
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
+    let pod = pods
+        .list(&lp)
+        .await
+        .map_err(|e| format!("list agent pods: {e}"))?
+        .items
+        .into_iter()
+        .find(|p| {
+            p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
+        })
+        .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?;
+    let pod_uid = pod.metadata.uid.ok_or("agent pod has no uid")?;
+    let node = pod
+        .spec
+        .and_then(|s| s.node_name)
+        .ok_or("agent pod has no nodeName")?;
+
+    // The node-agent on that node.
+    let na: Api<Pod> = Api::namespaced(client.clone(), "agentctl-system");
+    let na_lp = ListParams::default()
+        .labels("app.kubernetes.io/name=agentctl-node-agent")
+        .fields(&format!("spec.nodeName={node}"));
+    let na_ip = na
+        .list(&na_lp)
+        .await
+        .map_err(|e| format!("list node-agents: {e}"))?
+        .items
+        .into_iter()
+        // Skip a terminating/old pod during a rollout — only a Running one serves.
+        .filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
+        .find_map(|p| p.status.and_then(|s| s.pod_ip))
+        .ok_or_else(|| format!("no running node-agent on node {node}"))?;
+
+    let url = format!("http://{na_ip}:8080/v1/agents/{pod_uid}/{verb}");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| format!("node-agent POST {url}: {e}"))?;
+    let code = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if code.is_success() {
+        Ok(body)
+    } else {
+        Err(format!("node-agent {code}: {body}"))
+    }
 }
 
 fn status(code: StatusCode, kind: &str, message: &str) -> (StatusCode, Json<Value>) {
