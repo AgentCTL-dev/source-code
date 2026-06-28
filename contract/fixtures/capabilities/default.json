@@ -1,6 +1,6 @@
 {
   "a2a_peers": [],
-  "agent_version": "3.0.0",
+  "agent_version": "1.0.0",
   "allow_trifecta": false,
   "build_features": [
     "serve-mcp",
@@ -14,7 +14,7 @@
     "instance": null,
     "namespace": null,
     "node": null,
-    "run_id": "19f0effaddcaf960",
+    "run_id": "19f0fa74747c5897",
     "uid": null
   },
   "intelligence": {

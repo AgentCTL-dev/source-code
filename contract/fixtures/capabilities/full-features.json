@@ -5,7 +5,7 @@
       "transport": "vsock"
     }
   ],
-  "agent_version": "3.0.0",
+  "agent_version": "1.0.0",
   "allow_trifecta": true,
   "build_features": [
     "tls",
@@ -22,7 +22,7 @@
     "instance": "agent-0",
     "namespace": "agents",
     "node": "node-1",
-    "run_id": "19f0effae15af964",
+    "run_id": "19f0fa759d9c58ff",
     "uid": "abc-123-uid"
   },
   "intelligence": {
