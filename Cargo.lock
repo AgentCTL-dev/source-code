@@ -124,6 +124,7 @@ dependencies = [
  "agent-contract-client",
  "axum",
  "axum-server",
+ "libc",
  "rustls",
  "rustls-pemfile",
  "serde",

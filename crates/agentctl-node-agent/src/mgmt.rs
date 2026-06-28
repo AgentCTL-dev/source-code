@@ -86,6 +86,44 @@ impl ManagementClient {
         })
     }
 
+    /// The kernel-attested pid of the process serving this socket (`SO_PEERCRED`),
+    /// or `None` if the credential is unavailable.
+    ///
+    /// The node-agent is the **client** here (it `connect`s to the per-pod
+    /// socket), so the peer credential is the SERVER's — exactly the process we
+    /// want to attest against the requested pod UID (RFC 0015).
+    ///
+    /// `std::os::unix::net::UnixStream::peer_cred` is still nightly-only
+    /// (`peer_credentials_unix_socket`), so we read `SO_PEERCRED` directly with
+    /// `getsockopt` (Linux). A non-positive pid (e.g. the kernel could not
+    /// attribute the peer) is reported as `None`.
+    pub fn peer_pid(&self) -> Option<u32> {
+        use std::os::unix::io::AsRawFd;
+        let fd = self.writer.as_raw_fd();
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `cred`/`len` are valid, correctly sized out-params for the
+        // SO_PEERCRED getsockopt on a connected AF_UNIX stream; `fd` is owned by
+        // `self.writer` and outlives the call.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
+                &mut len,
+            )
+        };
+        if rc != 0 || cred.pid <= 0 {
+            return None;
+        }
+        Some(cred.pid as u32)
+    }
+
     /// The MCP handshake: `initialize`, then the `initialized` notification.
     /// Records the agent's `serverInfo`.
     pub fn initialize(&mut self) -> Result<(), Error> {

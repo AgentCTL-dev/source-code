@@ -19,6 +19,10 @@ spec:
       labels:
         app.kubernetes.io/name: agentctl-node-agent
     spec:
+      # hostPID: the bridge reads the management socket peer's host PID
+      # (UnixStream::peer_cred) to attest, via /proc/<pid>/cgroup, that the
+      # process serving the socket really belongs to the claimed pod (RFC 0002 §7).
+      hostPID: true
       containers:
         - name: node-agent
           image: agentctl/node-agent:dev

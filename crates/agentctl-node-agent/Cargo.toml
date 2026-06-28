@@ -29,3 +29,7 @@ tokio-stream = "0.1"
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
+# SO_PEERCRED pod→socket attestation (RFC 0002 §7 / RFC 0015): std's
+# UnixStream::peer_cred is still nightly-only (peer_credentials_unix_socket), so
+# we read the kernel-attested peer pid via getsockopt(SO_PEERCRED) ourselves.
+libc = "0.2"

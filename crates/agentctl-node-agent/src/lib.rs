@@ -12,9 +12,11 @@
 //! dependency-light here; the async Tier-A/Tier-B split and CID/socket discovery
 //! are layered on next.
 
+pub mod attest;
 pub mod discovery;
 pub mod metrics;
 pub mod mgmt;
 
+pub use attest::{attest_decision, pod_uid_for_pid, AttestMode, Attestation};
 pub use discovery::{discover, DiscoveredAgent};
 pub use mgmt::{Error, ManagementClient};

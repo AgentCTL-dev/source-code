@@ -36,11 +36,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentctl_node_agent::mgmt::URI_CAPABILITIES;
-use agentctl_node_agent::{discover, metrics, DiscoveredAgent, Error, ManagementClient};
+use agentctl_node_agent::{
+    attest_decision, discover, metrics, pod_uid_for_pid, AttestMode, Attestation, DiscoveredAgent,
+    Error, ManagementClient,
+};
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, Sse};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -178,6 +181,82 @@ fn load_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>, String> {
         .ok_or_else(|| "no private key in tls.key".into())
 }
 
+// --- pod→socket attestation (RFC 0002 §7 / RFC 0015) -----------------------
+
+/// A confirmed attestation mismatch under [`AttestMode::Enforce`]: the socket's
+/// server process belongs to a DIFFERENT pod than the one requested. Drives the
+/// HTTP 403 response body shared by every control handler.
+struct AttestDenial {
+    expected: String,
+    got: String,
+}
+
+impl AttestDenial {
+    /// The shared 403 response body.
+    fn body(&self) -> Value {
+        json!({
+            "error": "socket attestation failed",
+            "expected": self.expected,
+            "got": self.got,
+        })
+    }
+}
+
+/// Read the connected peer's kernel-attested pid (`SO_PEERCRED`), resolve its pod
+/// UID, and compare it against `requested_uid`. Returns `Err(AttestDenial)` only
+/// on a CONFIRMED mismatch under [`AttestMode::Enforce`]; everything else
+/// (attested, warn-mode mismatch, unresolved peer, or `Off`) returns `Ok(())` and
+/// the caller proceeds. Fail-open on resolution failure — only a confirmed
+/// mismatch denies.
+///
+/// Called inside the blocking task right after `connect`, before driving the
+/// agent, so the 403 path never touches the agent.
+fn attest_or_deny(
+    client: &ManagementClient,
+    requested_uid: &str,
+    mode: AttestMode,
+) -> Result<(), AttestDenial> {
+    if matches!(mode, AttestMode::Off) {
+        return Ok(());
+    }
+    let peer_pid = client.peer_pid();
+    let resolved = peer_pid.and_then(pod_uid_for_pid);
+    match attest_decision(requested_uid, resolved.as_deref()) {
+        Attestation::Attested(uid) => {
+            eprintln!(
+                "node-agent: attested pod {uid} peer_pid {}",
+                peer_pid.unwrap_or(0)
+            );
+            Ok(())
+        }
+        Attestation::Mismatch { expected, got } => {
+            // Security event: a socket is impersonating another pod.
+            eprintln!(
+                "node-agent: SECURITY socket attestation failed: expected pod {expected} but peer_pid {} belongs to pod {got}",
+                peer_pid.unwrap_or(0)
+            );
+            if matches!(mode, AttestMode::Enforce) {
+                Err(AttestDenial { expected, got })
+            } else {
+                eprintln!("node-agent: attestation mode=warn — proceeding despite mismatch");
+                Ok(())
+            }
+        }
+        Attestation::Unresolved => {
+            eprintln!("node-agent: peer pid unresolved; attestation skipped — is hostPID set?");
+            Ok(())
+        }
+    }
+}
+
+/// The result of driving a control verb: a bridge/agent failure or a denial.
+enum DriveError {
+    /// Attestation denied the request under enforce mode → HTTP 403.
+    Denied(AttestDenial),
+    /// A bridge or agent error → the handler's existing error mapping.
+    Bridge(String),
+}
+
 /// Execute a management verb against the local agent identified by `pod_uid`.
 async fn verb_handler(
     State(root): State<PathBuf>,
@@ -197,19 +276,28 @@ async fn verb_handler(
         );
     }
 
-    // ManagementClient is blocking std → run it off the async runtime.
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let mut client = ManagementClient::connect(&socket).map_err(|e| e.to_string())?;
-        client.initialize().map_err(|e| e.to_string())?;
+    // ManagementClient is blocking std → run it off the async runtime. Attest the
+    // socket's server process against the requested pod UID right after connect
+    // and before driving it; an enforced mismatch returns without touching the
+    // agent so the 403 path stays clean.
+    let mode = AttestMode::from_env();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, DriveError> {
+        let mut client =
+            ManagementClient::connect(&socket).map_err(|e| DriveError::Bridge(e.to_string()))?;
+        attest_or_deny(&client, &pod_uid, mode).map_err(DriveError::Denied)?;
+        client
+            .initialize()
+            .map_err(|e| DriveError::Bridge(e.to_string()))?;
         client
             .call_tool(&verb, json!({}))
-            .map_err(|e| e.to_string())
+            .map_err(|e| DriveError::Bridge(e.to_string()))
     })
     .await;
 
     match result {
         Ok(Ok(value)) => (StatusCode::OK, Json(json!({ "ok": true, "result": value }))),
-        Ok(Err(e)) => (
+        Ok(Err(DriveError::Denied(d))) => (StatusCode::FORBIDDEN, Json(d.body())),
+        Ok(Err(DriveError::Bridge(e))) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "ok": false, "error": e })),
         ),
@@ -234,7 +322,7 @@ async fn a2a_handler(
     State(root): State<PathBuf>,
     Path(pod_uid): Path<String>,
     Json(req): Json<Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req
         .get("method")
@@ -244,33 +332,59 @@ async fn a2a_handler(
     let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
     let socket = root.join(&pod_uid).join("mgmt.sock");
 
-    // ManagementClient is blocking std → run it off the async runtime.
-    let bridged = tokio::task::spawn_blocking(move || -> Result<Value, (i64, String)> {
+    /// An A2A bridge failure variant carrying either a relayed JSON-RPC error or
+    /// an enforced attestation denial.
+    enum A2aError {
+        Denied(AttestDenial),
+        Rpc(i64, String),
+    }
+
+    // ManagementClient is blocking std → run it off the async runtime. Attest the
+    // socket's server process before forwarding the request.
+    let mode = AttestMode::from_env();
+    let bridged = tokio::task::spawn_blocking(move || -> Result<Value, A2aError> {
         if !socket.exists() {
-            return Err((-32011, format!("no socket for pod {pod_uid}")));
+            return Err(A2aError::Rpc(
+                -32011,
+                format!("no socket for pod {pod_uid}"),
+            ));
         }
-        let mut client = ManagementClient::connect(&socket).map_err(|e| (-32011, e.to_string()))?;
-        client.initialize().map_err(|e| (-32011, e.to_string()))?;
+        let mut client =
+            ManagementClient::connect(&socket).map_err(|e| A2aError::Rpc(-32011, e.to_string()))?;
+        attest_or_deny(&client, &pod_uid, mode).map_err(A2aError::Denied)?;
+        client
+            .initialize()
+            .map_err(|e| A2aError::Rpc(-32011, e.to_string()))?;
         client.call(&method, params).map_err(|e| match e {
             // A genuine agent error: relay its code so the gateway can map it.
-            Error::Rpc { code, message } => (code, message),
+            Error::Rpc { code, message } => A2aError::Rpc(code, message),
             // Transport/protocol/json: a bridge failure.
-            other => (-32011, other.to_string()),
+            other => A2aError::Rpc(-32011, other.to_string()),
         })
     })
     .await;
 
-    let response = match bridged {
-        Ok(Ok(result)) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Ok(Err((code, message))) => {
-            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-        }
-        Err(e) => json!({
-            "jsonrpc": "2.0", "id": id,
-            "error": { "code": -32011, "message": e.to_string() }
-        }),
-    };
-    Json(response)
+    match bridged {
+        Ok(Ok(result)) => (
+            StatusCode::OK,
+            Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+        ),
+        // A confirmed impersonation: deny at the HTTP layer, not via JSON-RPC.
+        Ok(Err(A2aError::Denied(d))) => (StatusCode::FORBIDDEN, Json(d.body())),
+        Ok(Err(A2aError::Rpc(code, message))) => (
+            StatusCode::OK,
+            Json(
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+            ),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32011, "message": e.to_string() }
+            })),
+        ),
+    }
 }
 
 /// Bridge a **streaming** reference A2A request to the local agent and relay the
@@ -289,7 +403,7 @@ async fn a2a_stream_handler(
     State(root): State<PathBuf>,
     Path(pod_uid): Path<String>,
     Json(req): Json<Value>,
-) -> impl IntoResponse {
+) -> Response {
     let method = req
         .get("method")
         .and_then(Value::as_str)
@@ -298,24 +412,67 @@ async fn a2a_stream_handler(
     let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
     let socket = root.join(&pod_uid).join("mgmt.sock");
 
-    // The blocking client feeds frames to the SSE response through this channel;
-    // when the worker finishes (or fails), `tx` drops and the stream closes.
-    let (tx, rx) = mpsc::channel::<Value>(16);
+    let bridge_err =
+        |code: i64, message: String| json!({ "error": { "code": code, "message": message } });
 
-    tokio::task::spawn_blocking(move || {
-        let bridge_err =
-            |code: i64, message: String| json!({ "error": { "code": code, "message": message } });
-        if !socket.exists() {
-            let _ = tx.blocking_send(bridge_err(-32011, format!("no socket for pod {pod_uid}")));
-            return;
-        }
-        let mut client = match ManagementClient::connect(&socket) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.blocking_send(bridge_err(-32011, e.to_string()));
-                return;
+    /// The outcome of the blocking pre-flight: connect + attest BEFORE we commit
+    /// to the SSE response, so an enforced mismatch can return HTTP 403 cleanly
+    /// rather than as an in-band SSE event.
+    enum Preflight {
+        /// Attested (or skipped): hand the already-connected client to the worker.
+        Ready(Box<ManagementClient>),
+        /// Enforced attestation denial → HTTP 403.
+        Denied(AttestDenial),
+        /// A connect-time bridge failure → a single SSE error event, as before.
+        BridgeErr(i64, String),
+    }
+
+    // Pre-flight on a blocking task (connect is blocking std). ManagementClient
+    // owns its UnixStream and is Send, so we can carry it back here and into the
+    // streaming worker below.
+    let mode = AttestMode::from_env();
+    let pre = {
+        let socket = socket.clone();
+        let pod_uid = pod_uid.clone();
+        tokio::task::spawn_blocking(move || -> Preflight {
+            if !socket.exists() {
+                return Preflight::BridgeErr(-32011, format!("no socket for pod {pod_uid}"));
             }
-        };
+            let client = match ManagementClient::connect(&socket) {
+                Ok(c) => c,
+                Err(e) => return Preflight::BridgeErr(-32011, e.to_string()),
+            };
+            match attest_or_deny(&client, &pod_uid, mode) {
+                Ok(()) => Preflight::Ready(Box::new(client)),
+                Err(d) => Preflight::Denied(d),
+            }
+        })
+        .await
+    };
+
+    let client = match pre {
+        Ok(Preflight::Ready(client)) => *client,
+        // A confirmed impersonation: deny at the HTTP layer, never open the SSE.
+        Ok(Preflight::Denied(d)) => return (StatusCode::FORBIDDEN, Json(d.body())).into_response(),
+        // Connect-time bridge failure: emit one SSE error event, then close.
+        Ok(Preflight::BridgeErr(code, message)) => {
+            let event = Event::default().data(bridge_err(code, message).to_string());
+            let stream = tokio_stream::once(Ok::<_, Infallible>(event));
+            return Sse::new(stream).into_response();
+        }
+        Err(e) => {
+            let event = Event::default().data(bridge_err(-32011, e.to_string()).to_string());
+            let stream = tokio_stream::once(Ok::<_, Infallible>(event));
+            return Sse::new(stream).into_response();
+        }
+    };
+
+    // Attested → drive the stream. The blocking worker feeds frames to the SSE
+    // response through this channel; when it finishes (or fails), `tx` drops and
+    // the stream closes.
+    let (tx, rx) = mpsc::channel::<Value>(16);
+    tokio::task::spawn_blocking(move || {
+        let mut client = client;
         if let Err(e) = client.initialize() {
             let _ = tx.blocking_send(bridge_err(-32011, e.to_string()));
             return;
@@ -334,7 +491,7 @@ async fn a2a_stream_handler(
 
     let events = ReceiverStream::new(rx)
         .map(|frame| Ok::<_, Infallible>(Event::default().data(frame.to_string())));
-    Sse::new(events)
+    Sse::new(events).into_response()
 }
 
 /// Fetch the local agent's capabilities manifest as **raw JSON** (RFC 0005
@@ -353,19 +510,25 @@ async fn capabilities_handler(
         );
     }
 
-    let fetched = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let mut client = ManagementClient::connect(&socket).map_err(|e| e.to_string())?;
-        client.initialize().map_err(|e| e.to_string())?;
+    let mode = AttestMode::from_env();
+    let fetched = tokio::task::spawn_blocking(move || -> Result<Value, DriveError> {
+        let mut client =
+            ManagementClient::connect(&socket).map_err(|e| DriveError::Bridge(e.to_string()))?;
+        attest_or_deny(&client, &pod_uid, mode).map_err(DriveError::Denied)?;
+        client
+            .initialize()
+            .map_err(|e| DriveError::Bridge(e.to_string()))?;
         let text = client
             .read_resource_text(URI_CAPABILITIES)
-            .map_err(|e| e.to_string())?;
-        serde_json::from_str::<Value>(&text).map_err(|e| e.to_string())
+            .map_err(|e| DriveError::Bridge(e.to_string()))?;
+        serde_json::from_str::<Value>(&text).map_err(|e| DriveError::Bridge(e.to_string()))
     })
     .await;
 
     match fetched {
         Ok(Ok(manifest)) => (StatusCode::OK, Json(manifest)),
-        Ok(Err(e)) => (
+        Ok(Err(DriveError::Denied(d))) => (StatusCode::FORBIDDEN, Json(d.body())),
+        Ok(Err(DriveError::Bridge(e))) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "ok": false, "error": e })),
         ),
@@ -430,6 +593,20 @@ async fn discovery_loop(root: PathBuf, interval: Duration) {
 
 fn probe(agent: &DiscoveredAgent) -> Result<String, Box<dyn std::error::Error>> {
     let mut client = ManagementClient::connect(&agent.socket)?;
+    // Best-effort attestation for observability only (RFC 0015): confirm the
+    // socket's server process belongs to the pod whose subdir it was found in.
+    let peer_pid = client.peer_pid();
+    let resolved = peer_pid.and_then(pod_uid_for_pid);
+    match attest_decision(&agent.pod_uid, resolved.as_deref()) {
+        Attestation::Attested(uid) => {
+            eprintln!("    attested pod {uid} peer_pid {}", peer_pid.unwrap_or(0))
+        }
+        Attestation::Mismatch { expected, got } => eprintln!(
+            "    SECURITY discovery attestation MISMATCH: subdir pod {expected} but peer belongs to pod {got}"
+        ),
+        // Unresolved is expected without hostPID/host /proc — stay quiet.
+        Attestation::Unresolved => {}
+    }
     client.initialize()?;
     let manifest = client.read_capabilities()?;
     Ok(format!(
