@@ -104,7 +104,10 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
             { "name": "cancel" }
         ]})),
         "resources/read" => {
-            let uri = msg.pointer("/params/uri").and_then(Value::as_str).unwrap_or("");
+            let uri = msg
+                .pointer("/params/uri")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let text = match uri {
                 "agent://capabilities" | "agentd://capabilities" => manifest().to_string(),
                 "agent://inventory" | "agentd://inventory" => {
@@ -118,12 +121,19 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                     return Err((-32602, format!("unknown resource: {other}")));
                 }
             };
-            Ok(json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }))
+            Ok(
+                json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }),
+            )
         }
         "tools/call" => {
-            let name = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+            let name = msg
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             eprintln!("mock-agent: tools/call {name} (operator tool invoked)");
-            Ok(json!({ "content": [{ "type": "text", "text": format!("{name}: ok (mock)") }], "isError": false }))
+            Ok(
+                json!({ "content": [{ "type": "text", "text": format!("{name}: ok (mock)") }], "isError": false }),
+            )
         }
         other => Err((-32601, format!("method not found: {other}"))),
     }

@@ -144,7 +144,10 @@ impl ManagementClient {
 
     /// `tools/call` an operator tool.
     pub fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, Error> {
-        self.request("tools/call", json!({ "name": name, "arguments": arguments }))
+        self.request(
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        )
     }
 
     /// Convenience: the `drain` operator tool (RFC 0015).

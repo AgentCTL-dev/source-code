@@ -23,7 +23,9 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<(), kube::Error> {
     // Honor RUST_LOG (e.g. `agentctl_operator=debug`); default to info.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let client = Client::try_default().await?;
@@ -34,39 +36,53 @@ async fn main() -> Result<(), kube::Error> {
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");
 
     // Agent → Job/Deployment.
-    let agent_ctrl = Controller::new(Api::<Agent>::all(client.clone()), watcher::Config::default())
-        .owns(Api::<Job>::all(client.clone()), watcher::Config::default())
-        .owns(Api::<Deployment>::all(client.clone()), watcher::Config::default())
-        .shutdown_on_signal()
-        .run(reconcile, error_policy, ctx.clone())
-        .for_each(|res| async move {
-            match res {
-                Ok((obj, action)) => info!(kind = "Agent", ?obj, ?action, "reconciled"),
-                // A queued reconcile for an object already gone from the store
-                // (the post-delete / finalizer race) is benign — log it quietly.
-                Err(e @ ControllerError::ObjectNotFound(_)) => {
-                    debug!(error = %e, "object gone before reconcile (post-delete race)")
-                }
-                Err(e) => error!(error = %e, "reconcile loop error"),
+    let agent_ctrl = Controller::new(
+        Api::<Agent>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .owns(Api::<Job>::all(client.clone()), watcher::Config::default())
+    .owns(
+        Api::<Deployment>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .shutdown_on_signal()
+    .run(reconcile, error_policy, ctx.clone())
+    .for_each(|res| async move {
+        match res {
+            Ok((obj, action)) => info!(kind = "Agent", ?obj, ?action, "reconciled"),
+            // A queued reconcile for an object already gone from the store
+            // (the post-delete / finalizer race) is benign — log it quietly.
+            Err(e @ ControllerError::ObjectNotFound(_)) => {
+                debug!(error = %e, "object gone before reconcile (post-delete race)")
             }
-        });
+            Err(e) => error!(error = %e, "reconcile loop error"),
+        }
+    });
 
     // AgentFleet → Deployment (claim) / StatefulSet (shard).
-    let fleet_ctrl =
-        Controller::new(Api::<AgentFleet>::all(client.clone()), watcher::Config::default())
-            .owns(Api::<Deployment>::all(client.clone()), watcher::Config::default())
-            .owns(Api::<StatefulSet>::all(client.clone()), watcher::Config::default())
-            .shutdown_on_signal()
-            .run(reconcile_fleet, error_policy_fleet, ctx.clone())
-            .for_each(|res| async move {
-                match res {
-                    Ok((obj, action)) => info!(kind = "AgentFleet", ?obj, ?action, "reconciled"),
-                    Err(e @ ControllerError::ObjectNotFound(_)) => {
-                        debug!(error = %e, "object gone before reconcile (post-delete race)")
-                    }
-                    Err(e) => error!(error = %e, "reconcile loop error"),
-                }
-            });
+    let fleet_ctrl = Controller::new(
+        Api::<AgentFleet>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .owns(
+        Api::<Deployment>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .owns(
+        Api::<StatefulSet>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .shutdown_on_signal()
+    .run(reconcile_fleet, error_policy_fleet, ctx.clone())
+    .for_each(|res| async move {
+        match res {
+            Ok((obj, action)) => info!(kind = "AgentFleet", ?obj, ?action, "reconciled"),
+            Err(e @ ControllerError::ObjectNotFound(_)) => {
+                debug!(error = %e, "object gone before reconcile (post-delete race)")
+            }
+            Err(e) => error!(error = %e, "reconcile loop error"),
+        }
+    });
 
     tokio::join!(agent_ctrl, fleet_ctrl);
 

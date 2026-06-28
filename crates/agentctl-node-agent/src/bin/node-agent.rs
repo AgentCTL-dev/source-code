@@ -76,13 +76,18 @@ async fn verb_handler(
     let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let mut client = ManagementClient::connect(&socket).map_err(|e| e.to_string())?;
         client.initialize().map_err(|e| e.to_string())?;
-        client.call_tool(&verb, json!({})).map_err(|e| e.to_string())
+        client
+            .call_tool(&verb, json!({}))
+            .map_err(|e| e.to_string())
     })
     .await;
 
     match result {
         Ok(Ok(value)) => (StatusCode::OK, Json(json!({ "ok": true, "result": value }))),
-        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, Json(json!({ "ok": false, "error": e }))),
+        Ok(Err(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "ok": false, "error": e })),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "ok": false, "error": e.to_string() })),
@@ -93,7 +98,9 @@ async fn verb_handler(
 /// Scrape-proxy: read every local agent's metrics over the socket and re-expose
 /// them as one Prometheus exposition (RFC 0010). Networkless agents stay
 /// observable; Prometheus scrapes this node-agent endpoint.
-async fn metrics_handler(State(root): State<PathBuf>) -> ([(header::HeaderName, &'static str); 1], String) {
+async fn metrics_handler(
+    State(root): State<PathBuf>,
+) -> ([(header::HeaderName, &'static str); 1], String) {
     let agents = discover(&root).unwrap_or_default();
     let mut collected: Vec<(String, String)> = Vec::new();
     for agent in agents {
@@ -119,7 +126,10 @@ async fn metrics_handler(State(root): State<PathBuf>) -> ([(header::HeaderName, 
 }
 
 async fn discovery_loop(root: PathBuf, interval: Duration) {
-    eprintln!("node-agent: discovering management sockets under {}", root.display());
+    eprintln!(
+        "node-agent: discovering management sockets under {}",
+        root.display()
+    );
     loop {
         match discover(&root) {
             Ok(agents) => {

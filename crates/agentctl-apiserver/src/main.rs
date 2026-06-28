@@ -47,15 +47,15 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install ring crypto provider");
 
-    let client = Client::try_default()
-        .await
-        .expect("in-cluster kube client");
+    let client = Client::try_default().await.expect("in-cluster kube client");
 
     // Front-proxy trust anchor: only the kube-apiserver (presenting a cert signed
     // by this CA) may reach the API surface; then we trust its X-Remote-* headers.
@@ -72,7 +72,10 @@ async fn main() {
         .route("/livez", get(ok))
         .route("/apis", get(api_group_list))
         .route("/apis/management.agents.x-k8s.io", get(api_group))
-        .route("/apis/management.agents.x-k8s.io/v1alpha1", get(api_resources))
+        .route(
+            "/apis/management.agents.x-k8s.io/v1alpha1",
+            get(api_resources),
+        )
         .route(
             "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{ns}/agents/{name}/{verb}",
             post(handle_verb),
@@ -131,14 +134,16 @@ fn build_tls_config(client_ca: RootCertStore) -> Result<ServerConfig, String> {
 }
 
 fn load_certs(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    let mut r = BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
+    let mut r =
+        BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
     rustls_pemfile::certs(&mut r)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("read certs: {e}"))
 }
 
 fn load_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>, String> {
-    let mut r = BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
+    let mut r =
+        BufReader::new(std::fs::File::open(path).map_err(|e| format!("open {path:?}: {e}"))?);
     rustls_pemfile::private_key(&mut r)
         .map_err(|e| format!("read key: {e}"))?
         .ok_or_else(|| "no private key in tls.key".into())
@@ -155,7 +160,11 @@ async fn handle_verb(
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
     if !matches!(verb.as_str(), "drain" | "lame-duck" | "cancel") {
-        return status(StatusCode::NOT_FOUND, "Failure", &format!("unknown verb: {verb}"));
+        return status(
+            StatusCode::NOT_FOUND,
+            "Failure",
+            &format!("unknown verb: {verb}"),
+        );
     }
 
     let user = headers
@@ -164,7 +173,11 @@ async fn handle_verb(
         .unwrap_or("")
         .to_string();
     if user.is_empty() {
-        return status(StatusCode::UNAUTHORIZED, "Failure", "no X-Remote-User (not proxied?)");
+        return status(
+            StatusCode::UNAUTHORIZED,
+            "Failure",
+            "no X-Remote-User (not proxied?)",
+        );
     }
     let groups: Vec<String> = headers
         .get_all("X-Remote-Group")
@@ -186,7 +199,11 @@ async fn handle_verb(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "node-agent forward failed");
-                    status(StatusCode::BAD_GATEWAY, "Failure", &format!("forward failed: {e}"))
+                    status(
+                        StatusCode::BAD_GATEWAY,
+                        "Failure",
+                        &format!("forward failed: {e}"),
+                    )
                 }
             }
         }
@@ -258,9 +275,7 @@ async fn forward_to_node_agent(
         .map_err(|e| format!("list agent pods: {e}"))?
         .items
         .into_iter()
-        .find(|p| {
-            p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
-        })
+        .find(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
         .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?;
     let pod_uid = pod.metadata.uid.ok_or("agent pod has no uid")?;
     let node = pod

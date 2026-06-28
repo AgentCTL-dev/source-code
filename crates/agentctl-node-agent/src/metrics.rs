@@ -24,10 +24,16 @@ pub fn merge(agents: &[(String, String)]) -> String {
             }
             if let Some(rest) = line.strip_prefix("# HELP ") {
                 let name = rest.split_whitespace().next().unwrap_or_default();
-                meta.entry(name.to_string()).or_default().0.get_or_insert(line.to_string());
+                meta.entry(name.to_string())
+                    .or_default()
+                    .0
+                    .get_or_insert(line.to_string());
             } else if let Some(rest) = line.strip_prefix("# TYPE ") {
                 let name = rest.split_whitespace().next().unwrap_or_default();
-                meta.entry(name.to_string()).or_default().1.get_or_insert(line.to_string());
+                meta.entry(name.to_string())
+                    .or_default()
+                    .1
+                    .get_or_insert(line.to_string());
             } else if line.starts_with('#') {
                 continue;
             } else {
@@ -38,7 +44,9 @@ pub fn merge(agents: &[(String, String)]) -> String {
     }
 
     let mut out = String::new();
-    out.push_str("# HELP agentctl_node_agent_agents Agents this node-agent collected metrics from.\n");
+    out.push_str(
+        "# HELP agentctl_node_agent_agents Agents this node-agent collected metrics from.\n",
+    );
     out.push_str("# TYPE agentctl_node_agent_agents gauge\n");
     out.push_str(&format!("agentctl_node_agent_agents {}\n", agents.len()));
 

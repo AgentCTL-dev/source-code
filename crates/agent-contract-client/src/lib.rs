@@ -440,7 +440,10 @@ impl std::fmt::Display for NegotiationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NegotiationError::Malformed(s) => {
-                write!(f, "malformed contract_version: {s:?} (want \"major.minor\")")
+                write!(
+                    f,
+                    "malformed contract_version: {s:?} (want \"major.minor\")"
+                )
             }
             NegotiationError::UnsupportedMajor { found, supported } => write!(
                 f,

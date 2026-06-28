@@ -304,7 +304,10 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
 
 /// The desired `AgentFleet.status` body (replica counts are owned by KEDA / the
 /// workload and projected in a later step; v1 carries the conditions + observed).
-fn desired_fleet_status(condition: &Condition, observed: Option<i64>) -> Result<serde_json::Value, Error> {
+fn desired_fleet_status(
+    condition: &Condition,
+    observed: Option<i64>,
+) -> Result<serde_json::Value, Error> {
     Ok(serde_json::json!({
         "conditions": [serde_json::to_value(condition)?],
         "observedGeneration": serde_json::to_value(observed)?,
@@ -399,9 +402,13 @@ mod tests {
             mode: Some(mode_label(Mode::Loop)),
             ..Default::default()
         };
-        let status =
-            desired_status(&ready_condition(Some(3), "Deployment"), Some(3), "Ready", &contract)
-                .unwrap();
+        let status = desired_status(
+            &ready_condition(Some(3), "Deployment"),
+            Some(3),
+            "Ready",
+            &contract,
+        )
+        .unwrap();
         assert_eq!(status["observedGeneration"], 3);
         assert_eq!(status["phase"], "Ready");
         assert_eq!(status["conditions"][0]["type"], "Ready");
@@ -415,29 +422,38 @@ mod tests {
             mode: Some("once".into()),
             ..Default::default()
         };
-        let desired = desired_status(&ready_condition(Some(1), "Job"), Some(1), "Ready", &contract)
-            .unwrap();
+        let desired = desired_status(
+            &ready_condition(Some(1), "Job"),
+            Some(1),
+            "Ready",
+            &contract,
+        )
+        .unwrap();
         // no status yet → changed
         assert!(status_changed::<agent_api::AgentStatus>(None, &desired).unwrap());
         // an equivalent live status → unchanged (no needless patch / churn)
         let current: agent_api::AgentStatus = serde_json::from_value(desired.clone()).unwrap();
         assert!(!status_changed(Some(&current), &desired).unwrap());
         // a different phase → changed
-        let draining =
-            desired_status(&ready_condition(Some(1), "Job"), Some(1), "Draining", &contract)
-                .unwrap();
+        let draining = desired_status(
+            &ready_condition(Some(1), "Job"),
+            Some(1),
+            "Draining",
+            &contract,
+        )
+        .unwrap();
         assert!(status_changed(Some(&current), &draining).unwrap());
     }
 
     #[test]
     fn desired_fleet_status_carries_condition_and_generation() {
-        let status = desired_fleet_status(&ready_condition(Some(2), "Deployment"), Some(2)).unwrap();
+        let status =
+            desired_fleet_status(&ready_condition(Some(2), "Deployment"), Some(2)).unwrap();
         assert_eq!(status["observedGeneration"], 2);
         assert_eq!(status["conditions"][0]["type"], "Ready");
         assert_eq!(status["conditions"][0]["status"], "True");
         // a fleet status with a matching condition is unchanged (guard works for fleets too)
-        let current: agent_api::AgentFleetStatus =
-            serde_json::from_value(status.clone()).unwrap();
+        let current: agent_api::AgentFleetStatus = serde_json::from_value(status.clone()).unwrap();
         assert!(!status_changed(Some(&current), &status).unwrap());
     }
 

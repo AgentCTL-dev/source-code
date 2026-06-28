@@ -66,7 +66,10 @@ impl std::fmt::Display for RenderError {
                 write!(f, "image is required (resolve classRef first)")
             }
             RenderError::MissingShards => {
-                write!(f, "shard-mode fleet requires scaling.shards (the partition count N)")
+                write!(
+                    f,
+                    "shard-mode fleet requires scaling.shards (the partition count N)"
+                )
             }
             RenderError::UnsupportedSubstrate(s) => {
                 write!(f, "substrate {s:?} not implemented by this renderer")
@@ -79,7 +82,11 @@ impl std::error::Error for RenderError {}
 
 /// Render an `Agent` to its workload (mode→workload, RFC 0003 §5).
 pub fn render_agent(agent: &Agent) -> Result<Rendered, RenderError> {
-    let name = agent.metadata.name.clone().ok_or(RenderError::MissingName)?;
+    let name = agent
+        .metadata
+        .name
+        .clone()
+        .ok_or(RenderError::MissingName)?;
     let image = agent.spec.image.clone().ok_or(RenderError::MissingImage)?;
     require_stock_unix(agent.spec.substrate)?;
 
@@ -125,7 +132,11 @@ pub fn render_agent(agent: &Agent) -> Result<Rendered, RenderError> {
 /// → a Deployment with **`replicas` omitted** (KEDA's HPA owns it); shard mode →
 /// a StatefulSet whose replica count is the fixed partition count `N`.
 pub fn render_fleet(fleet: &AgentFleet) -> Result<Rendered, RenderError> {
-    let name = fleet.metadata.name.clone().ok_or(RenderError::MissingName)?;
+    let name = fleet
+        .metadata
+        .name
+        .clone()
+        .ok_or(RenderError::MissingName)?;
     let spec = &fleet.spec.template;
     let image = spec.image.clone().ok_or(RenderError::MissingImage)?;
     require_stock_unix(spec.substrate)?;
@@ -152,7 +163,11 @@ pub fn render_fleet(fleet: &AgentFleet) -> Result<Rendered, RenderError> {
             ..Default::default()
         }))),
         ScaleMode::Shard => {
-            let shards = fleet.spec.scaling.shards.ok_or(RenderError::MissingShards)?;
+            let shards = fleet
+                .spec
+                .scaling
+                .shards
+                .ok_or(RenderError::MissingShards)?;
             Ok(Rendered::StatefulSet(Box::new(StatefulSet {
                 metadata: meta,
                 spec: Some(StatefulSetSpec {
@@ -229,7 +244,11 @@ fn owner_ref(kind: &str, name: &str, uid: String) -> OwnerReference {
     }
 }
 
-fn pod_template(spec: &AgentSpec, image: &str, labels: &BTreeMap<String, String>) -> PodTemplateSpec {
+fn pod_template(
+    spec: &AgentSpec,
+    image: &str,
+    labels: &BTreeMap<String, String>,
+) -> PodTemplateSpec {
     let restart_policy = match spec.mode {
         Mode::Once | Mode::Schedule => Some("Never".to_string()),
         // Deployments/StatefulSets require Always.
@@ -368,7 +387,11 @@ mod tests {
                 scaling: Scaling {
                     mode,
                     shards,
-                    max: if mode == ScaleMode::Claim { Some(10) } else { None },
+                    max: if mode == ScaleMode::Claim {
+                        Some(10)
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 },
                 work_source: Some("queue://jobs".into()),
@@ -425,14 +448,20 @@ mod tests {
             Some("demo")
         );
         let c = container_of(&spec.template);
-        assert!(c.args.as_ref().unwrap().windows(2).any(|w| w
-            == ["--subscribe".to_string(), "file:///data/inbox".to_string()]));
+        assert!(c
+            .args
+            .as_ref()
+            .unwrap()
+            .windows(2)
+            .any(|w| w == ["--subscribe".to_string(), "file:///data/inbox".to_string()]));
     }
 
     #[test]
     fn stock_unix_substrate_wiring() {
         let r = render_agent(&agent(Mode::Once)).unwrap();
-        let Rendered::Job(job) = r else { unreachable!() };
+        let Rendered::Job(job) = r else {
+            unreachable!()
+        };
         let pod = job.spec.unwrap().template;
         let podspec = pod.spec.as_ref().unwrap();
 

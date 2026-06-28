@@ -18,7 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (file, yaml) in [
         ("agent.yaml", serde_yaml::to_string(&Agent::crd())?),
-        ("agentfleet.yaml", serde_yaml::to_string(&AgentFleet::crd())?),
+        (
+            "agentfleet.yaml",
+            serde_yaml::to_string(&AgentFleet::crd())?,
+        ),
     ] {
         let path = out.join(file);
         fs::write(&path, format!("{header}{yaml}"))?;

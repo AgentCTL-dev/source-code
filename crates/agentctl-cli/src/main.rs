@@ -17,7 +17,11 @@ use kube::{Api, Client, ResourceExt};
 
 /// agentctl — the kubectl-style CLI for conformant agents.
 #[derive(Parser)]
-#[command(name = "agentctl", version, about = "Control plane CLI for conformant agents")]
+#[command(
+    name = "agentctl",
+    version,
+    about = "Control plane CLI for conformant agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -119,7 +123,9 @@ async fn run_describe(args: DescribeArgs) -> Result<()> {
     let ns = args
         .namespace
         .unwrap_or_else(|| client.default_namespace().to_string());
-    let agent = Api::<Agent>::namespaced(client, &ns).get(&args.name).await?;
+    let agent = Api::<Agent>::namespaced(client, &ns)
+        .get(&args.name)
+        .await?;
     print!("{}", describe_agent(&agent, Timestamp::now()));
     Ok(())
 }
@@ -325,7 +331,9 @@ fn wants_wide(output: Option<&str>) -> Result<bool> {
     match output {
         None => Ok(false),
         Some("wide") => Ok(true),
-        Some(other) => anyhow::bail!("unsupported output format {other:?} (only 'wide' is supported)"),
+        Some(other) => {
+            anyhow::bail!("unsupported output format {other:?} (only 'wide' is supported)")
+        }
     }
 }
 
@@ -389,7 +397,10 @@ mod tests {
         assert_eq!(mode_str(Mode::Once), "once");
         assert_eq!(mode_str(Mode::Reactive), "reactive");
         assert_eq!(substrate_str(Substrate::KataHybrid), "kata-hybrid");
-        assert_eq!(substrate_str(Substrate::SidecarEmptydir), "sidecar-emptydir");
+        assert_eq!(
+            substrate_str(Substrate::SidecarEmptydir),
+            "sidecar-emptydir"
+        );
     }
 
     #[test]
@@ -445,7 +456,11 @@ mod tests {
         let rows = vec![
             vec!["NAME".to_string(), "MODE".to_string(), "AGE".to_string()],
             vec!["a".to_string(), "once".to_string(), "5m".to_string()],
-            vec!["longname".to_string(), "reactive".to_string(), "2d".to_string()],
+            vec![
+                "longname".to_string(),
+                "reactive".to_string(),
+                "2d".to_string(),
+            ],
         ];
         let table = render_table(&rows);
         let lines: Vec<&str> = table.lines().collect();

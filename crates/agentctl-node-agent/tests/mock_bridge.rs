@@ -66,7 +66,10 @@ fn serve_one(stream: UnixStream, capabilities_json: String) {
                 }]})
             }
             "tools/call" => {
-                let name = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+                let name = msg
+                    .pointer("/params/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 assert_eq!(name, "drain");
                 json!({"content": [{"type": "text", "text": "draining"}], "isError": false})
             }

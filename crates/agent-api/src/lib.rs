@@ -353,11 +353,21 @@ mod tests {
         let crd = Agent::crd();
         assert_eq!(crd.spec.group, "agents.x-k8s.io");
         assert_eq!(crd.spec.names.kind, "Agent");
-        assert!(crd.spec.names.short_names.as_ref().unwrap().contains(&"agent".to_string()));
+        assert!(crd
+            .spec
+            .names
+            .short_names
+            .as_ref()
+            .unwrap()
+            .contains(&"agent".to_string()));
         assert!(crd.spec.versions.iter().any(|v| v.name == "v1alpha1"));
         // status subresource is enabled
         let v = &crd.spec.versions[0];
-        assert!(v.subresources.as_ref().and_then(|s| s.status.as_ref()).is_some());
+        assert!(v
+            .subresources
+            .as_ref()
+            .and_then(|s| s.status.as_ref())
+            .is_some());
         // printer columns wired
         assert!(v
             .additional_printer_columns
