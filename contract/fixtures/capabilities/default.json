@@ -1,6 +1,6 @@
 {
   "a2a_peers": [],
-  "agent_version": "2.5.0",
+  "agent_version": "3.0.0",
   "allow_trifecta": false,
   "build_features": [
     "serve-mcp",
@@ -14,12 +14,14 @@
     "instance": null,
     "namespace": null,
     "node": null,
-    "run_id": "19f0ae13f093c57b8",
+    "run_id": "19f0effaddcaf960",
     "uid": null
   },
   "intelligence": {
+    "discovery": false,
     "endpoints": 0,
     "healthy": "unknown",
+    "models": [],
     "transport": null
   },
   "intelligence_summary": {
@@ -47,6 +49,7 @@
       ]
     },
     "cluster": true,
+    "config_effective": true,
     "config_schema": true,
     "config_validate": true,
     "events": false,

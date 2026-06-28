@@ -5,7 +5,7 @@
       "transport": "vsock"
     }
   ],
-  "agent_version": "2.5.0",
+  "agent_version": "3.0.0",
   "allow_trifecta": true,
   "build_features": [
     "tls",
@@ -22,13 +22,17 @@
     "instance": "agent-0",
     "namespace": "agents",
     "node": "node-1",
-    "run_id": "19f0ae21d543c5864",
+    "run_id": "19f0effae15af964",
     "uid": "abc-123-uid"
   },
   "intelligence": {
-    "endpoints": 0,
+    "discovery": false,
+    "endpoints": 1,
     "healthy": "unknown",
-    "transport": null
+    "models": [
+      "claude-sonnet-4"
+    ],
+    "transport": "https"
   },
   "intelligence_summary": {
     "toolmode": "native"
@@ -71,9 +75,11 @@
       ]
     },
     "cluster": true,
+    "config_effective": true,
     "config_schema": true,
     "config_validate": true,
     "events": true,
+    "events_schema": "1.0",
     "exit_codes": "1.0",
     "hot_reload": true,
     "intelligence": true,
