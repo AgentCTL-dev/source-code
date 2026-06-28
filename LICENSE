@@ -1,0 +1,43 @@
+agentctl — licensing
+=====================
+
+This repository is licensed under TWO licenses, by component. Each crate
+declares its license in its `Cargo.toml` (`license = ...`); this file is the
+authoritative map.
+
+Apache License 2.0  (open source — see LICENSE-APACHE)
+------------------------------------------------------
+The contract (the standard), the SDK/libraries, and the client tooling are
+permissively licensed so that ANY agent vendor or integrator can implement and
+use them freely (principle P0 — the contract must be open to be a standard):
+
+  - contract/                      (the Agent Control Contract: schemas + fixtures + spec)
+  - crates/agent-api               (Agent / AgentFleet / ModelPool CRD types)
+  - crates/agent-contract-client   (the typed contract client / SDK)
+  - crates/agentctl-cli            (the CLI / kubectl plugin)
+  - crates/agentctl-crdgen         (CRD YAML generator)
+  - crates/mock-agent              (conformant-agent stand-in for dev/conformance)
+
+Business Source License 1.1  (source-available — see LICENSE-BUSL)
+------------------------------------------------------------------
+The runnable control plane is under the BUSL. You may read, modify, and make
+non-production and internal non-commercial use of it freely; commercial
+production use or offering it as a hosted/managed service requires a commercial
+license until the Change Date (2030-06-28), on which each version converts to
+Apache License 2.0. See LICENSE-BUSL for the exact terms and Additional Use
+Grant.
+
+  - crates/agentctl-operator
+  - crates/agentctl-apiserver
+  - crates/agentctl-gateway
+  - crates/agentctl-modelgateway
+  - crates/agentctl-admission
+  - crates/agentctl-node-agent
+
+Commercial licensing: andrii@tsok.org
+
+Contributions are accepted under the Contributor License Agreement (see CLA.md),
+which lets the project offer the dual (open-source / commercial) licensing above.
+
+Note: "Business Source License" components are source-available, not OSI
+"open source," until their Change Date. The Apache-2.0 components are open source.

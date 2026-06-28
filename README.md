@@ -75,4 +75,18 @@ for the per-plane status and roadmap.
 
 ## License
 
-Apache-2.0.
+Dual-licensed by component (see [`LICENSE`](LICENSE) for the authoritative map):
+
+- **Apache-2.0** — the contract (`contract/`), the SDK/libraries (`agent-api`,
+  `agent-contract-client`), and the client tooling (`agentctl-cli`,
+  `agentctl-crdgen`, `mock-agent`). The standard and SDK are open so any agent
+  vendor can implement and build on them (P0).
+- **Business Source License 1.1** — the runnable control plane
+  (`agentctl-operator`, `-apiserver`, `-gateway`, `-modelgateway`, `-admission`,
+  `-node-agent`). Source-available: free for non-production and internal
+  non-commercial use; commercial production / managed-service use needs a
+  commercial license until the Change Date (2030-06-28), when each version
+  converts to Apache-2.0. See [`LICENSE-BUSL`](LICENSE-BUSL).
+
+Commercial licensing: andrii@tsok.org. Contributions are under the
+[CLA](CLA.md).

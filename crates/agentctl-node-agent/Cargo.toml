@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "agentctl node-agent (RFC 0008). Tier A control bridge: speaks the management profile to a local agent over a unix socket. (Async tiers + discovery added next.)"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
 repository.workspace = true
 
 [[bin]]

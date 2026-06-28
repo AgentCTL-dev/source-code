@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "agentctl A2A gateway (RFC 0013): the public A2A HTTP/JSON-RPC surface + Agent Card projection, bridging to an agent's A2A-over-the-substrate via the node-agent. Hand-rolled in Rust (axum). agentctl is Rust-only."
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
 repository.workspace = true
 
 [[bin]]

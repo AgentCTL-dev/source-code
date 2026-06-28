@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "agentctl operator: reconcile Agent/AgentFleet → workloads. agentctl RFC 0006. (this crate holds the pure rendering core plus the kube runtime controller that drives reconcile.)"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
 repository.workspace = true
 
 [[bin]]

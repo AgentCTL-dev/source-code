@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "agentctl aggregated APIServer (RFC 0009): the human management access path. Serves management.agents.x-k8s.io connect verbs with per-verb RBAC + identity, forwarding to the node-agent. Hand-rolled in Rust (axum + rustls)."
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
 repository.workspace = true
 
 [[bin]]
