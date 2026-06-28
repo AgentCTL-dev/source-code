@@ -33,6 +33,12 @@ spec:
           env:
             - name: RUST_LOG
               value: "info"
+            # Durable A2A task store (RFC 0013).
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-postgres
+                  key: DATABASE_URL
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

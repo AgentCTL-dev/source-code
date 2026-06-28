@@ -27,11 +27,14 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use deadpool_postgres::Pool;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::ListParams;
 use kube::{Api, Client};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
+
+mod store;
 
 /// Namespace the node-agent DaemonSet runs in (same as the apiserver assumes).
 const NODE_AGENT_NS: &str = "agentctl-system";
@@ -39,6 +42,7 @@ const NODE_AGENT_NS: &str = "agentctl-system";
 #[derive(Clone)]
 struct AppState {
     client: Client,
+    pool: Pool,
 }
 
 #[tokio::main]
@@ -51,6 +55,20 @@ async fn main() {
 
     let client = Client::try_default().await.expect("in-cluster kube client");
 
+    // The durable task store (RFC 0013). Retry the schema — the DB pod may start
+    // after us.
+    let pool = build_pool();
+    for attempt in 1..=30u32 {
+        match store::ensure_schema(&pool).await {
+            Ok(()) => break,
+            Err(e) if attempt == 30 => panic!("postgres schema after 30 tries: {e}"),
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "waiting for postgres…");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/agents", get(list_agents))
@@ -59,7 +77,7 @@ async fn main() {
             get(agent_card),
         )
         .route("/agents/{ns}/{name}", post(a2a_rpc))
-        .with_state(AppState { client });
+        .with_state(AppState { client, pool });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -124,20 +142,54 @@ async fn a2a_rpc(
     Json(mut req): Json<Value>,
 ) -> Response {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
-
-    // Translate spec → reference; unknown method ⇒ -32601 (METHOD_NOT_FOUND).
     let spec = req
         .get("method")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
+
+    // `tasks/list` is served by the GATEWAY from the durable store (the agent
+    // serves only live tasks); it is not forwarded.
+    if spec == "tasks/list" {
+        return match store::list(&state.pool, &ns, &name).await {
+            Ok(rows) => {
+                let tasks: Vec<Value> = rows.iter().map(store::task_json).collect();
+                Json(json!({ "jsonrpc": "2.0", "id": id, "result": { "tasks": tasks } }))
+                    .into_response()
+            }
+            Err(e) => Json(rpc_error(id, -32603, &format!("store list: {e}"))).into_response(),
+        };
+    }
+
+    // Translate spec → reference; unknown method ⇒ -32601 (METHOD_NOT_FOUND).
     let streaming = spec == "message/stream";
-    let reference = match translate_method(spec) {
+    let reference = match translate_method(&spec) {
         Some(m) => m,
         None => {
             return Json(rpc_error(id, -32601, &format!("method not found: {spec}")))
                 .into_response()
         }
     };
+
+    // `tasks/get`: serve from the durable store first (survives the agent),
+    // falling back to a live call.
+    if spec == "tasks/get" {
+        if let Some(tid) = req.pointer("/params/id").and_then(Value::as_str) {
+            if let Ok(Some(row)) = store::get(&state.pool, &ns, &name, tid).await {
+                return Json(
+                    json!({ "jsonrpc": "2.0", "id": id, "result": store::task_json(&row) }),
+                )
+                .into_response();
+            }
+        }
+    }
+
+    // The input text to persist alongside a message/send result.
+    let input = req
+        .pointer("/params/message/parts/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
 
     // Rewrite the request method in place to the reference spelling.
     if let Some(obj) = req.as_object_mut() {
@@ -173,21 +225,48 @@ async fn a2a_rpc(
     }
 
     let url = format!("http://{na_ip}:8080/v1/agents/{uid}/a2a");
-    match reqwest::Client::new().post(&url).json(&req).send().await {
+    let body = match reqwest::Client::new().post(&url).json(&req).send().await {
         Ok(resp) => match resp.json::<Value>().await {
-            // Return the node-agent's JSON-RPC response verbatim.
-            Ok(body) => Json(body).into_response(),
+            Ok(b) => b,
             Err(e) => {
-                Json(rpc_error(id, -32603, &format!("decode node-agent: {e}"))).into_response()
+                return Json(rpc_error(id, -32603, &format!("decode node-agent: {e}")))
+                    .into_response()
             }
         },
-        Err(e) => Json(rpc_error(
-            id,
-            -32603,
-            &format!("node-agent POST {url}: {e}"),
-        ))
-        .into_response(),
+        Err(e) => {
+            return Json(rpc_error(
+                id,
+                -32603,
+                &format!("node-agent POST {url}: {e}"),
+            ))
+            .into_response()
+        }
+    };
+
+    // Persist task state into the durable store.
+    if spec == "message/send" {
+        if let Some(result) = body.get("result") {
+            let tid = result.get("id").and_then(Value::as_str).unwrap_or("task-1");
+            let st = result
+                .pointer("/status/state")
+                .and_then(Value::as_str)
+                .unwrap_or("completed");
+            let artifact = result
+                .pointer("/artifacts/0/parts/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Err(e) = store::upsert(&state.pool, &ns, &name, tid, st, &input, artifact).await
+            {
+                tracing::warn!(error = %e, "store upsert failed");
+            }
+        }
+    } else if spec == "tasks/cancel" {
+        if let Some(tid) = body.pointer("/result/id").and_then(Value::as_str) {
+            let _ = store::set_state(&state.pool, &ns, &name, tid, "canceled").await;
+        }
     }
+
+    Json(body).into_response()
 }
 
 /// Mesh discovery registry: the union of `Agent` and `AgentFleet` CRs across all
@@ -307,6 +386,20 @@ fn base_url(headers: &HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:8080");
     format!("http://{host}")
+}
+
+/// Build the Postgres connection pool for the durable task store from
+/// `DATABASE_URL` (e.g. `postgres://user:pw@host:5432/db?sslmode=disable`).
+/// `NoTls` — the in-cluster hop is NetworkPolicy-scoped (TLS to the DB is later
+/// hardening), and it keeps the build pure-Rust (no C toolchain).
+fn build_pool() -> Pool {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let cfg: tokio_postgres::Config = url.parse().expect("parse DATABASE_URL");
+    let mgr = deadpool_postgres::Manager::new(cfg, tokio_postgres::NoTls);
+    Pool::builder(mgr)
+        .max_size(8)
+        .build()
+        .expect("build postgres pool")
 }
 
 // --- routing (kube; needs a cluster to run, not to compile/test) -----------

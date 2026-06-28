@@ -1,0 +1,80 @@
+# Postgres backing the gateway's durable A2A task store (RFC 0013 / brainstorm
+# D4). Dev-grade: a single pod with ephemeral storage. Production would use a
+# managed/replicated Postgres (or an operator) with a PVC + TLS + NetworkPolicy.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentctl-postgres
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-postgres
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: agentctl-dev
+  # Consumed by the gateway. sslmode=disable: in-cluster NoTls (later hardening).
+  DATABASE_URL: postgres://agentctl:agentctl-dev@agentctl-postgres.agentctl-system:5432/agentctl?sslmode=disable
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-postgres
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-postgres
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: agentctl
+            - name: POSTGRES_DB
+              value: agentctl
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-postgres
+                  key: POSTGRES_PASSWORD
+            # Postgres needs a writable data dir; PGDATA under the emptyDir mount.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - { containerPort: 5432, name: postgres }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "agentctl", "-d", "agentctl"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-postgres
+  namespace: agentctl-system
+  labels:
+    app.kubernetes.io/name: agentctl-postgres
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-postgres
+  ports:
+    - { port: 5432, targetPort: 5432, name: postgres }
