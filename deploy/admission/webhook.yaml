@@ -1,0 +1,30 @@
+# Registers the validating webhook for Agent CREATE/UPDATE. caBundle is filled in
+# by install.sh (the CA that signed the webhook's serving cert). failurePolicy
+# Fail: if the webhook is unreachable, the apiserver rejects the request (the
+# trifecta gate must not be bypassable). The cluster's own controllers are
+# excluded by the namespaceSelector below if needed.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: agentctl-admission
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+webhooks:
+  - name: agents.admission.agentctl.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: agentctl-admission
+        namespace: agentctl-system
+        path: /validate
+        port: 443
+      caBundle: CA_BUNDLE_PLACEHOLDER
+    rules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["agents"]
+        scope: Namespaced

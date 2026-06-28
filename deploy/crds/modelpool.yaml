@@ -91,6 +91,11 @@ spec:
             - endpoint
             - provider
             type: object
+            x-kubernetes-validations:
+            - message: budget.maxTokens must be > 0
+              rule: '!has(self.budget) || self.budget.maxTokens > 0'
+            - message: credentialSecretRef.name is required
+              rule: self.credentialSecretRef.name != ''
           status:
             description: '`ModelPool.status` — running meter against the pool''s budget.'
             nullable: true

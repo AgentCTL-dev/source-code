@@ -45,6 +45,10 @@ pub const GROUP: &str = "agents.x-k8s.io";
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
+#[schemars(extend("x-kubernetes-validations" = [{
+    "rule": "self.mode != 'schedule' || has(self.schedule)",
+    "message": "schedule is required when mode is 'schedule'"
+}]))]
 pub struct AgentSpec {
     /// The run shape. Determines the rendered workload kind.
     pub mode: Mode,
@@ -100,6 +104,30 @@ pub struct AgentSpec {
     /// Resolved limits/budgets (override the agent defaults).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
+
+    /// **Declared capability** (RFC 0007): the agent requests in-sandbox command
+    /// execution. The admission webhook gates this — it is a privileged
+    /// capability and one leg of the lethal trifecta, never granted implicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<bool>,
+
+    /// **Declared capability** (RFC 0007): the agent requests outbound network
+    /// egress. The admission webhook gates this — combined with `exec` and
+    /// `secrets` it forms the lethal trifecta and triggers the override gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<bool>,
+
+    /// **Declared capability** (RFC 0007): the names of namespace-local `Secret`s
+    /// the agent may read. The admission webhook validates each requested name
+    /// against policy; access to untrusted private data is a trifecta leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<String>>,
+
+    /// **Declared capability** (RFC 0007): the `ModelPool` (RFC 0012) this agent
+    /// binds for model access. The admission webhook validates the binding (the
+    /// pool exists / is permitted for this tenant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_pool: Option<String>,
 }
 
 /// The run shape (RFC 0003 §5 / agentd RFC 0008).
@@ -274,6 +302,10 @@ pub struct Condition {
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
+#[schemars(extend("x-kubernetes-validations" = [{
+    "rule": "self.scaling.mode != 'shard' || has(self.scaling.shards)",
+    "message": "shards is required when scaling.mode is 'shard'"
+}]))]
 pub struct AgentFleetSpec {
     /// The per-replica agent definition.
     pub template: AgentSpec,
@@ -368,6 +400,16 @@ pub struct AgentFleetStatus {
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "!has(self.budget) || self.budget.maxTokens > 0",
+        "message": "budget.maxTokens must be > 0"
+    },
+    {
+        "rule": "self.credentialSecretRef.name != ''",
+        "message": "credentialSecretRef.name is required"
+    }
+]))]
 pub struct ModelPoolSpec {
     /// Provider id, e.g. `"mock"` | `"anthropic"` | `"openai"` (free string).
     pub provider: String,

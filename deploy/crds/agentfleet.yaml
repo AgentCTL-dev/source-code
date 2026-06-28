@@ -103,6 +103,20 @@ spec:
                     required:
                     - name
                     type: object
+                  egress:
+                    description: |-
+                      **Declared capability** (RFC 0007): the agent requests outbound network
+                      egress. The admission webhook gates this — combined with `exec` and
+                      `secrets` it forms the lethal trifecta and triggers the override gate.
+                    nullable: true
+                    type: boolean
+                  exec:
+                    description: |-
+                      **Declared capability** (RFC 0007): the agent requests in-sandbox command
+                      execution. The admission webhook gates this — it is a privileged
+                      capability and one leg of the lethal trifecta, never granted implicitly.
+                    nullable: true
+                    type: boolean
                   image:
                     description: |-
                       The conformant-agent image to run. **Required iff `classRef` is unset;
@@ -187,6 +201,13 @@ spec:
                       intelligence). Surfaced as a printer column.
                     nullable: true
                     type: string
+                  modelPool:
+                    description: |-
+                      **Declared capability** (RFC 0007): the `ModelPool` (RFC 0012) this agent
+                      binds for model access. The admission webhook validates the binding (the
+                      pool exists / is permitted for this tenant).
+                    nullable: true
+                    type: string
                   schedule:
                     description: Schedule-mode cron. Used only for `schedule`.
                     nullable: true
@@ -199,6 +220,15 @@ spec:
                     required:
                     - cron
                     type: object
+                  secrets:
+                    description: |-
+                      **Declared capability** (RFC 0007): the names of namespace-local `Secret`s
+                      the agent may read. The admission webhook validates each requested name
+                      against policy; access to untrusted private data is a trifecta leg.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
                   subscribe:
                     description: Reactive-mode subscriptions (MCP resource URIs). Required for `reactive`.
                     items:
@@ -232,6 +262,9 @@ spec:
                 required:
                 - mode
                 type: object
+                x-kubernetes-validations:
+                - message: schedule is required when mode is 'schedule'
+                  rule: self.mode != 'schedule' || has(self.schedule)
               workSource:
                 description: The shared work source (an MCP resource URI) for claim/shard distribution.
                 nullable: true
@@ -240,6 +273,9 @@ spec:
             - scaling
             - template
             type: object
+            x-kubernetes-validations:
+            - message: shards is required when scaling.mode is 'shard'
+              rule: self.scaling.mode != 'shard' || has(self.scaling.shards)
           status:
             description: '`AgentFleet.status`.'
             nullable: true

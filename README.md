@@ -30,7 +30,7 @@ default; Kata-hybrid vsock as the hardened multi-tenant tier), a **two-tier
 node-agent**, and **contract-as-schema** anti-drift (codegen + behavioral
 conformance, not a shared crate).
 
-## Workspace (10 crates)
+## Workspace (11 crates)
 
 | crate | role |
 |---|---|
@@ -42,6 +42,7 @@ conformance, not a shared crate).
 | `agentctl-apiserver` | aggregated APIServer: front-proxy auth + SAR + verb forwarding |
 | `agentctl-gateway` | A2A gateway: public A2A HTTP/JSON-RPC + Agent Card projection, bridging to the agent over the node-agent |
 | `agentctl-modelgateway` | intelligence proxy: `ModelPool`-driven credential injection, token metering, budget enforcement |
+| `agentctl-admission` | validating webhook: lethal-trifecta override gate, image-registry allow-list, cross-object `ModelPool` checks |
 | `agentctl-cli` | `agentctl get` / `describe` |
 | `mock-agent` | a conformant-agent stand-in (management profile) for dev/e2e/conformance |
 
