@@ -14,7 +14,7 @@ CHECK THE ROLLOUT
 {{- if .Values.apiserver.enabled }}
 
   Confirm the aggregated API is registered and Available:
-    kubectl get apiservice v1alpha1.agents.x-k8s.io
+    kubectl get apiservice v1alpha1.management.agents.x-k8s.io
   (the AVAILABLE column should read True once the apiserver is serving)
 {{- end }}
 

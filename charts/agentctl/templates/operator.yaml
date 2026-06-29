@@ -4,9 +4,16 @@ kind: ServiceAccount
 metadata:
   name: agentctl-operator
   namespace: {{ $ns }}
+  {{- with .Values.operator.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     app.kubernetes.io/name: agentctl-operator
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -15,6 +22,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-operator
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["agents", "agentfleets"]
@@ -42,6 +52,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-operator
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -59,6 +72,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-operator
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   replicas: {{ .Values.operator.replicas }}
   selector:
@@ -66,11 +82,23 @@ spec:
       app.kubernetes.io/name: agentctl-operator
   template:
     metadata:
+      {{- $podAnnotations := merge (deepCopy (.Values.operator.podAnnotations | default dict)) (.Values.commonAnnotations | default dict) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: agentctl-operator
+        {{- $podLabels := merge (deepCopy (.Values.operator.podLabels | default dict)) (.Values.commonLabels | default dict) }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: agentctl-operator
       {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "operator")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -80,12 +108,19 @@ spec:
           image: {{ include "agentctl.image" (dict "root" $ "component" "operator") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            - name: RUST_LOG
-              value: "info"
+            {{- include "agentctl.podEnv" (dict "root" $ "comp" "operator") | nindent 12 }}
+          {{- with .Values.operator.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          # NOTE: no liveness/readiness probes — the operator has no health
+          # endpoint yet (a later code wave). Adding probes now would crash-loop it.
           resources:
-            {{- toYaml .Values.resources.small | nindent 12 }}
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+# NOTE: the operator's PodDisruptionBudget now lives in templates/pdb.yaml
+# alongside the other components' PDBs (rendered when operator.pdb.enabled).

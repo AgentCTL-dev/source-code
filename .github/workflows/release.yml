@@ -15,6 +15,8 @@ on:
 permissions:
   contents: read
   packages: write
+  # Required for cosign keyless (OIDC) signing via Sigstore Fulcio/Rekor.
+  id-token: write
 
 jobs:
   images:
@@ -49,6 +51,9 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
+      # Cosign for keyless signing of the pushed images.
+      - uses: sigstore/cosign-installer@v3
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -67,6 +72,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -82,12 +88,21 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
+      # Keyless (OIDC) signature over the image by its immutable digest.
+      - name: Sign image
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            "ghcr.io/agentctl-dev/${{ matrix.component }}@${{ steps.build.outputs.digest }}"
+
   chart:
     needs: images
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+      - uses: sigstore/cosign-installer@v3
 
       - name: Derive version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
@@ -101,4 +116,22 @@ jobs:
         run: helm package charts/agentctl --version "$VERSION" --app-version "$VERSION"
 
       - name: Push chart
-        run: helm push "agentctl-$VERSION.tgz" oci://ghcr.io/agentctl-dev/charts
+        id: push
+        run: |
+          # helm push prints the pushed reference and its digest to stderr;
+          # capture the digest so we can sign the chart by its immutable digest.
+          out="$(helm push "agentctl-$VERSION.tgz" oci://ghcr.io/agentctl-dev/charts 2>&1)"
+          echo "$out"
+          digest="$(echo "$out" | awk -F': ' '/^Digest:/ {print $2}')"
+          if [ -z "$digest" ]; then
+            echo "::error::could not determine pushed chart digest"; exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Keyless (OIDC) signature over the pushed chart by its digest.
+      - name: Sign chart
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            "ghcr.io/agentctl-dev/charts/agentctl@${{ steps.push.outputs.digest }}"

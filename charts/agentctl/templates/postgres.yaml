@@ -1,9 +1,20 @@
 {{- if eq .Values.postgres.mode "bundled" }}
 {{- $ns := include "agentctl.namespace" . }}
-{{- $pw := randAlphaNum 24 }}
+{{/* Reuse the existing password on upgrade (idempotent) — regenerating it would
+     break auth against the already-initialized Postgres data dir. lookup is empty
+     during `helm template`/install (no cluster), so a fresh install generates one. */}}
+{{- $existing := (lookup "v1" "Secret" $ns "agentctl-postgres") }}
+{{- $pw := "" }}
+{{- if and $existing $existing.data (hasKey $existing.data "POSTGRES_PASSWORD") }}
+{{-   $pw = index $existing.data "POSTGRES_PASSWORD" | b64dec }}
+{{- else }}
+{{-   $pw = randAlphaNum 24 }}
+{{- end }}
 # Postgres backing the gateway's durable A2A task store (RFC 0013 / brainstorm
-# D4). Dev-grade: a single pod with ephemeral storage. Production would use a
-# managed/replicated Postgres (or an operator) with a PVC + TLS + NetworkPolicy.
+# D4). Dev-grade: a single pod whose data dir is either ephemeral (emptyDir, the
+# eval default) or a PersistentVolumeClaim (postgres.bundled.storage=pvc).
+# Production would use a managed/replicated Postgres (or an operator) with a PVC
+# + TLS + NetworkPolicy.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -72,7 +83,36 @@ spec:
             limits: { cpu: "1", memory: 512Mi }
       volumes:
         - name: data
+        {{- if eq .Values.postgres.bundled.storage "pvc" }}
+          persistentVolumeClaim:
+            claimName: agentctl-postgres
+        {{- else }}
           emptyDir: {}
+        {{- end }}
+{{- if eq .Values.postgres.bundled.storage "pvc" }}
+---
+# Durable data dir for the bundled Postgres. helm.sh/resource-policy: keep so a
+# `helm uninstall` does not delete the task store; remove the PVC by hand to
+# reclaim. storageClassName empty -> the cluster's default StorageClass.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentctl-postgres
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-postgres
+    {{- include "agentctl.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.postgres.bundled.pvcSize | quote }}
+  {{- with .Values.postgres.bundled.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

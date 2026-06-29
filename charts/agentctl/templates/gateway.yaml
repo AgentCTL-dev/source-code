@@ -7,9 +7,16 @@ kind: ServiceAccount
 metadata:
   name: agentctl-gateway
   namespace: {{ $ns }}
+  {{- with .Values.gateway.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     app.kubernetes.io/name: agentctl-gateway
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -18,6 +25,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-gateway
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -34,6 +44,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-gateway
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -54,6 +67,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-gateway
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   replicas: {{ .Values.gateway.replicas }}
   selector:
@@ -61,11 +77,23 @@ spec:
       app.kubernetes.io/name: agentctl-gateway
   template:
     metadata:
+      {{- $podAnnotations := merge (deepCopy (.Values.gateway.podAnnotations | default dict)) (.Values.commonAnnotations | default dict) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: agentctl-gateway
+        {{- $podLabels := merge (deepCopy (.Values.gateway.podLabels | default dict)) (.Values.commonLabels | default dict) }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: agentctl-gateway
       {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "gateway")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -77,8 +105,7 @@ spec:
           ports:
             - { containerPort: 8080, name: http }
           env:
-            - name: RUST_LOG
-              value: "info"
+            {{- include "agentctl.podEnv" (dict "root" $ "comp" "gateway") | nindent 12 }}
             # Durable A2A task store (RFC 0013).
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
             # Ed25519 seed for Agent Card JWS signing (RFC 0014).
@@ -93,6 +120,10 @@ spec:
             - name: FEDERATION_PEERS
               value: {{ . | quote }}
             {{- end }}
+          {{- with (index .Values "gateway").envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -103,6 +134,13 @@ spec:
             - name: client-tls
               mountPath: /etc/agentctl-client/tls
               readOnly: true
+          # Gate liveness/readiness until the process is up and the DB schema
+          # migration has run, so a slow first start (waiting on Postgres) does
+          # not trip the liveness probe and crash-loop the pod. ~60s budget.
+          startupProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 2
+            failureThreshold: 30
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 2
@@ -112,7 +150,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            {{- toYaml .Values.resources.small | nindent 12 }}
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
       volumes:
         - name: client-tls
           secret:
@@ -126,6 +164,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-gateway
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     app.kubernetes.io/name: agentctl-gateway
@@ -145,9 +186,21 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-gateway
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
   annotations:
     "helm.sh/resource-policy": keep
+{{/* Reuse the existing seed on upgrade so the JWS signing key is stable across
+     replicas + upgrades (cards keep verifying). lookup is empty on fresh install. */}}
+{{- $gwSecret := (lookup "v1" "Secret" $ns "agentctl-gateway-signing") }}
+{{- $gwSeed := "" }}
+{{- if and $gwSecret $gwSecret.data (hasKey $gwSecret.data "GATEWAY_SIGNING_SEED") }}
+{{-   $gwSeed = index $gwSecret.data "GATEWAY_SIGNING_SEED" }}
+{{- else }}
+{{-   $gwSeed = randAlphaNum 32 | b64enc | b64enc }}
+{{- end }}
 type: Opaque
 data:
-  GATEWAY_SIGNING_SEED: {{ randAlphaNum 32 | b64enc | b64enc }}
+  GATEWAY_SIGNING_SEED: {{ $gwSeed }}
 {{- end }}

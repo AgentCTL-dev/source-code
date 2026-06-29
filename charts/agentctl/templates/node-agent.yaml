@@ -1,4 +1,20 @@
 {{- $ns := include "agentctl.namespace" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-node-agent
+  namespace: {{ $ns }}
+  {{- with .Values.nodeAgent.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: agentctl-node-agent
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+---
 # node-agent (RFC 0008, Tier A — control bridge), one per node. Mounts the
 # stock-unix hostPath socket root, discovers per-pod management sockets, and
 # bridges to each agent's management profile. (The operator↔node-agent API and
@@ -11,20 +27,36 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-node-agent
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: agentctl-node-agent
   template:
     metadata:
+      {{- $podAnnotations := merge (deepCopy (.Values.nodeAgent.podAnnotations | default dict)) (.Values.commonAnnotations | default dict) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: agentctl-node-agent
+        {{- $podLabels := merge (deepCopy (.Values.nodeAgent.podLabels | default dict)) (.Values.commonLabels | default dict) }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      serviceAccountName: agentctl-node-agent
       # hostPID: the bridge reads the management socket peer's host PID
       # (UnixStream::peer_cred) to attest, via /proc/<pid>/cgroup, that the
       # process serving the socket really belongs to the claimed pod (RFC 0002 §7).
       hostPID: true
       {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "nodeAgent")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
         - name: node-agent
           image: {{ include "agentctl.image" (dict "root" $ "component" "node-agent") }}
@@ -33,10 +65,13 @@ spec:
             - { containerPort: 8080, name: http }       # /healthz + /metrics (plaintext)
             - { containerPort: 8443, name: https }       # /v1/agents/* (mTLS, RFC 0015)
           env:
-            - name: RUST_LOG
-              value: "info"
+            {{- include "agentctl.podEnv" (dict "root" $ "comp" "nodeAgent") | nindent 12 }}
             - name: AGENTCTL_SOCKET_ROOT
               value: {{ .Values.substrate.socketRoot | quote }}
+          {{- with (index .Values "nodeAgent").envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             # Host-side bridge: reads per-pod sockets the kubelet creates on the
             # hostPath (root-owned). Production tightens this (RFC 0008/0015).
@@ -48,12 +83,7 @@ spec:
               mountPath: /etc/agentctl-node-agent/tls
               readOnly: true
           resources:
-            requests:
-              cpu: 25m
-              memory: 32Mi
-            limits:
-              cpu: 200m
-              memory: 128Mi
+            {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
       volumes:
         - name: sockets
           hostPath:

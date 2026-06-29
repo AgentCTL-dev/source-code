@@ -50,3 +50,13 @@ jobs:
 
       - name: helm template
         run: helm template agentctl charts/agentctl >/dev/null
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: cargo deny
+        run: cargo deny check advisories bans licenses sources

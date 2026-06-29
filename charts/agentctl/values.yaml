@@ -21,6 +21,22 @@ image:
 referenceAgent:
   image: agentd:1.0.0
 
+# Global metadata stamped onto every rendered object (merged alongside the
+# chart's own labels). commonLabels also flow into pod templates; commonAnnotations
+# flow into pod templates. Default empty = no change to today's output.
+commonLabels: {}
+commonAnnotations: {}
+
+# Observability. When metrics.serviceMonitor.enabled=true the chart emits a
+# Prometheus-Operator ServiceMonitor per scrape target (wired in a later wave).
+# Default disabled so a stock install needs no Prometheus-Operator CRDs.
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}                 # extra labels for Prometheus serviceMonitorSelector
+
 # Namespace the control plane runs in. Helm cannot reliably own the namespace it
 # installs into (release storage needs it to pre-exist), so the chart does NOT
 # create it by default. Either `helm install --create-namespace`, or pre-create it
@@ -48,30 +64,179 @@ postgres:
     image: postgres:16-alpine
     storage: emptyDir         # emptyDir (eval) | pvc
     pvcSize: 5Gi
+    storageClassName: ""      # pvc only; empty = cluster default StorageClass
   external:
     # mode=external: point at a managed Postgres via a pre-created Secret holding
     # a key 'DATABASE_URL' (postgres://user:pw@host:5432/db?sslmode=require).
     dsnSecretName: ""
     dsnSecretKey: DATABASE_URL
 
-# Planes — toggle components. The operator + node-agent are always installed.
+# ---------------------------------------------------------------------------
+# Planes — per-component knobs. The operator + node-agent are always installed.
+# Every block shares the same shape: replicas, logLevel, resources, scheduling
+# (nodeSelector/affinity/tolerations/topologySpreadConstraints/priorityClassName),
+# pod metadata (podAnnotations/podLabels), env (extraEnv/envFrom), and a
+# serviceAccount.annotations passthrough. Defaults reproduce today's hardcoded
+# behaviour, so a stock `helm install` renders byte-for-byte as before.
+# ---------------------------------------------------------------------------
+
 operator:
   replicas: 1
-nodeAgent: {}
+  logLevel: info               # -> RUST_LOG
+  # Leader-elected singleton: default to the small footprint (was resources.small).
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []                 # list of core-v1 EnvVar
+  envFrom: []                  # list of core-v1 EnvFromSource
+  serviceAccount:
+    annotations: {}
+  # PDB only — no autoscaling (singleton). Disabled by default.
+  pdb:
+    enabled: false
+    minAvailable: 1
+
+nodeAgent:
+  logLevel: info               # -> RUST_LOG
+  # DaemonSet (one per node): footprint currently inline in node-agent.yaml.
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+  nodeSelector: {}
+  affinity: {}
+  # Default tolerates everything so the bridge lands on every node (control-plane
+  # taints included). Narrow this to restrict where the node-agent runs.
+  tolerations:
+    - operator: Exists
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  envFrom: []
+  serviceAccount:
+    annotations: {}
+
 apiserver:
   enabled: true
   replicas: 1
+  logLevel: info               # -> RUST_LOG
+  # Aggregated apiserver: footprint currently inline in apiserver.yaml.
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 300m, memory: 128Mi }
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  envFrom: []
+  serviceAccount:
+    annotations: {}
+  pdb:
+    enabled: false
+    minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+
 gateway:
   enabled: true
   replicas: 1
+  logLevel: info               # -> RUST_LOG
+  # Stateless A2A gateway: small footprint (was resources.small).
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  envFrom: []
+  serviceAccount:
+    annotations: {}
+  pdb:
+    enabled: false
+    minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+
 modelgateway:
   enabled: true
   replicas: 1
+  logLevel: info               # -> RUST_LOG
+  # Inference proxy: small footprint (was resources.small).
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  envFrom: []
+  serviceAccount:
+    annotations: {}
+  pdb:
+    enabled: false
+    minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+
 admission:
   enabled: true
   replicas: 1
+  logLevel: info               # -> RUST_LOG
+  # Validating webhook: small footprint (was resources.small).
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }
   # Image-registry allow-list the webhook enforces (CSV prefixes; empty = allow all).
   allowedRegistries: "agentd:,mock-agent,agentctl/,gcr.io/,registry.k8s.io/,ghcr.io/"
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  envFrom: []
+  serviceAccount:
+    annotations: {}
+  pdb:
+    enabled: false
+    minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
 
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 networkPolicies:
@@ -81,5 +246,7 @@ networkPolicies:
 substrate:
   socketRoot: /run/agentctl/sockets
 
+# Shared default-resource anchor. Still consumed by the components not yet migrated
+# to per-component resources; kept as the small-footprint reference for new blocks.
 resources:
   small: { requests: { cpu: 25m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }

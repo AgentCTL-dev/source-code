@@ -1,0 +1,35 @@
+{{/*
+PodDisruptionBudgets for the control-plane Deployments. Opt-in per component
+(<comp>.pdb.enabled, off by default) so a stock install renders unchanged. A PDB
+keeps minAvailable replicas up during VOLUNTARY disruptions (node drains/upgrades).
+*/}}
+{{- $ns := include "agentctl.namespace" . }}
+{{- $comps := list
+  (dict "comp" "operator"     "enabled" true)
+  (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled)
+  (dict "comp" "gateway"      "enabled" .Values.gateway.enabled)
+  (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled)
+  (dict "comp" "admission"    "enabled" .Values.admission.enabled)
+}}
+{{- range $c := $comps }}
+{{- $cfg := index $.Values $c.comp }}
+{{- if and $c.enabled $cfg.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: agentctl-{{ $c.comp }}
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-{{ $c.comp }}
+    {{- include "agentctl.labels" $ | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  minAvailable: {{ $cfg.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-{{ $c.comp }}
+{{- end }}
+{{- end }}

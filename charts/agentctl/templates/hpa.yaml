@@ -1,0 +1,44 @@
+{{/*
+HorizontalPodAutoscalers for the stateless, horizontally-scalable Deployments.
+Opt-in per component (<comp>.autoscaling.enabled, off by default). When enabled
+the HPA owns the replica count, so .Values.<comp>.replicas is ignored. The
+operator (leader-elected singleton), admission (webhook), and node-agent
+(DaemonSet) are intentionally excluded — they don't scale on CPU.
+*/}}
+{{- $ns := include "agentctl.namespace" . }}
+{{- $comps := list
+  (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled)
+  (dict "comp" "gateway"      "enabled" .Values.gateway.enabled)
+  (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled)
+}}
+{{- range $c := $comps }}
+{{- $cfg := index $.Values $c.comp }}
+{{- if and $c.enabled $cfg.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agentctl-{{ $c.comp }}
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-{{ $c.comp }}
+    {{- include "agentctl.labels" $ | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agentctl-{{ $c.comp }}
+  minReplicas: {{ $cfg.autoscaling.minReplicas }}
+  maxReplicas: {{ $cfg.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $cfg.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

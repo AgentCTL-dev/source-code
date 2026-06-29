@@ -1,0 +1,65 @@
+# cargo-deny configuration for the agentctl workspace.
+#
+# Run locally with:  cargo deny check
+# CI runs:           cargo deny check advisories bans licenses sources
+#
+# Uses the v2 schema (cargo-deny >= 0.16). The intent:
+#   advisories — block known vulnerabilities and unsound crates; surface
+#                unmaintained crates. The `ignore` list is kept empty and
+#                ready for triaged, justified exceptions.
+#   licenses   — allow a conservative set of permissive licenses; the
+#                first-party control-plane crates are BUSL-1.1 and are allowed
+#                via per-crate exceptions.
+#   bans       — warn (don't fail) on duplicate versions for the first run.
+#   sources    — only crates.io is permitted.
+
+[advisories]
+# RustSec advisory database. Vulnerabilities and unsound advisories are
+# denied by default in the v2 schema. For unmaintained crates we scope to
+# "transitive": deep dependencies are flagged, but a directly-declared
+# unmaintained crate (currently rustls-pemfile, RUSTSEC-2025-0134, pulled in
+# via the TLS stack and not yet replaceable) does not fail the first run.
+# Tighten to "all" once the direct dependency is migrated/triaged.
+unmaintained = "transitive"
+# Add triaged advisory IDs here with a justification when an exception is
+# unavoidable, e.g.  ignore = ["RUSTSEC-0000-0000"].
+ignore = []
+
+[licenses]
+# SPDX expression matching uses a license-text confidence threshold; 0.8 is a
+# good balance for crates that ship slightly-customized license texts.
+confidence-threshold = 0.8
+# Permissive licenses allowed for third-party dependencies.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+]
+# First-party control-plane crates are source-available under BUSL-1.1
+# (see LICENSE-BUSL). Allow that license only for those crates.
+exceptions = [
+    { allow = ["BUSL-1.1"], crate = "agentctl-operator" },
+    { allow = ["BUSL-1.1"], crate = "agentctl-node-agent" },
+    { allow = ["BUSL-1.1"], crate = "agentctl-apiserver" },
+    { allow = ["BUSL-1.1"], crate = "agentctl-gateway" },
+    { allow = ["BUSL-1.1"], crate = "agentctl-modelgateway" },
+    { allow = ["BUSL-1.1"], crate = "agentctl-admission" },
+]
+
+[bans]
+# Warn (rather than fail) on duplicate versions of the same crate — common and
+# usually benign in a normal dependency tree; tighten to "deny" later.
+multiple-versions = "warn"
+# Prefer the highest semver-compatible version when deduplicating.
+wildcards = "allow"
+
+[sources]
+# Only the public crates.io registry is allowed as a source.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

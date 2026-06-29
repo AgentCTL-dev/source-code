@@ -1,0 +1,59 @@
+{{/*
+Prometheus-Operator ServiceMonitors, one per scrape target. Gated entirely on
+metrics.serviceMonitor.enabled (off by default) so a stock install needs no
+Prometheus-Operator CRDs — these objects use monitoring.coreos.com/v1, which only
+exists once the Prometheus Operator (and its CRDs) is installed.
+
+NOTE: most components only serve /metrics once the metrics-endpoint code lands in
+a later wave; until then these ServiceMonitors are configured but the scrape
+returns 404. The node-agent already serves /metrics on :8080 (the http port).
+The node-agent runs as a DaemonSet with no Service object today, so its
+ServiceMonitor selector matches nothing until a (headless) node-agent Service
+exposing the http port is added — see the chart notes.
+*/}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+{{- $targets := list
+  (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled    "port" "https" "scheme" "https")
+  (dict "comp" "gateway"      "enabled" .Values.gateway.enabled      "port" "http"  "scheme" "http")
+  (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled "port" "http"  "scheme" "http")
+  (dict "comp" "admission"    "enabled" .Values.admission.enabled    "port" "https" "scheme" "https")
+  (dict "comp" "node-agent"   "enabled" true                         "port" "http"  "scheme" "http")
+}}
+{{- range $t := $targets }}
+{{- if $t.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentctl-{{ $t.comp }}
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-{{ $t.comp }}
+    {{- include "agentctl.labels" $ | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- with $.Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ $ns }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-{{ $t.comp }}
+  endpoints:
+    - port: {{ $t.port }}
+      path: /metrics
+      {{- if eq $t.scheme "https" }}
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
+      interval: {{ $.Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ $.Values.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -7,9 +7,16 @@ kind: ServiceAccount
 metadata:
   name: agentctl-apiserver
   namespace: {{ $ns }}
+  {{- with .Values.apiserver.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 ---
 # SubjectAccessReview / TokenReview (delegated authn/authz).
 apiVersion: rbac.authorization.k8s.io/v1
@@ -19,6 +26,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -36,6 +46,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -48,6 +61,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -66,6 +82,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -83,6 +102,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   replicas: {{ .Values.apiserver.replicas }}
   selector:
@@ -90,11 +112,23 @@ spec:
       app.kubernetes.io/name: agentctl-apiserver
   template:
     metadata:
+      {{- $podAnnotations := merge (deepCopy (.Values.apiserver.podAnnotations | default dict)) (.Values.commonAnnotations | default dict) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: agentctl-apiserver
+        {{- $podLabels := merge (deepCopy (.Values.apiserver.podLabels | default dict)) (.Values.commonLabels | default dict) }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: agentctl-apiserver
       {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "apiserver")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -106,8 +140,11 @@ spec:
           ports:
             - { containerPort: 6443, name: https }
           env:
-            - name: RUST_LOG
-              value: "info"
+            {{- include "agentctl.podEnv" (dict "root" $ "comp" "apiserver") | nindent 12 }}
+          {{- with (index .Values "apiserver").envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -132,8 +169,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            requests: { cpu: 25m, memory: 32Mi }
-            limits: { cpu: 300m, memory: 128Mi }
+            {{- toYaml .Values.apiserver.resources | nindent 12 }}
       volumes:
         - name: tls
           secret:
@@ -150,6 +186,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     app.kubernetes.io/name: agentctl-apiserver
@@ -166,6 +205,9 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
   annotations:
     cert-manager.io/inject-ca-from: "{{ $ns }}/agentctl-apiserver"
 spec:
