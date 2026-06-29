@@ -77,6 +77,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+          # Cross-run BuildKit layer cache (per component) — the cross-compile
+          # build stage is cached so unchanged deps are not recompiled.
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
   chart:
     needs: images

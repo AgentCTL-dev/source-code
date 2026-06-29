@@ -26,9 +26,9 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"   # resolved deps (enum-ordinalize 1.89, kube 4.0.0 1.88) require it
 license = "Apache-2.0"
-repository = "https://github.com/agentctl/agentctl"
+repository = "https://github.com/AgentCTL-dev/source-code"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
