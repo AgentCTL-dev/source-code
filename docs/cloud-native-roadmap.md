@@ -116,9 +116,12 @@ Status: ✅ done · 🔜 next · ⬜ planned.
   Chart Deployment+Service (opt-in `coordination.enabled`), Dockerfile, CI matrix, `/metrics`.
   Verified live on kind: grant-once + `held_by` contention + ack-dedupe + stats + counters;
   19 unit tests incl. a 2-thread/200-iteration concurrent-claim race.
-- 🔜 **KEDA external scaler** (`crates/scaler`): reads the coordination server's `work.stats`
-  backlog → `IsActive`/`GetMetrics` for KEDA scale-from-zero. The last piece to make claim
-  fleets fully elastic-from-zero (the server already exposes the signal).
+- ✅ **KEDA external scaler** (`crates/agentctl-scaler`): a tonic gRPC `externalscaler.proto`
+  server (`IsActive`/`StreamIsActive`/`GetMetricSpec`/`GetMetrics`) reading the coordination
+  server's `work.stats` backlog. The operator renders a `keda.sh` `ScaledObject` (external
+  trigger → the scaler) for each claim-mode fleet. **Elastic-from-zero loop verified live on
+  kind:** backlog 0 → 0 pods; submit 8 → scaler reports backlog → KEDA scales **0→1** from zero;
+  drain (claim+ack) → backlog 0 → KEDA scales **1→0**. The claim-mode scaling track is complete.
 - 🔜 Coordination server HA/durability (the documented single-serializing-point risk) — the
   `ClaimStore` trait is the seam; v1 is single-replica/in-memory.
 

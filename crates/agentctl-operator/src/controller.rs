@@ -25,6 +25,7 @@ use agent_api::{Agent, AgentFleet, Condition, ContractStatus, Mode};
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Patch, PatchParams};
+use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event as KEvent, EventType, Recorder};
 use kube::runtime::finalizer::{finalizer, Event};
@@ -32,7 +33,10 @@ use kube::{Api, Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
-use crate::{fleet_selector_string, render_agent, render_fleet, RenderError, Rendered};
+use crate::{
+    fleet_selector_string, render_agent, render_fleet, render_scaled_object, RenderError, Rendered,
+    DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
+};
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
 const FINALIZER: &str = "agentctl.dev/cleanup";
@@ -52,6 +56,66 @@ pub struct Ctx {
     pub metrics: Arc<Metrics>,
     /// Publishes Kubernetes Events on reconcile outcomes (RFC 0010).
     pub recorder: Recorder,
+    /// KEDA scaler wiring for claim-mode fleets (RFC 0011).
+    pub scaler: ScalerConfig,
+}
+
+/// Operator-side KEDA scaler wiring for claim-mode fleets (RFC 0011). Read once
+/// from the environment at startup ([`ScalerConfig::from_env`]) and carried on
+/// [`Ctx`]. The defaults point a stock install at the in-cluster scaler +
+/// coordination Services; `enabled=false` (env `SCALER_ENABLED`) lets a non-KEDA
+/// cluster turn ScaledObject emission off entirely so the Deployment reconcile is
+/// untouched.
+#[derive(Clone, Debug)]
+pub struct ScalerConfig {
+    /// Emit a `keda.sh/v1alpha1` ScaledObject per claim fleet. `SCALER_ENABLED`,
+    /// default `true`.
+    pub enabled: bool,
+    /// gRPC address KEDA dials for the external trigger. `SCALER_ADDRESS`,
+    /// default [`DEFAULT_SCALER_ADDRESS`].
+    pub scaler_address: String,
+    /// Coordination base URL the scaler reads the backlog from when a fleet does
+    /// not set its own `spec.workSource`. `COORDINATION_URL`, default
+    /// [`DEFAULT_COORDINATION_URL`].
+    pub coordination_url: String,
+}
+
+impl Default for ScalerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scaler_address: DEFAULT_SCALER_ADDRESS.to_string(),
+            coordination_url: DEFAULT_COORDINATION_URL.to_string(),
+        }
+    }
+}
+
+impl ScalerConfig {
+    /// Build from the operator environment, falling back to the defaults.
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        Self {
+            enabled: std::env::var("SCALER_ENABLED")
+                .map(|v| parse_bool(&v))
+                .unwrap_or(d.enabled),
+            scaler_address: non_empty_env("SCALER_ADDRESS").unwrap_or(d.scaler_address),
+            coordination_url: non_empty_env("COORDINATION_URL").unwrap_or(d.coordination_url),
+        }
+    }
+}
+
+/// Parse a boolean-ish env value; anything but the explicit false-set is true so
+/// `SCALER_ENABLED` defaults to on even for unexpected values.
+fn parse_bool(v: &str) -> bool {
+    !matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off" | ""
+    )
+}
+
+/// `std::env::var` filtered to a non-empty value (so `FOO=` falls back to default).
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
 /// Everything that can go wrong driving one reconcile. A [`RenderError`] is
@@ -383,7 +447,7 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // `.status.selector` (the label-selector string matching the fleet pods), so
     // `kubectl get agentfleet` shows replicas and an HPA can read both back. On a
     // render error we leave them unset (the merge patch keeps the last value).
-    let (condition, replicas, selector) = match render_fleet(&fleet) {
+    let (condition, replicas, selector, scaler_condition) = match render_fleet(&fleet) {
         Ok(rendered) => {
             let kind = rendered_kind(&rendered);
             apply_workload(&ctx.client, ns, &rendered).await?;
@@ -397,10 +461,15 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 format!("{kind} workload applied"),
             )
             .await;
+            // KEDA autoscaling for claim-mode fleets (RFC 0011). Gated +
+            // best-effort: never hard-fails the Deployment reconcile (e.g. when
+            // the KEDA CRDs are absent) — it only surfaces a condition.
+            let scaler_condition = reconcile_scaled_object(ctx.as_ref(), ns, &fleet).await;
             (
                 ready_condition(observed, kind),
                 Some(fleet_replica_count(&fleet, &rendered)),
                 Some(fleet_selector_string(&name)),
+                scaler_condition,
             )
         }
         Err(e) => {
@@ -414,11 +483,17 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 e.to_string(),
             )
             .await;
-            (validated_failed_condition(&e.to_string()), None, None)
+            (validated_failed_condition(&e.to_string()), None, None, None)
         }
     };
 
-    let desired = desired_fleet_status(&condition, observed, replicas, selector.as_deref())?;
+    let desired = desired_fleet_status(
+        &condition,
+        observed,
+        replicas,
+        selector.as_deref(),
+        scaler_condition.as_ref(),
+    )?;
     if status_changed(fleet.status.as_ref(), &desired)? {
         let patch = serde_json::json!({ "status": desired });
         // Best-effort: a failed status write is logged, never fatal — the next
@@ -436,6 +511,83 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
         debug!(fleet = %name, "fleet status unchanged; skipped patch");
     }
     Ok(Action::requeue(requeue_after()))
+}
+
+/// Best-effort: render + server-side-apply the KEDA `ScaledObject` for a
+/// **claim-mode** fleet (RFC 0011), returning a `ScaledObject=False` condition to
+/// surface on the fleet status when the apply failed (typically the KEDA CRDs are
+/// not installed). Returns `None` — i.e. nothing to surface — when the scaler is
+/// disabled, the fleet is shard mode (no ScaledObject), or the apply succeeded.
+///
+/// The workload Deployment is already applied by the time this runs, so a failure
+/// here NEVER hard-fails the reconcile: KEDA being absent degrades to "no
+/// autoscaling", not "no fleet".
+async fn reconcile_scaled_object(ctx: &Ctx, ns: &str, fleet: &AgentFleet) -> Option<Condition> {
+    if !ctx.scaler.enabled {
+        return None;
+    }
+    // None for shard mode → no ScaledObject for fixed-partition fleets.
+    let body = render_scaled_object(
+        fleet,
+        &ctx.scaler.scaler_address,
+        &ctx.scaler.coordination_url,
+    )?;
+    let name = fleet.name_any();
+    match apply_scaled_object(&ctx.client, ns, &name, &body).await {
+        Ok(()) => {
+            debug!(fleet = %name, "applied KEDA ScaledObject");
+            None
+        }
+        Err(e) => {
+            warn!(
+                fleet = %name, error = %e,
+                "failed to apply KEDA ScaledObject (best-effort; is KEDA installed?)"
+            );
+            publish_event(
+                ctx,
+                fleet,
+                EventType::Warning,
+                "ScaledObjectApplyFailed",
+                "Autoscale",
+                format!("KEDA ScaledObject apply failed (is KEDA installed?): {e}"),
+            )
+            .await;
+            Some(scaled_object_failed_condition(&e.to_string()))
+        }
+    }
+}
+
+/// Server-side-apply the untyped KEDA `ScaledObject` (a [`DynamicObject`] body)
+/// under our field manager. The operator holds **no KEDA crate dependency** — the
+/// GVK is constructed by hand — so a cluster without the KEDA CRDs returns an
+/// error here that the caller swallows (see [`reconcile_scaled_object`]).
+async fn apply_scaled_object(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    body: &serde_json::Value,
+) -> Result<(), Error> {
+    let gvk = GroupVersionKind::gvk("keda.sh", "v1alpha1", "ScaledObject");
+    let ar = ApiResource::from_gvk_with_plural(&gvk, "scaledobjects");
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    let pp = PatchParams::apply(FIELD_MANAGER).force();
+    api.patch(name, &pp, &Patch::Apply(body)).await?;
+    Ok(())
+}
+
+/// Condition surfaced on a fleet when the KEDA ScaledObject apply failed
+/// (best-effort; typically the KEDA CRDs are not installed). The Deployment is
+/// already applied, so this never blocks the workload — it only signals that
+/// autoscaling is not wired.
+pub fn scaled_object_failed_condition(message: &str) -> Condition {
+    Condition {
+        type_: "ScaledObject".to_string(),
+        status: "False".to_string(),
+        reason: Some("ScaledObjectApplyFailed".to_string()),
+        message: Some(message.to_string()),
+        observed_generation: None,
+        last_transition_time: None,
+    }
 }
 
 /// The replica count to surface on `.status.replicas` for the scale subresource.
@@ -461,15 +613,24 @@ fn fleet_replica_count(fleet: &AgentFleet, rendered: &Rendered) -> u32 {
 /// The desired `AgentFleet.status` body. Carries the conditions + observed
 /// generation, plus the scale-subresource projection (`replicas` + `selector`)
 /// when a render succeeded; those are omitted on a render error so the merge
-/// patch preserves the last-known values.
+/// patch preserves the last-known values. An optional `extra` condition (e.g. the
+/// KEDA ScaledObject apply outcome) is appended after the primary one.
 fn desired_fleet_status(
     condition: &Condition,
     observed: Option<i64>,
     replicas: Option<u32>,
     selector: Option<&str>,
+    extra: Option<&Condition>,
 ) -> Result<serde_json::Value, Error> {
+    let mut conditions = vec![serde_json::to_value(condition)?];
+    // A best-effort outcome (e.g. the KEDA ScaledObject apply) is appended as a
+    // second condition. On the next success it is simply not appended, and the
+    // merge patch replaces the whole array — so it self-heals.
+    if let Some(extra) = extra {
+        conditions.push(serde_json::to_value(extra)?);
+    }
     let mut status = serde_json::json!({
-        "conditions": [serde_json::to_value(condition)?],
+        "conditions": conditions,
         "observedGeneration": serde_json::to_value(observed)?,
     });
     if let Some(replicas) = replicas {
@@ -619,6 +780,7 @@ mod tests {
             Some(2),
             Some(5),
             Some("agentctl.dev/agent=fleet,app.kubernetes.io/name=agent"),
+            None,
         )
         .unwrap();
         assert_eq!(status["observedGeneration"], 2);
@@ -638,9 +800,14 @@ mod tests {
     fn desired_fleet_status_omits_scale_projection_on_render_error() {
         // render-error path passes None/None → replicas + selector are not written,
         // so the merge patch preserves whatever the live status already holds.
-        let status =
-            desired_fleet_status(&validated_failed_condition("bad spec"), Some(1), None, None)
-                .unwrap();
+        let status = desired_fleet_status(
+            &validated_failed_condition("bad spec"),
+            Some(1),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(status.get("replicas").is_none());
         assert!(status.get("selector").is_none());
     }
@@ -750,6 +917,49 @@ mod tests {
         for (k, v) in &match_labels {
             assert!(selector.contains(&format!("{k}={v}")));
         }
+    }
+
+    #[test]
+    fn scaler_config_defaults_point_at_in_cluster_services() {
+        let d = ScalerConfig::default();
+        assert!(d.enabled);
+        assert_eq!(d.scaler_address, DEFAULT_SCALER_ADDRESS);
+        assert_eq!(d.coordination_url, DEFAULT_COORDINATION_URL);
+    }
+
+    #[test]
+    fn parse_bool_only_false_set_disables() {
+        for off in ["0", "false", "FALSE", "no", "off", "", "  Off  "] {
+            assert!(!parse_bool(off), "{off:?} should disable");
+        }
+        for on in ["1", "true", "TRUE", "yes", "on", "anything"] {
+            assert!(parse_bool(on), "{on:?} should enable");
+        }
+    }
+
+    #[test]
+    fn scaled_object_failed_condition_is_false_with_reason() {
+        let c = scaled_object_failed_condition("no KEDA CRDs");
+        assert_eq!(c.type_, "ScaledObject");
+        assert_eq!(c.status, "False");
+        assert_eq!(c.reason.as_deref(), Some("ScaledObjectApplyFailed"));
+        assert!(c.message.unwrap().contains("no KEDA CRDs"));
+    }
+
+    #[test]
+    fn desired_fleet_status_appends_extra_condition() {
+        let status = desired_fleet_status(
+            &ready_condition(Some(1), "Deployment"),
+            Some(1),
+            Some(2),
+            Some("agentctl.dev/agent=f"),
+            Some(&scaled_object_failed_condition("boom")),
+        )
+        .unwrap();
+        // primary condition first, the best-effort ScaledObject outcome second.
+        assert_eq!(status["conditions"][0]["type"], "Ready");
+        assert_eq!(status["conditions"][1]["type"], "ScaledObject");
+        assert_eq!(status["conditions"][1]["status"], "False");
     }
 
     #[test]

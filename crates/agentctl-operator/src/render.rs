@@ -195,6 +195,109 @@ pub fn render_fleet(fleet: &AgentFleet) -> Result<Rendered, RenderError> {
     }
 }
 
+/// Default in-cluster address of the agentctl KEDA external scaler (gRPC). The
+/// operator overrides this from `SCALER_ADDRESS`; KEDA dials it for the external
+/// trigger (RFC 0011).
+pub const DEFAULT_SCALER_ADDRESS: &str = "agentctl-scaler.agentctl-system:9100";
+/// Default in-cluster coordination-server base URL the scaler reads the claim
+/// backlog (`work.stats`) from. Overridden from `COORDINATION_URL`, or per-fleet
+/// by `spec.workSource` when set.
+pub const DEFAULT_COORDINATION_URL: &str = "http://agentctl-coordination.agentctl-system/";
+/// Fallback per-replica backlog target KEDA scales toward when a claim fleet does
+/// not set `scaling.target.value`.
+const DEFAULT_SCALE_THRESHOLD: &str = "5";
+
+/// Render the KEDA `ScaledObject` that autoscales a **claim-mode** fleet's
+/// Deployment off the coordination backlog (RFC 0011), or `None` for shard mode
+/// (a StatefulSet with a fixed partition count `N` is NOT KEDA-driven, so the
+/// caller emits no ScaledObject for it).
+///
+/// Built as an untyped [`serde_json::Value`] (a kube `DynamicObject` body) so the
+/// operator carries **no hard dependency on the KEDA CRD types**: a cluster
+/// without KEDA simply never has this object applied (the controller gates on a
+/// config flag and applies it best-effort).
+///
+/// The KEDA-safe invariant holds: this object — not the rendered Deployment —
+/// owns the replica count (`scaleTargetRef` → the Deployment, whose
+/// `.spec.replicas` stays unset; see [`render_fleet`]).
+///
+/// - `scaler_address` — gRPC address KEDA dials for the external trigger
+///   (operator `SCALER_ADDRESS`, default [`DEFAULT_SCALER_ADDRESS`]).
+/// - `coordination_url` — coordination base URL the scaler reads the backlog
+///   from; the fleet's own `spec.workSource` wins when set, else this operator
+///   default (`COORDINATION_URL`, default [`DEFAULT_COORDINATION_URL`]).
+pub fn render_scaled_object(
+    fleet: &AgentFleet,
+    scaler_address: &str,
+    coordination_url: &str,
+) -> Option<serde_json::Value> {
+    // Shard mode is a fixed partition count — no KEDA autoscaling.
+    if fleet.spec.scaling.mode != ScaleMode::Claim {
+        return None;
+    }
+    let name = fleet.metadata.name.clone()?;
+    let scaling = &fleet.spec.scaling;
+
+    // minReplicaCount defaults to 0 (scale-to-zero); maxReplicaCount is emitted
+    // only when set (else KEDA's own default applies).
+    let min = scaling.min.unwrap_or(0);
+    // threshold: the per-replica backlog target (scaling.target.value, default 5).
+    let threshold = scaling
+        .target
+        .as_ref()
+        .map(|t| t.value.clone())
+        .unwrap_or_else(|| DEFAULT_SCALE_THRESHOLD.to_string());
+    // coordinationUrl: the fleet's own work source wins; else the operator default.
+    let coordination_url = fleet
+        .spec
+        .work_source
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| coordination_url.to_string());
+
+    let mut spec = serde_json::json!({
+        // scaleTargetRef.name = the rendered Deployment (same name as the fleet).
+        "scaleTargetRef": { "name": name },
+        "minReplicaCount": min,
+        "triggers": [{
+            "type": "external",
+            "metadata": {
+                "scalerAddress": scaler_address,
+                "coordinationUrl": coordination_url,
+                "threshold": threshold,
+                "activationThreshold": "1",
+            }
+        }]
+    });
+    if let Some(max) = scaling.max {
+        spec["maxReplicaCount"] = serde_json::json!(max);
+    }
+
+    let mut metadata = serde_json::json!({
+        "name": name,
+        "labels": managed_labels(&name),
+        // ownerRef → the AgentFleet so GC reclaims the ScaledObject with the fleet.
+        "ownerReferences": [{
+            "apiVersion": API_VERSION,
+            "kind": "AgentFleet",
+            "name": name,
+            "uid": uid_of(&fleet.metadata.uid),
+            "controller": true,
+            "blockOwnerDeletion": true,
+        }],
+    });
+    if let Some(ns) = &fleet.metadata.namespace {
+        metadata["namespace"] = serde_json::json!(ns);
+    }
+
+    Some(serde_json::json!({
+        "apiVersion": "keda.sh/v1alpha1",
+        "kind": "ScaledObject",
+        "metadata": metadata,
+        "spec": spec,
+    }))
+}
+
 fn require_stock_unix(substrate: Option<Substrate>) -> Result<(), RenderError> {
     match substrate.unwrap_or(Substrate::StockUnix) {
         Substrate::StockUnix => Ok(()),
@@ -693,5 +796,80 @@ mod tests {
             render_fleet(&fleet(ScaleMode::Shard, None)),
             Err(RenderError::MissingShards)
         );
+    }
+
+    #[test]
+    fn claim_fleet_renders_a_scaled_object() {
+        let f = fleet(ScaleMode::Claim, None);
+        let so = render_scaled_object(&f, DEFAULT_SCALER_ADDRESS, DEFAULT_COORDINATION_URL)
+            .expect("claim mode produces a ScaledObject");
+
+        assert_eq!(so["apiVersion"], "keda.sh/v1alpha1");
+        assert_eq!(so["kind"], "ScaledObject");
+        assert_eq!(so["metadata"]["name"], "workers");
+        assert_eq!(so["metadata"]["namespace"], "agents");
+        // Owns the Deployment of the same name; ownerRef back to the AgentFleet.
+        assert_eq!(so["spec"]["scaleTargetRef"]["name"], "workers");
+        let owner = &so["metadata"]["ownerReferences"][0];
+        assert_eq!(owner["kind"], "AgentFleet");
+        assert_eq!(owner["name"], "workers");
+        assert_eq!(owner["uid"], "fleet-uid");
+        assert_eq!(owner["controller"], true);
+
+        // min defaults to 0 (scale-to-zero); max comes from scaling.max (10 here).
+        assert_eq!(so["spec"]["minReplicaCount"], 0);
+        assert_eq!(so["spec"]["maxReplicaCount"], 10);
+
+        // External trigger → the scaler, carrying the coordination + threshold knobs.
+        let trigger = &so["spec"]["triggers"][0];
+        assert_eq!(trigger["type"], "external");
+        let md = &trigger["metadata"];
+        assert_eq!(md["scalerAddress"], DEFAULT_SCALER_ADDRESS);
+        // the fleet helper sets workSource = "queue://jobs", which wins over the
+        // operator COORDINATION_URL default.
+        assert_eq!(md["coordinationUrl"], "queue://jobs");
+        // no scaling.target set → default threshold "5".
+        assert_eq!(md["threshold"], "5");
+        assert_eq!(md["activationThreshold"], "1");
+    }
+
+    #[test]
+    fn scaled_object_falls_back_to_default_coordination_url() {
+        // No per-fleet workSource → the operator COORDINATION_URL default is used.
+        let mut f = fleet(ScaleMode::Claim, None);
+        f.spec.work_source = None;
+        let so =
+            render_scaled_object(&f, DEFAULT_SCALER_ADDRESS, DEFAULT_COORDINATION_URL).unwrap();
+        assert_eq!(
+            so["spec"]["triggers"][0]["metadata"]["coordinationUrl"],
+            DEFAULT_COORDINATION_URL
+        );
+    }
+
+    #[test]
+    fn shard_fleet_renders_no_scaled_object() {
+        // Shard mode is a fixed StatefulSet partition count — never KEDA-driven.
+        let f = fleet(ScaleMode::Shard, Some(3));
+        assert!(
+            render_scaled_object(&f, DEFAULT_SCALER_ADDRESS, DEFAULT_COORDINATION_URL).is_none()
+        );
+    }
+
+    #[test]
+    fn scaled_object_honors_target_value_and_work_source() {
+        let mut f = fleet(ScaleMode::Claim, None);
+        f.spec.scaling.target = Some(agent_api::ScaleTarget {
+            signal: "backlog".into(),
+            value: "12".into(),
+        });
+        f.spec.work_source = Some("http://my-coordination.custom.svc/".into());
+
+        let so = render_scaled_object(&f, "scaler:9100", DEFAULT_COORDINATION_URL).unwrap();
+        let md = &so["spec"]["triggers"][0]["metadata"];
+        // scaling.target.value wins over the default threshold.
+        assert_eq!(md["threshold"], "12");
+        // the fleet's own workSource wins over the operator coordination default.
+        assert_eq!(md["coordinationUrl"], "http://my-coordination.custom.svc/");
+        assert_eq!(md["scalerAddress"], "scaler:9100");
     }
 }

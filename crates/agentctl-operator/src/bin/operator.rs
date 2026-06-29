@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use agent_api::{Agent, AgentFleet};
 use agentctl_operator::controller::{
-    error_policy, error_policy_fleet, reconcile, reconcile_fleet, Ctx,
+    error_policy, error_policy_fleet, reconcile, reconcile_fleet, Ctx, ScalerConfig,
 };
 use agentctl_operator::{lease, serve, Metrics};
 use futures::StreamExt;
@@ -88,10 +88,22 @@ async fn main() -> Result<(), kube::Error> {
         },
     );
 
+    // KEDA scaler wiring for claim-mode fleets (RFC 0011), read from the operator
+    // env (SCALER_ENABLED / SCALER_ADDRESS / COORDINATION_URL). Defaults point at
+    // the in-cluster scaler + coordination Services; disable on a non-KEDA cluster.
+    let scaler = ScalerConfig::from_env();
+    info!(
+        enabled = scaler.enabled,
+        scaler_address = %scaler.scaler_address,
+        coordination_url = %scaler.coordination_url,
+        "KEDA scaler config"
+    );
+
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
         recorder,
+        scaler,
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");

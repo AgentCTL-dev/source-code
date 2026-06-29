@@ -41,6 +41,12 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # KEDA ScaledObjects for claim-mode AgentFleets (RFC 0011). The operator applies
+  # these best-effort; a cluster without the KEDA CRDs simply never has them
+  # created (the operator gates emission on SCALER_ENABLED and tolerates absence).
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
@@ -130,6 +136,23 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # KEDA scaler wiring for claim-mode AgentFleets (RFC 0011). The
+            # operator renders a ScaledObject per claim fleet when SCALER_ENABLED;
+            # SCALER_ADDRESS is the external scaler's gRPC endpoint and
+            # COORDINATION_URL the backlog source it reads. Resolution order:
+            # operator.scaler.* override -> top-level scaler block -> in-cluster
+            # Service DNS / the scaler component toggle. Default OFF (scaler block
+            # disabled) so a stock install emits no KEDA objects.
+            {{- $scaler := .Values.scaler | default dict }}
+            {{- $opScaler := .Values.operator.scaler | default dict }}
+            {{- $scalerEnabled := ($scaler.enabled | default false) }}
+            {{- if hasKey $opScaler "enabled" }}{{- $scalerEnabled = $opScaler.enabled }}{{- end }}
+            - name: SCALER_ENABLED
+              value: {{ $scalerEnabled | quote }}
+            - name: SCALER_ADDRESS
+              value: {{ ($opScaler.address | default $scaler.address | default (printf "agentctl-scaler.%s:9100" $ns)) | quote }}
+            - name: COORDINATION_URL
+              value: {{ ($opScaler.coordinationUrl | default $scaler.coordinationUrl | default (printf "http://agentctl-coordination.%s/" $ns)) | quote }}
           {{- with .Values.operator.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

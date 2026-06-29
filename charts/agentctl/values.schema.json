@@ -25,6 +25,9 @@
         "allowedRegistries": { "type": "string" },
         "secretsNamespaces": { "type": "array" },
         "federationPeers": { "type": "string" },
+        "address": { "type": "string" },
+        "coordinationUrl": { "type": "string" },
+        "scaler": { "type": "object" },
         "probes": { "type": "object" },
         "serviceAccount": {
           "type": "object",
@@ -162,6 +165,7 @@
     "modelgateway": { "$ref": "#/definitions/component" },
     "admission": { "$ref": "#/definitions/component" },
     "coordination": { "$ref": "#/definitions/component" },
+    "scaler": { "$ref": "#/definitions/component" },
     "networkPolicies": {
       "type": "object",
       "additionalProperties": true,

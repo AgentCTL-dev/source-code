@@ -1,0 +1,54 @@
+// KEDA external scaler contract — the canonical externalscaler.proto (package
+// `externalscaler`), vendored verbatim from KEDA's `pkg/scalers/externalscaler`
+// (field numbers + names are part of KEDA's wire ABI; do not renumber/rename).
+//
+// agentctl serves the SERVER side of this (agentctl RFC 0011 §5.2): the four RPCs
+// KEDA's external trigger calls to make a claim-mode AgentFleet scale FROM ZERO on
+// the coordination server's off-pod backlog (contract ask P9).
+syntax = "proto3";
+
+package externalscaler;
+
+option go_package = ".;externalscaler";
+
+service ExternalScaler {
+    rpc IsActive(ScaledObjectRef) returns (IsActiveResponse) {}
+    rpc StreamIsActive(ScaledObjectRef) returns (stream IsActiveResponse) {}
+    rpc GetMetricSpec(ScaledObjectRef) returns (GetMetricSpecResponse) {}
+    rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse) {}
+}
+
+message ScaledObjectRef {
+    string name = 1;
+    string namespace = 2;
+    map<string, string> scalerMetadata = 3;
+}
+
+message IsActiveResponse {
+    bool result = 1;
+}
+
+message GetMetricSpecResponse {
+    repeated MetricSpec metricSpecs = 1;
+}
+
+message MetricSpec {
+    string metricName = 1;
+    int64 targetSize = 2;
+    double targetSizeFloat = 3;
+}
+
+message GetMetricsRequest {
+    ScaledObjectRef scaledObjectRef = 1;
+    string metricName = 2;
+}
+
+message GetMetricsResponse {
+    repeated MetricValue metricValues = 1;
+}
+
+message MetricValue {
+    string metricName = 1;
+    int64 metricValue = 2;
+    double metricValueFloat = 3;
+}

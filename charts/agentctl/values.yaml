@@ -141,6 +141,13 @@ operator:
   envFrom: []                  # list of core-v1 EnvFromSource
   serviceAccount:
     annotations: {}
+  # Optional per-operator override of the KEDA scaler wiring (env SCALER_ENABLED /
+  # SCALER_ADDRESS / COORDINATION_URL). Unset keys fall back to the top-level
+  # `scaler` block, then to the in-cluster Service DNS defaults. Uncomment to pin:
+  #   scaler:
+  #     enabled: true                                   # SCALER_ENABLED
+  #     address: agentctl-scaler.agentctl-system:9100   # SCALER_ADDRESS
+  #     coordinationUrl: http://agentctl-coordination.agentctl-system/  # COORDINATION_URL
   # PDB only — no autoscaling (singleton). Disabled by default.
   pdb:
     enabled: false
@@ -321,6 +328,47 @@ coordination:
     enabled: false
     minReplicas: 1
     maxReplicas: 1
+    targetCPUUtilizationPercentage: 80
+
+# KEDA external scaler (RFC 0011) — claim-depth autoscaling for AgentFleets.
+# A stateless gRPC service (:9100) KEDA dials to drive claim-mode fleet replica
+# counts off the coordination backlog (with scale-from-zero). DISABLED by default
+# so a stock install ships no KEDA-coupled objects. Enabling it (scaler.enabled=
+# true) ALSO flips the operator's SCALER_ENABLED on, so the operator renders a
+# keda.sh/v1alpha1 ScaledObject per claim fleet pointing at this scaler. Requires
+# KEDA installed in the cluster (the operator applies ScaledObjects best-effort —
+# absent KEDA CRDs it logs + sets a fleet condition, never failing the workload).
+scaler:
+  enabled: false
+  # Resolved by the operator's KEDA wiring (templates/operator.yaml) and overridable
+  # there via operator.scaler.*; empty = the in-cluster Service DNS defaults
+  # (agentctl-scaler.<ns>:9100 and http://agentctl-coordination.<ns>/).
+  address: ""                  # SCALER_ADDRESS the operator stamps into ScaledObjects
+  coordinationUrl: ""          # COORDINATION_URL the scaler reads the backlog from
+  replicas: 1
+  logLevel: info               # -> RUST_LOG
+  # Stateless gRPC scaler: small footprint.
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  envFrom: []
+  serviceAccount:
+    annotations: {}
+  pdb:
+    enabled: false
+    minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
     targetCPUUtilizationPercentage: 80
 
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).

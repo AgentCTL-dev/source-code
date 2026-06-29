@@ -24,6 +24,7 @@ members = [
     "crates/agentctl-admission",
     "crates/agentctl-telemetry",
     "crates/agentctl-coordination",
+    "crates/agentctl-scaler",
 ]
 
 [workspace.package]

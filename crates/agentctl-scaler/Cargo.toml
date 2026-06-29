@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: BUSL-1.1
+[package]
+name = "agentctl-scaler"
+version = "0.1.0"
+description = "agentctl KEDA EXTERNAL gRPC scaler (RFC 0011 §5): serves KEDA's externalscaler.proto, reading the reference coordination MCP server's off-pod backlog (work.stats, contract ask P9) so claim-mode AgentFleets scale FROM ZERO. IsActive is the from-zero gate; GetMetrics feeds the HPA's ceil(pending/threshold). Hand-rolled in Rust (tonic + axum). agentctl is Rust-only."
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
+repository.workspace = true
+
+[[bin]]
+name = "agentctl-scaler"
+path = "src/main.rs"
+
+[dependencies]
+# gRPC server for KEDA's externalscaler.proto. Default features (router/transport/
+# codegen) — NO `tls-*` feature, so no aws-lc-rs/openssl is pulled (plaintext in
+# the cluster network, matching the coordination server's HTTP surface).
+tonic = "0.14"
+# prost codec runtime for the generated messages (tonic 0.14 split this out).
+tonic-prost = "0.14"
+prost = "0.14"
+# `ReceiverStream` adapter for the StreamIsActive server-streaming response.
+tokio-stream = "0.1"
+# Health/readiness/metrics HTTP surface — same axum version the other binaries serve.
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal", "net", "sync"] }
+serde_json.workspace = true
+# HTTP client for the coordination-server MCP hop. rustls + the **ring** provider
+# (webpki roots), default-features off, NO native-tls → no openssl/aws-lc, no C
+# toolchain. Same reqwest the gateway uses for its node-agent hop.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+# Shared tracing init: fmt-only by default, OTLP export when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set (matches every other control-plane binary).
+agentctl-telemetry = { path = "../agentctl-telemetry" }
+
+[build-dependencies]
+# tonic 0.14 prost codegen (bundles tonic-build + prost-build); drives the system
+# protoc at /usr/bin/protoc. Server-only (build.rs sets build_client(false)).
+tonic-prost-build = "0.14"

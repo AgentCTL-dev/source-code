@@ -1,0 +1,117 @@
+{{- $ns := include "agentctl.namespace" . }}
+{{- if .Values.scaler.enabled }}
+# ServiceAccount for the KEDA external scaler. No RBAC: it is a stateless gRPC
+# service KEDA polls; it reads the claim backlog over HTTP from the coordination
+# server (address passed per-trigger by the operator's ScaledObject), not the
+# cluster API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-scaler
+  namespace: {{ $ns }}
+  {{- with .Values.scaler.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: agentctl-scaler
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+---
+# The KEDA external scaler (RFC 0011): a stateless gRPC service implementing the
+# KEDA `externalscaler.ExternalScaler` API on :9100. KEDA dials it (per the
+# ScaledObject external trigger the operator renders for each claim-mode
+# AgentFleet) and the scaler answers IsActive/GetMetrics off the coordination
+# server's claim backlog, driving the fleet's Deployment replica count
+# (scale-from-zero on a non-empty backlog). A small HTTP surface on :8080 serves
+# /healthz + /readyz + /metrics.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-scaler
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-scaler
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.scaler.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-scaler
+  template:
+    metadata:
+      {{- $podAnnotations := merge (deepCopy (.Values.scaler.podAnnotations | default dict)) (.Values.commonAnnotations | default dict) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: agentctl-scaler
+        {{- $podLabels := merge (deepCopy (.Values.scaler.podLabels | default dict)) (.Values.commonLabels | default dict) }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: agentctl-scaler
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "scaler")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scaler
+          image: {{ include "agentctl.image" (dict "root" $ "component" "scaler") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 9100, name: grpc }   # KEDA externalscaler gRPC API
+            - { containerPort: 8080, name: http }    # /healthz, /readyz, /metrics
+          env:
+            {{- include "agentctl.podEnv" (dict "root" $ "comp" "scaler") | nindent 12 }}
+          {{- with .Values.scaler.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Liveness: the gRPC listener is up (KEDA's transport). Readiness: the
+          # HTTP /readyz returns 200 once the scaler is ready to answer queries.
+          livenessProbe:
+            tcpSocket: { port: 9100 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.scaler.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-scaler
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-scaler
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-scaler
+  ports:
+    - { port: 9100, targetPort: grpc, name: grpc }   # KEDA dials this
+    - { port: 8080, targetPort: http, name: http }    # /metrics scrape
+{{- end }}

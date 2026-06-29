@@ -234,9 +234,51 @@ http://agentctl-coordination.<release-namespace>.svc/
 **v1 caveats.** The server is **single-replica and in-memory** — the claim queue
 and `work.stats` live in process and claims are serialized, so `coordination.replicas`
 is pinned to `1` and autoscaling is unsupported (HA / durable backing is future
-work). The **remaining piece** is the KEDA external scaler that reads `work.stats`
-off the coordination server to drive `AgentFleet` replica counts (claim-depth-based
-autoscaling); until it lands, scale claim-mode fleets manually (see above).
+work).
+
+### KEDA autoscaler (claim-depth scaling)
+
+The **KEDA external scaler** closes the claim-mode loop: it reads `work.stats` off
+the coordination server and drives each claim-mode `AgentFleet`'s Deployment replica
+count by claim depth — **including scale-from-zero**. It is **disabled by default**.
+
+**Prerequisite: [KEDA](https://keda.sh) must be installed in the cluster** (it owns
+the `keda.sh/v1alpha1` CRDs and runs the HPA that the ScaledObject configures).
+
+```sh
+helm upgrade --install agentctl charts/agentctl \
+  --set coordination.enabled=true \
+  --set scaler.enabled=true
+```
+
+This renders an `agentctl-scaler` ServiceAccount, Deployment, and Service — a
+stateless gRPC service on `:9100` (the KEDA `externalscaler` API) plus an HTTP
+`:8080` surface (`/healthz`, `/readyz`, `/metrics`). Enabling `scaler.enabled` also
+flips the operator's `SCALER_ENABLED` on (wired via `operator.scaler.*` →
+top-level `scaler.*` → in-cluster Service DNS), so:
+
+- **the operator renders a `keda.sh/v1alpha1` ScaledObject per claim-mode fleet.**
+  Its `scaleTargetRef` points at the fleet's Deployment; `minReplicaCount` comes
+  from `scaling.min` (default `0`, i.e. scale-to-zero), `maxReplicaCount` from
+  `scaling.max`; the single **external trigger** points KEDA at the scaler
+  (`scalerAddress`) and carries the coordination backlog source (`coordinationUrl`
+  = the fleet's `workSource`, else the operator's `COORDINATION_URL`), the
+  per-replica `threshold` (`scaling.target.value`, default `5`), and an
+  `activationThreshold` of `1` (the scale-from-zero trip point).
+- **scale-from-zero flow:** at zero replicas KEDA polls the scaler's `IsActive`;
+  when the coordination backlog for the fleet's work source becomes non-empty
+  (depth ≥ `activationThreshold`), KEDA scales the Deployment `0 → 1`; thereafter
+  the HPA scales `1 → N` toward `threshold` claims-per-replica up to
+  `maxReplicaCount`, and back down to `minReplicaCount` (0) once the backlog drains.
+
+**Safe + additive.** ScaledObject emission is gated on `SCALER_ENABLED` and applied
+**best-effort**: the rendered Deployment never carries `.spec.replicas` (KEDA owns
+it), and if the KEDA CRDs are absent the operator logs the failure and sets a
+`ScaledObject=False` condition on the fleet **without failing the workload
+reconcile** — the fleet still runs, just without claim-depth autoscaling. Turn the
+scaler off (`scaler.enabled=false`, the default) on a non-KEDA cluster and scale
+claim-mode fleets manually (see above). Shard-mode fleets are a fixed partition
+count and never get a ScaledObject.
 
 ### Control-plane components
 
