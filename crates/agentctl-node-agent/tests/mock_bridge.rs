@@ -44,7 +44,7 @@ fn serve_one(stream: UnixStream, capabilities_json: String) {
             "initialize" => json!({
                 "protocolVersion": "2025-11-25",
                 "capabilities": {"tools": {}, "resources": {"subscribe": true}},
-                "serverInfo": {"name": "agent", "version": "2.5.0"}
+                "serverInfo": {"name": "agentd", "version": "1.0.0"}
             }),
             // A management-origin peer sees the operator tools too.
             "tools/list" => json!({"tools": [
@@ -104,8 +104,8 @@ fn management_bridge_drives_the_wire() {
     // Drive the bridge.
     let mut client = ManagementClient::connect(&sock).expect("connect");
     client.initialize().expect("initialize");
-    assert_eq!(client.server_name.as_deref(), Some("agent"));
-    assert_eq!(client.server_version.as_deref(), Some("2.5.0"));
+    assert_eq!(client.server_name.as_deref(), Some("agentd"));
+    assert_eq!(client.server_version.as_deref(), Some("1.0.0"));
 
     let tools = client.list_tools().expect("tools/list");
     assert!(tools.contains(&"drain".to_string()));
