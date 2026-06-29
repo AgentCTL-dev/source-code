@@ -1,0 +1,100 @@
+# Release pipeline for the agentctl control plane.
+#
+# Triggered by pushing a vX.Y.Z tag. Strips the leading "v" to derive the
+# version, then:
+#   images — build + push the 6 component images (multi-arch, with provenance
+#            and SBOM) to ghcr.io/agentctl-dev/<comp>, tagged {{version}} + latest.
+#   chart  — package the Helm chart and push it to
+#            oci://ghcr.io/agentctl-dev/charts (chart name "agentctl").
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # component -> Dockerfile dir + image name; crate/bin documented for
+        # the mapping (the per-component Dockerfile builds the right binary).
+        include:
+          - component: operator
+            crate: agentctl-operator
+            bin: agentctl-operator
+          - component: node-agent
+            crate: agentctl-node-agent
+            bin: node-agent
+          - component: apiserver
+            crate: agentctl-apiserver
+            bin: agentctl-apiserver
+          - component: gateway
+            crate: agentctl-gateway
+            bin: agentctl-gateway
+          - component: modelgateway
+            crate: agentctl-modelgateway
+            bin: agentctl-modelgateway
+          - component: admission
+            crate: agentctl-admission
+            bin: agentctl-admission
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/agentctl-dev/${{ matrix.component }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/${{ matrix.component }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+  chart:
+    needs: images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+
+      - name: Derive version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR (Helm OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Package chart
+        run: helm package charts/agentctl --version "$VERSION" --app-version "$VERSION"
+
+      - name: Push chart
+        run: helm push "agentctl-$VERSION.tgz" oci://ghcr.io/agentctl-dev/charts

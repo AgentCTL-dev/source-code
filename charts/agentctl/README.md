@@ -42,6 +42,34 @@ kubectl -n agentctl-system get certificate                # all READY=True
 kubectl get apiservice v1alpha1.management.agents.x-k8s.io # AVAILABLE=True
 ```
 
+### From the published GHCR registry (no local image loading)
+
+CI publishes the component images and the chart itself to `ghcr.io/agentctl-dev`
+on every `vX.Y.Z` tag. To install the published artifacts, pull the chart over OCI
+and use the GHCR registry overlay:
+
+```console
+helm install agentctl oci://ghcr.io/agentctl-dev/charts/agentctl \
+  -n agentctl-system --version 0.1.0 \
+  --set image.registry=ghcr.io/agentctl-dev --set image.tag=0.1.0
+```
+
+For tamper-evident installs, pin by digest via `image.digests.<comp>` (see
+`values-ghcr.yaml`) — a digest entry renders `…/<comp>@sha256:…` instead of the tag.
+
+### Via the `agentctl` CLI
+
+```console
+agentctl install -n agentctl-system            # defaults to the OCI chart above
+agentctl install --chart ./charts/agentctl --dry-run   # render against a local chart
+```
+
+The CLI pre-flights cert-manager, ensures the namespace + PodSecurity label, then
+runs `helm upgrade --install` (pass `--registry`, `--tag`, `--version`, `--set`).
+
+> An **OLM/OperatorHub bundle** (alpha) lives in [`bundle/`](../../bundle/README.md)
+> for clusters running Operator Lifecycle Manager.
+
 ## Key values
 
 | Key | Default | Purpose |

@@ -1,3 +1,9 @@
+# CI for the agentctl workspace.
+#
+# Runs on every PR and on pushes to main. Two jobs:
+#   build-test — fmt + clippy (-D warnings) + tests + CRD drift gate.
+#   helm       — lint and render the agentctl chart.
+# Release/publish lives in release.yml (tag-driven).
 name: ci
 
 on:
@@ -9,7 +15,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  build-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,3 +38,15 @@ jobs:
           cargo run -p agentctl-crdgen
           git diff --exit-code deploy/crds/ \
             || { echo "::error::deploy/crds is stale — run 'cargo run -p agentctl-crdgen'"; exit 1; }
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+
+      - name: helm lint
+        run: helm lint charts/agentctl
+
+      - name: helm template
+        run: helm template agentctl charts/agentctl >/dev/null

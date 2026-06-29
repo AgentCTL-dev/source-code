@@ -1,0 +1,9 @@
+# Keep the Docker build context small. The multi-stage Dockerfiles only need the
+# Rust sources and the contract/ inputs; everything below is irrelevant to the
+# in-image `cargo build`.
+target/
+.git/
+charts/
+bundle/
+**/*.md
+deploy/examples

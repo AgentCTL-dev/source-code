@@ -1,0 +1,20 @@
+# GHCR overlay — install agentctl from the published images (no kind-loading).
+#
+#   helm install agentctl oci://ghcr.io/agentctl-dev/charts/agentctl \
+#     -n agentctl-system --create-namespace -f values-ghcr.yaml
+#
+# This pulls ghcr.io/agentctl-dev/<comp>:0.1.0 for each of the 6 components
+# (operator, node-agent, apiserver, gateway, modelgateway, admission).
+image:
+  registry: ghcr.io/agentctl-dev
+  tag: 0.1.0
+  # For tamper-evident, reproducible installs, pin each component by digest below
+  # (a digest entry wins over the tag). Fill in the published sha256 digests:
+  #   digests:
+  #     operator: sha256:...
+  #     node-agent: sha256:...
+  #     apiserver: sha256:...
+  #     gateway: sha256:...
+  #     modelgateway: sha256:...
+  #     admission: sha256:...
+  digests: {}

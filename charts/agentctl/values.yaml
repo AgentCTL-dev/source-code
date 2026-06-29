@@ -1,12 +1,21 @@
 # agentctl Helm values. The control plane is BUSL-1.1; the contract + SDK are
 # Apache-2.0 (see the repo LICENSE). cert-manager is a prerequisite.
 
-# Container images. Per-component overrides win over the shared registry/tag.
+# Container images. Setting image.registry=ghcr.io/agentctl-dev pulls the published
+# images (ghcr.io/agentctl-dev/<comp>:<tag>); empty registry = local (kind-loaded)
+# names (agentctl/<comp>:<tag>). For reproducible, tamper-evident installs, pin by
+# digest via image.digests (a digest entry wins over the tag for that component).
 image:
   registry: ""                 # e.g. ghcr.io/agentctl-dev — empty = local (kind-loaded) names
   tag: dev
   pullPolicy: IfNotPresent
   pullSecrets: []
+  # Digest pins (require image.registry set). Map comp -> sha256:... ; a non-empty
+  # entry renders "<registry>/<comp>@<digest>" instead of the :tag for that comp.
+  # Comps: operator, node-agent, apiserver, gateway, modelgateway, admission.
+  #   digests:
+  #     operator: sha256:...
+  digests: {}
 
 # The neutral reference agent (data plane) — used only by the bundled examples.
 referenceAgent:

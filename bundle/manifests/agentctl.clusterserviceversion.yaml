@@ -1,0 +1,514 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  name: agentctl.v0.1.0
+  namespace: placeholder
+  annotations:
+    capabilities: Basic Install
+    categories: "Application Runtime,AI/Machine Learning,Developer Tools"
+    containerImage: ghcr.io/agentctl-dev/operator:0.1.0
+    createdAt: "2026-06-29T00:00:00Z"
+    support: Andrii Tsok (andrii@tsok.org)
+    repository: https://github.com/AgentCTL-dev/source-code
+    description: >-
+      The Kubernetes control plane for fleets of conformant agents — operator,
+      aggregated APIServer, A2A gateway, intelligence ModelGateway, admission
+      webhook, and on-node bridge. ALPHA / PREVIEW: the OLM CSV installs the
+      Deployments only; the node-agent DaemonSet, the aggregated APIService, the
+      validating webhook registration, and the cert-manager Certificates must be
+      applied separately (or via the Helm chart). cert-manager is a runtime
+      prerequisite.
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "agents.x-k8s.io/v1alpha1",
+          "kind": "Agent",
+          "metadata": { "name": "summarizer", "namespace": "default" },
+          "spec": {
+            "mode": "once",
+            "image": "ghcr.io/agentctl-dev/mock-agent:0.1.0",
+            "instruction": "Read /data/report.md and write a 3-bullet summary to /data/summary.md",
+            "modelPool": "mockpool",
+            "substrate": "stock-unix"
+          }
+        },
+        {
+          "apiVersion": "agents.x-k8s.io/v1alpha1",
+          "kind": "AgentFleet",
+          "metadata": { "name": "workers", "namespace": "default" },
+          "spec": {
+            "template": {
+              "mode": "reactive",
+              "image": "ghcr.io/agentctl-dev/mock-agent:0.1.0",
+              "subscribe": ["queue://jobs"]
+            },
+            "scaling": {
+              "mode": "claim",
+              "min": 0,
+              "max": 10,
+              "target": { "signal": "pending_events", "value": "5" }
+            },
+            "workSource": "queue://jobs"
+          }
+        },
+        {
+          "apiVersion": "agents.x-k8s.io/v1alpha1",
+          "kind": "ModelPool",
+          "metadata": { "name": "mockpool", "namespace": "default" },
+          "spec": {
+            "provider": "mock",
+            "endpoint": "http://mock-provider.default:8080",
+            "credentialSecretRef": { "name": "provider-credentials", "key": "api-key" },
+            "models": ["mock-model-v1"],
+            "defaultModel": "mock-model-v1",
+            "budget": { "maxTokens": 150 }
+          }
+        }
+      ]
+spec:
+  displayName: agentctl
+  version: 0.1.0
+  maturity: alpha
+  minKubeVersion: 1.31.0
+  replaces: ""
+  provider:
+    name: Andrii Tsok
+    url: https://github.com/AgentCTL-dev
+  maintainers:
+    - name: Andrii Tsok
+      email: andrii@tsok.org
+  keywords:
+    - agents
+    - ai
+    - operator
+    - control-plane
+    - a2a
+    - mcp
+  links:
+    - name: Source
+      url: https://github.com/AgentCTL-dev/source-code
+    - name: Helm Chart
+      url: https://github.com/AgentCTL-dev/source-code/tree/main/charts/agentctl
+  icon: []
+  description: |
+    # agentctl
+
+    The Kubernetes control plane for fleets of conformant agents. agentctl turns
+    the Agent Control Contract into native Kubernetes API objects (`Agent`,
+    `AgentFleet`, `ModelPool`) and reconciles them across six planes:
+
+    - **operator** — reconciles `Agent`/`AgentFleet` CRs into Jobs, CronJobs,
+      Deployments, and StatefulSets (RFC 0003).
+    - **apiserver** — an aggregated API (`management.agents.x-k8s.io`) for live
+      management verbs, proxied to the per-pod agents (RFC 0009).
+    - **gateway** — a stateless A2A (agent-to-agent) HTTP gateway with signed
+      Agent Cards and mesh federation (RFC 0013/0014).
+    - **modelgateway** — the intelligence plane: a credential-injecting,
+      token-metering, budget-enforcing inference proxy so agents hold **no**
+      provider secrets (RFC 0012).
+    - **admission** — a validating webhook enforcing the lethal-trifecta override
+      gate, an image-registry allow-list, and cross-object checks (RFC 0007).
+    - **node-agent** — a per-node DaemonSet bridging each pod's management socket
+      on the substrate (RFC 0008/0015).
+
+    ## ALPHA / PREVIEW — read this before installing
+
+    OLM's `deployment` install strategy can only carry **Deployments**,
+    **(Cluster)Roles**, and **ServiceAccounts**. Several agentctl components are
+    therefore **NOT installed by this CSV** and must be applied separately — the
+    Helm chart at `charts/agentctl` installs all of them:
+
+    - **node-agent DaemonSet** — not a Deployment; install via Helm or
+      `deploy/node-agent`.
+    - **Aggregated APIService** (`v1alpha1.management.agents.x-k8s.io`) — not
+      expressible as a CSV `owned` apiservicedefinition without OLM-managed
+      serving certs; apply it separately.
+    - **ValidatingWebhookConfiguration** for the admission webhook — apply
+      separately (or via Helm) so cert-manager can inject its `caBundle`.
+    - **cert-manager Certificates/Issuers** — the apiserver, admission webhook,
+      gateway client, and node-agent all mount TLS Secrets issued by
+      cert-manager. **cert-manager (>= 1.13) is a hard runtime prerequisite**;
+      until those Secrets exist, the apiserver/admission/gateway pods stay
+      Pending.
+    - **Postgres + signing Secret** — the gateway and modelgateway need a
+      `DATABASE_URL` (Secret `agentctl-postgres`) and the gateway needs
+      `agentctl-gateway-signing`; the CSV does not create these.
+
+    For a complete, wired install use:
+
+    ```
+    helm install agentctl oci://ghcr.io/agentctl-dev/charts/agentctl \
+      --namespace agentctl-system --create-namespace
+    ```
+
+    This bundle is intended for evaluating the operator + CRDs under OLM and is
+    **not** a full OperatorHub-ready packaging.
+  installModes:
+    - type: OwnNamespace
+      supported: false
+    - type: SingleNamespace
+      supported: false
+    - type: MultiNamespace
+      supported: false
+    - type: AllNamespaces
+      supported: true
+  customresourcedefinitions:
+    owned:
+      - name: agents.agents.x-k8s.io
+        version: v1alpha1
+        kind: Agent
+        displayName: Agent
+        description: >-
+          One logical agent: an instruction + bindings rendered to a workload
+          whose shape follows `mode` (once→Job, schedule→CronJob,
+          loop/reactive→Deployment). Declared capabilities (exec/egress/secrets)
+          are gated by the admission webhook (RFC 0003/0007).
+      - name: agentfleets.agents.x-k8s.io
+        version: v1alpha1
+        kind: AgentFleet
+        displayName: AgentFleet
+        description: >-
+          A replicated, autoscaled set of agents (RFC 0003/0011). Renders to a
+          StatefulSet (shard mode) or Deployment (claim mode); KEDA owns the
+          replica count for elastic claim pools.
+      - name: modelpools.agents.x-k8s.io
+        version: v1alpha1
+        kind: ModelPool
+        displayName: ModelPool
+        description: >-
+          A pool of model access (RFC 0012). Names the provider, endpoint, the
+          Secret holding the API key, allowed models, and an optional token
+          budget. Agents hold no provider secrets; the ModelGateway injects the
+          credential and meters/limits usage.
+  install:
+    strategy: deployment
+    spec:
+      # ServiceAccounts the operator + planes run as. OLM creates these (and the
+      # (Cluster)Roles + bindings below) in the install namespace.
+      clusterPermissions:
+        # --- operator: reconcile CRs into workloads ---
+        - serviceAccountName: agentctl-operator
+          rules:
+            - apiGroups: ["agents.x-k8s.io"]
+              resources: ["agents", "agentfleets"]
+              verbs: ["get", "list", "watch", "update", "patch"]
+            - apiGroups: ["agents.x-k8s.io"]
+              resources: ["agents/status", "agentfleets/status"]
+              verbs: ["get", "update", "patch"]
+            - apiGroups: ["agents.x-k8s.io"]
+              resources: ["agents/finalizers", "agentfleets/finalizers"]
+              verbs: ["update"]
+            - apiGroups: ["batch"]
+              resources: ["jobs"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: ["apps"]
+              resources: ["deployments", "statefulsets"]
+              verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+            - apiGroups: [""]
+              resources: ["events"]
+              verbs: ["create", "patch"]
+        # --- apiserver: delegated authn/authz + Agent→pod routing ---
+        # NOTE: the chart binds system:auth-delegator; OLM clusterPermissions
+        # cannot bind a pre-existing ClusterRole, so the equivalent rules are
+        # inlined here. The chart ALSO creates a RoleBinding in kube-system to
+        # extension-apiserver-authentication-reader (the front-proxy CA) — that
+        # is NOT expressible via CSV permissions and must be applied separately.
+        - serviceAccountName: agentctl-apiserver
+          rules:
+            - apiGroups: ["authentication.k8s.io"]
+              resources: ["tokenreviews"]
+              verbs: ["create"]
+            - apiGroups: ["authorization.k8s.io"]
+              resources: ["subjectaccessreviews"]
+              verbs: ["create"]
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list"]
+        # --- gateway: routing + mesh discovery registry ---
+        - serviceAccountName: agentctl-gateway
+          rules:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list"]
+            - apiGroups: ["agents.x-k8s.io"]
+              resources: ["agents", "agentfleets"]
+              verbs: ["get", "list"]
+        # --- modelgateway: read ModelPools + their credential Secrets ---
+        - serviceAccountName: agentctl-modelgateway
+          rules:
+            - apiGroups: ["agents.x-k8s.io"]
+              resources: ["modelpools"]
+              verbs: ["get", "list", "watch"]
+            - apiGroups: ["agents.x-k8s.io"]
+              resources: ["modelpools/status"]
+              verbs: ["get", "update", "patch"]
+            - apiGroups: [""]
+              resources: ["secrets"]
+              verbs: ["get", "list"]
+        # --- admission: cross-object "referenced ModelPool exists" check ---
+        - serviceAccountName: agentctl-admission
+          rules:
+            - apiGroups: ["agents.x-k8s.io"]
+              resources: ["modelpools"]
+              verbs: ["get", "list"]
+      deployments:
+        # --- operator ---
+        - name: agentctl-operator
+          label:
+            app.kubernetes.io/name: agentctl-operator
+            app.kubernetes.io/part-of: agentctl
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: agentctl-operator
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: agentctl-operator
+              spec:
+                serviceAccountName: agentctl-operator
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: operator
+                    image: ghcr.io/agentctl-dev/operator:0.1.0
+                    imagePullPolicy: IfNotPresent
+                    env:
+                      - name: RUST_LOG
+                        value: info
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop: ["ALL"]
+                    resources:
+                      requests: { cpu: 25m, memory: 32Mi }
+                      limits: { cpu: 500m, memory: 256Mi }
+        # --- apiserver (aggregated API; needs cert-manager TLS Secrets) ---
+        - name: agentctl-apiserver
+          label:
+            app.kubernetes.io/name: agentctl-apiserver
+            app.kubernetes.io/part-of: agentctl
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: agentctl-apiserver
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: agentctl-apiserver
+              spec:
+                serviceAccountName: agentctl-apiserver
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: apiserver
+                    image: ghcr.io/agentctl-dev/apiserver:0.1.0
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - { containerPort: 6443, name: https }
+                    env:
+                      - name: RUST_LOG
+                        value: info
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop: ["ALL"]
+                    volumeMounts:
+                      - { name: tls, mountPath: /etc/agentctl-apiserver/tls, readOnly: true }
+                      - { name: client-tls, mountPath: /etc/agentctl-client/tls, readOnly: true }
+                    readinessProbe:
+                      tcpSocket: { port: 6443 }
+                      initialDelaySeconds: 2
+                      periodSeconds: 5
+                    livenessProbe:
+                      tcpSocket: { port: 6443 }
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    resources:
+                      requests: { cpu: 25m, memory: 32Mi }
+                      limits: { cpu: 300m, memory: 128Mi }
+                volumes:
+                  # NOT created by this CSV — issued by cert-manager (see README).
+                  - name: tls
+                    secret:
+                      secretName: agentctl-apiserver-tls
+                  - name: client-tls
+                    secret:
+                      secretName: agentctl-client-tls
+        # --- gateway (A2A; needs Postgres + signing + client TLS Secrets) ---
+        - name: agentctl-gateway
+          label:
+            app.kubernetes.io/name: agentctl-gateway
+            app.kubernetes.io/part-of: agentctl
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: agentctl-gateway
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: agentctl-gateway
+              spec:
+                serviceAccountName: agentctl-gateway
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: gateway
+                    image: ghcr.io/agentctl-dev/gateway:0.1.0
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - { containerPort: 8080, name: http }
+                    env:
+                      - name: RUST_LOG
+                        value: info
+                      # NOT created by this CSV — see README (Helm/Postgres).
+                      - name: DATABASE_URL
+                        valueFrom:
+                          secretKeyRef:
+                            name: agentctl-postgres
+                            key: DATABASE_URL
+                      - name: GATEWAY_SIGNING_SEED
+                        valueFrom:
+                          secretKeyRef:
+                            name: agentctl-gateway-signing
+                            key: GATEWAY_SIGNING_SEED
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop: ["ALL"]
+                    volumeMounts:
+                      - { name: client-tls, mountPath: /etc/agentctl-client/tls, readOnly: true }
+                    readinessProbe:
+                      httpGet: { path: /healthz, port: 8080 }
+                      initialDelaySeconds: 2
+                      periodSeconds: 5
+                    livenessProbe:
+                      httpGet: { path: /healthz, port: 8080 }
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    resources:
+                      requests: { cpu: 25m, memory: 32Mi }
+                      limits: { cpu: 500m, memory: 256Mi }
+                volumes:
+                  # NOT created by this CSV — issued by cert-manager (see README).
+                  - name: client-tls
+                    secret:
+                      secretName: agentctl-client-tls
+        # --- modelgateway (intelligence plane; needs Postgres Secret) ---
+        - name: agentctl-modelgateway
+          label:
+            app.kubernetes.io/name: agentctl-modelgateway
+            app.kubernetes.io/part-of: agentctl
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: agentctl-modelgateway
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: agentctl-modelgateway
+              spec:
+                serviceAccountName: agentctl-modelgateway
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: modelgateway
+                    image: ghcr.io/agentctl-dev/modelgateway:0.1.0
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - { containerPort: 8080, name: http }
+                    env:
+                      - name: RUST_LOG
+                        value: info
+                      # NOT created by this CSV — see README (Helm/Postgres).
+                      - name: DATABASE_URL
+                        valueFrom:
+                          secretKeyRef:
+                            name: agentctl-postgres
+                            key: DATABASE_URL
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop: ["ALL"]
+                    readinessProbe:
+                      httpGet: { path: /healthz, port: 8080 }
+                      initialDelaySeconds: 2
+                      periodSeconds: 5
+                    livenessProbe:
+                      httpGet: { path: /healthz, port: 8080 }
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    resources:
+                      requests: { cpu: 25m, memory: 32Mi }
+                      limits: { cpu: 500m, memory: 256Mi }
+        # --- admission webhook (needs cert-manager TLS + a separately-applied
+        #     ValidatingWebhookConfiguration to actually receive requests) ---
+        - name: agentctl-admission
+          label:
+            app.kubernetes.io/name: agentctl-admission
+            app.kubernetes.io/part-of: agentctl
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: agentctl-admission
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: agentctl-admission
+              spec:
+                serviceAccountName: agentctl-admission
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: admission
+                    image: ghcr.io/agentctl-dev/admission:0.1.0
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - { containerPort: 8443, name: https }
+                    env:
+                      - name: RUST_LOG
+                        value: info
+                      - name: ALLOWED_REGISTRIES
+                        value: "agentd:,mock-agent,agentctl/,gcr.io/,registry.k8s.io/,ghcr.io/"
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop: ["ALL"]
+                    volumeMounts:
+                      - { name: tls, mountPath: /etc/agentctl-admission/tls, readOnly: true }
+                    readinessProbe:
+                      httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
+                      initialDelaySeconds: 2
+                      periodSeconds: 5
+                    livenessProbe:
+                      httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    resources:
+                      requests: { cpu: 25m, memory: 32Mi }
+                      limits: { cpu: 500m, memory: 256Mi }
+                volumes:
+                  # NOT created by this CSV — issued by cert-manager (see README).
+                  - name: tls
+                    secret:
+                      secretName: agentctl-admission-tls

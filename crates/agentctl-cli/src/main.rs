@@ -10,6 +10,8 @@
 //! argv0 dispatch can route that without changing this logic. The table columns
 //! deliberately mirror the `Agent` CRD printer columns declared in `agent-api`.
 
+mod install;
+
 use agent_api::{Agent, AgentStatus, Mode, Substrate};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -34,6 +36,10 @@ enum Command {
     Get(GetArgs),
     /// Show one agent's spec summary and its status conditions.
     Describe(DescribeArgs),
+    /// Install (or upgrade) the agentctl control plane via Helm.
+    Install(install::InstallArgs),
+    /// Uninstall the agentctl control plane via Helm.
+    Uninstall(install::UninstallArgs),
 }
 
 #[derive(Args)]
@@ -66,6 +72,8 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Get(args) => run_get(args).await,
         Command::Describe(args) => run_describe(args).await,
+        Command::Install(args) => install::run_install(args).await,
+        Command::Uninstall(args) => install::run_uninstall(args).await,
     }
 }
 

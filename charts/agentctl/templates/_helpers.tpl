@@ -12,13 +12,16 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{/*
 Resolve a component image. Usage:
   {{ include "agentctl.image" (dict "root" $ "component" "operator") }}
-registry empty -> the local dev name "agentctl/<component>:<tag>" (kind-loaded);
-registry set   -> "<registry>/<component>:<tag>".
+digest pinned -> "<registry>/<component>@<digest>" (image.digests[component] wins);
+registry set  -> "<registry>/<component>:<tag>";
+registry empty -> the local dev name "agentctl/<component>:<tag>" (kind-loaded).
 */}}
 {{- define "agentctl.image" -}}
 {{- $reg := .root.Values.image.registry -}}
 {{- $tag := .root.Values.image.tag -}}
-{{- if $reg -}}{{ $reg }}/{{ .component }}:{{ $tag }}{{- else -}}agentctl/{{ .component }}:{{ $tag }}{{- end -}}
+{{- $digest := "" -}}
+{{- with .root.Values.image.digests -}}{{- $digest = index . $.component | default "" -}}{{- end -}}
+{{- if and $reg $digest -}}{{ $reg }}/{{ .component }}@{{ $digest }}{{- else if $reg -}}{{ $reg }}/{{ .component }}:{{ $tag }}{{- else -}}agentctl/{{ .component }}:{{ $tag }}{{- end -}}
 {{- end -}}
 
 {{/* imagePullSecrets block (if any). Usage: {{ include "agentctl.pullSecrets" $ | nindent 6 }} */}}
