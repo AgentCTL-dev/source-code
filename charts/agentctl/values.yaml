@@ -1,0 +1,76 @@
+# agentctl Helm values. The control plane is BUSL-1.1; the contract + SDK are
+# Apache-2.0 (see the repo LICENSE). cert-manager is a prerequisite.
+
+# Container images. Per-component overrides win over the shared registry/tag.
+image:
+  registry: ""                 # e.g. ghcr.io/agentctl-dev — empty = local (kind-loaded) names
+  tag: dev
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# The neutral reference agent (data plane) — used only by the bundled examples.
+referenceAgent:
+  image: agentd:1.0.0
+
+# Namespace the control plane runs in. Helm cannot reliably own the namespace it
+# installs into (release storage needs it to pre-exist), so the chart does NOT
+# create it by default. Either `helm install --create-namespace`, or pre-create it
+# with the PodSecurity label the node-agent (hostPath + hostPID) needs:
+#   kubectl create ns agentctl-system
+#   kubectl label ns agentctl-system pod-security.kubernetes.io/enforce=privileged
+namespace:
+  name: agentctl-system
+  create: false
+  podSecurity: privileged      # node-agent needs hostPath + hostPID
+
+# cert-manager wiring. When enabled (required), the chart creates a self-signed
+# bootstrap Issuer -> a CA -> a CA Issuer, and issues every serving/mTLS cert,
+# with caBundle injection into the APIService + the ValidatingWebhookConfiguration.
+certManager:
+  enabled: true
+  # If you already run a cluster CA Issuer, set this and the chart skips the
+  # self-signed bootstrap (uses your issuer as the CA for the leaf certs).
+  caIssuerRef: ""              # e.g. "my-ca-clusterissuer" (ClusterIssuer)
+
+# Durable store for the gateway + modelgateway (tasks, push configs, token usage).
+postgres:
+  mode: bundled               # bundled | external
+  bundled:
+    image: postgres:16-alpine
+    storage: emptyDir         # emptyDir (eval) | pvc
+    pvcSize: 5Gi
+  external:
+    # mode=external: point at a managed Postgres via a pre-created Secret holding
+    # a key 'DATABASE_URL' (postgres://user:pw@host:5432/db?sslmode=require).
+    dsnSecretName: ""
+    dsnSecretKey: DATABASE_URL
+
+# Planes — toggle components. The operator + node-agent are always installed.
+operator:
+  replicas: 1
+nodeAgent: {}
+apiserver:
+  enabled: true
+  replicas: 1
+gateway:
+  enabled: true
+  replicas: 1
+modelgateway:
+  enabled: true
+  replicas: 1
+admission:
+  enabled: true
+  replicas: 1
+  # Image-registry allow-list the webhook enforces (CSV prefixes; empty = allow all).
+  allowedRegistries: "agentd:,mock-agent,agentctl/,gcr.io/,registry.k8s.io/,ghcr.io/"
+
+# Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
+networkPolicies:
+  enabled: false
+
+# Substrate: the on-node socket root the node-agent watches + the operator wires.
+substrate:
+  socketRoot: /run/agentctl/sockets
+
+resources:
+  small: { requests: { cpu: 25m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }

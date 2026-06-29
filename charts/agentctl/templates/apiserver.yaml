@@ -1,0 +1,180 @@
+{{- if .Values.apiserver.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+# RBAC for the aggregated apiserver (RFC 0009): delegated authz (SAR/TokenReview)
+# + read the front-proxy CA from kube-system.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-apiserver
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+# SubjectAccessReview / TokenReview (delegated authn/authz).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-apiserver-auth-delegator
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-apiserver
+    namespace: {{ $ns }}
+---
+# Resolve Agent → pod → node-agent (the management-verb routing).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-apiserver-routing
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-apiserver-routing
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-apiserver-routing
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-apiserver
+    namespace: {{ $ns }}
+---
+# Read extension-apiserver-authentication (the requestheader / front-proxy CA).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentctl-apiserver-authreader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-apiserver
+    namespace: {{ $ns }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-apiserver
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.apiserver.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-apiserver
+    spec:
+      serviceAccountName: agentctl-apiserver
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: apiserver
+          image: {{ include "agentctl.image" (dict "root" $ "component" "apiserver") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 6443, name: https }
+          env:
+            - name: RUST_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/agentctl-apiserver/tls
+              readOnly: true
+            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            - name: client-tls
+              mountPath: /etc/agentctl-client/tls
+              readOnly: true
+          # tcpSocket (not httpGet): the server requires a front-proxy client
+          # cert for TLS, which the kubelet probes don't present.
+          readinessProbe:
+            tcpSocket: { port: 6443 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 6443 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 300m, memory: 128Mi }
+      volumes:
+        - name: tls
+          secret:
+            secretName: agentctl-apiserver-tls
+        - name: client-tls
+          secret:
+            secretName: agentctl-client-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-apiserver
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-apiserver
+  ports:
+    - { port: 443, targetPort: 6443, name: https }
+---
+# Registers the aggregated apiserver with the kube-aggregator. The serving CA is
+# injected into caBundle by cert-manager (cert-manager.io/inject-ca-from). The
+# aggregator proxies management.agents.x-k8s.io/v1alpha1 requests to the Service.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.management.agents.x-k8s.io
+  labels:
+    app.kubernetes.io/name: agentctl-apiserver
+    {{- include "agentctl.labels" . | nindent 4 }}
+  annotations:
+    cert-manager.io/inject-ca-from: "{{ $ns }}/agentctl-apiserver"
+spec:
+  group: management.agents.x-k8s.io
+  version: v1alpha1
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  service:
+    name: agentctl-apiserver
+    namespace: {{ $ns }}
+    port: 443
+{{- end }}

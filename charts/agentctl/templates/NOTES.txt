@@ -1,0 +1,24 @@
+{{- $ns := include "agentctl.namespace" . }}
+agentctl {{ .Chart.AppVersion }} has been installed into namespace "{{ $ns }}".
+
+PREREQUISITE
+  cert-manager must be installed and healthy in the cluster — the chart issues
+  every serving/mTLS cert through it (APIService + webhook caBundle injection):
+    kubectl get pods -n cert-manager
+
+CHECK THE ROLLOUT
+  Watch the control-plane pods come up:
+    kubectl -n {{ $ns }} get pods
+    kubectl -n {{ $ns }} rollout status deploy/agentctl-operator
+
+{{- if .Values.apiserver.enabled }}
+
+  Confirm the aggregated API is registered and Available:
+    kubectl get apiservice v1alpha1.agents.x-k8s.io
+  (the AVAILABLE column should read True once the apiserver is serving)
+{{- end }}
+
+NEXT STEPS
+  The kubectl-agent plugin ships separately from this chart — install it to drive
+  agents from the CLI, then create your first Agent:
+    kubectl get agents -A

@@ -1,0 +1,153 @@
+{{- $ns := include "agentctl.namespace" . }}
+{{- if .Values.gateway.enabled }}
+# RBAC for the A2A gateway: resolve Agent → pod → node-agent (same routing as the
+# apiserver). Stateless; reads pods only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-gateway
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # The mesh discovery registry (GET /agents) lists the CRDs.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents", "agentfleets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-gateway
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-gateway
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-gateway
+    namespace: {{ $ns }}
+---
+# The A2A gateway (RFC 0013): a replicated, stateless HTTP service fronting the
+# agents' A2A-over-the-substrate surface (bridged via the node-agent). Projects
+# each agent's Agent Card and routes spec-form A2A JSON-RPC to the reference verbs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-gateway
+    spec:
+      serviceAccountName: agentctl-gateway
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: {{ include "agentctl.image" (dict "root" $ "component" "gateway") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            - name: RUST_LOG
+              value: "info"
+            # Durable A2A task store (RFC 0013).
+            {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            # Ed25519 seed for Agent Card JWS signing (RFC 0014).
+            - name: GATEWAY_SIGNING_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-gateway-signing
+                  key: GATEWAY_SIGNING_SEED
+            # Mesh registry federation (RFC 0014): peer gateway base URLs (CSV).
+            # Peers are queried with ?local=1 to prevent recursion.
+            {{- with .Values.gateway.federationPeers }}
+            - name: FEDERATION_PEERS
+              value: {{ . | quote }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            - name: client-tls
+              mountPath: /etc/agentctl-client/tls
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources.small | nindent 12 }}
+      volumes:
+        - name: client-tls
+          secret:
+            secretName: agentctl-client-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-gateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-gateway
+  ports:
+    - { port: 80, targetPort: 8080, name: http }
+---
+# Ed25519 signing key for A2A Agent Card JWS signing (RFC 0014). The gateway
+# loads the 32-byte seed (base64) and serves the public key at
+# /.well-known/jwks.json. Chart-generated and kept across upgrades so cards
+# verify consistently across replicas. Replace with a managed (rotated) secret
+# for production.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentctl-gateway-signing
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-gateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/resource-policy": keep
+type: Opaque
+data:
+  GATEWAY_SIGNING_SEED: {{ randAlphaNum 32 | b64enc | b64enc }}
+{{- end }}

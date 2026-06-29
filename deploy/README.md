@@ -1,6 +1,12 @@
 # deploy/
 
-Install artifacts for agentctl and a local end-to-end walkthrough.
+Raw per-component manifests + a local end-to-end walkthrough — useful for
+development, kustomize overlays, and understanding each object.
+
+> **For a production-style install, use the Helm chart: [`charts/agentctl`](../charts/agentctl/README.md).**
+> One `helm install` brings up every component and wires all TLS (APIServer,
+> admission webhook, node-agent mTLS) through **cert-manager** with automatic
+> caBundle injection + rotation — superseding the `install.sh` cert scripts here.
 
 ```
 deploy/

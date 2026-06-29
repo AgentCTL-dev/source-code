@@ -1,0 +1,13 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "agentctl.namespace" . }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+    # The node-agent DaemonSet needs hostPath + hostPID; relax PodSecurity for
+    # this namespace only.
+    pod-security.kubernetes.io/enforce: {{ .Values.namespace.podSecurity }}
+    pod-security.kubernetes.io/audit: {{ .Values.namespace.podSecurity }}
+    pod-security.kubernetes.io/warn: {{ .Values.namespace.podSecurity }}
+{{- end }}

@@ -1,0 +1,149 @@
+{{- if .Values.admission.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+# RBAC for the validating webhook: read ModelPool CRs for the cross-object
+# "referenced modelPool exists" check.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-admission
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-admission
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["modelpools"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-admission
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-admission
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-admission
+    namespace: {{ $ns }}
+---
+# The validating admission webhook (RFC 0007): enforces the cross-object + policy
+# rules CEL can't — the lethal-trifecta override gate, an image-registry
+# allow-list, and "referenced ModelPool exists". Serves HTTPS on :8443 with a
+# cert from the agentctl-admission-tls Secret (created by templates/certificates.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-admission
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.admission.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-admission
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-admission
+    spec:
+      serviceAccountName: agentctl-admission
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: admission
+          image: {{ include "agentctl.image" (dict "root" $ "component" "admission") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8443, name: https }
+          env:
+            - name: RUST_LOG
+              value: "info"
+            # Image-registry allow-list (CSV prefixes); empty would allow all.
+            - name: ALLOWED_REGISTRIES
+              value: {{ .Values.admission.allowedRegistries | quote }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/agentctl-admission/tls, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources.small | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: agentctl-admission-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-admission
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-admission
+  ports:
+    - { port: 443, targetPort: 8443, name: https }
+---
+# Registers the validating webhook for Agent CREATE/UPDATE. caBundle is injected
+# by cert-manager via the inject-ca-from annotation (the CA that signed the
+# webhook's serving cert). failurePolicy Fail: if the webhook is unreachable, the
+# apiserver rejects the request (the trifecta gate must not be bypassable).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: agentctl-admission
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+    {{- include "agentctl.labels" . | nindent 4 }}
+  annotations:
+    cert-manager.io/inject-ca-from: "{{ $ns }}/agentctl-admission"
+webhooks:
+  - name: agents.admission.agentctl.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: agentctl-admission
+        namespace: {{ $ns }}
+        path: /validate
+        port: 443
+    rules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["agents"]
+        scope: Namespaced
+{{- end }}

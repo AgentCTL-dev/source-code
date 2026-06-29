@@ -1,0 +1,91 @@
+{{- $ns := include "agentctl.namespace" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-operator
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-operator
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents", "agentfleets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents/status", "agentfleets/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents/finalizers", "agentfleets/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-operator
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-operator
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-operator
+    namespace: {{ $ns }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-operator
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-operator
+    spec:
+      serviceAccountName: agentctl-operator
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: {{ include "agentctl.image" (dict "root" $ "component" "operator") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: RUST_LOG
+              value: "info"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources.small | nindent 12 }}

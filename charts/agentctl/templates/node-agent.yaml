@@ -1,0 +1,64 @@
+{{- $ns := include "agentctl.namespace" . }}
+# node-agent (RFC 0008, Tier A — control bridge), one per node. Mounts the
+# stock-unix hostPath socket root, discovers per-pod management sockets, and
+# bridges to each agent's management profile. (The operator↔node-agent API and
+# the A2A data-path tier are layered on next; this is discovery + bridge.)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agentctl-node-agent
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-node-agent
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-node-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-node-agent
+    spec:
+      # hostPID: the bridge reads the management socket peer's host PID
+      # (UnixStream::peer_cred) to attest, via /proc/<pid>/cgroup, that the
+      # process serving the socket really belongs to the claimed pod (RFC 0002 §7).
+      hostPID: true
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      containers:
+        - name: node-agent
+          image: {{ include "agentctl.image" (dict "root" $ "component" "node-agent") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8080, name: http }       # /healthz + /metrics (plaintext)
+            - { containerPort: 8443, name: https }       # /v1/agents/* (mTLS, RFC 0015)
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: AGENTCTL_SOCKET_ROOT
+              value: {{ .Values.substrate.socketRoot | quote }}
+          securityContext:
+            # Host-side bridge: reads per-pod sockets the kubelet creates on the
+            # hostPath (root-owned). Production tightens this (RFC 0008/0015).
+            runAsUser: 0
+          volumeMounts:
+            - name: sockets
+              mountPath: /run/agentctl/sockets
+            - name: tls
+              mountPath: /etc/agentctl-node-agent/tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: sockets
+          hostPath:
+            path: {{ .Values.substrate.socketRoot }}
+            type: DirectoryOrCreate
+        - name: tls
+          secret:
+            secretName: agentctl-node-agent-tls

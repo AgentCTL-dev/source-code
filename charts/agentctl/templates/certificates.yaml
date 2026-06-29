@@ -1,0 +1,124 @@
+{{- if .Values.certManager.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+{{- if not .Values.certManager.caIssuerRef }}
+# Bootstrap: self-signed issuer -> the agentctl CA -> a CA issuer that mints the
+# leaf certs below. (Skipped if you supply certManager.caIssuerRef.)
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: agentctl-selfsigned
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: agentctl-ca
+  secretName: agentctl-ca-key
+  duration: 87600h    # 10y
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: agentctl-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: agentctl-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: agentctl-ca-key
+---
+{{- end }}
+# --- leaf certs (all signed by the agentctl CA; secrets carry ca.crt) ---
+# Aggregated APIServer serving cert (caBundle injected into the APIService).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-apiserver
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-apiserver-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-apiserver.{{ $ns }}.svc
+    - agentctl-apiserver.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- if .Values.admission.enabled }}
+---
+# Admission webhook serving cert (caBundle injected into the ValidatingWebhookConfiguration).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-admission
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-admission-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-admission.{{ $ns }}.svc
+    - agentctl-admission.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- end }}
+---
+# node-agent control-API server cert (mTLS on :8443). Clients verify the CA only
+# (the node-agent is addressed by dynamic pod IP), so the SAN is informational.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-node-agent
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-node-agent-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: agentctl-node-agent
+  dnsNames: ["agentctl-node-agent"]
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+---
+# Control-plane client cert (apiserver + gateway present this to the node-agent).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-client
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-client-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: agentctl-control-plane
+  usages: ["client auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- end }}

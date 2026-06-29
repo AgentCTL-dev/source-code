@@ -1,0 +1,117 @@
+{{- if .Values.modelgateway.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+# RBAC for the ModelGateway: read ModelPool CRs and the provider-credential
+# Secrets they reference (the credentials the control plane injects so agents
+# never hold them). Secrets access is cluster-wide here for the dev MVP — a real
+# deployment scopes it to the pools' namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-modelgateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-modelgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-modelgateway
+  labels:
+    app.kubernetes.io/name: agentctl-modelgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["modelpools"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["modelpools/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-modelgateway
+  labels:
+    app.kubernetes.io/name: agentctl-modelgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-modelgateway
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-modelgateway
+    namespace: {{ $ns }}
+---
+# The ModelGateway (RFC 0012): the intelligence plane's credential-injecting,
+# token-metering, budget-enforcing inference proxy. Agents reach it WITHOUT any
+# provider secret; it injects the ModelPool's credential, meters per-pool tokens
+# in Postgres, and enforces the pool budget.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-modelgateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-modelgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.modelgateway.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-modelgateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-modelgateway
+    spec:
+      serviceAccountName: agentctl-modelgateway
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: modelgateway
+          image: {{ include "agentctl.image" (dict "root" $ "component" "modelgateway") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            - name: RUST_LOG
+              value: "info"
+            {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources.small | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-modelgateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-modelgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-modelgateway
+  ports:
+    - { port: 80, targetPort: 8080, name: http }
+{{- end }}
