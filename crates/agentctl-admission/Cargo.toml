@@ -24,6 +24,9 @@ k8s-openapi = { version = "0.28", features = ["latest"] }
 # CRD types (ModelPool) for the cross-object existence check.
 agent-api = { path = "../agent-api" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+# base64 for the mutating webhook's JSONPatch payload (the AdmissionResponse.patch
+# field is a base64-encoded RFC 6902 patch document).
+base64 = "0.22"
 serde_json.workspace = true
 serde = { workspace = true }
 tracing = "0.1"

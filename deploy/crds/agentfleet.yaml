@@ -39,6 +39,16 @@ spec:
               StatefulSet (shard mode) or Deployment (claim mode); **KEDA owns
               `.spec.replicas`**, so the rendered workload omits it.
             properties:
+              replicas:
+                description: |-
+                  Claim-mode replica count, the target of the `scale` subresource so
+                  `kubectl scale agentfleet` and an HPA can drive it. **KEDA owns this in
+                  steady state** (RFC 0011); the rendered workload omits it. Optional so
+                  claim mode may scale to 0 / defer to KEDA when unset.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
               scaling:
                 description: The scaling regime.
                 properties:
@@ -325,6 +335,22 @@ spec:
                 minimum: 0.0
                 nullable: true
                 type: integer
+              replicas:
+                description: |-
+                  Current replica count surfaced through the `scale` subresource
+                  (`statusReplicasPath = .status.replicas`). Populated by the operator from
+                  the rendered workload's observed replicas; HPA reads this back.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              selector:
+                description: |-
+                  Serialized label selector for the `scale` subresource
+                  (`labelSelectorPath = .status.selector`); an HPA uses it to find the
+                  pods it scales. Populated by the operator with the workload's selector.
+                nullable: true
+                type: string
             type: object
         required:
         - spec
@@ -333,4 +359,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
       status: {}

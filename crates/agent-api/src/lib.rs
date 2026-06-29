@@ -300,7 +300,12 @@ pub struct Condition {
     printcolumn = r#"{"name":"Scaling","type":"string","jsonPath":".spec.scaling.mode"}"#,
     printcolumn = r#"{"name":"Desired","type":"integer","jsonPath":".status.desiredReplicas"}"#,
     printcolumn = r#"{"name":"Ready","type":"integer","jsonPath":".status.readyReplicas"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    scale(
+        spec_replicas_path = ".spec.replicas",
+        status_replicas_path = ".status.replicas",
+        label_selector_path = ".status.selector"
+    )
 )]
 #[serde(rename_all = "camelCase")]
 #[schemars(extend("x-kubernetes-validations" = [{
@@ -315,6 +320,12 @@ pub struct AgentFleetSpec {
     /// The shared work source (an MCP resource URI) for claim/shard distribution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_source: Option<String>,
+    /// Claim-mode replica count, the target of the `scale` subresource so
+    /// `kubectl scale agentfleet` and an HPA can drive it. **KEDA owns this in
+    /// steady state** (RFC 0011); the rendered workload omits it. Optional so
+    /// claim mode may scale to 0 / defer to KEDA when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
 }
 
 /// The scaling regime (RFC 0011).
@@ -372,6 +383,16 @@ pub struct AgentFleetStatus {
     pub desired_replicas: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_replicas: Option<u32>,
+    /// Current replica count surfaced through the `scale` subresource
+    /// (`statusReplicasPath = .status.replicas`). Populated by the operator from
+    /// the rendered workload's observed replicas; HPA reads this back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
+    /// Serialized label selector for the `scale` subresource
+    /// (`labelSelectorPath = .status.selector`); an HPA uses it to find the
+    /// pods it scales. Populated by the operator with the workload's selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scale_time: Option<String>,
 }

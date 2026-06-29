@@ -1,16 +1,32 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! agentctl admission plane (RFC 0007) — the validating webhook.
+//! agentctl admission plane (RFC 0007) — the admission webhooks.
 //!
 //! The CRDs carry declarative CEL invariants enforced by the apiserver. This
-//! webhook covers what CEL **can't** express: cross-object existence
-//! (does the named `ModelPool` exist in the namespace?), cluster policy
-//! (the image registry allow-list), and the **lethal-trifecta override gate**
-//! (exec + egress + secrets together require an explicit opt-in annotation).
+//! server adds the two admission concerns CEL can't own:
 //!
-//! A `ValidatingWebhookConfiguration` points the kube-apiserver at
-//! `POST /validate` over HTTPS; the webhook returns an `AdmissionReview`
-//! verdict. Hand-rolled in Rust (axum + rustls/ring; agentctl is Rust-only).
-//! The serving cert is mounted at `/etc/agentctl-admission/tls`.
+//! 1. **Validating** (`POST /validate`): what CEL **can't** express — cross-object
+//!    existence (does the named `ModelPool` exist in the namespace?), cluster
+//!    policy (the image registry allow-list), and the **lethal-trifecta override
+//!    gate** (exec + egress + secrets together require an explicit opt-in
+//!    annotation). These checks cover **both** `Agent` (at `spec.*`) and
+//!    `AgentFleet` (at `spec.template.*`, an `AgentSpec`) so a fleet cannot smuggle
+//!    a disallowed image or an ungated trifecta past the gate (the bypass this
+//!    server closes).
+//! 2. **Defaulting** (`POST /mutate`): a mutating webhook that returns a base64
+//!    JSONPatch of **secure defaults** — the standard `app.kubernetes.io/*` labels,
+//!    a conservative `mode`, and a minimal-exposure `surfaces` set. It deliberately
+//!    does **not** hard-default `substrate`: the secure default is tenancy-derived
+//!    (RFC 0002 §5 — `kata-hybrid` for hostile, `stock-unix` for single) and the
+//!    most-isolated tier needs a Kata `RuntimeClass` absent on most stock clusters
+//!    (RFC 0002 §9), so forcing one cluster-wide would either break stock clusters
+//!    or be insecure. Leaving `substrate` absent lets the operator/renderer resolve
+//!    it from the `AgentClass`/tenancy (RFC 0007 B3) — the documented secure path.
+//!
+//! `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` point the
+//! kube-apiserver at `POST /validate` and `POST /mutate` over HTTPS (mutating runs
+//! first — k8s sequences mutating admission before validating). Hand-rolled in Rust
+//! (axum + rustls/ring; agentctl is Rust-only). The serving cert is mounted at
+//! `/etc/agentctl-admission/tls`.
 
 use std::io::BufReader;
 use std::net::SocketAddr;
@@ -22,6 +38,8 @@ use axum::extract::State;
 use axum::http::header;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use kube::{Api, Client};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
@@ -74,6 +92,7 @@ async fn main() {
         // insecureSkipVerify) without a client cert — no new plaintext port.
         .route("/metrics", get(serve_metrics))
         .route("/validate", post(validate))
+        .route("/mutate", post(mutate))
         .with_state(AppState {
             client,
             allowed_registries: allowed_registries.clone(),
@@ -89,7 +108,7 @@ async fn main() {
     tracing::info!(
         %addr,
         registries = ?allowed_registries,
-        "agentctl admission webhook serving (validating: registry + trifecta + modelPool)"
+        "agentctl admission webhook serving (validate: registry + trifecta + modelPool over Agent/AgentFleet; mutate: secure defaults)"
     );
     axum_server::bind_rustls(addr, config)
         .handle(handle)
@@ -175,9 +194,11 @@ async fn serve_metrics(
     )
 }
 
-/// The admission endpoint. Parses an `admission.k8s.io/v1` `AdmissionReview`
-/// whose `request.object` is an `Agent`, runs the policy + cross-object checks,
-/// and returns an `AdmissionReview` verdict (`allowed` + a denial message).
+/// The validating endpoint. Parses an `admission.k8s.io/v1` `AdmissionReview`
+/// whose `request.object` is an `Agent` **or** `AgentFleet`, runs the policy +
+/// cross-object checks against the `AgentSpec`-shaped view (`spec` for `Agent`,
+/// `spec.template` for `AgentFleet`), and returns an `AdmissionReview` verdict
+/// (`allowed` + a denial message).
 async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> Json<Value> {
     let request = &review["request"];
     let uid = request["uid"].as_str().unwrap_or_default().to_string();
@@ -194,6 +215,11 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     let object = &request["object"];
     let empty = Value::Object(Map::new());
     let spec = object.get("spec").unwrap_or(&empty);
+    let kind = reviewed_kind(request, object);
+    // The same image/exec/egress/secrets/modelPool checks apply to an Agent's spec
+    // and to an AgentFleet's `spec.template` (itself an AgentSpec) — the latter is
+    // the bypass this closes.
+    let view = agent_spec_view(&kind, spec, &empty);
 
     let empty_map = Map::new();
     let annotations = object["metadata"]["annotations"]
@@ -201,10 +227,10 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
         .unwrap_or(&empty_map);
 
     // Cross-object: resolve whether the named ModelPool exists (if one is named).
-    let model_pool_exists = resolve_model_pool(&state.client, spec, &namespace).await;
+    let model_pool_exists = resolve_model_pool(&state.client, view, &namespace).await;
 
     let verdict = evaluate(
-        spec,
+        view,
         annotations,
         &state.allowed_registries,
         model_pool_exists,
@@ -212,12 +238,57 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     );
 
     match &verdict {
-        Ok(()) => tracing::info!(%uid, %namespace, "admit"),
-        Err(msg) => tracing::warn!(%uid, %namespace, deny = %msg, "deny"),
+        Ok(()) => tracing::info!(%uid, %namespace, %kind, "admit"),
+        Err(msg) => tracing::warn!(%uid, %namespace, %kind, deny = %msg, "deny"),
     }
     state.metrics.record(verdict.is_ok());
 
     Json(admission_response(&uid, verdict))
+}
+
+/// The reviewed object's kind, preferring `request.object.kind`, falling back to
+/// the request GVK (`request.kind.kind`), defaulting to `"Agent"`.
+fn reviewed_kind(request: &Value, object: &Value) -> String {
+    object
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| request["kind"]["kind"].as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Agent")
+        .to_string()
+}
+
+/// Select the `AgentSpec`-shaped sub-object to check from a reviewed object's
+/// `spec`, given the object `kind`. For `AgentFleet` the `AgentSpec` lives at
+/// `spec.template`; for `Agent` (and anything else) it is `spec` itself. An
+/// `AgentFleet` missing its (required) `template` falls back to `empty` so the
+/// checks simply find nothing to deny rather than panicking.
+fn agent_spec_view<'a>(kind: &str, spec: &'a Value, empty: &'a Value) -> &'a Value {
+    if kind == "AgentFleet" {
+        spec.get("template").unwrap_or(empty)
+    } else {
+        spec
+    }
+}
+
+/// The mutating endpoint. Parses an `admission.k8s.io/v1` `AdmissionReview` for an
+/// `Agent`/`AgentFleet` and returns an `AdmissionReview` carrying a base64
+/// JSONPatch of secure defaults (labels + `mode` + `surfaces`); see
+/// [`build_default_patch`] for the field-by-field rationale, and the module docs
+/// for why `substrate` is deliberately **not** defaulted here.
+async fn mutate(State(state): State<AppState>, Json(review): Json<Value>) -> Json<Value> {
+    let request = &review["request"];
+    let uid = request["uid"].as_str().unwrap_or_default().to_string();
+    let object = &request["object"];
+    let kind = reviewed_kind(request, object);
+
+    let patch = build_default_patch(&kind, object);
+
+    tracing::info!(%uid, %kind, ops = patch.len(), "mutate");
+    state.metrics.record_mutation(!patch.is_empty());
+
+    Json(mutation_response(&uid, &patch))
 }
 
 /// If `spec.modelPool` names a pool, look it up in `namespace`: `Some(true)` if
@@ -323,6 +394,121 @@ fn evaluate(
     }
 
     Ok(())
+}
+
+// --- defaulting (pure) -----------------------------------------------------
+
+/// The `app.kubernetes.io/name` value for a reviewed kind.
+fn kind_app_name(kind: &str) -> &'static str {
+    match kind {
+        "AgentFleet" => "agentfleet",
+        _ => "agent",
+    }
+}
+
+/// Escape a string for use as a single JSON Pointer (RFC 6901) reference token:
+/// `~` ⇒ `~0`, `/` ⇒ `~1` (order matters — `~` first).
+fn escape_pointer_token(s: &str) -> String {
+    s.replace('~', "~0").replace('/', "~1")
+}
+
+/// Build the RFC 6902 JSONPatch of **secure defaults** for an `Agent`/`AgentFleet`.
+/// Every op is conditional on the field being **absent** — defaulting never
+/// clobbers an author's explicit value (and is auditable in the patch). Defaults:
+///
+/// 1. **Standard `app.kubernetes.io/*` labels** (`managed-by`/`part-of`/`name`) —
+///    pure metadata, always safe. Adds the whole `metadata.labels` object if none
+///    exists, else only the missing keys.
+/// 2. **`mode`** ⇒ `"once"` — the conservative run-once shape and the documented
+///    enum default; only added when absent (it is a required field, so defaulting
+///    it pre-empts a structural rejection with the safest run shape).
+/// 3. **`surfaces`** ⇒ all-`false` — minimal control-plane exposure; an author opts
+///    a surface on explicitly. `a2a` in particular is a network/contract-unsupported
+///    (RFC 0007 B6 / P2) surface that must never default on.
+///
+/// Deliberately **not** defaulted: `substrate`. Its secure default is
+/// tenancy-derived (RFC 0002 §5) and the most-isolated tier (`kata-hybrid`) needs a
+/// Kata `RuntimeClass` absent on most stock clusters (RFC 0002 §9); hard-defaulting
+/// here would either break stock clusters or be insecure, so the field is left
+/// absent for the operator/renderer to resolve from `AgentClass`/tenancy
+/// (RFC 0007 B3).
+///
+/// The `AgentSpec`-shaped defaults target `spec.*` for an `Agent` and
+/// `spec.template.*` for an `AgentFleet`, and are emitted only when the parent
+/// (`spec` / `spec.template`) is present — an "add" into a missing parent would
+/// fail to apply.
+fn build_default_patch(kind: &str, object: &Value) -> Vec<Value> {
+    let mut ops = Vec::new();
+
+    // 1. Standard recommended labels (only the absent keys).
+    let desired_labels = [
+        ("app.kubernetes.io/managed-by", "agentctl"),
+        ("app.kubernetes.io/part-of", "agentctl"),
+        ("app.kubernetes.io/name", kind_app_name(kind)),
+    ];
+    match object["metadata"]["labels"].as_object() {
+        None => {
+            // No labels map at all — add the whole object in one op.
+            let mut m = Map::new();
+            for (k, v) in desired_labels {
+                m.insert(k.to_string(), json!(v));
+            }
+            ops.push(json!({ "op": "add", "path": "/metadata/labels", "value": m }));
+        }
+        Some(existing) => {
+            for (k, v) in desired_labels {
+                if !existing.contains_key(k) {
+                    ops.push(json!({
+                        "op": "add",
+                        "path": format!("/metadata/labels/{}", escape_pointer_token(k)),
+                        "value": v,
+                    }));
+                }
+            }
+        }
+    }
+
+    // 2/3. Safe AgentSpec-shaped defaults: /spec/* (Agent) or /spec/template/*
+    // (AgentFleet). Only when the parent container is present.
+    let (view, base) = if kind == "AgentFleet" {
+        (
+            object.get("spec").and_then(|s| s.get("template")),
+            "/spec/template",
+        )
+    } else {
+        (object.get("spec"), "/spec")
+    };
+    if let Some(view) = view {
+        if view.get("mode").is_none() {
+            ops.push(json!({ "op": "add", "path": format!("{base}/mode"), "value": "once" }));
+        }
+        if view.get("surfaces").is_none() {
+            ops.push(json!({
+                "op": "add",
+                "path": format!("{base}/surfaces"),
+                "value": { "management": false, "metrics": false, "a2a": false },
+            }));
+        }
+    }
+
+    ops
+}
+
+/// Build the mutating `AdmissionReview` response. An empty patch yields a bare
+/// `allowed: true` (no `patch`/`patchType`); a non-empty patch is serialized,
+/// base64-encoded, and tagged `patchType: JSONPatch`.
+fn mutation_response(uid: &str, patch: &[Value]) -> Value {
+    let mut response = json!({ "uid": uid, "allowed": true });
+    if !patch.is_empty() {
+        let bytes = serde_json::to_vec(patch).unwrap_or_default();
+        response["patchType"] = json!("JSONPatch");
+        response["patch"] = json!(BASE64.encode(bytes));
+    }
+    json!({
+        "apiVersion": "admission.k8s.io/v1",
+        "kind": "AdmissionReview",
+        "response": response,
+    })
 }
 
 #[cfg(test)]
@@ -457,5 +643,227 @@ mod tests {
 
         let ok = admission_response("uid-9", Ok(()));
         assert_eq!(ok["response"]["allowed"], true);
+    }
+
+    // --- AgentFleet coverage (the closed bypass) ---------------------------
+
+    #[test]
+    fn agent_view_is_the_spec_itself() {
+        let spec = json!({ "image": "x", "exec": true });
+        let empty = Value::Object(Map::new());
+        assert_eq!(agent_spec_view("Agent", &spec, &empty), &spec);
+        // Anything that is not an AgentFleet is treated like an Agent.
+        assert_eq!(agent_spec_view("Whatever", &spec, &empty), &spec);
+    }
+
+    #[test]
+    fn agentfleet_view_is_spec_template() {
+        let template = json!({ "image": "x", "exec": true });
+        let spec = json!({ "template": template.clone(), "scaling": { "mode": "claim" } });
+        let empty = Value::Object(Map::new());
+        assert_eq!(agent_spec_view("AgentFleet", &spec, &empty), &template);
+    }
+
+    #[test]
+    fn agentfleet_missing_template_falls_back_to_empty() {
+        let spec = json!({ "scaling": { "mode": "claim" } });
+        let empty = Value::Object(Map::new());
+        assert_eq!(agent_spec_view("AgentFleet", &spec, &empty), &empty);
+    }
+
+    #[test]
+    fn agentfleet_trifecta_denied_via_template() {
+        // The same lethal trifecta in a fleet's template must be gated — this is
+        // the bypass the fix closes (the webhook used to only see `agents`).
+        let spec = json!({
+            "template": { "mode": "loop", "exec": true, "egress": true, "secrets": ["db"] },
+            "scaling": { "mode": "claim" }
+        });
+        let empty = Value::Object(Map::new());
+        let view = agent_spec_view("AgentFleet", &spec, &empty);
+        let err = evaluate(view, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("lethal trifecta"));
+    }
+
+    #[test]
+    fn agentfleet_trifecta_allowed_with_annotation() {
+        let spec = json!({
+            "template": { "exec": true, "egress": true, "secrets": ["db"] },
+            "scaling": { "mode": "claim" }
+        });
+        let empty = Value::Object(Map::new());
+        let view = agent_spec_view("AgentFleet", &spec, &empty);
+        // The override annotation rides on the AgentFleet object's metadata.
+        let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "true" }));
+        assert!(evaluate(view, &anns, &[], None, "default").is_ok());
+    }
+
+    #[test]
+    fn agentfleet_registry_denied_via_template() {
+        let spec = json!({
+            "template": { "image": "docker.io/library/evil:latest" },
+            "scaling": { "mode": "claim" }
+        });
+        let empty = Value::Object(Map::new());
+        let view = agent_spec_view("AgentFleet", &spec, &empty);
+        let registries = vec!["ghcr.io/acme/".to_string()];
+        let err = evaluate(view, &Map::new(), &registries, None, "default").unwrap_err();
+        assert!(err.contains("not from an allowed registry"));
+    }
+
+    #[test]
+    fn reviewed_kind_prefers_object_then_request_then_default() {
+        let req = json!({ "kind": { "kind": "AgentFleet" } });
+        let obj = json!({ "kind": "Agent" });
+        assert_eq!(reviewed_kind(&req, &obj), "Agent");
+        // Object kind missing ⇒ fall back to the request GVK.
+        let obj_no_kind = json!({ "metadata": {} });
+        assert_eq!(reviewed_kind(&req, &obj_no_kind), "AgentFleet");
+        // Both missing ⇒ default to Agent.
+        assert_eq!(reviewed_kind(&json!({}), &json!({})), "Agent");
+    }
+
+    // --- defaulting / mutate ----------------------------------------------
+
+    #[test]
+    fn mutate_defaults_agent_mode_surfaces_and_labels() {
+        let object = json!({
+            "kind": "Agent",
+            "metadata": { "name": "demo" },
+            "spec": { "image": "ghcr.io/acme/a:v1" }
+        });
+        let ops = build_default_patch("Agent", &object);
+        // No labels map existed ⇒ one op adds the whole labels object.
+        let labels_op = ops
+            .iter()
+            .find(|o| o["path"] == "/metadata/labels")
+            .expect("labels object op");
+        assert_eq!(
+            labels_op["value"]["app.kubernetes.io/managed-by"],
+            "agentctl"
+        );
+        assert_eq!(labels_op["value"]["app.kubernetes.io/name"], "agent");
+        // mode + surfaces defaulted on /spec.
+        assert!(ops
+            .iter()
+            .any(|o| o["path"] == "/spec/mode" && o["value"] == "once"));
+        let surfaces = ops
+            .iter()
+            .find(|o| o["path"] == "/spec/surfaces")
+            .expect("surfaces op");
+        assert_eq!(surfaces["value"]["management"], false);
+        assert_eq!(surfaces["value"]["metrics"], false);
+        assert_eq!(surfaces["value"]["a2a"], false);
+    }
+
+    #[test]
+    fn mutate_targets_template_for_agentfleet() {
+        let object = json!({
+            "kind": "AgentFleet",
+            "metadata": { "name": "f", "labels": { "team": "acme" } },
+            "spec": { "template": { "image": "ghcr.io/acme/a:v1" }, "scaling": { "mode": "claim" } }
+        });
+        let ops = build_default_patch("AgentFleet", &object);
+        // AgentSpec defaults land on /spec/template/*.
+        assert!(ops
+            .iter()
+            .any(|o| o["path"] == "/spec/template/mode" && o["value"] == "once"));
+        assert!(ops.iter().any(|o| o["path"] == "/spec/template/surfaces"));
+        // labels already present ⇒ per-key adds (escaped), never a whole-object add.
+        assert!(!ops.iter().any(|o| o["path"] == "/metadata/labels"));
+        assert!(ops
+            .iter()
+            .any(|o| o["path"] == "/metadata/labels/app.kubernetes.io~1managed-by"));
+        // app.kubernetes.io/name resolves to the fleet kind.
+        let name_op = ops
+            .iter()
+            .find(|o| o["path"] == "/metadata/labels/app.kubernetes.io~1name")
+            .expect("name label op");
+        assert_eq!(name_op["value"], "agentfleet");
+    }
+
+    #[test]
+    fn mutate_does_not_clobber_present_fields() {
+        let object = json!({
+            "kind": "Agent",
+            "metadata": { "name": "demo", "labels": { "app.kubernetes.io/managed-by": "me" } },
+            "spec": { "mode": "loop", "surfaces": { "management": true } }
+        });
+        let ops = build_default_patch("Agent", &object);
+        // mode + surfaces already set ⇒ no ops for them.
+        assert!(!ops.iter().any(|o| o["path"] == "/spec/mode"));
+        assert!(!ops.iter().any(|o| o["path"] == "/spec/surfaces"));
+        // managed-by already set ⇒ not re-added; part-of + name still added.
+        assert!(!ops
+            .iter()
+            .any(|o| o["path"] == "/metadata/labels/app.kubernetes.io~1managed-by"));
+        assert!(ops
+            .iter()
+            .any(|o| o["path"] == "/metadata/labels/app.kubernetes.io~1part-of"));
+    }
+
+    #[test]
+    fn mutate_never_defaults_substrate() {
+        let object = json!({
+            "kind": "Agent",
+            "metadata": { "name": "demo" },
+            "spec": { "image": "ghcr.io/acme/a:v1" }
+        });
+        let ops = build_default_patch("Agent", &object);
+        assert!(
+            !ops.iter()
+                .any(|o| o["path"].as_str().is_some_and(|p| p.contains("substrate"))),
+            "substrate must be left to the operator/renderer (RFC 0002 §5 / RFC 0007 B3)"
+        );
+    }
+
+    #[test]
+    fn mutate_skips_spec_defaults_when_spec_absent() {
+        // No spec ⇒ no /spec/* ops (an "add" into a missing parent would fail).
+        let object = json!({ "kind": "Agent", "metadata": { "name": "x" } });
+        let ops = build_default_patch("Agent", &object);
+        assert!(!ops
+            .iter()
+            .any(|o| o["path"].as_str().is_some_and(|p| p.starts_with("/spec"))));
+        // Labels are still defaulted (metadata always patchable).
+        assert!(ops.iter().any(|o| o["path"] == "/metadata/labels"));
+    }
+
+    #[test]
+    fn mutation_response_encodes_base64_jsonpatch() {
+        let ops = build_default_patch(
+            "Agent",
+            &json!({ "kind": "Agent", "metadata": {}, "spec": {} }),
+        );
+        let resp = mutation_response("uid-1", &ops);
+        assert_eq!(resp["response"]["uid"], "uid-1");
+        assert_eq!(resp["response"]["allowed"], true);
+        assert_eq!(resp["response"]["patchType"], "JSONPatch");
+        let encoded = resp["response"]["patch"].as_str().unwrap();
+        let decoded = BASE64.decode(encoded).unwrap();
+        let back: Value = serde_json::from_slice(&decoded).unwrap();
+        assert!(back
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["path"] == "/spec/mode"));
+    }
+
+    #[test]
+    fn mutation_response_empty_patch_omits_patch_fields() {
+        let resp = mutation_response("uid-2", &[]);
+        assert_eq!(resp["response"]["allowed"], true);
+        assert_eq!(resp["apiVersion"], "admission.k8s.io/v1");
+        assert!(resp["response"].get("patch").is_none());
+        assert!(resp["response"].get("patchType").is_none());
+    }
+
+    #[test]
+    fn escape_pointer_token_escapes_slash_and_tilde() {
+        assert_eq!(
+            escape_pointer_token("app.kubernetes.io/name"),
+            "app.kubernetes.io~1name"
+        );
+        assert_eq!(escape_pointer_token("a~b/c"), "a~0b~1c");
     }
 }

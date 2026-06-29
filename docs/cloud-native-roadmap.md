@@ -57,16 +57,22 @@ Status: ✅ done · 🔜 next · ⬜ planned.
 - 🔜 PodSecurity: split so only node-agent's namespace is `privileged`, the rest `restricted`.
 - 🔜 Postgres TLS (sslmode=require) + externalized creds.
 
-## ⬜ Wave 4 — API/CRD lifecycle (P0/P1)
+## ✅ Wave 4 — API/CRD lifecycle (done, verified on kind)
 
-- ⬜ **Admission covers AgentFleet + ModelPool** (P0): the trifecta/registry gate only
-  validates `Agent` today; extend the webhook rules + logic.
-- ⬜ **Defaulting/mutating webhook** (P0): absent defaults make `substrate` resolve to the
-  least-isolated stock-unix, contradicting the documented secure default.
-- ⬜ AgentFleet **scale subresource** (P1) so `kubectl scale` + HPA can target it.
-- ⬜ Spec-invariant enforcement (P1) via CEL/admission.
-- ⬜ Conversion webhook + multi-version evolution past v1alpha1 (P1, L).
-- ⬜ Krew plugin manifest; CRD categories; consistent app.kubernetes.io labels.
+- ✅ **Admission covers AgentFleet** (P0): the registry + lethal-trifecta gate now runs over
+  an `AgentFleet`'s `spec.template` (shared `evaluate()`), and the ValidatingWebhookConfiguration
+  rules include `agentfleets`. Verified: a fleet with an off-allow-list image OR a trifecta
+  template is **denied**. (ModelPool invariants stay enforced by CRD CEL — not duplicated.)
+- ✅ **Defaulting mutating webhook** (P0): a `/mutate` handler on the admission service applies
+  the standard `app.kubernetes.io/*` labels + `mode`/`surfaces` minimal-exposure defaults
+  (verified live). `substrate` is deliberately **not** hard-defaulted — the secure tier is
+  tenancy-derived and kata-hybrid needs a runtime absent on stock clusters, so it's left
+  auditable for the renderer to resolve (RFC 0002/0007).
+- ✅ AgentFleet **scale subresource** (P1): `kubectl scale agentfleet` + HPA can target
+  `.spec.replicas`. Verified `kubectl scale --replicas=3`.
+- 🔜 Spec-invariant enforcement gaps not covered by CEL; conversion webhook + multi-version
+  evolution past v1alpha1 (L); operator wiring of `status.replicas`/`selector` for HPA read-back.
+- 🔜 Krew plugin manifest; CRD categories.
 
 ## ⬜ Wave 5 — day-2 / docs
 

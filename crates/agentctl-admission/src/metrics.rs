@@ -21,6 +21,10 @@ pub struct Metrics {
     admit: AtomicU64,
     /// Reviews that were denied.
     deny: AtomicU64,
+    /// Mutating reviews handled by `/mutate`.
+    mutations: AtomicU64,
+    /// Mutating reviews that emitted a non-empty defaulting patch.
+    mutations_patched: AtomicU64,
 }
 
 impl Metrics {
@@ -31,6 +35,8 @@ impl Metrics {
             reviews: AtomicU64::new(0),
             admit: AtomicU64::new(0),
             deny: AtomicU64::new(0),
+            mutations: AtomicU64::new(0),
+            mutations_patched: AtomicU64::new(0),
         }
     }
 
@@ -39,6 +45,15 @@ impl Metrics {
         self.reviews.fetch_add(1, Ordering::Relaxed);
         let bucket = if allowed { &self.admit } else { &self.deny };
         bucket.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one mutating review (`patched` ⇒ a non-empty defaulting patch was
+    /// returned).
+    pub fn record_mutation(&self, patched: bool) {
+        self.mutations.fetch_add(1, Ordering::Relaxed);
+        if patched {
+            self.mutations_patched.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Render the Prometheus exposition body.
@@ -67,6 +82,18 @@ impl Metrics {
             "agentctl_admission_deny_total",
             "AdmissionReviews that were denied.",
             self.deny.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_admission_mutations_total",
+            "Mutating AdmissionReviews handled by /mutate.",
+            self.mutations.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_admission_mutations_patched_total",
+            "Mutating AdmissionReviews that returned a non-empty defaulting patch.",
+            self.mutations_patched.load(Ordering::Relaxed),
         );
         out
     }

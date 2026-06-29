@@ -149,10 +149,16 @@ spec:
   ports:
     - { port: 443, targetPort: 8443, name: https }
 ---
-# Registers the validating webhook for Agent CREATE/UPDATE. caBundle is injected
-# by cert-manager via the inject-ca-from annotation (the CA that signed the
-# webhook's serving cert). failurePolicy Fail: if the webhook is unreachable, the
-# apiserver rejects the request (the trifecta gate must not be bypassable).
+# Registers the validating webhook for Agent + AgentFleet CREATE/UPDATE. caBundle
+# is injected by cert-manager via the inject-ca-from annotation (the CA that signed
+# the webhook's serving cert). failurePolicy Fail: if the webhook is unreachable,
+# the apiserver rejects the request (the trifecta gate must not be bypassable).
+# AgentFleet is covered because spec.template is an AgentSpec carrying the same
+# image/exec/egress/secrets — without it, a fleet bypasses the registry + trifecta
+# gates entirely. ModelPool is NOT listed: its budget (maxTokens > 0) and
+# credentialSecretRef.name invariants are already enforced by CRD CEL
+# (x-kubernetes-validations), and provider/endpoint are structurally required — the
+# webhook would only duplicate CEL (RFC 0007 rung-A vs rung-B: no duplication).
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -181,6 +187,49 @@ webhooks:
       - apiGroups: ["agents.x-k8s.io"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["agents"]
+        resources: ["agents", "agentfleets"]
+        scope: Namespaced
+---
+# Registers the DEFAULTING mutating webhook for Agent + AgentFleet CREATE/UPDATE.
+# Kubernetes sequences mutating admission BEFORE validating admission, so these
+# secure defaults (labels + mode + minimal surfaces) are in place before the
+# validating webhook above runs. reinvocationPolicy Never: defaults are computed
+# once, idempotently (every op is conditional on the field being absent). It shares
+# the :8443 server, the agentctl-admission Service, and the agentctl-admission-tls
+# cert with the validating webhook. NOTE: it deliberately does NOT default
+# spec.substrate — the secure default is tenancy-derived (RFC 0002 §5) and the
+# most-isolated tier (kata-hybrid) needs a Kata RuntimeClass absent on most stock
+# clusters (RFC 0002 §9); leaving it absent lets the operator/renderer resolve it
+# from AgentClass/tenancy (RFC 0007 B3) rather than breaking stock clusters.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: agentctl-admission
+  labels:
+    app.kubernetes.io/name: agentctl-admission
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+  annotations:
+    cert-manager.io/inject-ca-from: "{{ $ns }}/agentctl-admission"
+webhooks:
+  - name: defaulting.agents.admission.agentctl.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    reinvocationPolicy: Never
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: agentctl-admission
+        namespace: {{ $ns }}
+        path: /mutate
+        port: 443
+    rules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["agents", "agentfleets"]
         scope: Namespaced
 {{- end }}

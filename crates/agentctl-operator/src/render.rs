@@ -463,6 +463,7 @@ mod tests {
                     ..Default::default()
                 },
                 work_source: Some("queue://jobs".into()),
+                replicas: None,
             },
         );
         f.metadata.namespace = Some("agents".into());

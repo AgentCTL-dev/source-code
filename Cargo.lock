@@ -28,6 +28,7 @@ dependencies = [
  "agent-api",
  "axum",
  "axum-server",
+ "base64",
  "k8s-openapi",
  "kube",
  "rustls",
