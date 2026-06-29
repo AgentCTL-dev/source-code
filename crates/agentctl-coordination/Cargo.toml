@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: BUSL-1.1
+[package]
+name = "agentctl-coordination"
+version = "0.1.0"
+description = "agentctl reference coordination MCP server (RFC 0011 §3.2): the claim-mode correctness backbone — the single serializing point that makes exactly-one-owner hold across replicas. Serves the frozen work.* tools (claim/renew/ack/release) + the P9 backlog count (work.stats / work://pending) over MCP JSON-RPC. Hand-rolled in Rust (axum). agentctl is Rust-only."
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
+repository.workspace = true
+
+[[bin]]
+name = "agentctl-coordination"
+path = "src/main.rs"
+
+[dependencies]
+# axum HTTP surface — same version the gateway/node-agent serve on.
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+serde_json.workspace = true
+tracing = "0.1"
+# Shared tracing init: fmt-only by default, OTLP export when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set (matches every other control-plane binary).
+agentctl-telemetry = { path = "../agentctl-telemetry" }

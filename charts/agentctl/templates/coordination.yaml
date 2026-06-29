@@ -1,0 +1,108 @@
+{{- $ns := include "agentctl.namespace" . }}
+{{- if .Values.coordination.enabled }}
+# ServiceAccount for the claim-mode coordination server. No RBAC: it holds the
+# claim queue in memory and never reads cluster state.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-coordination
+  namespace: {{ $ns }}
+  {{- with .Values.coordination.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: agentctl-coordination
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+---
+# The claim-mode coordination server: a single-replica HTTP/MCP service that
+# hands out work claims to AgentFleet replicas (pull/claim work source). v1 keeps
+# the claim queue + stats in memory and serializes claims, so it runs as a single
+# replica (HA / durable backing is future work).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-coordination
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-coordination
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.coordination.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-coordination
+  template:
+    metadata:
+      {{- $podAnnotations := merge (deepCopy (.Values.coordination.podAnnotations | default dict)) (.Values.commonAnnotations | default dict) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: agentctl-coordination
+        {{- $podLabels := merge (deepCopy (.Values.coordination.podLabels | default dict)) (.Values.commonLabels | default dict) }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: agentctl-coordination
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "coordination")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coordination
+          image: {{ include "agentctl.image" (dict "root" $ "component" "coordination") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8080, name: http }
+          env:
+            {{- include "agentctl.podEnv" (dict "root" $ "comp" "coordination") | nindent 12 }}
+          {{- with (index .Values "coordination").envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.coordination.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-coordination
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-coordination
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-coordination
+  ports:
+    - { port: 80, targetPort: 8080, name: http }
+{{- end }}

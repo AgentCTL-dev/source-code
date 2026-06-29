@@ -23,6 +23,7 @@ members = [
     "crates/agentctl-modelgateway",
     "crates/agentctl-admission",
     "crates/agentctl-telemetry",
+    "crates/agentctl-coordination",
 ]
 
 [workspace.package]

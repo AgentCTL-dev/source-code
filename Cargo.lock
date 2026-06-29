@@ -71,6 +71,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentctl-coordination"
+version = "0.1.0"
+dependencies = [
+ "agentctl-telemetry",
+ "axum",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "agentctl-crdgen"
 version = "0.1.0"
 dependencies = [

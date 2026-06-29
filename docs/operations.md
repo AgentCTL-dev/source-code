@@ -209,6 +209,35 @@ fighting it. In claim mode with `minReplicas` unset, the fleet may scale to 0 / 
 KEDA. (Caveat: the operator does not yet write back `status.replicas`/`status.selector`,
 so HPA read-back from the fleet status is a deferred item — see §6.)
 
+### Coordination server (claim mode)
+
+The **coordination server** is the claim-mode work broker: a single in-cluster
+HTTP/MCP service that hands out work claims to `AgentFleet` replicas and tracks
+per-source `work.stats`. It is **disabled by default**; enable it with:
+
+```sh
+helm upgrade --install agentctl charts/agentctl --set coordination.enabled=true
+```
+
+This renders a `agentctl-coordination` ServiceAccount, Deployment, and Service
+(`:80` → container `:8080`, `/healthz` liveness + `/readyz` readiness, `/metrics`).
+A claim-mode `AgentFleet` points its work source at the in-cluster endpoint —
+set its `work.claim.server` (the pull/claim `workSource`) to the cluster DNS name:
+
+```
+http://agentctl-coordination.<release-namespace>.svc/
+```
+
+(the MCP/HTTP coordination endpoint; substitute your release namespace, e.g.
+`agentctl-system`).
+
+**v1 caveats.** The server is **single-replica and in-memory** — the claim queue
+and `work.stats` live in process and claims are serialized, so `coordination.replicas`
+is pinned to `1` and autoscaling is unsupported (HA / durable backing is future
+work). The **remaining piece** is the KEDA external scaler that reads `work.stats`
+off the coordination server to drive `AgentFleet` replica counts (claim-depth-based
+autoscaling); until it lands, scale claim-mode fleets manually (see above).
+
 ### Control-plane components
 
 - **operator** — leader-elected singleton. Raise `operator.replicas` for HA (1 active +
@@ -226,7 +255,7 @@ so HPA read-back from the fleet status is a deferred item — see §6.)
 
 Enable PodDisruptionBudgets per component to keep replicas up across voluntary disruptions
 (node drains/upgrades): `--set gateway.pdb.enabled=true --set gateway.pdb.minAvailable=1`
-(available for operator, apiserver, gateway, modelgateway, admission). PDBs and HPAs are
+(available for operator, apiserver, gateway, modelgateway, admission, coordination). PDBs and HPAs are
 off by default so a stock install renders unchanged.
 
 ---

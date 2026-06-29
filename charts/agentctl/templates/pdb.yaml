@@ -10,6 +10,7 @@ keeps minAvailable replicas up during VOLUNTARY disruptions (node drains/upgrade
   (dict "comp" "gateway"      "enabled" .Values.gateway.enabled)
   (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled)
   (dict "comp" "admission"    "enabled" .Values.admission.enabled)
+  (dict "comp" "coordination" "enabled" .Values.coordination.enabled)
 }}
 {{- range $c := $comps }}
 {{- $cfg := index $.Values $c.comp }}

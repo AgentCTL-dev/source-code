@@ -288,6 +288,41 @@ admission:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 80
 
+# Claim-mode coordination server (RFC: pull/claim work source). Hands out work
+# claims to AgentFleet replicas over an in-cluster HTTP/MCP endpoint. v1 is
+# SINGLE-REPLICA and IN-MEMORY: the claim queue + work.stats are held in process
+# and claims are serialized, so it does not scale horizontally (autoscaling stays
+# off, replicas pinned to 1). HA / durable backing is future work. Disabled by
+# default — enable with coordination.enabled=true.
+coordination:
+  enabled: false
+  replicas: 1                  # single serializing replica in v1 (do not raise)
+  logLevel: info               # -> RUST_LOG
+  # In-memory coordination server: small footprint.
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  envFrom: []
+  serviceAccount:
+    annotations: {}
+  pdb:
+    enabled: false
+    minAvailable: 1
+  # Stateful / single-serializing in v1 — horizontal autoscaling is unsupported.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 1
+    targetCPUUtilizationPercentage: 80
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the

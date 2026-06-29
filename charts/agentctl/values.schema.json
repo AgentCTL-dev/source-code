@@ -161,6 +161,7 @@
     "gateway": { "$ref": "#/definitions/component" },
     "modelgateway": { "$ref": "#/definitions/component" },
     "admission": { "$ref": "#/definitions/component" },
+    "coordination": { "$ref": "#/definitions/component" },
     "networkPolicies": {
       "type": "object",
       "additionalProperties": true,

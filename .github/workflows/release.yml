@@ -2,7 +2,7 @@
 #
 # Triggered by pushing a vX.Y.Z tag. Strips the leading "v" to derive the
 # version, then:
-#   images — build + push the 6 component images (multi-arch, with provenance
+#   images — build + push the 7 component images (multi-arch, with provenance
 #            and SBOM) to ghcr.io/agentctl-dev/<comp>, tagged {{version}} + latest.
 #   chart  — package the Helm chart and push it to
 #            oci://ghcr.io/agentctl-dev/charts (chart name "agentctl").
@@ -45,6 +45,9 @@ jobs:
           - component: admission
             crate: agentctl-admission
             bin: agentctl-admission
+          - component: coordination
+            crate: agentctl-coordination
+            bin: agentctl-coordination
     steps:
       - uses: actions/checkout@v4
 

@@ -104,6 +104,24 @@ Status: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **Operations runbook** (`docs/operations.md`): backup/restore, upgrade/rollback (incl. the
   CRD-not-upgraded-by-helm caveat), scaling, observability + SLOs, disaster scenarios.
 
+## ✅ Scaling track — reference coordination server (done, verified on kind)
+
+- ✅ **Reference coordination MCP server** (`crates/agentctl-coordination`, RFC 0011 §3.2): the
+  claim-mode correctness backbone. Serves the frozen `work.*` surface over MCP JSON-RPC/HTTP —
+  **atomic `work.claim`** (single-Mutex serializing point; exactly one of N racers wins),
+  lease TTL + background expiry sweep, `work.renew`/`ack`/`release`, **transactional dedupe on
+  `agent/claim_key`**, `work.submit` (producer enqueue), and `work.stats` + `work://pending`
+  (the scale-from-zero backlog, P9). In-memory single-Mutex store behind a `ClaimStore` trait
+  (Redis/Postgres backend slots in later); deterministic lease ids (no RNG/wall-clock).
+  Chart Deployment+Service (opt-in `coordination.enabled`), Dockerfile, CI matrix, `/metrics`.
+  Verified live on kind: grant-once + `held_by` contention + ack-dedupe + stats + counters;
+  19 unit tests incl. a 2-thread/200-iteration concurrent-claim race.
+- 🔜 **KEDA external scaler** (`crates/scaler`): reads the coordination server's `work.stats`
+  backlog → `IsActive`/`GetMetrics` for KEDA scale-from-zero. The last piece to make claim
+  fleets fully elastic-from-zero (the server already exposes the signal).
+- 🔜 Coordination server HA/durability (the documented single-serializing-point risk) — the
+  `ClaimStore` trait is the seam; v1 is single-replica/in-memory.
+
 ## 🔜 Explicitly deferred (documented in docs/operations.md)
 
 - ⬜ **PodSecurity namespace split** — the `agentctl-system` ns is labeled `privileged` for the
