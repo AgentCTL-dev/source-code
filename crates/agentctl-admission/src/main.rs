@@ -16,8 +16,10 @@ use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
+use axum::http::header;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kube::{Api, Client};
@@ -27,6 +29,8 @@ use serde_json::{json, Map, Value};
 use tracing_subscriber::EnvFilter;
 
 use agent_api::ModelPool;
+
+mod metrics;
 
 /// Where the serving cert + key are mounted (a TLS `Secret` volume).
 const TLS_DIR: &str = "/etc/agentctl-admission/tls";
@@ -43,6 +47,8 @@ struct AppState {
     client: Client,
     /// Allowed image-registry prefixes (empty ⇒ allow all).
     allowed_registries: Vec<String>,
+    /// Prometheus counters surfaced at `/metrics`.
+    metrics: Arc<metrics::Metrics>,
 }
 
 #[tokio::main]
@@ -63,23 +69,65 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(healthz))
+        // `/metrics` rides the EXISTING :8443 HTTPS server. Admission's TLS uses
+        // `with_no_client_auth`, so Prometheus can scrape it (scheme https,
+        // insecureSkipVerify) without a client cert — no new plaintext port.
+        .route("/metrics", get(serve_metrics))
         .route("/validate", post(validate))
         .with_state(AppState {
             client,
             allowed_registries: allowed_registries.clone(),
+            metrics: Arc::new(metrics::Metrics::new()),
         });
 
     let addr: SocketAddr = "0.0.0.0:8443".parse().unwrap();
     let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
+    // Graceful shutdown: on SIGTERM/SIGINT, stop accepting and drain in-flight
+    // requests (axum-server's `Handle::graceful_shutdown`).
+    let handle = axum_server::Handle::new();
+    tokio::spawn(shutdown_signal(handle.clone()));
     tracing::info!(
         %addr,
         registries = ?allowed_registries,
         "agentctl admission webhook serving (validating: registry + trifecta + modelPool)"
     );
     axum_server::bind_rustls(addr, config)
+        .handle(handle)
         .serve(app.into_make_service())
         .await
         .expect("serve");
+}
+
+// --- graceful shutdown -----------------------------------------------------
+
+/// Wait for SIGTERM/SIGINT, then trigger axum-server's graceful drain (a bounded
+/// grace period for in-flight requests to finish).
+async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
+    wait_for_signal().await;
+    tracing::info!("shutting down: draining in-flight requests");
+    handle.graceful_shutdown(Some(Duration::from_secs(15)));
+}
+
+/// Resolve once either SIGINT (Ctrl-C) or SIGTERM arrives.
+async fn wait_for_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 // --- TLS -------------------------------------------------------------------
@@ -115,6 +163,16 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// `GET /metrics` — the Prometheus exposition (node-agent text format).
+async fn serve_metrics(
+    State(state): State<AppState>,
+) -> ([(header::HeaderName, &'static str); 1], String) {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics.render(),
+    )
 }
 
 /// The admission endpoint. Parses an `admission.k8s.io/v1` `AdmissionReview`
@@ -157,6 +215,7 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
         Ok(()) => tracing::info!(%uid, %namespace, "admit"),
         Err(msg) => tracing::warn!(%uid, %namespace, deny = %msg, "deny"),
     }
+    state.metrics.record(verdict.is_ok());
 
     Json(admission_response(&uid, verdict))
 }

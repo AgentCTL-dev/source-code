@@ -17,19 +17,24 @@ Status: ✅ done · 🔜 next · ⬜ planned.
 - ✅ Multi-arch images via **cross-compilation** (cargo-zigbuild, no QEMU) + GHA layer cache.
 - ✅ **cosign** keyless signing of images + chart by digest; **cargo-deny** CI job + `deny.toml`.
 
-## 🔜 Wave 2 — observability + reliability code (the remaining P0s)
+## ✅ Wave 2 — observability + reliability code (done, verified on kind)
 
-- 🔜 **Prometheus `/metrics` on every component** (P0): only node-agent exposes metrics
-  today; add a metrics endpoint to apiserver/gateway/modelgateway/admission/operator,
-  then flip on the ServiceMonitors. Ship a Grafana dashboard + alert rules.
-- 🔜 **Operator leader election** (P0): a coordination.k8s.io Lease so the operator
-  can run >1 replica (HA) instead of being a reconcile SPOF; add a `/healthz` +
-  liveness/readiness probes (deferred from Wave 1 — needs the health server).
-- 🔜 **Graceful shutdown** (P0): SIGTERM → drain in the axum services so rollouts don't
-  hard-drop in-flight requests / SSE streams (terminationGracePeriod + connection drain).
+- ✅ **Prometheus `/metrics` on every component** (P0): operator + all 4 HTTP services
+  now expose `/metrics` (the node-agent already did), hand-rolled Prometheus text in the
+  node-agent style (`agentctl_operator_*` / `_gateway_*` / `_modelgateway_*` / `_apiserver_*`
+  / `_admission_*`). apiserver `/metrics` stays behind its mTLS gate; admission via its
+  HTTPS server. ServiceMonitors (Wave 1) now have real targets.
+- ✅ **Operator leader election** (P0): a `coordination.k8s.io` Lease (`agentctl-operator`,
+  15s/10s acquire-renew, holder = POD_NAME) — only the leader reconciles, standbys serve
+  `/healthz` and `/readyz=503`; safe at >1 replica. Added a health/metrics server +
+  liveness `/healthz` + readiness `/readyz` probes + an operator Service + leader RBAC.
+  Verified: the Lease is held + renewing, `/readyz=200`, `agentctl_operator_leader 1`.
+- ✅ **Graceful shutdown** (P0): all 4 HTTP services drain in-flight requests on SIGTERM/SIGINT
+  (`with_graceful_shutdown` / `axum_server` handle), SSE streams close cleanly.
 - 🔜 **OpenTelemetry/OTLP tracing** (P1) across apiserver → node-agent → agent and the gateway.
 - 🔜 **Operator Kubernetes Events** (P1) for reconcile outcomes (RBAC already held).
 - 🔜 Dependency-aware readiness (P1): probes reflect real backing-store/dependency health.
+- 🔜 Grafana dashboard + Prometheus alert rules; release the Lease on SIGTERM for instant failover.
 
 ## 🔜 Wave 3 — security hardening (P0/P1)
 

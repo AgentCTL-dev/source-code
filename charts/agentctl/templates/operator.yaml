@@ -44,6 +44,11 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Leader election (operator HA): contend for the coordination.k8s.io Lease
+  # named "agentctl-operator" so only one replica runs the reconcile loop.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch", "watch", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -107,8 +112,20 @@ spec:
         - name: operator
           image: {{ include "agentctl.image" (dict "root" $ "component" "operator") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8080, name: http }       # /healthz, /readyz, /metrics
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "operator") | nindent 12 }}
+            # Downward API: pod name is the leader-election holderIdentity; the
+            # namespace scopes the coordination.k8s.io Lease (operator HA).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           {{- with .Values.operator.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
@@ -118,9 +135,40 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          # NOTE: no liveness/readiness probes — the operator has no health
-          # endpoint yet (a later code wave). Adding probes now would crash-loop it.
+          # Liveness: the process is up (served by every replica, leader or
+          # standby). Readiness: 200 only once this replica holds leadership AND
+          # the manager is running — so the Service routes to the active leader.
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: {{ .Values.operator.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.operator.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: {{ .Values.operator.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.operator.probes.readiness.periodSeconds }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
+---
+# Metrics Service for the operator (RFC 0010). Selects every operator replica and
+# exposes the http port so the operator ServiceMonitor can scrape /metrics.
+# publishNotReadyAddresses: scrape standbys too (which report /readyz 503) so the
+# leader gauge is observable across all replicas — exactly one should read 1.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-operator
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-operator
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: agentctl-operator
+  ports:
+    - { port: 8080, targetPort: http, name: http }
 # NOTE: the operator's PodDisruptionBudget now lives in templates/pdb.yaml
 # alongside the other components' PDBs (rendered when operator.pdb.enabled).

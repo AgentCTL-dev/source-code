@@ -1,19 +1,31 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The `agentctl-operator` binary: run the reconcile [`Controller`] (RFC 0006).
+//! The `agentctl-operator` binary: run the reconcile [`Controller`] (RFC 0006)
+//! as a leader-elected, observable singleton.
 //!
-//! Watches `Agent` objects and the `Job`/`Deployment` workloads they own, and
-//! reconciles each via [`agentctl_operator::controller`]. Requires a cluster to
-//! run; it is compile-checked here without one.
+//! Watches `Agent`/`AgentFleet` objects and the workloads they own, reconciling
+//! each via [`agentctl_operator::controller`]. On top of that this binary adds
+//! operator HA + observability:
+//!
+//! * a **health/metrics** HTTP server ([`serve`]) on `HEALTH_PORT`/`METRICS_PORT`
+//!   (default 8080): `/healthz`, `/readyz`, `/metrics` — served by every replica;
+//! * **leader election** ([`lease`]) over a `coordination.k8s.io/v1` Lease named
+//!   `agentctl-operator`: only the holder runs the controllers; standbys serve
+//!   `/healthz` and report `/readyz` 503. Default `replicas: 1`, but safe at >1.
+//!
+//! Requires a cluster to run; it is compile-checked here without one.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use agent_api::{Agent, AgentFleet};
 use agentctl_operator::controller::{
     error_policy, error_policy_fleet, reconcile, reconcile_fleet, Ctx,
 };
+use agentctl_operator::{lease, serve, Metrics};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::coordination::v1::Lease;
 use kube::runtime::controller::Error as ControllerError;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Client};
@@ -30,8 +42,42 @@ async fn main() -> Result<(), kube::Error> {
         .init();
 
     let client = Client::try_default().await?;
+    let metrics = Arc::new(Metrics::new());
+
+    // Health/metrics server: bind first and on EVERY replica (leader or standby)
+    // so the kubelet liveness probe is answered before — and regardless of —
+    // leadership. /readyz stays 503 until this replica is the leader.
+    let port = serve::port_from_env();
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+    tokio::spawn(serve::serve(addr, metrics.clone()));
+    info!(%addr, "serving /healthz, /readyz, /metrics");
+
+    // Leader election (RFC 0006 — operator HA). Identity is the pod name (downward
+    // API); the lease lives in the operator's own namespace.
+    let identity = std::env::var("POD_NAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "agentctl-operator".to_string());
+    let namespace =
+        std::env::var("POD_NAMESPACE").unwrap_or_else(|_| client.default_namespace().to_string());
+    let leases: Api<Lease> = Api::namespaced(client.clone(), &namespace);
+
+    info!(identity, namespace, "starting leader election");
+    // Blocks until this replica wins the lease; spawns the renewer (which exits
+    // the process if leadership is later lost, so two replicas never both lead).
+    lease::run(
+        leases,
+        &identity,
+        lease::LeaseConfig::default(),
+        metrics.clone(),
+    )
+    .await;
+
+    // Leader: the manager is now coming up → /readyz can flip to 200.
+    metrics.set_manager_up(true);
     let ctx = Arc::new(Ctx {
         client: client.clone(),
+        metrics: metrics.clone(),
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");

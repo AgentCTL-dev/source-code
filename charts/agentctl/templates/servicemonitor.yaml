@@ -14,6 +14,7 @@ exposing the http port is added — see the chart notes.
 {{- if .Values.metrics.serviceMonitor.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
 {{- $targets := list
+  (dict "comp" "operator"     "enabled" true                         "port" "http"  "scheme" "http")
   (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled    "port" "https" "scheme" "https")
   (dict "comp" "gateway"      "enabled" .Values.gateway.enabled      "port" "http"  "scheme" "http")
   (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled "port" "http"  "scheme" "http")

@@ -19,7 +19,7 @@
 //! [`rendered_kind`], [`requeue_after`], [`error_backoff`]).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_api::{Agent, AgentFleet, Condition, ContractStatus, Mode};
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
@@ -30,6 +30,7 @@ use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
+use crate::metrics::Metrics;
 use crate::{render_agent, render_fleet, RenderError, Rendered};
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
@@ -42,10 +43,12 @@ const RESYNC: Duration = Duration::from_secs(300);
 /// Backoff before retrying a failed reconcile (transient apiserver errors).
 const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 
-/// Shared reconcile context: the cluster client every handler patches through.
+/// Shared reconcile context: the cluster client every handler patches through,
+/// plus the metrics registry the reconcile path records into.
 #[derive(Clone)]
 pub struct Ctx {
     pub client: Client,
+    pub metrics: Arc<Metrics>,
 }
 
 /// Everything that can go wrong driving one reconcile. A [`RenderError`] is
@@ -73,9 +76,19 @@ pub enum Error {
     Finalizer(#[source] Box<kube::runtime::finalizer::Error<Error>>),
 }
 
+/// Reconcile one `Agent`, recording the reconcile-total/-errors counters and the
+/// duration histogram around the actual work in [`reconcile_inner`].
+pub async fn reconcile(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+    let start = Instant::now();
+    let result = reconcile_inner(agent, ctx.clone()).await;
+    ctx.metrics
+        .record_reconcile(start.elapsed(), result.is_err());
+    result
+}
+
 /// Reconcile one `Agent`: wrap apply/cleanup in the deletion finalizer so the
 /// owned workload is reclaimed in order before the object disappears.
-pub async fn reconcile(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+async fn reconcile_inner(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let ns = agent.namespace().ok_or(Error::MissingNamespace)?;
     let agents: Api<Agent> = Api::namespaced(ctx.client.clone(), &ns);
 
@@ -252,10 +265,20 @@ pub fn error_policy(_agent: Arc<Agent>, err: &Error, _ctx: Arc<Ctx>) -> Action {
 // AgentFleet reconcile (scaling plane, RFC 0011)
 // ---------------------------------------------------------------------------
 
+/// Reconcile one `AgentFleet`, recording reconcile metrics around the work in
+/// [`reconcile_fleet_inner`] (shared counters/histogram with the `Agent` loop).
+pub async fn reconcile_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+    let start = Instant::now();
+    let result = reconcile_fleet_inner(fleet, ctx.clone()).await;
+    ctx.metrics
+        .record_reconcile(start.elapsed(), result.is_err());
+    result
+}
+
 /// Reconcile one `AgentFleet`: render it to a Deployment (claim) or StatefulSet
 /// (shard) and apply it, wrapped in the deletion finalizer (the workload is
 /// owner-referenced, so GC reclaims it).
-pub async fn reconcile_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+async fn reconcile_fleet_inner(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let ns = fleet.namespace().ok_or(Error::MissingNamespace)?;
     let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), &ns);
 

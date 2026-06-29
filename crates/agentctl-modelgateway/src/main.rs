@@ -18,10 +18,11 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use agent_api::{ModelPool, ModelPoolSpec};
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -32,6 +33,7 @@ use kube::{Api, Client};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
 
+mod metrics;
 mod store;
 
 /// Identity header: the requesting agent's namespace (required).
@@ -45,6 +47,8 @@ const H_POOL: &str = "X-Model-Pool";
 struct AppState {
     client: Client,
     pool: Pool,
+    /// Prometheus counters surfaced at `/metrics`.
+    metrics: Arc<metrics::Metrics>,
 }
 
 #[tokio::main]
@@ -72,16 +76,63 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        // `/metrics` rides the EXISTING plaintext :8080 (the chart's `http` port),
+        // alongside /healthz — no new port; scraped scheme=http.
+        .route("/metrics", get(serve_metrics))
         .route("/v1/infer", post(infer))
         .route("/v1/usage", get(usage))
-        .with_state(AppState { client, pool });
+        .with_state(AppState {
+            client,
+            pool,
+            metrics: Arc::new(metrics::Metrics::new()),
+        });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     tracing::info!(%addr, "agentctl modelgateway serving the intelligence plane");
-    axum::serve(listener, app).await.expect("serve");
+    // Graceful shutdown: on SIGTERM/SIGINT, stop accepting and drain in-flight
+    // requests (hyper's `with_graceful_shutdown`).
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("serve");
+}
+
+// --- graceful shutdown -----------------------------------------------------
+
+/// Wait for SIGTERM/SIGINT, then resolve so hyper drains in-flight requests.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutting down: draining in-flight requests");
+}
+
+/// `GET /metrics` — the Prometheus exposition (node-agent text format).
+async fn serve_metrics(
+    State(state): State<AppState>,
+) -> ([(header::HeaderName, &'static str); 1], String) {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics.render(),
+    )
 }
 
 // --- handlers --------------------------------------------------------------
@@ -96,6 +147,7 @@ async fn infer(
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response {
+    state.metrics.inc_request();
     // a. identity headers.
     let ns = match header_str(&headers, H_NAMESPACE) {
         Some(ns) => ns,
@@ -117,6 +169,7 @@ async fn infer(
     if budget.is_some() {
         match store::pool_tokens(&state.pool, &ns, &pool_name).await {
             Ok(used) if over_budget(used, budget) => {
+                state.metrics.inc_budget_rejection();
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     Json(json!({
@@ -159,9 +212,13 @@ async fn infer(
         .await
     {
         Ok(r) => r,
-        Err(e) => return bad_gateway(&format!("provider POST {url}: {e}")),
+        Err(e) => {
+            state.metrics.inc_error();
+            return bad_gateway(&format!("provider POST {url}: {e}"));
+        }
     };
     if !resp.status().is_success() {
+        state.metrics.inc_error();
         let code = resp.status().as_u16();
         let detail = resp.text().await.unwrap_or_default();
         return (
@@ -172,7 +229,10 @@ async fn infer(
     }
     let mut provider_body = match resp.json::<Value>().await {
         Ok(b) => b,
-        Err(e) => return bad_gateway(&format!("decode provider response: {e}")),
+        Err(e) => {
+            state.metrics.inc_error();
+            return bad_gateway(&format!("decode provider response: {e}"));
+        }
     };
 
     // f. meter the tokens, then return the provider body tagged with the pool.
@@ -180,6 +240,7 @@ async fn infer(
         .pointer("/usage/total_tokens")
         .and_then(Value::as_i64)
         .unwrap_or(0);
+    state.metrics.add_tokens(total);
     if let Err(e) = store::record_usage(&state.pool, &ns, &pool_name, &agent, total).await {
         tracing::warn!(%ns, pool = %pool_name, error = %e, "record usage failed");
     }

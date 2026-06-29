@@ -81,12 +81,22 @@ postgres:
 # ---------------------------------------------------------------------------
 
 operator:
-  replicas: 1
+  replicas: 1                  # leader-elected: safe to raise for HA (1 active + standbys)
   logLevel: info               # -> RUST_LOG
   # Leader-elected singleton: default to the small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits: { cpu: 500m, memory: 256Mi }
+  # Health-probe timings (httpGet against the http port). Liveness hits /healthz
+  # (always 200 while the process lives); readiness hits /readyz (200 only on the
+  # leader, so the Service routes to the active replica). Tune for your cluster.
+  probes:
+    liveness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readiness:
+      initialDelaySeconds: 2
+      periodSeconds: 5
   nodeSelector: {}
   affinity: {}
   tolerations: []

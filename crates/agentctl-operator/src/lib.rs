@@ -8,6 +8,10 @@
 //! workload and patches `Agent.status`.
 
 pub mod controller;
+pub mod lease;
+pub mod metrics;
 pub mod render;
+pub mod serve;
 
+pub use metrics::Metrics;
 pub use render::{render_agent, render_fleet, RenderError, Rendered};

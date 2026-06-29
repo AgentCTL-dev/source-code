@@ -37,6 +37,7 @@ use kube::{Api, Client};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
 
+mod metrics;
 mod na_client;
 mod signing;
 mod store;
@@ -51,6 +52,8 @@ struct AppState {
     signer: Arc<signing::Signer>,
     /// mTLS client for the node-agent control hop (RFC 0015). Built once.
     na: reqwest::Client,
+    /// Prometheus counters surfaced at `/metrics`.
+    metrics: Arc<metrics::Metrics>,
 }
 
 #[tokio::main]
@@ -88,6 +91,9 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        // `/metrics` rides the EXISTING plaintext :8080 (the chart's `http` port),
+        // alongside /healthz — no new port; scraped scheme=http.
+        .route("/metrics", get(serve_metrics))
         .route("/.well-known/jwks.json", get(jwks))
         .route("/agents", get(list_agents))
         .route(
@@ -104,6 +110,7 @@ async fn main() {
             pool,
             signer,
             na: na_client::node_agent_client(),
+            metrics: Arc::new(metrics::Metrics::new()),
         });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
@@ -111,7 +118,51 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     tracing::info!(%addr, "agentctl gateway serving the A2A HTTP surface");
-    axum::serve(listener, app).await.expect("serve");
+    // Graceful shutdown: on SIGTERM/SIGINT, stop accepting and drain in-flight
+    // requests (hyper's `with_graceful_shutdown`). In-flight SSE streams
+    // (`message/stream`) are short-lived — our agents complete synchronously, so
+    // the node-agent emits its terminal frame and the passthrough body ends,
+    // letting the connection close cleanly within the drain.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("serve");
+}
+
+// --- graceful shutdown -----------------------------------------------------
+
+/// Wait for SIGTERM/SIGINT, then resolve so hyper drains in-flight requests
+/// (including any in-flight SSE passthroughs).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutting down: draining in-flight requests and SSE streams");
+}
+
+/// `GET /metrics` — the Prometheus exposition (node-agent text format).
+async fn serve_metrics(
+    State(state): State<AppState>,
+) -> ([(header::HeaderName, &'static str); 1], String) {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics.render(),
+    )
 }
 
 // --- handlers --------------------------------------------------------------
@@ -159,10 +210,12 @@ async fn agent_card(
     Path((ns, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
+    state.metrics.inc_card();
     let base_url = base_url(&headers);
     match build_signed_card(&state, &ns, &name, &base_url, None).await {
         Ok(card) => (StatusCode::OK, Json(card)),
         Err(e) => {
+            state.metrics.inc_upstream_error();
             tracing::warn!(%ns, agent = %name, error = %e, "card build failed");
             (StatusCode::BAD_GATEWAY, Json(json!({ "error": e })))
         }
@@ -176,10 +229,12 @@ async fn fleet_card(
     Path((ns, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
+    state.metrics.inc_card();
     let base_url = base_url(&headers);
     match build_signed_card(&state, &ns, &name, &base_url, Some("AgentFleet")).await {
         Ok(card) => (StatusCode::OK, Json(card)),
         Err(e) => {
+            state.metrics.inc_upstream_error();
             tracing::warn!(%ns, fleet = %name, error = %e, "fleet card build failed");
             (StatusCode::BAD_GATEWAY, Json(json!({ "error": e })))
         }
@@ -197,6 +252,7 @@ async fn a2a_rpc(
     Path((ns, name)): Path<(String, String)>,
     Json(mut req): Json<Value>,
 ) -> Response {
+    state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let spec = req
         .get("method")
@@ -284,6 +340,7 @@ async fn a2a_rpc(
     let (uid, na_ip) = match resolve(&state.client, &ns, &name).await {
         Ok(loc) => loc,
         Err(e) => {
+            state.metrics.inc_upstream_error();
             tracing::warn!(%ns, agent = %name, error = %e, "rpc resolve failed");
             return Json(rpc_error(id, -32603, &e)).into_response();
         }
@@ -293,6 +350,7 @@ async fn a2a_rpc(
         // Streaming path: forward to the node-agent's SSE endpoint and pipe the
         // raw `text/event-stream` body straight through — do NOT parse the SSE
         // frames (transparent byte pipe; the node-agent already framed them).
+        state.metrics.inc_stream();
         let url = format!("https://{na_ip}:8443/v1/agents/{uid}/a2a/stream");
         return match state.na.post(&url).json(&req).send().await {
             Ok(resp) => (
@@ -300,12 +358,15 @@ async fn a2a_rpc(
                 Body::from_stream(resp.bytes_stream()),
             )
                 .into_response(),
-            Err(e) => Json(rpc_error(
-                id,
-                -32603,
-                &format!("node-agent POST {url}: {e}"),
-            ))
-            .into_response(),
+            Err(e) => {
+                state.metrics.inc_upstream_error();
+                Json(rpc_error(
+                    id,
+                    -32603,
+                    &format!("node-agent POST {url}: {e}"),
+                ))
+                .into_response()
+            }
         };
     }
 
@@ -314,17 +375,19 @@ async fn a2a_rpc(
         Ok(resp) => match resp.json::<Value>().await {
             Ok(b) => b,
             Err(e) => {
+                state.metrics.inc_upstream_error();
                 return Json(rpc_error(id, -32603, &format!("decode node-agent: {e}")))
-                    .into_response()
+                    .into_response();
             }
         },
         Err(e) => {
+            state.metrics.inc_upstream_error();
             return Json(rpc_error(
                 id,
                 -32603,
                 &format!("node-agent POST {url}: {e}"),
             ))
-            .into_response()
+            .into_response();
         }
     };
 
@@ -343,6 +406,8 @@ async fn a2a_rpc(
             if let Err(e) = store::upsert(&state.pool, &ns, &name, tid, st, &input, artifact).await
             {
                 tracing::warn!(error = %e, "store upsert failed");
+            } else {
+                state.metrics.inc_task();
             }
             // Deliver a push notification if a webhook is registered (RFC 0013).
             if let Ok(Some((url, token))) = store::push_get(&state.pool, &ns, &name, tid).await {

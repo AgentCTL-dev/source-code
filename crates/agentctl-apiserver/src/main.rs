@@ -19,9 +19,10 @@ use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use k8s_openapi::api::authorization::v1::{
@@ -36,6 +37,7 @@ use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
 use tracing_subscriber::EnvFilter;
 
+mod metrics;
 mod na_client;
 
 const GROUP: &str = "management.agents.x-k8s.io";
@@ -47,6 +49,8 @@ struct AppState {
     client: Client,
     /// mTLS client for the node-agent control hop (RFC 0015). Built once.
     na: reqwest::Client,
+    /// Prometheus counters surfaced at `/metrics`.
+    metrics: Arc<metrics::Metrics>,
 }
 
 #[tokio::main]
@@ -75,6 +79,11 @@ async fn main() {
         .route("/healthz", get(ok))
         .route("/readyz", get(ok))
         .route("/livez", get(ok))
+        // `/metrics` rides the EXISTING :6443 HTTPS surface — it does NOT open a
+        // separate plaintext port, so it stays behind the front-proxy mTLS gate
+        // (only a CA-signed client cert can scrape; never bypasses the apiserver's
+        // TLS). The chart's ServiceMonitor scrapes it scheme=https.
+        .route("/metrics", get(serve_metrics))
         .route("/apis", get(api_group_list))
         .route("/apis/management.agents.x-k8s.io", get(api_group))
         .route(
@@ -88,16 +97,54 @@ async fn main() {
         .with_state(AppState {
             client,
             na: na_client::node_agent_client(),
+            metrics: Arc::new(metrics::Metrics::new()),
         })
         .fallback(not_found);
 
     let addr: SocketAddr = "0.0.0.0:6443".parse().unwrap();
     let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
+    // Graceful shutdown: on SIGTERM/SIGINT, stop accepting and drain in-flight
+    // requests (axum-server's `Handle::graceful_shutdown`).
+    let handle = axum_server::Handle::new();
+    tokio::spawn(shutdown_signal(handle.clone()));
     tracing::info!(%addr, group = GROUP, "agentctl aggregated apiserver serving (stage 2: connect verbs + SAR)");
     axum_server::bind_rustls(addr, config)
+        .handle(handle)
         .serve(app.into_make_service())
         .await
         .expect("serve");
+}
+
+// --- graceful shutdown -----------------------------------------------------
+
+/// Wait for SIGTERM/SIGINT, then trigger axum-server's graceful drain (a bounded
+/// grace period for in-flight requests to finish).
+async fn shutdown_signal(handle: axum_server::Handle<SocketAddr>) {
+    wait_for_signal().await;
+    tracing::info!("shutting down: draining in-flight requests");
+    handle.graceful_shutdown(Some(Duration::from_secs(15)));
+}
+
+/// Resolve once either SIGINT (Ctrl-C) or SIGTERM arrives.
+async fn wait_for_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 // --- TLS / front-proxy -----------------------------------------------------
@@ -174,6 +221,7 @@ async fn handle_verb(
             &format!("unknown verb: {verb}"),
         );
     }
+    state.metrics.inc_request();
 
     let user = headers
         .get("X-Remote-User")
@@ -195,9 +243,11 @@ async fn handle_verb(
 
     match authorize(&state.client, &user, &groups, &ns, &name, &verb).await {
         Ok(true) => {
+            state.metrics.inc_authorized();
             tracing::info!(%user, %ns, agent = %name, %verb, "authorized management verb");
             match forward_to_node_agent(&state.client, &state.na, &ns, &name, &verb).await {
                 Ok(result) => {
+                    state.metrics.inc_forwarded();
                     tracing::info!(%ns, agent = %name, %verb, "forwarded to node-agent");
                     status(
                         StatusCode::OK,
@@ -206,6 +256,7 @@ async fn handle_verb(
                     )
                 }
                 Err(e) => {
+                    state.metrics.inc_error();
                     tracing::error!(error = %e, "node-agent forward failed");
                     status(
                         StatusCode::BAD_GATEWAY,
@@ -216,6 +267,7 @@ async fn handle_verb(
             }
         }
         Ok(false) => {
+            state.metrics.inc_denied();
             tracing::warn!(%user, %ns, agent = %name, %verb, "denied by SubjectAccessReview");
             status(
                 StatusCode::FORBIDDEN,
@@ -224,6 +276,7 @@ async fn handle_verb(
             )
         }
         Err(e) => {
+            state.metrics.inc_error();
             tracing::error!(error = %e, "SubjectAccessReview failed");
             status(StatusCode::INTERNAL_SERVER_ERROR, "Failure", &e)
         }
@@ -338,6 +391,17 @@ fn status(code: StatusCode, kind: &str, message: &str) -> (StatusCode, Json<Valu
 
 async fn ok() -> &'static str {
     "ok"
+}
+
+/// `GET /metrics` — the Prometheus exposition (node-agent text format), served on
+/// the existing mTLS surface.
+async fn serve_metrics(
+    State(state): State<AppState>,
+) -> ([(header::HeaderName, &'static str); 1], String) {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics.render(),
+    )
 }
 
 async fn api_group_list() -> Json<Value> {
