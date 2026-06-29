@@ -32,7 +32,7 @@ use kube::{Api, Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
-use crate::{render_agent, render_fleet, RenderError, Rendered};
+use crate::{fleet_selector_string, render_agent, render_fleet, RenderError, Rendered};
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
 const FINALIZER: &str = "agentctl.dev/cleanup";
@@ -378,7 +378,12 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     let observed = fleet.metadata.generation;
     let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
 
-    let condition = match render_fleet(&fleet) {
+    // On a successful render we also surface the scale-subresource projection:
+    // `.status.replicas` (the observed/desired replica count) and
+    // `.status.selector` (the label-selector string matching the fleet pods), so
+    // `kubectl get agentfleet` shows replicas and an HPA can read both back. On a
+    // render error we leave them unset (the merge patch keeps the last value).
+    let (condition, replicas, selector) = match render_fleet(&fleet) {
         Ok(rendered) => {
             let kind = rendered_kind(&rendered);
             apply_workload(&ctx.client, ns, &rendered).await?;
@@ -392,7 +397,11 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 format!("{kind} workload applied"),
             )
             .await;
-            ready_condition(observed, kind)
+            (
+                ready_condition(observed, kind),
+                Some(fleet_replica_count(&fleet, &rendered)),
+                Some(fleet_selector_string(&name)),
+            )
         }
         Err(e) => {
             warn!(fleet = %name, error = %e, "render rejected fleet spec; marking Validated=False");
@@ -405,33 +414,71 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 e.to_string(),
             )
             .await;
-            validated_failed_condition(&e.to_string())
+            (validated_failed_condition(&e.to_string()), None, None)
         }
     };
 
-    let desired = desired_fleet_status(&condition, observed)?;
+    let desired = desired_fleet_status(&condition, observed, replicas, selector.as_deref())?;
     if status_changed(fleet.status.as_ref(), &desired)? {
         let patch = serde_json::json!({ "status": desired });
-        fleets
+        // Best-effort: a failed status write is logged, never fatal — the next
+        // resync re-projects it. The workload is already applied at this point.
+        match fleets
             .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
-            .await?;
-        debug!(fleet = %name, "patched fleet status");
+            .await
+        {
+            Ok(_) => debug!(fleet = %name, "patched fleet status"),
+            Err(e) => {
+                warn!(fleet = %name, error = %e, "failed to patch fleet status (best-effort)")
+            }
+        }
     } else {
         debug!(fleet = %name, "fleet status unchanged; skipped patch");
     }
     Ok(Action::requeue(requeue_after()))
 }
 
-/// The desired `AgentFleet.status` body (replica counts are owned by KEDA / the
-/// workload and projected in a later step; v1 carries the conditions + observed).
+/// The replica count to surface on `.status.replicas` for the scale subresource.
+///
+/// - **shard mode**: the rendered StatefulSet's fixed partition count `N`.
+/// - **claim mode**: `.spec.replicas` (the scale-subresource target an HPA/KEDA
+///   drives), defaulting to 0 when unset (scaled-to-zero / deferred to KEDA).
+///
+/// Never reads or writes the rendered Deployment's `.spec.replicas` — that field
+/// stays unset and KEDA-owned (the KEDA-safe invariant, RFC 0011).
+fn fleet_replica_count(fleet: &AgentFleet, rendered: &Rendered) -> u32 {
+    match rendered {
+        Rendered::StatefulSet(sts) => sts
+            .spec
+            .as_ref()
+            .and_then(|s| s.replicas)
+            .map(|r| r.max(0) as u32)
+            .unwrap_or(0),
+        _ => fleet.spec.replicas.unwrap_or(0),
+    }
+}
+
+/// The desired `AgentFleet.status` body. Carries the conditions + observed
+/// generation, plus the scale-subresource projection (`replicas` + `selector`)
+/// when a render succeeded; those are omitted on a render error so the merge
+/// patch preserves the last-known values.
 fn desired_fleet_status(
     condition: &Condition,
     observed: Option<i64>,
+    replicas: Option<u32>,
+    selector: Option<&str>,
 ) -> Result<serde_json::Value, Error> {
-    Ok(serde_json::json!({
+    let mut status = serde_json::json!({
         "conditions": [serde_json::to_value(condition)?],
         "observedGeneration": serde_json::to_value(observed)?,
-    }))
+    });
+    if let Some(replicas) = replicas {
+        status["replicas"] = serde_json::to_value(replicas)?;
+    }
+    if let Some(selector) = selector {
+        status["selector"] = serde_json::to_value(selector)?;
+    }
+    Ok(status)
 }
 
 /// Requeue with a short backoff on any fleet reconcile error.
@@ -567,14 +614,142 @@ mod tests {
 
     #[test]
     fn desired_fleet_status_carries_condition_and_generation() {
-        let status =
-            desired_fleet_status(&ready_condition(Some(2), "Deployment"), Some(2)).unwrap();
+        let status = desired_fleet_status(
+            &ready_condition(Some(2), "Deployment"),
+            Some(2),
+            Some(5),
+            Some("agentctl.dev/agent=fleet,app.kubernetes.io/name=agent"),
+        )
+        .unwrap();
         assert_eq!(status["observedGeneration"], 2);
         assert_eq!(status["conditions"][0]["type"], "Ready");
         assert_eq!(status["conditions"][0]["status"], "True");
+        assert_eq!(status["replicas"], 5);
+        assert_eq!(
+            status["selector"],
+            "agentctl.dev/agent=fleet,app.kubernetes.io/name=agent"
+        );
         // a fleet status with a matching condition is unchanged (guard works for fleets too)
         let current: agent_api::AgentFleetStatus = serde_json::from_value(status.clone()).unwrap();
         assert!(!status_changed(Some(&current), &status).unwrap());
+    }
+
+    #[test]
+    fn desired_fleet_status_omits_scale_projection_on_render_error() {
+        // render-error path passes None/None → replicas + selector are not written,
+        // so the merge patch preserves whatever the live status already holds.
+        let status =
+            desired_fleet_status(&validated_failed_condition("bad spec"), Some(1), None, None)
+                .unwrap();
+        assert!(status.get("replicas").is_none());
+        assert!(status.get("selector").is_none());
+    }
+
+    #[test]
+    fn fleet_replica_count_from_shard_statefulset_and_claim_spec() {
+        use agent_api::{AgentFleet, AgentFleetSpec, AgentSpec, ScaleMode, Scaling};
+
+        let template = AgentSpec {
+            mode: Mode::Reactive,
+            image: Some("ghcr.io/example/agent@sha256:abc".into()),
+            ..Default::default()
+        };
+
+        // shard mode: replicas come from the rendered StatefulSet's partition count.
+        let mut shard = AgentFleet::new(
+            "fleet",
+            AgentFleetSpec {
+                template: template.clone(),
+                scaling: Scaling {
+                    mode: ScaleMode::Shard,
+                    shards: Some(4),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        shard.metadata.namespace = Some("agents".into());
+        shard.metadata.uid = Some("uid-shard".into());
+        let rendered = render_fleet(&shard).unwrap();
+        assert!(matches!(rendered, Rendered::StatefulSet(_)));
+        assert_eq!(fleet_replica_count(&shard, &rendered), 4);
+
+        // claim mode: rendered Deployment omits replicas (KEDA-owned) → fall back
+        // to .spec.replicas (the scale-subresource target).
+        let mut claim = AgentFleet::new(
+            "fleet",
+            AgentFleetSpec {
+                template,
+                scaling: Scaling {
+                    mode: ScaleMode::Claim,
+                    ..Default::default()
+                },
+                replicas: Some(3),
+                ..Default::default()
+            },
+        );
+        claim.metadata.namespace = Some("agents".into());
+        claim.metadata.uid = Some("uid-claim".into());
+        let rendered = render_fleet(&claim).unwrap();
+        assert!(matches!(rendered, Rendered::Deployment(_)));
+        // KEDA-safe: the rendered Deployment still carries no .spec.replicas.
+        if let Rendered::Deployment(dep) = &rendered {
+            assert!(dep.spec.as_ref().unwrap().replicas.is_none());
+        }
+        assert_eq!(fleet_replica_count(&claim, &rendered), 3);
+
+        // claim mode with no spec.replicas → defaults to 0 (deferred to KEDA).
+        claim.spec.replicas = None;
+        let rendered = render_fleet(&claim).unwrap();
+        assert_eq!(fleet_replica_count(&claim, &rendered), 0);
+    }
+
+    #[test]
+    fn fleet_selector_string_matches_rendered_pod_labels() {
+        use agent_api::{AgentFleet, AgentFleetSpec, AgentSpec, ScaleMode, Scaling};
+        use std::collections::BTreeMap;
+
+        let mut fleet = AgentFleet::new(
+            "myfleet",
+            AgentFleetSpec {
+                template: AgentSpec {
+                    mode: Mode::Reactive,
+                    image: Some("ghcr.io/example/agent@sha256:abc".into()),
+                    ..Default::default()
+                },
+                scaling: Scaling {
+                    mode: ScaleMode::Claim,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        fleet.metadata.namespace = Some("agents".into());
+        fleet.metadata.uid = Some("uid-1".into());
+
+        let selector = fleet_selector_string("myfleet");
+        // sorted, equality-based form built from the SAME labels render.rs uses.
+        assert_eq!(
+            selector,
+            "agentctl.dev/agent=myfleet,app.kubernetes.io/managed-by=agentctl,app.kubernetes.io/name=agent"
+        );
+
+        // every matchLabels entry on the rendered workload appears in the string.
+        let rendered = render_fleet(&fleet).unwrap();
+        let Rendered::Deployment(dep) = &rendered else {
+            panic!("claim fleet should render a Deployment");
+        };
+        let match_labels: BTreeMap<String, String> = dep
+            .spec
+            .as_ref()
+            .unwrap()
+            .selector
+            .match_labels
+            .clone()
+            .unwrap();
+        for (k, v) in &match_labels {
+            assert!(selector.contains(&format!("{k}={v}")));
+        }
     }
 
     #[test]

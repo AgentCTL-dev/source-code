@@ -33,9 +33,14 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 # CRD types (Agent / AgentFleet) for the mesh discovery registry (GET /agents).
 agent-api = { path = "../agent-api" }
-# Durable A2A task store (RFC 0013). NoTls in-cluster → pure Rust, no C toolchain.
+# Durable A2A task store (RFC 0013). sslmode=disable → NoTls (default); when the
+# DSN asks for TLS (sslmode=require, e.g. bundled postgres.tls.enabled) the store
+# wraps the hop with tokio-postgres-rustls. Both pure Rust, no C toolchain.
 deadpool-postgres = "0.14"
 tokio-postgres = "0.7"
+# TLS connector for the Postgres hop. default-features off + `ring` → rustls/ring
+# (no aws-lc-rs, no C toolchain — reuses the rustls/ring stack above).
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 serde_json.workspace = true
 tracing = "0.1"

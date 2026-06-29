@@ -22,9 +22,15 @@ k8s-openapi = { version = "0.28", features = ["latest"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # The ModelPool CRD type (agents.x-k8s.io/v1alpha1).
 agent-api = { path = "../agent-api" }
-# Durable usage meter. NoTls in-cluster → pure Rust, no C toolchain.
+# Durable usage meter. sslmode=disable → NoTls (default); when the DSN asks for
+# TLS (sslmode=require, e.g. bundled postgres.tls.enabled) the store wraps the hop
+# with tokio-postgres-rustls. Both pure Rust, no C toolchain.
 deadpool-postgres = "0.14"
 tokio-postgres = "0.7"
+# TLS connector + rustls (ring provider) for the Postgres hop. default-features
+# off + `ring` → no aws-lc-rs, no C toolchain.
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 serde_json.workspace = true
 tracing = "0.1"

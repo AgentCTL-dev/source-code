@@ -222,6 +222,26 @@ fn label_selector(labels: &BTreeMap<String, String>) -> LabelSelector {
     }
 }
 
+/// The label-selector STRING matching a fleet's pods, for the scale
+/// subresource's `labelSelectorPath` (`.status.selector`). Built from the SAME
+/// [`managed_labels`] the rendered workload's `.spec.selector.matchLabels` and
+/// pod template carry, so an HPA reading `.status.selector` resolves exactly the
+/// operator-managed pods. Formatted as comma-separated `key=value` pairs in the
+/// `BTreeMap`'s sorted key order, so the string is deterministic.
+pub fn fleet_selector_string(name: &str) -> String {
+    selector_string(&managed_labels(name))
+}
+
+/// Serialize a `matchLabels` map to the equality-based label-selector string
+/// form Kubernetes uses (`k1=v1,k2=v2`, keys sorted).
+fn selector_string(labels: &BTreeMap<String, String>) -> String {
+    labels
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn owned_meta(
     name: &str,
     namespace: Option<String>,

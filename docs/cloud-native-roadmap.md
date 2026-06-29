@@ -91,6 +91,26 @@ Status: ✅ done · 🔜 next · ⬜ planned.
 - ✅ **helm test hook** (P2): `helm test` connectivity probe (gateway `/healthz` + APIService
   discovery) — verified Phase: Succeeded.
 - ✅ **Krew plugin manifest** (P2) for `kubectl agent`.
-- 🔜 Remaining polish: Postgres TLS (sslmode=require); PodSecurity namespace split; backup/restore
-  + upgrade/rollback runbook + SLOs; conversion webhook (multi-version); operator `status.replicas`
-  write-back for HPA read-back. (All P1/P2; none production-blocking.)
+## ✅ Wave 6 — residual tail (done, verified on kind)
+
+- ✅ **Operator `status.replicas`/`selector` write-back** (P1): the operator populates the
+  AgentFleet scale subresource's status (selector = the rendered pod labels; replicas =
+  shard count / claim `spec.replicas`, KEDA-safe). Verified `status.selector` is set so an
+  HPA can read the scale subresource.
+- ✅ **Bundled Postgres TLS** (P1, opt-in `postgres.bundled.tls.enabled`): cert-manager serving
+  cert + `ssl=on`; the gateway/modelgateway DB client gained `tokio-postgres-rustls` (ring — no
+  openssl) and connect `sslmode=require`. Verified live: `SHOW ssl` → `on`, gateway connects over
+  TLS. Default stays `sslmode=disable` (unchanged).
+- ✅ **Operations runbook** (`docs/operations.md`): backup/restore, upgrade/rollback (incl. the
+  CRD-not-upgraded-by-helm caveat), scaling, observability + SLOs, disaster scenarios.
+
+## 🔜 Explicitly deferred (documented in docs/operations.md)
+
+- ⬜ **PodSecurity namespace split** — the `agentctl-system` ns is labeled `privileged` for the
+  node-agent; all other components already self-confine via securityContext. Splitting into a
+  privileged node-agent ns + a restricted control-plane ns is a structural change with high
+  regression surface and low incremental security; deferred.
+- ⬜ **Conversion webhook / multi-version** — CRDs are `v1alpha1`; there's no `v1beta1` schema to
+  convert to yet, so conversion scaffolding is premature. Revisit when a v2 schema lands.
+- ⬜ **Postgres `verify-full`** (client CA verification) and externalized-creds rotation; client
+  currently does `sslmode=require` (encrypt, no CA verify).

@@ -14,4 +14,4 @@ pub mod render;
 pub mod serve;
 
 pub use metrics::Metrics;
-pub use render::{render_agent, render_fleet, RenderError, Rendered};
+pub use render::{fleet_selector_string, render_agent, render_fleet, RenderError, Rendered};

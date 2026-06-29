@@ -1,5 +1,6 @@
 {{- if eq .Values.postgres.mode "bundled" }}
 {{- $ns := include "agentctl.namespace" . }}
+{{- $tls := .Values.postgres.bundled.tls.enabled }}
 {{/* Reuse the existing password on upgrade (idempotent) — regenerating it would
      break auth against the already-initialized Postgres data dir. lookup is empty
      during `helm template`/install (no cluster), so a fresh install generates one. */}}
@@ -28,8 +29,34 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_PASSWORD: {{ $pw | quote }}
-  # Consumed by the gateway. sslmode=disable: in-cluster NoTls (later hardening).
-  DATABASE_URL: "postgres://agentctl:{{ $pw }}@agentctl-postgres.{{ $ns }}:5432/agentctl?sslmode=disable"
+  # Consumed by the gateway + modelgateway. sslmode=require when bundled TLS is on
+  # (the rustls client encrypts the hop without CA verify); sslmode=disable (NoTls)
+  # otherwise — the working default path.
+  DATABASE_URL: "postgres://agentctl:{{ $pw }}@agentctl-postgres.{{ $ns }}:5432/agentctl?sslmode={{ if $tls }}require{{ else }}disable{{ end }}"
+{{- if $tls }}
+---
+# Serving cert for the bundled Postgres (postgres.bundled.tls.enabled). Signed by
+# the chart CA; the secret (agentctl-postgres-tls) carries tls.crt/tls.key/ca.crt
+# and is mounted at /tls in the postgres pod. Requires cert-manager.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-postgres-tls
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-postgres
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-postgres-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-postgres.{{ $ns }}.svc
+    - agentctl-postgres.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -70,6 +97,20 @@ spec:
         - name: postgres
           image: {{ .Values.postgres.bundled.image }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if $tls }}
+          # Serve TLS from the mounted cert-manager material. The docker-entrypoint
+          # runs initdb first, then exec's `postgres` with these -c overrides.
+          args:
+            - postgres
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/tls/tls.crt
+            - -c
+            - ssl_key_file=/tls/tls.key
+            - -c
+            - ssl_ca_file=/tls/ca.crt
+          {{- end }}
           env:
             - name: POSTGRES_USER
               value: agentctl
@@ -87,6 +128,9 @@ spec:
             - { containerPort: 5432, name: postgres }
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
+            {{- if $tls }}
+            - { name: tls, mountPath: /tls, readOnly: true }
+            {{- end }}
           # Minimally privileged: no privilege escalation, no Linux capabilities,
           # RuntimeDefault seccomp. (Root fs stays writable — postgres writes its
           # socket/lock under /var/run/postgresql + /tmp; PGDATA is on the mount.)
@@ -111,6 +155,15 @@ spec:
             claimName: agentctl-postgres
         {{- else }}
           emptyDir: {}
+        {{- end }}
+        {{- if $tls }}
+        # cert-manager serving material. defaultMode 0640 + fsGroup=runAsUser makes
+        # the key root:<fsGroup> 0640 — readable by the postgres uid, which postgres
+        # accepts (key must be 0600/0640 owned by root or the db user).
+        - name: tls
+          secret:
+            secretName: agentctl-postgres-tls
+            defaultMode: 0640
         {{- end }}
 {{- if eq .Values.postgres.bundled.storage "pvc" }}
 ---

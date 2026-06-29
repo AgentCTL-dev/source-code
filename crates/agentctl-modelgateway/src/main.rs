@@ -32,6 +32,7 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 use serde_json::{json, Value};
 
+mod db_tls;
 mod metrics;
 mod store;
 
@@ -402,13 +403,21 @@ fn bad_gateway(msg: &str) -> Response {
 }
 
 /// Build the Postgres connection pool for the usage meter from `DATABASE_URL`
-/// (e.g. `postgres://user:pw@host:5432/db?sslmode=disable`). `NoTls` — the
-/// in-cluster hop is NetworkPolicy-scoped (TLS to the DB is later hardening), and
-/// it keeps the build pure-Rust (no C toolchain).
+/// (e.g. `postgres://user:pw@host:5432/db?sslmode=disable`).
+///
+/// `sslmode=disable` (the default path) → [`tokio_postgres::NoTls`]: a plain
+/// in-cluster hop, kept NetworkPolicy-scoped. Any other mode (`require`/`prefer`,
+/// e.g. bundled `postgres.tls.enabled` or an external managed DSN) → a rustls/ring
+/// connector ([`db_tls::make_connector`]) that encrypts the hop. Both stay
+/// pure-Rust (no C toolchain).
 fn build_pool() -> Pool {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let cfg: tokio_postgres::Config = url.parse().expect("parse DATABASE_URL");
-    let mgr = deadpool_postgres::Manager::new(cfg, tokio_postgres::NoTls);
+    let mgr = if cfg.get_ssl_mode() == tokio_postgres::config::SslMode::Disable {
+        deadpool_postgres::Manager::new(cfg, tokio_postgres::NoTls)
+    } else {
+        deadpool_postgres::Manager::new(cfg, db_tls::make_connector())
+    };
     Pool::builder(mgr)
         .max_size(8)
         .build()

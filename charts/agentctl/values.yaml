@@ -87,6 +87,17 @@ postgres:
     storage: emptyDir         # emptyDir (eval) | pvc
     pvcSize: 5Gi
     storageClassName: ""      # pvc only; empty = cluster default StorageClass
+    # In-cluster TLS for the bundled Postgres. DEFAULT false: the working
+    # sslmode=disable (NoTls) path is preserved unless you opt in. Requires
+    # cert-manager (certManager.enabled, the default). When true the chart:
+    #   - issues a cert-manager Certificate (agentctl-postgres-tls) for
+    #     agentctl-postgres.<ns>.svc[.cluster.local], signed by the chart CA;
+    #   - mounts that secret at /tls (defaultMode 0640; fsGroup=runAsUser so the
+    #     key is group-readable by the postgres uid) and runs postgres ssl=on;
+    #   - sets DATABASE_URL sslmode=require, so the gateway/modelgateway rustls
+    #     client encrypts the hop WITHOUT CA verification (see operations.md §1).
+    tls:
+      enabled: false
   external:
     # mode=external: point at a managed Postgres via a pre-created Secret holding
     # a key 'DATABASE_URL' (postgres://user:pw@host:5432/db?sslmode=require).
