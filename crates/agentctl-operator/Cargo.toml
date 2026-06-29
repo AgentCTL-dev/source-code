@@ -13,6 +13,9 @@ path = "src/bin/operator.rs"
 
 [dependencies]
 agent-api = { path = "../agent-api" }
+# Shared tracing init: fmt layer (default) + OTLP export when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set.
+agentctl-telemetry = { path = "../agentctl-telemetry" }
 # Default features keep the client (rustls + config); `runtime` adds the
 # Controller/watcher/finalizer, `derive` the CR typing the controller watches.
 kube = { version = "4", features = ["runtime", "derive"] }

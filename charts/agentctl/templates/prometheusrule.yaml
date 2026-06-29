@@ -1,0 +1,112 @@
+{{/*
+Prometheus-Operator alerting rules for the agentctl control plane. Gated entirely
+on observability.alerts.enabled (off by default) so a stock install needs no
+Prometheus-Operator CRDs — this object uses monitoring.coreos.com/v1, which only
+exists once the Prometheus Operator (and its CRDs) is installed.
+
+Prometheus discovers PrometheusRule objects via its `ruleSelector`. Most installs
+select on a label (kube-prometheus-stack defaults to `release: <prometheus
+release>`). Set observability.alerts.labels to whatever your Prometheus selects on
+so these rules are actually loaded — e.g. --set observability.alerts.labels.release=prometheus.
+
+The alerts assume the metrics are scraped (see metrics.serviceMonitor.enabled).
+ServiceMonitors here name the per-component scrape job `agentctl-<comp>`, so the
+component-down alert matches on `job=~"agentctl-.*"`.
+*/}}
+{{- if .Values.observability.alerts.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentctl
+  namespace: {{ include "agentctl.namespace" . }}
+  labels:
+    app.kubernetes.io/name: agentctl
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.observability.alerts.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: agentctl.control-plane
+      rules:
+        # No operator is leading the reconcile loop. With operator.replicas>=1 a
+        # healthy install has exactly one replica reporting leader=1; the sum
+        # collapsing to 0 means the Lease is uncontended/expired and CRDs stop
+        # reconciling. (If the operator is wholly unscraped, AgentctlComponentDown
+        # fires instead — this rule needs at least one operator series present.)
+        - alert: AgentctlOperatorNoLeader
+          expr: sum(agentctl_operator_leader) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "agentctl operator has no leader"
+            description: >-
+              sum(agentctl_operator_leader) has been 0 for 5m — no operator replica
+              holds leadership, so Agent/AgentFleet/ModelPool reconciliation is stalled.
+
+        # Reconcile errors are sustained. A small transient rate is normal on
+        # conflicts/requeues; a sustained rate points at a systemic failure
+        # (RBAC, API errors, bad spec) the operator can't make progress past.
+        - alert: AgentctlReconcileErrors
+          expr: sum(rate(agentctl_operator_reconcile_errors_total[5m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentctl operator reconcile errors elevated"
+            description: >-
+              The operator reconcile error rate has exceeded 0.1/s for 10m
+              (current {{`{{ $value | printf "%.3f" }}`}}/s). Check operator logs and CR status.
+
+        # A control-plane component's scrape target is down (up==0) or its metrics
+        # are absent. `up` is emitted per scrape target by Prometheus; the agentctl
+        # ServiceMonitors set job=agentctl-<comp>. absent() covers the case where a
+        # component is entirely gone (no series), which up==0 alone cannot catch.
+        - alert: AgentctlComponentDown
+          expr: |-
+            (up{job=~"agentctl-.*"} == 0)
+            or
+            (absent(up{job="agentctl-operator"}) == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "agentctl component {{`{{ $labels.job }}`}} is down"
+            description: >-
+              Prometheus reports {{`{{ $labels.job }}`}} as down (up==0) or its metrics
+              are absent for 5m. The component is unreachable or crash-looping.
+
+        # The admission webhook is denying an unusual volume of Agent/AgentFleet
+        # admissions — a misconfigured allow-list, a bad rollout, or an attacker
+        # probing the trifecta/registry gates. Sustained, not a single deny.
+        - alert: AgentctlAdmissionDenySpike
+          expr: sum(rate(agentctl_admission_deny_total[5m])) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentctl admission deny rate spiking"
+            description: >-
+              The admission webhook deny rate has exceeded 1/s for 10m
+              (current {{`{{ $value | printf "%.2f" }}`}}/s). Inspect rejected Agent/AgentFleet
+              submissions (registry allow-list, lethal-trifecta gate, missing ModelPool).
+
+        # The ModelGateway is rejecting inference on ModelPool token budgets. Any
+        # sustained rate means tenants are hitting their cap and losing inference
+        # — raise the budget or investigate runaway consumption.
+        - alert: AgentctlBudgetRejections
+          expr: sum(rate(agentctl_modelgateway_budget_rejections_total[5m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "agentctl ModelGateway is rejecting inference on budget"
+            description: >-
+              The ModelGateway has been rejecting inference on ModelPool token budgets
+              for 15m (current {{`{{ $value | printf "%.3f" }}`}}/s). Tenants are hitting
+              their maxTokens cap; raise the budget or investigate consumption.
+{{- end }}

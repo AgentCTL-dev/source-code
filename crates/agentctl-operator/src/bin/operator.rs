@@ -27,19 +27,16 @@ use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::coordination::v1::Lease;
 use kube::runtime::controller::Error as ControllerError;
+use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Client};
 use tracing::{debug, error, info};
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), kube::Error> {
-    // Honor RUST_LOG (e.g. `agentctl_operator=debug`); default to info.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // Honor RUST_LOG (e.g. `agentctl_operator=debug`); default to info. Adds an
+    // OTLP exporter only when OTEL_EXPORTER_OTLP_ENDPOINT is set (else fmt-only).
+    agentctl_telemetry::init("agentctl-operator");
 
     let client = Client::try_default().await?;
     let metrics = Arc::new(Metrics::new());
@@ -80,9 +77,21 @@ async fn main() -> Result<(), kube::Error> {
 
     // Won the lease: run the controllers (set_leader is handled inside lease::run +
     // the renewer; manager_up was already set above so /readyz was 200 while standby).
+    // Kubernetes Events recorder (RFC 0010): the operator already holds events
+    // RBAC; `reporter.controller` is the controller name and `instance` the pod so
+    // events are attributable per-replica.
+    let recorder = Recorder::new(
+        client.clone(),
+        Reporter {
+            controller: "agentctl-operator".to_string(),
+            instance: Some(identity.clone()),
+        },
+    );
+
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
+        recorder,
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");

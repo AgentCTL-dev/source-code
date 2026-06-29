@@ -1,0 +1,184 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "agentctl Helm values",
+  "description": "Validates the top-level shape of agentctl chart values. Intentionally permissive (additionalProperties allowed on most objects) so valid installs are never rejected, while still catching type mistakes (e.g. a string where an integer/boolean is required).",
+  "type": "object",
+  "additionalProperties": true,
+  "definitions": {
+    "component": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "type": "integer", "minimum": 0 },
+        "logLevel": { "type": "string" },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "affinity": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "topologySpreadConstraints": { "type": "array" },
+        "priorityClassName": { "type": "string" },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" },
+        "extraEnv": { "type": "array" },
+        "envFrom": { "type": "array" },
+        "allowedRegistries": { "type": "string" },
+        "secretsNamespaces": { "type": "array" },
+        "federationPeers": { "type": "string" },
+        "probes": { "type": "object" },
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "annotations": { "type": "object" }
+          }
+        },
+        "pdb": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minAvailable": { "type": ["integer", "string"] }
+          }
+        },
+        "autoscaling": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minReplicas": { "type": "integer", "minimum": 1 },
+            "maxReplicas": { "type": "integer", "minimum": 1 },
+            "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        }
+      }
+    }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "registry": { "type": "string" },
+        "tag": { "type": ["string", "number"] },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": { "type": "array" },
+        "digests": { "type": "object" }
+      }
+    },
+    "referenceAgent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "image": { "type": "string" }
+      }
+    },
+    "commonLabels": { "type": "object" },
+    "commonAnnotations": { "type": "object" },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string" },
+            "scrapeTimeout": { "type": "string" },
+            "labels": { "type": "object" }
+          }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "dashboards": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "alerts": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "type": "object" }
+          }
+        }
+      }
+    },
+    "namespace": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "create": { "type": "boolean" },
+        "podSecurity": { "type": "string" }
+      }
+    },
+    "certManager": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "caIssuerRef": { "type": "string" }
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "mode": { "type": "string", "enum": ["bundled", "external"] },
+        "bundled": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "image": { "type": "string" },
+            "runAsUser": { "type": "integer" },
+            "storage": { "type": "string" },
+            "pvcSize": { "type": "string" },
+            "storageClassName": { "type": "string" }
+          }
+        },
+        "external": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "dsnSecretName": { "type": "string" },
+            "dsnSecretKey": { "type": "string" }
+          }
+        }
+      }
+    },
+    "operator": { "$ref": "#/definitions/component" },
+    "nodeAgent": { "$ref": "#/definitions/component" },
+    "apiserver": { "$ref": "#/definitions/component" },
+    "gateway": { "$ref": "#/definitions/component" },
+    "modelgateway": { "$ref": "#/definitions/component" },
+    "admission": { "$ref": "#/definitions/component" },
+    "networkPolicies": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "agentNamespaces": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "substrate": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "socketRoot": { "type": "string" }
+      }
+    },
+    "resources": { "type": "object" }
+  }
+}

@@ -30,4 +30,6 @@ base64 = "0.22"
 serde_json.workspace = true
 serde = { workspace = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Shared tracing init: fmt-only by default, OTLP export when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set.
+agentctl-telemetry = { path = "../agentctl-telemetry" }

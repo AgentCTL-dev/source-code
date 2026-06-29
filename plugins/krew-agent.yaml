@@ -1,0 +1,87 @@
+# Krew plugin manifest for `kubectl agent` (plugin name: agent).
+#
+# NOTE: the `kubectl-agent` binary is the agentctl CLI (the `agentctl-cli` crate)
+# compiled and shipped under the name `kubectl-agent`. kubectl discovers any
+# executable named `kubectl-<name>` on PATH and exposes it as `kubectl <name>`, so
+# the same Rust CLI that ships as `agentctl` is published here as `kubectl-agent` to
+# drive Agents/AgentFleets/ModelPools from kubectl (e.g. `kubectl agent list`,
+# `kubectl agent logs`, `kubectl agent call`). There is no separate codebase — it is
+# one binary built twice (or symlinked) under the two names.
+#
+# The platforms[].uri and platforms[].sha256 values below are RELEASE PLACEHOLDERS:
+# CI fills the real download URLs + archive sha256 digests when cutting a `vX.Y.Z`
+# tag (and bumps spec.version to match) before submitting to the krew-index.
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: agent
+spec:
+  version: v0.1.0
+  homepage: https://github.com/AgentCTL-dev/source-code
+  shortDescription: Manage and drive agentctl Agents from kubectl.
+  description: |
+    kubectl-agent is the agentctl CLI exposed as a kubectl plugin. It drives the
+    agentctl control plane — create, inspect, and manage Agent / AgentFleet /
+    ModelPool resources, stream agent logs, and invoke agents over A2A through the
+    aggregated APIServer and gateway — using your existing kubeconfig context and
+    RBAC. It is the same binary as the standalone `agentctl` CLI, installed under
+    the `kubectl-agent` name so it runs as `kubectl agent <subcommand>`.
+
+    Requires the agentctl control plane installed in the cluster (see the agentctl
+    Helm chart) and a kubeconfig with access to the management.agents.x-k8s.io API.
+  caveats: |
+    This plugin talks to the agentctl aggregated APIServer
+    (management.agents.x-k8s.io). Install the agentctl control plane first, then:
+      kubectl agent --help
+  platforms:
+    - selector:
+        matchLabels:
+          os: linux
+          arch: amd64
+      # RELEASE PLACEHOLDER — filled at tag time.
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_linux_amd64.tar.gz
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      bin: kubectl-agent
+      files:
+        - from: kubectl-agent
+          to: .
+    - selector:
+        matchLabels:
+          os: linux
+          arch: arm64
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_linux_arm64.tar.gz
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      bin: kubectl-agent
+      files:
+        - from: kubectl-agent
+          to: .
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: amd64
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_darwin_amd64.tar.gz
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      bin: kubectl-agent
+      files:
+        - from: kubectl-agent
+          to: .
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: arm64
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_darwin_arm64.tar.gz
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      bin: kubectl-agent
+      files:
+        - from: kubectl-agent
+          to: .
+    - selector:
+        matchLabels:
+          os: windows
+          arch: amd64
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_windows_amd64.zip
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      bin: kubectl-agent.exe
+      files:
+        - from: kubectl-agent.exe
+          to: .

@@ -22,6 +22,7 @@ members = [
     "crates/agentctl-gateway",
     "crates/agentctl-modelgateway",
     "crates/agentctl-admission",
+    "crates/agentctl-telemetry",
 ]
 
 [workspace.package]
@@ -33,3 +34,13 @@ repository = "https://github.com/AgentCTL-dev/source-code"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Distributed tracing (OTLP) — wired through the shared `agentctl-telemetry`
+# crate. The exporter is OTLP/gRPC over tonic with NO TLS feature, so it pulls
+# no aws-lc-rs/openssl (stays pure-Rust, no C toolchain — matches the rustls/ring
+# stack). The OTLP layer is installed only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
+# set; absent it, behaviour is the fmt-only default. Versions resolve cleanly
+# with the existing tracing 0.1 / tokio 1 / hyper 1 / http 1 in the lockfile.
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"] }
+tracing-opentelemetry = "0.33"

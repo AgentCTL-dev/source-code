@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: BUSL-1.1
+[package]
+name = "agentctl-telemetry"
+version = "0.1.0"
+description = "Shared tracing init for agentctl control-plane binaries: the fmt layer (byte-identical to before) plus an OTLP/gRPC span exporter + W3C propagation that turn on only when OTEL_EXPORTER_OTLP_ENDPOINT is set."
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
+repository.workspace = true
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# OTLP exporter + tracing bridge (declared in [workspace.dependencies]); OTLP/gRPC
+# over tonic, no TLS feature → no C toolchain. Only active when the env var is set.
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+# W3C `traceparent` carrier over the shared `http` types (axum/reqwest both expose
+# the same `http::HeaderMap`), so the propagation helpers stay framework-neutral.
+http = "1"

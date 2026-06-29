@@ -15,6 +15,11 @@ path = "src/bin/node-agent.rs"
 agent-contract-client = { path = "../agent-contract-client" }
 serde.workspace = true
 serde_json.workspace = true
+# Tracing + shared init: the management bridge is instrumented and continues the
+# apiserver's trace (W3C `traceparent`). fmt-only by default; OTLP export when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set.
+tracing = "0.1"
+agentctl-telemetry = { path = "../agentctl-telemetry" }
 # The node-agent binary serves a small HTTP API (RFC 0009 backend) for the
 # aggregated apiserver to call; the ManagementClient itself stays blocking std.
 axum = "0.8"

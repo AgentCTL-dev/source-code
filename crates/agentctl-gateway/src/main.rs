@@ -35,7 +35,6 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::ListParams;
 use kube::{Api, Client};
 use serde_json::{json, Value};
-use tracing_subscriber::EnvFilter;
 
 mod metrics;
 mod na_client;
@@ -58,11 +57,9 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // fmt layer (honoring RUST_LOG, default info) + OTLP export when
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise byte-identical to before.
+    agentctl_telemetry::init("agentctl-gateway");
     // ring crypto provider as the process default (RFC 0015): no aws-lc-rs → no
     // C toolchain. Required so reqwest's rustls backend (federation/push) and the
     // node-agent mTLS client both resolve a provider.
@@ -247,6 +244,7 @@ async fn fleet_card(
 /// JSON-RPC call and return the node-agent's response verbatim. `message/stream`
 /// takes the streaming path: it forwards to the node-agent's `…/a2a/stream` and
 /// pipes the resulting SSE byte-stream straight back to the client untouched.
+#[tracing::instrument(skip_all, fields(ns = %ns, agent = %name))]
 async fn a2a_rpc(
     State(state): State<AppState>,
     Path((ns, name)): Path<(String, String)>,

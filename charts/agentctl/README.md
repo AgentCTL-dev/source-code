@@ -85,6 +85,48 @@ runs `helm upgrade --install` (pass `--registry`, `--tag`, `--version`, `--set`)
 | `networkPolicies.enabled` | `false` | ship egress/tenant NetworkPolicies (needs a policy CNI) |
 | `substrate.socketRoot` | `/run/agentctl/sockets` | on-node socket root the node-agent watches |
 
+## Observability (day-2)
+
+All metrics are exposed on each component's `/metrics` endpoint
+(`agentctl_operator_*`, `agentctl_gateway_*`, `agentctl_modelgateway_*`,
+`agentctl_admission_*`, node-agent, plus `process_start_time_seconds`). Wire them up:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `metrics.serviceMonitor.enabled` | `false` | emit a Prometheus-Operator `ServiceMonitor` per scrape target (jobs `agentctl-<comp>`) |
+| `observability.dashboards.enabled` | `false` | ship a Grafana dashboard as a `ConfigMap` labeled `grafana_dashboard: "1"` (sidecar auto-discovery) |
+| `observability.alerts.enabled` | `false` | ship a `PrometheusRule` (needs the Prometheus-Operator CRDs) |
+| `observability.alerts.labels` | `{}` | extra labels so your Prometheus `ruleSelector` picks up the rule, e.g. `--set observability.alerts.labels.release=prometheus` |
+
+```console
+helm upgrade agentctl ./charts/agentctl -n agentctl-system \
+  --set metrics.serviceMonitor.enabled=true \
+  --set observability.dashboards.enabled=true \
+  --set observability.alerts.enabled=true \
+  --set observability.alerts.labels.release=prometheus
+```
+
+The dashboard (`templates/dashboard.yaml`, uid `agentctl-control-plane`) charts the
+operator (reconcile/error rate, latency, leader), the A2A gateway, the ModelGateway
+(inference, tokens, budget rejections), and the admission webhook. The alerts
+(`templates/prometheusrule.yaml`) are `AgentctlOperatorNoLeader`,
+`AgentctlReconcileErrors`, `AgentctlComponentDown`, `AgentctlAdmissionDenySpike`, and
+`AgentctlBudgetRejections`. Both are off by default so a stock install needs no
+Grafana or Prometheus-Operator CRDs.
+
+### `helm test`
+
+After install, `helm test agentctl -n agentctl-system` runs a connectivity probe
+(`templates/tests/test-connection.yaml`) that checks the gateway `/healthz` and that
+the aggregated `APIService management.agents.x-k8s.io/v1alpha1` is registered and
+Available — exiting non-zero (failing the test) if either is unreachable.
+
+### `kubectl agent` (Krew)
+
+The `kubectl-agent` CLI plugin ships separately via Krew
+([`plugins/krew-agent.yaml`](../../plugins/krew-agent.yaml)); it is the `agentctl`
+CLI installed under the `kubectl-agent` name so it runs as `kubectl agent …`.
+
 ## What cert-manager wires (replacing the old `install.sh` scripts)
 
 A self-signed bootstrap `Issuer` → an **agentctl CA** → a CA `Issuer` mints:

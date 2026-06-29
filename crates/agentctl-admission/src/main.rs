@@ -44,7 +44,6 @@ use kube::{Api, Client};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use serde_json::{json, Map, Value};
-use tracing_subscriber::EnvFilter;
 
 use agent_api::ModelPool;
 
@@ -71,11 +70,9 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // fmt layer (honoring RUST_LOG, default info) + OTLP export when
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise byte-identical to before.
+    agentctl_telemetry::init("agentctl-admission");
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install ring crypto provider");
@@ -199,6 +196,7 @@ async fn serve_metrics(
 /// cross-object checks against the `AgentSpec`-shaped view (`spec` for `Agent`,
 /// `spec.template` for `AgentFleet`), and returns an `AdmissionReview` verdict
 /// (`allowed` + a denial message).
+#[tracing::instrument(name = "admission.validate", skip_all)]
 async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> Json<Value> {
     let request = &review["request"];
     let uid = request["uid"].as_str().unwrap_or_default().to_string();

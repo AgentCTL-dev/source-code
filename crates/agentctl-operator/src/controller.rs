@@ -26,8 +26,9 @@ use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
+use kube::runtime::events::{Event as KEvent, EventType, Recorder};
 use kube::runtime::finalizer::{finalizer, Event};
-use kube::{Api, Client, ResourceExt};
+use kube::{Api, Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
@@ -49,6 +50,8 @@ const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 pub struct Ctx {
     pub client: Client,
     pub metrics: Arc<Metrics>,
+    /// Publishes Kubernetes Events on reconcile outcomes (RFC 0010).
+    pub recorder: Recorder,
 }
 
 /// Everything that can go wrong driving one reconcile. A [`RenderError`] is
@@ -77,13 +80,58 @@ pub enum Error {
 }
 
 /// Reconcile one `Agent`, recording the reconcile-total/-errors counters and the
-/// duration histogram around the actual work in [`reconcile_inner`].
+/// duration histogram around the actual work in [`reconcile_inner`]. A failed
+/// reconcile (transient apiserver/finalizer error) emits a Warning Event.
+#[tracing::instrument(skip_all, fields(agent = %agent.name_any()))]
 pub async fn reconcile(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let start = Instant::now();
-    let result = reconcile_inner(agent, ctx.clone()).await;
+    let result = reconcile_inner(agent.clone(), ctx.clone()).await;
     ctx.metrics
         .record_reconcile(start.elapsed(), result.is_err());
+    if let Err(e) = &result {
+        publish_event(
+            &ctx,
+            agent.as_ref(),
+            EventType::Warning,
+            "ReconcileError",
+            "Reconcile",
+            e.to_string(),
+        )
+        .await;
+    }
     result
+}
+
+/// Publish a Kubernetes Event against `obj` (RFC 0010). Best-effort: a failed
+/// publish is logged, never fatal to the reconcile. Generic over the CR type so
+/// both `Agent` and `AgentFleet` share one path.
+async fn publish_event<K>(
+    ctx: &Ctx,
+    obj: &K,
+    type_: EventType,
+    reason: &str,
+    action: &str,
+    note: String,
+) where
+    K: Resource<DynamicType = ()>,
+{
+    let reference = obj.object_ref(&());
+    if let Err(e) = ctx
+        .recorder
+        .publish(
+            &KEvent {
+                type_,
+                reason: reason.to_string(),
+                note: Some(note),
+                action: action.to_string(),
+                secondary: None,
+            },
+            &reference,
+        )
+        .await
+    {
+        warn!(error = %e, reason, "failed to publish Kubernetes Event");
+    }
 }
 
 /// Reconcile one `Agent`: wrap apply/cleanup in the deletion finalizer so the
@@ -115,6 +163,15 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             let kind = rendered_kind(&rendered);
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(agent = %name, workload = kind, "applied workload");
+            publish_event(
+                ctx.as_ref(),
+                agent.as_ref(),
+                EventType::Normal,
+                "Reconciled",
+                "WorkloadApplied",
+                format!("{kind} workload applied"),
+            )
+            .await;
             (
                 ready_condition(observed, kind),
                 "Ready",
@@ -126,6 +183,15 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
         }
         Err(e) => {
             warn!(agent = %name, error = %e, "render rejected spec; marking Validated=False");
+            publish_event(
+                ctx.as_ref(),
+                agent.as_ref(),
+                EventType::Warning,
+                "RenderFailed",
+                "Validate",
+                e.to_string(),
+            )
+            .await;
             (
                 validated_failed_condition(&e.to_string()),
                 "Invalid",
@@ -267,11 +333,23 @@ pub fn error_policy(_agent: Arc<Agent>, err: &Error, _ctx: Arc<Ctx>) -> Action {
 
 /// Reconcile one `AgentFleet`, recording reconcile metrics around the work in
 /// [`reconcile_fleet_inner`] (shared counters/histogram with the `Agent` loop).
+#[tracing::instrument(skip_all, fields(fleet = %fleet.name_any()))]
 pub async fn reconcile_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let start = Instant::now();
-    let result = reconcile_fleet_inner(fleet, ctx.clone()).await;
+    let result = reconcile_fleet_inner(fleet.clone(), ctx.clone()).await;
     ctx.metrics
         .record_reconcile(start.elapsed(), result.is_err());
+    if let Err(e) = &result {
+        publish_event(
+            &ctx,
+            fleet.as_ref(),
+            EventType::Warning,
+            "ReconcileError",
+            "Reconcile",
+            e.to_string(),
+        )
+        .await;
+    }
     result
 }
 
@@ -305,10 +383,28 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             let kind = rendered_kind(&rendered);
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(fleet = %name, workload = kind, "applied fleet workload");
+            publish_event(
+                ctx.as_ref(),
+                fleet.as_ref(),
+                EventType::Normal,
+                "Reconciled",
+                "WorkloadApplied",
+                format!("{kind} workload applied"),
+            )
+            .await;
             ready_condition(observed, kind)
         }
         Err(e) => {
             warn!(fleet = %name, error = %e, "render rejected fleet spec; marking Validated=False");
+            publish_event(
+                ctx.as_ref(),
+                fleet.as_ref(),
+                EventType::Warning,
+                "RenderFailed",
+                "Validate",
+                e.to_string(),
+            )
+            .await;
             validated_failed_condition(&e.to_string())
         }
     };

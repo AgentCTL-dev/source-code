@@ -31,7 +31,6 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::api::ListParams;
 use kube::{Api, Client};
 use serde_json::{json, Value};
-use tracing_subscriber::EnvFilter;
 
 mod metrics;
 mod store;
@@ -53,11 +52,9 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // fmt layer (honoring RUST_LOG, default info) + OTLP export when
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise byte-identical to before.
+    agentctl_telemetry::init("agentctl-modelgateway");
 
     let client = Client::try_default().await.expect("in-cluster kube client");
 
@@ -142,6 +139,7 @@ async fn serve_metrics(
 /// the budget, injects the pool's credential, forwards to the provider, meters
 /// the result, and returns the provider response (tagged with the pool for
 /// traceability).
+#[tracing::instrument(name = "modelgateway.infer", skip_all)]
 async fn infer(
     State(state): State<AppState>,
     headers: HeaderMap,

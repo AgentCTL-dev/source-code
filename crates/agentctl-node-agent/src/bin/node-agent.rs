@@ -42,7 +42,7 @@ use agentctl_node_agent::{
     Error, ManagementClient,
 };
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -61,6 +61,11 @@ const TLS_DIR: &str = "/etc/agentctl-node-agent/tls";
 
 #[tokio::main]
 async fn main() {
+    // Tracing: fmt layer by default (mirrors the eprintln stderr logs), plus OTLP
+    // export when OTEL_EXPORTER_OTLP_ENDPOINT is set so the management bridge spans
+    // join the apiserver's trace.
+    agentctl_telemetry::init("agentctl-node-agent");
+
     // mTLS via rustls with the ring provider (no aws-lc-rs → no C toolchain).
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -259,10 +264,15 @@ enum DriveError {
 }
 
 /// Execute a management verb against the local agent identified by `pod_uid`.
+/// The management bridge entry point (RFC 0009): it continues the apiserver's
+/// trace via the propagated W3C `traceparent` (no-op when OTLP is off).
+#[tracing::instrument(skip_all, fields(pod_uid = %pod_uid, verb = %verb))]
 async fn verb_handler(
     State(root): State<PathBuf>,
     Path((pod_uid, verb)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
+    agentctl_telemetry::set_parent(&tracing::Span::current(), &headers);
     if !matches!(verb.as_str(), "drain" | "lame-duck" | "cancel" | "status") {
         return (
             StatusCode::BAD_REQUEST,

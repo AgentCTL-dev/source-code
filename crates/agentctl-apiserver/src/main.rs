@@ -35,7 +35,6 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
-use tracing_subscriber::EnvFilter;
 
 mod metrics;
 mod na_client;
@@ -55,11 +54,9 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // fmt layer (honoring RUST_LOG, default info) + OTLP export when
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise byte-identical to before.
+    agentctl_telemetry::init("agentctl-apiserver");
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install ring crypto provider");
@@ -209,6 +206,7 @@ fn load_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>, String> {
 /// A management connect verb on an Agent. The connection is already front-proxy
 /// authenticated (rustls required a valid client cert), so we trust the
 /// `X-Remote-*` identity; we then `SubjectAccessReview` the verb before acting.
+#[tracing::instrument(skip_all, fields(ns = %ns, agent = %name, verb = %verb))]
 async fn handle_verb(
     State(state): State<AppState>,
     Path((ns, name, verb)): Path<(String, String, String)>,
@@ -361,10 +359,15 @@ async fn forward_to_node_agent(
         .find_map(|p| p.status.and_then(|s| s.pod_ip))
         .ok_or_else(|| format!("no running node-agent on node {node}"))?;
 
-    // mTLS control hop (RFC 0015): https on :8443, client-cert required.
+    // mTLS control hop (RFC 0015): https on :8443, client-cert required. Inject the
+    // W3C `traceparent` so the node-agent continues this trace (no-op when OTLP is
+    // off — nothing is added to the request).
     let url = format!("https://{na_ip}:8443/v1/agents/{pod_uid}/{verb}");
+    let mut trace_headers = reqwest::header::HeaderMap::new();
+    agentctl_telemetry::inject_context(&mut trace_headers);
     let resp = http
         .post(&url)
+        .headers(trace_headers)
         .send()
         .await
         .map_err(|e| format!("node-agent POST {url}: {e}"))?;

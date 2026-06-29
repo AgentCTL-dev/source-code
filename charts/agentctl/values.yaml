@@ -37,6 +37,24 @@ metrics:
     scrapeTimeout: 10s
     labels: {}                 # extra labels for Prometheus serviceMonitorSelector
 
+# Day-2 observability extras (both off by default so a stock install ships no
+# Grafana/Prometheus-Operator-coupled objects). Pair these with
+# metrics.serviceMonitor.enabled=true so the metrics they chart/alert on are scraped.
+observability:
+  dashboards:
+    # Render the Grafana dashboard ConfigMap (templates/dashboard.yaml), labeled
+    # grafana_dashboard: "1" for the Grafana sidecar's auto-discovery. No Grafana
+    # CRDs needed — it is a plain ConfigMap.
+    enabled: false
+  alerts:
+    # Render the PrometheusRule (templates/prometheusrule.yaml). Requires the
+    # Prometheus-Operator CRDs (monitoring.coreos.com/v1) to be installed.
+    enabled: false
+    # Extra labels stamped on the PrometheusRule so your Prometheus picks it up via
+    # its ruleSelector. kube-prometheus-stack selects on the release label, e.g.:
+    #   labels: { release: prometheus }
+    labels: {}
+
 # Namespace the control plane runs in. Helm cannot reliably own the namespace it
 # installs into (release storage needs it to pre-exist), so the chart does NOT
 # create it by default. Either `helm install --create-namespace`, or pre-create it

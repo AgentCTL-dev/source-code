@@ -39,7 +39,9 @@ tokio-postgres = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 serde_json.workspace = true
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Shared tracing init: fmt-only by default, OTLP export when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set.
+agentctl-telemetry = { path = "../agentctl-telemetry" }
 # Agent Card signing (JWS / EdDSA) + JWKS (RFC 0013). Both pure Rust — no C
 # toolchain (keep the gateway image dependency-free of a C compiler).
 ed25519-dalek = "2"

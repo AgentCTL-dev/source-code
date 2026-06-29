@@ -1,0 +1,75 @@
+{{/*
+`helm test` connectivity probe. Rendered as a Helm test hook (helm.sh/hook: test),
+so it is created only by `helm test <release>` — never on install/upgrade. The Pod
+exits non-zero (failing the test) if any enabled control-plane surface is
+unreachable:
+  - the A2A gateway's /healthz (HTTP 200), and
+  - the aggregated APIService management.agents.x-k8s.io/v1alpha1 — queried through
+    the kube-apiserver's discovery, which only succeeds once the APIService is
+    registered AND Available (the aggregator proxies to the agentctl apiserver).
+Uses curlimages/curl and the pod's own ServiceAccount token (discovery is granted
+to system:authenticated), so no extra RBAC is required.
+*/}}
+{{- $ns := include "agentctl.namespace" . }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agentctl-test-connection
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-test-connection
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  restartPolicy: Never
+  {{- include "agentctl.pullSecrets" . | nindent 2 }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100        # curlimages/curl's uid (its image USER is the non-numeric 'curl_user', which the kubelet can't verify against runAsNonRoot)
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: curlimages/curl:8.11.0
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -u
+          fail=0
+          SA=/var/run/secrets/kubernetes.io/serviceaccount
+          {{- if .Values.gateway.enabled }}
+          echo "[test] GET http://agentctl-gateway.{{ $ns }}.svc/healthz"
+          if curl -fsS --max-time 10 "http://agentctl-gateway.{{ $ns }}.svc/healthz" >/dev/null; then
+            echo "  OK gateway /healthz"
+          else
+            echo "  FAIL gateway /healthz unreachable"; fail=1
+          fi
+          {{- end }}
+          {{- if .Values.apiserver.enabled }}
+          echo "[test] discovery management.agents.x-k8s.io/v1alpha1 via kube-apiserver"
+          if curl -fsS --max-time 10 --cacert "$SA/ca.crt" \
+               -H "Authorization: Bearer $(cat $SA/token)" \
+               "https://kubernetes.default.svc/apis/management.agents.x-k8s.io/v1alpha1" >/dev/null; then
+            echo "  OK APIService registered and Available"
+          else
+            echo "  FAIL APIService not registered/Available"; fail=1
+          fi
+          {{- end }}
+          if [ "$fail" -ne 0 ]; then
+            echo "[test] FAILED"; exit 1
+          fi
+          echo "[test] all checks passed"

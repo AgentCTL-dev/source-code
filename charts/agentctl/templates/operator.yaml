@@ -44,6 +44,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # The kube Recorder emits via the modern events.k8s.io/v1 API group.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
   # Leader election (operator HA): contend for the coordination.k8s.io Lease
   # named "agentctl-operator" so only one replica runs the reconcile loop.
   - apiGroups: ["coordination.k8s.io"]

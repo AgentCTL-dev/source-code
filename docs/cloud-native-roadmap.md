@@ -74,7 +74,23 @@ Status: ✅ done · 🔜 next · ⬜ planned.
   evolution past v1alpha1 (L); operator wiring of `status.replicas`/`selector` for HPA read-back.
 - 🔜 Krew plugin manifest; CRD categories.
 
-## ⬜ Wave 5 — day-2 / docs
+## ✅ Wave 5 — observability + day-2 polish (done, verified on kind)
 
-- ⬜ values.schema.json; helm test hooks; Grafana dashboards + Prometheus alerts.
-- ⬜ Backup/restore (Postgres); upgrade/rollback runbook; SLOs.
+- ✅ **OTLP distributed tracing** (P1): a shared `agentctl-telemetry` crate wires an OTLP/gRPC
+  exporter (no TLS deps — stays rustls/ring) into all 6 binaries, **off unless
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set** (default = fmt-only, byte-identical). `#[instrument]`
+  on the key handlers + **W3C `traceparent` propagation** apiserver→node-agent. Verified all
+  services start healthy with it linked.
+- ✅ **Operator Kubernetes Events** (P1): a kube `Recorder` emits `Reconciled`/`RenderFailed`/
+  `ReconcileError` Events on Agent + AgentFleet reconcile (+ the `events.k8s.io` RBAC). Verified
+  a live `Normal Reconciled agent/mock "Deployment workload applied"` event.
+- ✅ **Grafana dashboard + PrometheusRule alerts** (P2): opt-in (`observability.dashboards/alerts.enabled`)
+  — dashboard ConfigMap (sidecar-discoverable) + alerts (no-leader, reconcile-errors, component-down,
+  deny-spike, budget-rejections).
+- ✅ **values.schema.json** (P2): validates the values shape; verified it rejects type errors.
+- ✅ **helm test hook** (P2): `helm test` connectivity probe (gateway `/healthz` + APIService
+  discovery) — verified Phase: Succeeded.
+- ✅ **Krew plugin manifest** (P2) for `kubectl agent`.
+- 🔜 Remaining polish: Postgres TLS (sslmode=require); PodSecurity namespace split; backup/restore
+  + upgrade/rollback runbook + SLOs; conversion webhook (multi-version); operator `status.replicas`
+  write-back for HPA read-back. (All P1/P2; none production-blocking.)
