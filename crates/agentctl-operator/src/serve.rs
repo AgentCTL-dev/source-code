@@ -6,9 +6,10 @@
 //!
 //! * `GET /healthz` — 200 while the process is alive (liveness). Served by every
 //!   replica, leader or standby, so the kubelet never kills a healthy standby.
-//! * `GET /readyz` — 200 once the manager is running AND this replica holds
-//!   leadership; 503 otherwise (a standby is intentionally un-ready, so a
-//!   fronting `Service` routes only to the active leader).
+//! * `GET /readyz` — 200 once the manager is up and participating in leader
+//!   election (NOT gated on holding leadership — standbys are Ready too, so a
+//!   RollingUpdate doesn't deadlock and HA standbys stay available). The active
+//!   leader is observable via the `agentctl_operator_leader` gauge.
 //! * `GET /metrics` — the Prometheus exposition from [`Metrics::render`], scraped
 //!   by the operator `ServiceMonitor`.
 //!
@@ -96,7 +97,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readyz_flips_with_leadership() {
+    async fn readyz_flips_with_manager_up_not_leadership() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt; // oneshot
@@ -104,7 +105,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let app = router(metrics.clone());
 
-        // standby (not ready) → 503
+        // manager not up yet → 503
         let res = app
             .clone()
             .oneshot(
@@ -117,9 +118,10 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        // leader + manager up → 200
+        // manager up but NOT leader (a standby) → still Ready (200): readiness is
+        // not gated on leadership (avoids RollingUpdate deadlock / un-Ready standbys).
         metrics.set_manager_up(true);
-        metrics.set_leader(true);
+        metrics.set_leader(false);
         let res = app
             .oneshot(
                 Request::builder()

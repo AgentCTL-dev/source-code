@@ -52,6 +52,20 @@ spec:
         app.kubernetes.io/name: agentctl-postgres
     spec:
       {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      # Run as the non-root postgres uid. fsGroup makes the mounted data dir
+      # (emptyDir or PVC) group-owned + group-writable by 999, so initdb can create
+      # PGDATA without a root chown. CAVEAT: the upstream postgres user is uid 999
+      # on the Debian image; the postgres:16-alpine image's built-in postgres user
+      # is uid 70. The official docker-entrypoint.sh supports running as an
+      # arbitrary non-root uid (it skips the gosu privilege-drop), and fsGroup makes
+      # the data dir writable, so initdb succeeds. If your image/initdb rejects an
+      # unknown uid ("user does not exist"), set this to 70 (the alpine postgres
+      # uid) — fsGroup keeps the data dir writable either way.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.postgres.bundled.runAsUser }}
+        runAsGroup: {{ .Values.postgres.bundled.runAsUser }}
+        fsGroup: {{ .Values.postgres.bundled.runAsUser }}
       containers:
         - name: postgres
           image: {{ .Values.postgres.bundled.image }}
@@ -73,6 +87,15 @@ spec:
             - { containerPort: 5432, name: postgres }
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
+          # Minimally privileged: no privilege escalation, no Linux capabilities,
+          # RuntimeDefault seccomp. (Root fs stays writable — postgres writes its
+          # socket/lock under /var/run/postgresql + /tmp; PGDATA is on the mount.)
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "agentctl", "-d", "agentctl"]

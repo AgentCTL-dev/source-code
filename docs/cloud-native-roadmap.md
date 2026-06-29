@@ -36,17 +36,26 @@ Status: ✅ done · 🔜 next · ⬜ planned.
 - 🔜 Dependency-aware readiness (P1): probes reflect real backing-store/dependency health.
 - 🔜 Grafana dashboard + Prometheus alert rules; release the Lease on SIGTERM for instant failover.
 
-## 🔜 Wave 3 — security hardening (P0/P1)
+## ✅ Wave 3 — security hardening (done, verified on kind)
 
-- 🔜 **Tenant agent pod securityContext** (P0): the operator renders agent pods with no
-  securityContext — harden the hostile multi-tenant data plane (runAsNonRoot, drop caps,
-  seccomp, readOnlyRootFilesystem) in `render.rs`.
-- 🔜 **node-agent minimal privilege** (P0): it runs root + hostPID + hostPath — drop all
-  caps it doesn't need, add seccompProfile, readOnlyRootFilesystem.
-- 🔜 ModelGateway secrets RBAC scoping (P1, currently cluster-wide get/list).
-- 🔜 NetworkPolicy completeness (P1): cover control plane + Postgres, parametrize namespaces.
-- 🔜 Postgres hardening (P1): securityContext, TLS (sslmode), non-default creds.
-- 🔜 PodSecurity: keep node-agent ns privileged; run the rest under `restricted`.
+- ✅ **Tenant agent pod securityContext** (P0): `render.rs` now confines every rendered
+  agent pod — `capabilities: drop [ALL]`, `allowPrivilegeEscalation: false`,
+  `readOnlyRootFilesystem: true` (+ writable `/tmp` emptyDir), pod `seccompProfile:
+  RuntimeDefault`. Verified: a re-rendered mock runs confined and the node-agent still
+  reads its socket. (`runAsNonRoot` is the documented follow-up — gated on substrate
+  socket-perms, RFC 0002.)
+- ✅ **node-agent minimal privilege** (P0): stays root + hostPID (needs it) but drops ALL
+  caps, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem` + seccomp RuntimeDefault.
+- ✅ **Postgres non-root** (P1): `runAsNonRoot` as the image's postgres uid (values knob,
+  default 70 for -alpine) + fsGroup; drop caps + seccomp. Verified `uid=70(postgres)`.
+- ✅ **NetworkPolicy completeness** (P1): parametrized namespaces + control-plane default-deny
+  with narrow allows + Postgres ingress-only (renders; enforcement needs a policy CNI).
+- ✅ **ModelGateway secrets RBAC** (P1): `secretsNamespaces` knob → namespaced Roles instead
+  of cluster-wide secrets get/list when set.
+- ✅ **Bonus fix:** operator leader-election readiness no longer gates on leadership (was
+  deadlocking RollingUpdate + leaving HA standbys un-Ready) — readiness = manager-up.
+- 🔜 PodSecurity: split so only node-agent's namespace is `privileged`, the rest `restricted`.
+- 🔜 Postgres TLS (sslmode=require) + externalized creds.
 
 ## ⬜ Wave 4 — API/CRD lifecycle (P0/P1)
 

@@ -46,10 +46,15 @@ async fn main() -> Result<(), kube::Error> {
 
     // Health/metrics server: bind first and on EVERY replica (leader or standby)
     // so the kubelet liveness probe is answered before — and regardless of —
-    // leadership. /readyz stays 503 until this replica is the leader.
+    // leadership. Mark the manager up now (participating in the election) so
+    // /readyz flips to 200 for standbys too: gating readiness on leadership would
+    // deadlock a RollingUpdate (the old leader holds the lease until it
+    // terminates, but won't terminate until the new pod is Ready). Who actually
+    // leads is observable via the agentctl_operator_leader gauge.
     let port = serve::port_from_env();
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     tokio::spawn(serve::serve(addr, metrics.clone()));
+    metrics.set_manager_up(true);
     info!(%addr, "serving /healthz, /readyz, /metrics");
 
     // Leader election (RFC 0006 — operator HA). Identity is the pod name (downward
@@ -73,8 +78,8 @@ async fn main() -> Result<(), kube::Error> {
     )
     .await;
 
-    // Leader: the manager is now coming up → /readyz can flip to 200.
-    metrics.set_manager_up(true);
+    // Won the lease: run the controllers (set_leader is handled inside lease::run +
+    // the renewer; manager_up was already set above so /readyz was 200 while standby).
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),

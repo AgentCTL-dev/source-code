@@ -1,33 +1,196 @@
 {{- if .Values.networkPolicies.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
-# Defence-in-depth network isolation for the data plane (RFC 0015). These make
-# the "networkless agent" claim real: an agent pod may egress ONLY to the on-node
-# bridge (node-agent), the A2A gateway, and the ModelGateway — never the internet
-# or other tenants. NOTE: enforced only by a NetworkPolicy-capable CNI
-# (Calico/Cilium); kind's default kindnet does NOT enforce these (they are inert
-# but correct, and enforce on a real cluster).
+{{- $agentNamespaces := .Values.networkPolicies.agentNamespaces | default (list "default") }}
+# Defence-in-depth network isolation (RFC 0015). Two scopes:
+#   1. Control plane (release namespace {{ $ns }}): a namespace-wide
+#      default-deny-ingress + narrow allows for the sanctioned flows.
+#   2. Data plane (each of .Values.networkPolicies.agentNamespaces): agent pods
+#      get a default-deny + sanctioned egress (DNS + control plane) and ingress
+#      (control plane only) — making the "networkless agent" claim real.
+# NOTE: enforced ONLY by a NetworkPolicy-capable CNI (Calico/Cilium). kind's
+# default kindnet does NOT enforce these — they render correctly but are inert
+# there, and take effect on a real policy cluster.
+# -----------------------------------------------------------------------------
+# Control plane: deny all ingress to every pod in the control-plane namespace by
+# default; the allow policies below re-open only the sanctioned ports.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: agent-default-deny
-  namespace: default
+  name: agentctl-controlplane-default-deny-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+{{- if .Values.apiserver.enabled }}
+---
+# Aggregated apiserver: the kube-aggregator (kube-apiserver) proxies management
+# API calls to :6443. The aggregator runs on the host network, so its source
+# cannot be pinned by a pod/namespace selector — allow the port from any source.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-apiserver-ingress
+  namespace: {{ $ns }}
   labels:
     {{- include "agentctl.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
+      app.kubernetes.io/name: agentctl-apiserver
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 6443 }
+{{- end }}
+{{- if .Values.admission.enabled }}
+---
+# Validating webhook: invoked by the kube-apiserver (host network) on :8443 —
+# allow the serving port from any source.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-admission-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-admission
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8443 }
+{{- end }}
+{{- if .Values.gateway.enabled }}
+---
+# A2A gateway: the mesh entry point (external clients + agents) on :8080. Allow
+# the HTTP port from any source; front it with an ingress controller / LB in prod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-gateway-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-gateway
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}
+---
+# node-agent control API (mTLS, RFC 0015) on :8443 — reached only by the apiserver
+# and gateway (management-verb routing), both in the control-plane namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-node-agent-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-node-agent
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentctl-apiserver
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentctl-gateway
+      ports:
+        - { protocol: TCP, port: 8443 }
+{{- if .Values.modelgateway.enabled }}
+---
+# ModelGateway: the inference proxy on :8080, reached by agent pods in the tenant
+# namespaces (agents hold no provider credential; the proxy injects it).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-modelgateway-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-modelgateway
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range $agentNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}
+{{- if eq .Values.postgres.mode "bundled" }}
+---
+# Postgres (durable task / usage store): reached only by the gateway + modelgateway
+# (both in the control-plane namespace) on :5432.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-postgres-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentctl-gateway
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentctl-modelgateway
+      ports:
+        - { protocol: TCP, port: 5432 }
+{{- end }}
+# -----------------------------------------------------------------------------
+# Data plane: per-tenant-namespace agent isolation. These make the "networkless
+# agent" claim real: an agent pod may egress ONLY to DNS and the on-node bridge
+# (node-agent), the A2A gateway, and the ModelGateway — never the internet or
+# other tenants — and accepts ingress only from the control plane.
+{{- range $agentNs := $agentNamespaces }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-default-deny
+  namespace: {{ $agentNs }}
+  labels:
+    {{- include "agentctl.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
       app.kubernetes.io/name: agent
   policyTypes: ["Ingress", "Egress"]
-  # Empty ingress/egress = deny all by default; the allow policy below re-opens
+  # Empty ingress/egress = deny all by default; the allow policies below re-open
   # only the sanctioned flows.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: agent-allow-controlplane-and-dns
-  namespace: default
+  namespace: {{ $agentNs }}
   labels:
-    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- include "agentctl.labels" $ | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
@@ -55,9 +218,9 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: agent-ingress-controlplane-only
-  namespace: default
+  namespace: {{ $agentNs }}
   labels:
-    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- include "agentctl.labels" $ | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
@@ -68,4 +231,5 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ns }}
+{{- end }}
 {{- end }}

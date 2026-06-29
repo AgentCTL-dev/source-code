@@ -1,9 +1,13 @@
 {{- if .Values.modelgateway.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
+{{- $secretsNs := .Values.modelgateway.secretsNamespaces | default (list) }}
 # RBAC for the ModelGateway: read ModelPool CRs and the provider-credential
 # Secrets they reference (the credentials the control plane injects so agents
-# never hold them). Secrets access is cluster-wide here for the dev MVP — a real
-# deployment scopes it to the pools' namespaces.
+# never hold them). ModelPool access is cluster-wide. Secrets access defaults to
+# cluster-wide (modelgateway.secretsNamespaces empty) for the dev MVP — a large
+# credential blast radius. RECOMMENDED: set modelgateway.secretsNamespaces to the
+# namespaces holding the credential Secrets; the chart then drops the cluster-wide
+# secrets rule and instead binds a namespaced Role (secrets get/list) per namespace.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -37,9 +41,13 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["modelpools/status"]
     verbs: ["get", "update", "patch"]
+  {{- if not $secretsNs }}
+  # No secretsNamespaces set -> cluster-wide secrets read (dev default). Scope it
+  # via modelgateway.secretsNamespaces to render namespaced Roles instead.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -59,6 +67,46 @@ subjects:
   - kind: ServiceAccount
     name: agentctl-modelgateway
     namespace: {{ $ns }}
+{{- range $secretsNs }}
+---
+# Scoped credential read: secrets get/list confined to {{ . }} (instead of the
+# cluster-wide rule above). One Role+RoleBinding per modelgateway.secretsNamespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentctl-modelgateway-secrets
+  namespace: {{ . }}
+  labels:
+    app.kubernetes.io/name: agentctl-modelgateway
+    {{- include "agentctl.labels" $ | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentctl-modelgateway-secrets
+  namespace: {{ . }}
+  labels:
+    app.kubernetes.io/name: agentctl-modelgateway
+    {{- include "agentctl.labels" $ | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentctl-modelgateway-secrets
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-modelgateway
+    namespace: {{ $ns }}
+{{- end }}
 ---
 # The ModelGateway (RFC 0012): the intelligence plane's credential-injecting,
 # token-metering, budget-enforcing inference proxy. Agents reach it WITHOUT any

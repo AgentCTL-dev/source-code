@@ -57,6 +57,14 @@ spec:
       {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "nodeAgent")) }}
       {{- . | nindent 6 }}
       {{- end }}
+      # Pod-level hardening: RuntimeDefault seccomp for every container. The bridge
+      # MUST stay root + hostPID + hostPath (RFC 0008: it reads root-owned per-pod
+      # sockets and attests peers via /proc), so runAsUser stays 0 — but it is
+      # otherwise stripped to the floor (no caps, no privilege escalation, read-only
+      # root fs) below.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: node-agent
           image: {{ include "agentctl.image" (dict "root" $ "component" "node-agent") }}
@@ -74,14 +82,25 @@ spec:
           {{- end }}
           securityContext:
             # Host-side bridge: reads per-pod sockets the kubelet creates on the
-            # hostPath (root-owned). Production tightens this (RFC 0008/0015).
+            # hostPath (root-owned), so it runs as root (RFC 0008/0015). It needs
+            # NO Linux capabilities beyond default root file access — drop ALL —
+            # and is otherwise minimally privileged: no privilege escalation and a
+            # read-only root filesystem (writable scratch is the /tmp emptyDir).
             runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: sockets
               mountPath: /run/agentctl/sockets
             - name: tls
               mountPath: /etc/agentctl-node-agent/tls
               readOnly: true
+            # Writable scratch: readOnlyRootFilesystem makes / read-only, so give
+            # the process a tmpfs-backed /tmp to work in.
+            - name: tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
       volumes:
@@ -92,3 +111,6 @@ spec:
         - name: tls
           secret:
             secretName: agentctl-node-agent-tls
+        # Writable scratch for the read-only-rootfs container.
+        - name: tmp
+          emptyDir: {}

@@ -100,11 +100,14 @@ impl Metrics {
         self.manager_up.store(up, Ordering::Relaxed);
     }
 
-    /// Readiness: the manager is running AND this replica holds leadership. A
-    /// standby (non-leader) replica is deliberately *not* ready, so a `Service`
-    /// fronting the operator only routes to the active leader.
+    /// Readiness: the manager is up and participating in leader election —
+    /// NOT gated on holding leadership. Standbys are Ready too: gating readiness
+    /// on leadership deadlocks a RollingUpdate (the old leader holds the lease
+    /// until it terminates, but it won't terminate until the new pod is Ready)
+    /// and would leave standbys un-Ready in an HA (>1 replica) deployment.
+    /// Who is actually leading is observable via the `agentctl_operator_leader` gauge.
     pub fn is_ready(&self) -> bool {
-        self.manager_up.load(Ordering::Relaxed) && self.is_leader()
+        self.manager_up.load(Ordering::Relaxed)
     }
 
     /// Render the current state as a Prometheus text exposition
@@ -211,13 +214,16 @@ mod tests {
     #[test]
     fn leader_gauge_and_readiness_track_state() {
         let m = Metrics::new();
-        assert!(!m.is_ready()); // neither up nor leader
+        assert!(!m.is_ready()); // manager not up yet
         m.set_manager_up(true);
-        assert!(!m.is_ready()); // up but not leader → still not ready
+        // Readiness tracks manager-up, NOT leadership: a standby (up, not leader)
+        // is Ready so RollingUpdate doesn't deadlock and HA standbys stay available.
+        assert!(m.is_ready());
         m.set_leader(true);
-        assert!(m.is_ready()); // up AND leader → ready
-        assert!(m.render().contains("agentctl_operator_leader 1"));
+        assert!(m.is_ready());
+        assert!(m.render().contains("agentctl_operator_leader 1")); // leader gauge tracks leadership
         m.set_leader(false);
-        assert!(!m.is_ready());
+        assert!(m.render().contains("agentctl_operator_leader 0"));
+        assert!(m.is_ready()); // still Ready (still participating)
     }
 }

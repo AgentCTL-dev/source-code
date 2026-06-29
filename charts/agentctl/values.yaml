@@ -62,6 +62,10 @@ postgres:
   mode: bundled               # bundled | external
   bundled:
     image: postgres:16-alpine
+    # Non-root uid the Postgres container runs as (runAsUser/Group + fsGroup). 70 is
+    # the postgres user in the -alpine image; the Debian postgres image uses 999 —
+    # set this to match your image if you override it.
+    runAsUser: 70
     storage: emptyDir         # emptyDir (eval) | pvc
     pvcSize: 5Gi
     storageClassName: ""      # pvc only; empty = cluster default StorageClass
@@ -194,6 +198,13 @@ modelgateway:
   enabled: true
   replicas: 1
   logLevel: info               # -> RUST_LOG
+  # Namespaces the ModelGateway may read provider-credential Secrets in (the
+  # credentials it injects so agents never hold them). Empty = a cluster-wide
+  # secrets get/list ClusterRole (back-compat dev default; broad blast radius).
+  # RECOMMENDED for production: list the namespaces that hold the ModelPool
+  # credential Secrets — the chart then drops the cluster-wide secrets rule and
+  # renders a namespaced Role + RoleBinding (secrets get/list) in each instead.
+  secretsNamespaces: []
   # Inference proxy: small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }
@@ -249,8 +260,20 @@ admission:
     targetCPUUtilizationPercentage: 80
 
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
+# When enabled the chart renders: (a) control-plane policies in the release
+# namespace — a namespace-wide default-deny-ingress plus narrow allows for the
+# sanctioned flows (aggregator->apiserver, webhook->admission, A2A ingress->gateway,
+# apiserver/gateway->node-agent control API, agents->modelgateway, gateway+
+# modelgateway->postgres); and (b) per-agent-namespace data-plane policies
+# (default-deny + sanctioned egress/ingress) for each entry in agentNamespaces.
 networkPolicies:
   enabled: false
+  # Namespaces where tenant/agent (data-plane) pods run. Each listed namespace
+  # gets the agent default-deny + sanctioned egress (DNS + control plane) + ingress
+  # (control-plane only) policies. Defaults to [default] to match the bundled
+  # examples; set to your tenant namespaces in a real multi-tenant install.
+  agentNamespaces:
+    - default
 
 # Substrate: the on-node socket root the node-agent watches + the operator wires.
 substrate:

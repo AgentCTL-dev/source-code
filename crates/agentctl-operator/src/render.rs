@@ -18,8 +18,9 @@ use agent_api::{Agent, AgentFleet, AgentSpec, Mode, ScaleMode, Substrate};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EnvVarSource, HostPathVolumeSource, ObjectFieldSelector, PodSpec,
-    PodTemplateSpec, Volume, VolumeMount,
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, HostPathVolumeSource,
+    ObjectFieldSelector, PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 
@@ -32,6 +33,14 @@ const SOCKET_HOSTPATH_ROOT: &str = "/run/agentctl/sockets";
 /// In-pod mount point where the agent binds its management socket.
 const SOCKET_MOUNT: &str = "/run/agent";
 const SOCKET_VOLUME: &str = "agentctl-sockets";
+
+/// Writable scratch dir mounted over the read-only root filesystem. With
+/// `readOnlyRootFilesystem: true` (see `container_security_context`) the
+/// container cannot write to `/`, so the agent's temp scratch needs an explicit
+/// writable `emptyDir` here. The management socket dir (`SOCKET_MOUNT`) is a
+/// separate mounted volume and stays writable on its own.
+const TMP_MOUNT: &str = "/tmp";
+const TMP_VOLUME: &str = "tmp";
 
 /// What the renderer produced. Boxed to keep the enum small (clippy).
 #[derive(Debug, Clone, PartialEq)]
@@ -261,15 +270,27 @@ fn pod_template(
         image: Some(image.to_string()),
         args: Some(agent_args(spec)),
         env: Some(downward_env()),
-        volume_mounts: Some(vec![VolumeMount {
-            name: SOCKET_VOLUME.to_string(),
-            mount_path: SOCKET_MOUNT.to_string(),
-            // Per RFC 0002 §6.1: the per-pod subdir is selected by the pod UID
-            // via subPathExpr, so the path is unique WITHOUT the operator
-            // knowing the UID at render time.
-            sub_path_expr: Some("$(AGENT_POD_UID)".to_string()),
-            ..Default::default()
-        }]),
+        // Confine the tenant container (hostile multi-tenancy P0).
+        security_context: Some(container_security_context()),
+        volume_mounts: Some(vec![
+            VolumeMount {
+                name: SOCKET_VOLUME.to_string(),
+                mount_path: SOCKET_MOUNT.to_string(),
+                // Per RFC 0002 §6.1: the per-pod subdir is selected by the pod UID
+                // via subPathExpr, so the path is unique WITHOUT the operator
+                // knowing the UID at render time. NOT marked readOnly: the agent
+                // binds its management socket here.
+                sub_path_expr: Some("$(AGENT_POD_UID)".to_string()),
+                ..Default::default()
+            },
+            // Writable scratch: `readOnlyRootFilesystem` makes `/` read-only, so
+            // give the agent an explicit writable `/tmp`.
+            VolumeMount {
+                name: TMP_VOLUME.to_string(),
+                mount_path: TMP_MOUNT.to_string(),
+                ..Default::default()
+            },
+        ]),
         ..Default::default()
     };
 
@@ -281,16 +302,63 @@ fn pod_template(
         spec: Some(PodSpec {
             containers: vec![container],
             restart_policy,
-            volumes: Some(vec![Volume {
-                name: SOCKET_VOLUME.to_string(),
-                host_path: Some(HostPathVolumeSource {
-                    path: SOCKET_HOSTPATH_ROOT.to_string(),
-                    type_: Some("DirectoryOrCreate".to_string()),
-                }),
-                ..Default::default()
-            }]),
+            // Pod-level hardening (hostile multi-tenancy P0).
+            security_context: Some(pod_security_context()),
+            volumes: Some(vec![
+                Volume {
+                    name: SOCKET_VOLUME.to_string(),
+                    host_path: Some(HostPathVolumeSource {
+                        path: SOCKET_HOSTPATH_ROOT.to_string(),
+                        type_: Some("DirectoryOrCreate".to_string()),
+                    }),
+                    ..Default::default()
+                },
+                // Backs the writable `/tmp` mount above.
+                Volume {
+                    name: TMP_VOLUME.to_string(),
+                    empty_dir: Some(EmptyDirVolumeSource::default()),
+                    ..Default::default()
+                },
+            ]),
             ..Default::default()
         }),
+    }
+}
+
+/// Container-level confinement for the tenant agent (hostile multi-tenancy P0):
+/// block privilege escalation, drop all Linux capabilities, and make the root
+/// filesystem read-only (writable paths are explicit volumes — see `/tmp` and
+/// the management socket mount).
+///
+/// NOTE: `runAsNonRoot`/`runAsUser` are deliberately NOT set here. On the
+/// stock-unix substrate the agent binds its management socket into a hostPath
+/// `subPath` dir the kubelet creates `root:root`, so a nonroot UID could not
+/// write it and the socket bind would fail. Forcing nonroot is a FOLLOW-UP
+/// gated on substrate socket-perms (RFC 0002 §6.1). When that lands, a
+/// user-supplied Agent-spec securityContext override should win.
+fn container_security_context() -> SecurityContext {
+    SecurityContext {
+        allow_privilege_escalation: Some(false),
+        read_only_root_filesystem: Some(true),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".to_string()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Pod-level confinement: pin the seccomp profile to the runtime default so the
+/// kernel syscall surface is filtered for every container in the pod. As with
+/// the container context, `runAsNonRoot` is intentionally left unset (see
+/// `container_security_context`).
+fn pod_security_context() -> PodSecurityContext {
+    PodSecurityContext {
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
     }
 }
 
@@ -491,6 +559,71 @@ mod tests {
         );
         let serve = env.iter().find(|e| e.name == "AGENT_SERVE_MCP").unwrap();
         assert_eq!(serve.value.as_deref(), Some("unix:/run/agent/mgmt.sock"));
+    }
+
+    #[test]
+    fn rendered_pod_is_confined() {
+        // Hardening must apply to every rendered workload; exercise the Job path
+        // (all kinds share `pod_template`).
+        let r = render_agent(&agent(Mode::Once)).unwrap();
+        let Rendered::Job(job) = r else {
+            unreachable!()
+        };
+        let pod = job.spec.unwrap().template;
+        let podspec = pod.spec.as_ref().unwrap();
+
+        // Pod-level: seccomp pinned to the runtime default.
+        let psc = podspec
+            .security_context
+            .as_ref()
+            .expect("pod securityContext present");
+        assert_eq!(
+            psc.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
+        // runAsNonRoot is a follow-up (RFC 0002 socket-perms) — must NOT be forced
+        // yet or the stock-unix mgmt-socket bind breaks.
+        assert_eq!(psc.run_as_non_root, None);
+        assert_eq!(psc.run_as_user, None);
+
+        // Container-level: no priv-esc, drop ALL caps, read-only root fs.
+        let c = container_of(&pod);
+        let sc = c
+            .security_context
+            .as_ref()
+            .expect("container securityContext present");
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(sc.read_only_root_filesystem, Some(true));
+        assert_eq!(
+            sc.capabilities.as_ref().unwrap().drop.as_deref(),
+            Some(["ALL".to_string()].as_slice())
+        );
+        assert_eq!(sc.run_as_non_root, None);
+        assert_eq!(sc.run_as_user, None);
+
+        // Writable /tmp emptyDir backs the read-only root filesystem.
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let tmp_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/tmp")
+            .expect("/tmp mount present");
+        assert_eq!(tmp_mount.name, "tmp");
+        // /tmp mount is writable (readOnly not set).
+        assert_ne!(tmp_mount.read_only, Some(true));
+
+        let volumes = podspec.volumes.as_ref().unwrap();
+        let tmp_vol = volumes
+            .iter()
+            .find(|v| v.name == "tmp")
+            .expect("tmp volume present");
+        assert!(tmp_vol.empty_dir.is_some(), "tmp volume is an emptyDir");
+
+        // The management socket mount stays writable (the agent binds there).
+        let sock_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/run/agent")
+            .expect("socket mount present");
+        assert_ne!(sock_mount.read_only, Some(true));
     }
 
     #[test]
