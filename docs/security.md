@@ -424,6 +424,16 @@ pinning close the loop at deploy.
   operations.md §1.
 - [x] **Coordination HA/durability, opt-in** — `coordination.store=postgres` backs the claim queue
   with the durable Postgres store (shared across replicas), so `coordination.replicas` can be raised
-  for HA. Default `store=memory` stays single-replica/in-process.
-- [ ] NetworkPolicy enforcement — needs Calico/Cilium (kindnet ignores).
-- [ ] coordination/scaler stronger-than-token (attested) auth.
+  for HA. Default `store=memory` stays single-replica/in-process. **Load-tested** at 2 replicas:
+  72 concurrent claims across 12 items → exactly 12 grants, zero double-grants (the atomic
+  conditional-UPSERT grant-one holds under cross-replica contention); state also survives a pod
+  restart (durability).
+- [x] **NetworkPolicy enforcement** — `networkPolicies.enabled` ships a default-deny + narrow
+  allow-list (control plane + per agent namespace). Enforcement requires a policy CNI (kindnet
+  ignores NetworkPolicies); **verified under Calico**: control-plane default-deny holds,
+  Postgres/node-agent ingress allow-lists enforce by pod label, the ModelGateway
+  `namespaceSelector` restricts to the tenant namespace, and agent egress is limited to DNS +
+  the gateway/ModelGateway pods (cross-tenant + wrong-port + admission-webhook traffic dropped).
+- [ ] coordination/scaler stronger-than-token (attested) auth — the `AGENTCTL_API_TOKEN` bearer
+  is a coarse in-cluster gate; per-caller source-IP/pod attestation (as on the ModelGateway) or
+  mTLS is the follow-up.
