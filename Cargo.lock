@@ -77,6 +77,8 @@ dependencies = [
  "agentctl-telemetry",
  "axum",
  "deadpool-postgres",
+ "k8s-openapi",
+ "kube",
  "rustls",
  "serde_json",
  "tokio",

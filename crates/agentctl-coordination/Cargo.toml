@@ -18,6 +18,11 @@ axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 serde_json.workspace = true
 tracing = "0.1"
+# OPT-IN attested identity (COORDINATION_ATTEST_IDENTITY, RFC 0015): resolve the
+# caller's source IP → pod → identity to bind/verify the lease holder. SAME feature
+# set the modelgateway uses — rustls/ring, NO openssl/aws-lc, no C toolchain.
+kube = { version = "4", default-features = false, features = ["client", "rustls-tls", "ring"] }
+k8s-openapi = { version = "0.28", features = ["latest"] }
 # Durable, HA-capable claim store (the optional Postgres backend behind the
 # ClaimStore trait — chosen at startup by COORDINATION_DATABASE_URL/DATABASE_URL;
 # absent ⇒ the in-memory default). Same stack the gateway/modelgateway use:

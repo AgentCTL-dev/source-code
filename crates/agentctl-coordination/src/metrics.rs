@@ -24,6 +24,8 @@ pub struct Metrics {
     released: AtomicU64,
     expired: AtomicU64,
     auth_rejected: AtomicU64,
+    attest_ok: AtomicU64,
+    attest_reject: AtomicU64,
 }
 
 impl Metrics {
@@ -40,6 +42,8 @@ impl Metrics {
             released: AtomicU64::new(0),
             expired: AtomicU64::new(0),
             auth_rejected: AtomicU64::new(0),
+            attest_ok: AtomicU64::new(0),
+            attest_reject: AtomicU64::new(0),
         }
     }
 
@@ -78,6 +82,17 @@ impl Metrics {
     /// A request to a data endpoint was rejected (401) by the bearer-token gate.
     pub fn inc_auth_rejected(&self) {
         self.auth_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A claim-lifecycle call's caller was successfully attested (source IP resolved
+    /// to a pod identity) and allowed to proceed (RFC 0015 attested mode).
+    pub fn inc_attest_ok(&self) {
+        self.attest_ok.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A claim-lifecycle call was rejected by attestation: the source IP could not
+    /// be attested (fail closed) OR the attested caller is not the lease holder
+    /// (a tenant tried to settle/steal another tenant's lease).
+    pub fn inc_attest_reject(&self) {
+        self.attest_reject.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render the Prometheus exposition body. `pending`/`claimed` are the live
@@ -144,6 +159,18 @@ impl Metrics {
             "Requests to data endpoints rejected (401) by the bearer-token gate.",
             self.auth_rejected.load(Ordering::Relaxed),
         );
+        counter(
+            &mut out,
+            "agentctl_coordination_attest_ok_total",
+            "Claim-lifecycle calls whose caller was attested and allowed (RFC 0015).",
+            self.attest_ok.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_coordination_attest_reject_total",
+            "Claim-lifecycle calls rejected by attestation (unattestable caller or holder mismatch).",
+            self.attest_reject.load(Ordering::Relaxed),
+        );
         gauge(
             &mut out,
             "agentctl_coordination_pending",
@@ -206,6 +233,10 @@ mod tests {
         m.add_expired(3);
         m.inc_auth_rejected();
         m.inc_auth_rejected();
+        m.inc_attest_ok();
+        m.inc_attest_ok();
+        m.inc_attest_ok();
+        m.inc_attest_reject();
         let body = m.render(5, 2);
 
         assert!(body.contains("# TYPE agentctl_coordination_claims_granted_total counter"));
@@ -219,6 +250,10 @@ mod tests {
         assert!(body.contains("agentctl_coordination_expired_total 3"));
         assert!(body.contains("# TYPE agentctl_coordination_auth_rejected_total counter"));
         assert!(body.contains("agentctl_coordination_auth_rejected_total 2"));
+        assert!(body.contains("# TYPE agentctl_coordination_attest_ok_total counter"));
+        assert!(body.contains("agentctl_coordination_attest_ok_total 3"));
+        assert!(body.contains("# TYPE agentctl_coordination_attest_reject_total counter"));
+        assert!(body.contains("agentctl_coordination_attest_reject_total 1"));
         assert!(body.contains("# TYPE agentctl_coordination_pending gauge"));
         assert!(body.contains("agentctl_coordination_pending 5"));
         assert!(body.contains("agentctl_coordination_claimed 2"));

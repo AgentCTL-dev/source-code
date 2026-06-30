@@ -1,8 +1,11 @@
 {{- $ns := include "agentctl.namespace" . }}
 {{- if .Values.coordination.enabled }}
-# ServiceAccount for the claim-mode coordination server. No RBAC: it holds the
-# claim queue in memory (or in Postgres when coordination.store=postgres) and never
-# reads cluster state.
+# ServiceAccount for the claim-mode coordination server. By default it holds NO
+# cluster RBAC: it keeps the claim queue in memory (or in Postgres when
+# coordination.store=postgres) and never reads cluster state. When
+# coordination.attestIdentity is set it additionally gets cluster-wide pods
+# get/list (the ClusterRole below) so it can resolve a caller's source IP to the
+# owning pod and bind claim ownership to that attested identity.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -18,6 +21,47 @@ metadata:
     {{- with (include "agentctl.commonLabels" $) }}
     {{- . | nindent 4 }}
     {{- end }}
+{{- if .Values.coordination.attestIdentity }}
+---
+# Source-IP identity attestation (coordination.attestIdentity): the coordination
+# server resolves the caller's source IP to the owning pod (a kube pods lookup on
+# status.podIP) to bind work-claim ownership to an attested identity, so a tenant
+# cannot ack/release another tenant's claim. Needs cluster-wide pods get/list.
+# Rendered ONLY when the toggle is on (default off -> no RBAC, today's output).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-coordination
+  labels:
+    app.kubernetes.io/name: agentctl-coordination
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-coordination
+  labels:
+    app.kubernetes.io/name: agentctl-coordination
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-coordination
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-coordination
+    namespace: {{ $ns }}
+{{- end }}
 ---
 # The claim-mode coordination server: an HTTP/MCP service that hands out work
 # claims to AgentFleet replicas (pull/claim work source). The default store=memory
@@ -82,6 +126,22 @@ spec:
             # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
             {{- . | nindent 12 }}
             {{- end }}
+            {{- end }}
+            {{- if .Values.coordination.attestIdentity }}
+            # Source-IP identity attestation (coordination.attestIdentity): bind
+            # work-claim ownership to the caller's attested identity (source IP ->
+            # owning pod via a kube pods lookup) instead of trusting self-asserted
+            # claim metadata, so a tenant cannot ack/release another tenant's claim.
+            # Needs the pods get/list ClusterRole (rendered alongside this). Default
+            # off renders no env (today's behaviour).
+            - name: COORDINATION_ATTEST_IDENTITY
+              value: "true"
+            # Downward API: the coordination server's own namespace, anchoring the
+            # pod lookup. Rendered only with attestIdentity.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- end }}
             {{- if .Values.apiToken.enabled }}
             # In-cluster bearer-token gate (apiToken.enabled): require

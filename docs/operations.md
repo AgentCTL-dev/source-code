@@ -262,6 +262,24 @@ safe to scale `coordination.replicas` for HA. Pair with `postgres.bundled.tls.ve
 to CA-pin the hop, and `metrics.serviceMonitor.enabled=true` to scrape the coordination
 `/metrics` (the chart already renders an `agentctl-coordination` ServiceMonitor).
 
+**Attested claim ownership (anti-cross-tenant).** By default any in-cluster caller (holding
+the `AGENTCTL_API_TOKEN` when `apiToken.enabled`) can ack/release any claim. Set
+`coordination.attestIdentity=true` to bind claim ownership to the caller's
+**source-IP-attested** identity (the server resolves the source IP to the owning pod via a
+kube `pods` lookup), so a tenant cannot ack/release another tenant's claim:
+
+```sh
+helm upgrade --install agentctl charts/agentctl \
+  --set coordination.enabled=true \
+  --set coordination.attestIdentity=true
+```
+
+This renders an `agentctl-coordination` ClusterRole + ClusterRoleBinding (cluster-wide `pods`
+get/list — the coordination server has no cluster RBAC otherwise) and sets
+`COORDINATION_ATTEST_IDENTITY=true` + `POD_NAMESPACE` (downward API) on the Deployment.
+Default off renders no RBAC and no env. See security.md ("Attested claim ownership
+(coordination)").
+
 ### KEDA autoscaler (claim-depth scaling)
 
 The **KEDA external scaler** closes the claim-mode loop: it reads `work.stats` off

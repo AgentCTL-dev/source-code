@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use deadpool_postgres::{Manager, Pool};
 
-use crate::store::{ClaimResult, ClaimStore, Stats, SubmitOutcome};
+use crate::store::{holder_mismatch_error, ClaimResult, ClaimStore, Stats, SubmitOutcome};
 
 /// Pool size — mirrors the gateway/modelgateway stores.
 const POOL_MAX_SIZE: usize = 8;
@@ -222,23 +222,41 @@ impl ClaimStore for PgClaimStore {
         }
     }
 
-    fn renew(&self, lease_id: &str, ttl_ms: u64) -> Result<(), String> {
+    fn renew(
+        &self,
+        lease_id: &str,
+        ttl_ms: u64,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String> {
         let lease_id = lease_id.to_string();
+        let expected = expected_holder.map(str::to_string);
         let pool = self.pool.clone();
-        self.block(async move { db_renew(&pool, &lease_id, ttl_ms).await })
+        self.block(async move { db_renew(&pool, &lease_id, ttl_ms, expected.as_deref()).await })
     }
 
-    fn ack(&self, lease_id: &str, claim_key: &str) -> Result<(), String> {
+    fn ack(
+        &self,
+        lease_id: &str,
+        claim_key: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String> {
         let lease_id = lease_id.to_string();
         let claim_key = claim_key.to_string();
+        let expected = expected_holder.map(str::to_string);
         let pool = self.pool.clone();
-        self.block(async move { db_ack(&pool, &lease_id, &claim_key).await })
+        self.block(async move { db_ack(&pool, &lease_id, &claim_key, expected.as_deref()).await })
     }
 
-    fn release(&self, lease_id: &str, _reason: &str) -> Result<(), String> {
+    fn release(
+        &self,
+        lease_id: &str,
+        _reason: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String> {
         let lease_id = lease_id.to_string();
+        let expected = expected_holder.map(str::to_string);
         let pool = self.pool.clone();
-        self.block(async move { db_release(&pool, &lease_id).await })
+        self.block(async move { db_release(&pool, &lease_id, expected.as_deref()).await })
     }
 
     fn sweep_expired(&self) -> usize {
@@ -454,8 +472,18 @@ async fn db_claim(
 }
 
 /// `work.renew` → extend a LIVE, owned lease. Never resurrects an expired lease
-/// (the `expires_at > now()` guard). 0 rows ⇒ unknown/expired ⇒ Err.
-async fn db_renew(pool: &Pool, lease_id: &str, ttl_ms: u64) -> Result<(), String> {
+/// (the `expires_at > now()` guard). The `($3::text IS NULL OR holder = $3)`
+/// predicate is the attested-identity gate (RFC 0015): `NULL` ⇒ unconstrained
+/// (attest off); otherwise the UPDATE matches ONLY when the recorded holder equals
+/// the attested caller — atomic, so a tenant cannot renew another's lease. 0 rows
+/// ⇒ unknown/expired, or (when gated) a holder mismatch — distinguished by a
+/// read-back so the wire layer can report a 403-style reject.
+async fn db_renew(
+    pool: &Pool,
+    lease_id: &str,
+    ttl_ms: u64,
+    expected_holder: Option<&str>,
+) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let ttl = i64::try_from(ttl_ms).unwrap_or(i64::MAX);
     let n = client
@@ -463,64 +491,114 @@ async fn db_renew(pool: &Pool, lease_id: &str, ttl_ms: u64) -> Result<(), String
             "UPDATE work_items
                 SET expires_at = now() + ($2::bigint * interval '1 millisecond'),
                     updated_at = now()
-              WHERE lease_id = $1 AND status = 'claimed' AND expires_at > now()",
-            &[&lease_id, &ttl],
+              WHERE lease_id = $1 AND status = 'claimed' AND expires_at > now()
+                AND ($3::text IS NULL OR holder = $3)",
+            &[&lease_id, &ttl, &expected_holder],
         )
         .await
         .map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err(format!("unknown or expired lease_id: {lease_id}"));
+    if n > 0 {
+        return Ok(());
     }
-    Ok(())
+    // Gated + a LIVE lease with this id still exists ⇒ the predicate rejected a
+    // wrong holder (mismatch), not an unknown/expired lease.
+    if expected_holder.is_some() && lease_is_live(&client, lease_id).await? {
+        return Err(holder_mismatch_error(lease_id));
+    }
+    Err(format!("unknown or expired lease_id: {lease_id}"))
 }
 
 /// `work.ack` → settle the lease and record its `claim_key` as the acked tombstone
-/// (status='acked'); idempotent via [`ack_result`].
-async fn db_ack(pool: &Pool, lease_id: &str, claim_key: &str) -> Result<(), String> {
+/// (status='acked'); idempotent via [`ack_result`]. The
+/// `($3::text IS NULL OR holder = $3)` predicate is the attested-identity gate: a
+/// tenant may settle ONLY its own lease. Idempotent re-ack (key already acked) is
+/// honoured BEFORE the mismatch check, so a redelivered ack of an already-settled
+/// item is a no-op regardless of who sends it.
+async fn db_ack(
+    pool: &Pool,
+    lease_id: &str,
+    claim_key: &str,
+    expected_holder: Option<&str>,
+) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let updated = client
         .execute(
             "UPDATE work_items
                 SET status = 'acked', lease_id = NULL, holder = NULL,
                     expires_at = NULL, updated_at = now()
-              WHERE lease_id = $1",
-            &[&lease_id],
+              WHERE lease_id = $1 AND ($2::text IS NULL OR holder = $2)",
+            &[&lease_id, &expected_holder],
         )
         .await
         .map_err(|e| e.to_string())?;
-    let key_already_acked = if updated == 0 {
-        client
-            .query_opt(
-                "SELECT 1 FROM work_items WHERE claim_key = $1 AND status = 'acked'",
-                &[&claim_key],
-            )
-            .await
-            .map_err(|e| e.to_string())?
-            .is_some()
-    } else {
-        false
-    };
-    ack_result(updated > 0, key_already_acked, lease_id)
+    if updated > 0 {
+        return Ok(());
+    }
+    // Not settled: idempotent re-ack (the key is already an acked tombstone) wins
+    // first — harmless no-op for any caller.
+    let key_already_acked = client
+        .query_opt(
+            "SELECT 1 FROM work_items WHERE claim_key = $1 AND status = 'acked'",
+            &[&claim_key],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if key_already_acked {
+        return Ok(());
+    }
+    // Gated + a LIVE lease with this id still exists ⇒ a wrong-holder mismatch.
+    if expected_holder.is_some() && lease_is_live(&client, lease_id).await? {
+        return Err(holder_mismatch_error(lease_id));
+    }
+    ack_result(false, false, lease_id)
 }
 
 /// `work.release` → return a held item to `pending` (re-claimable; does NOT record
-/// a tombstone). 0 rows ⇒ unknown lease ⇒ Err.
-async fn db_release(pool: &Pool, lease_id: &str) -> Result<(), String> {
+/// a tombstone). The `($2::text IS NULL OR holder = $2)` predicate is the
+/// attested-identity gate: a tenant may release ONLY its own lease. 0 rows ⇒
+/// unknown lease, or (when gated) a holder mismatch.
+async fn db_release(
+    pool: &Pool,
+    lease_id: &str,
+    expected_holder: Option<&str>,
+) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let n = client
         .execute(
             "UPDATE work_items
                 SET status = 'pending', lease_id = NULL, holder = NULL,
                     expires_at = NULL, updated_at = now()
-              WHERE lease_id = $1",
-            &[&lease_id],
+              WHERE lease_id = $1 AND ($2::text IS NULL OR holder = $2)",
+            &[&lease_id, &expected_holder],
         )
         .await
         .map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err(format!("unknown lease_id: {lease_id}"));
+    if n > 0 {
+        return Ok(());
     }
-    Ok(())
+    if expected_holder.is_some() && lease_is_live(&client, lease_id).await? {
+        return Err(holder_mismatch_error(lease_id));
+    }
+    Err(format!("unknown lease_id: {lease_id}"))
+}
+
+/// Whether a row with this `lease_id` is still a LIVE claimed lease (a `lease_id`
+/// is non-NULL only while claimed; `ack`/`release`/`sweep` clear it). Used ONLY to
+/// classify a gated lifecycle op that matched 0 rows: a still-live lease means the
+/// holder predicate rejected a wrong holder (mismatch) rather than the lease being
+/// unknown/expired. This read does not affect the mutation's atomicity — the wrong
+/// holder has already failed to mutate.
+async fn lease_is_live(client: &deadpool_postgres::Client, lease_id: &str) -> Result<bool, String> {
+    Ok(client
+        .query_opt(
+            "SELECT 1 FROM work_items
+              WHERE lease_id = $1 AND status = 'claimed' AND expires_at > now()",
+            &[&lease_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some())
 }
 
 /// Move every expired `claimed` row back to `pending` (re-offer a dead claimer's

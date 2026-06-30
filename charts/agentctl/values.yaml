@@ -367,6 +367,16 @@ coordination:
   # raise coordination.replicas for HA (each replica shares the Postgres-backed
   # queue). Default memory renders no DATABASE_URL (today's output unchanged).
   store: memory                # memory | postgres
+  # Attested claim ownership: when true the coordination server binds each work
+  # claim to the caller's source-IP-attested identity (it resolves the connection's
+  # source IP to the owning pod via a kube pods lookup on status.podIP) instead of
+  # trusting self-asserted claim metadata. This blocks cross-tenant ack/release — a
+  # tenant cannot ack or release another tenant's claim. Robust because confined
+  # tenant pods drop CAP_NET_RAW and so cannot spoof their source IP. Requires the
+  # cluster-wide pods get/list grant (the chart renders a ClusterRole + binding ONLY
+  # when this is on) and sets COORDINATION_ATTEST_IDENTITY + POD_NAMESPACE on the
+  # Deployment. Default false renders no RBAC and no env (today's output unchanged).
+  attestIdentity: false
   # 1 is the safe default. With store=postgres the queue is durable + shared, so you
   # may raise this for HA; with store=memory keep it at 1 (per-pod in-process queue).
   replicas: 1

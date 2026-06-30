@@ -26,26 +26,31 @@
 //! without touching the wire layer; v1 ships the in-memory store and documents
 //! that a coordination loss collapses the serializing point for dependent fleets.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::ListParams;
+use kube::{Api, Client};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
+mod attest;
 mod db_tls;
 mod mcp;
 mod metrics;
 mod pg_store;
 mod store;
 
+use attest::CallerIdentity;
 use metrics::Metrics;
 use pg_store::PgClaimStore;
 use store::{ClaimStore, InMemoryStore};
@@ -69,6 +74,18 @@ struct AppState {
     /// `Some` ⇒ enforce `Authorization: Bearer <token>`; `None` (env unset/empty)
     /// ⇒ no auth (back-compat). Read once from `AGENTCTL_API_TOKEN` at startup.
     auth_token: Option<Arc<String>>,
+    /// OPT-IN attested-identity gate (RFC 0015), `COORDINATION_ATTEST_IDENTITY`.
+    /// When `true`, the claim lifecycle is bound to / verified against the caller's
+    /// kernel-attested source-IP identity (the lease HOLDER), not the spoofable
+    /// self-asserted `_meta`. When `false` (default), behaviour is unchanged.
+    attest: bool,
+    /// In-cluster kube client used ONLY in attested mode to resolve a source IP to
+    /// its pod. `None` when attestation is off (the server then does NO cluster
+    /// reads, exactly as before).
+    client: Option<Client>,
+    /// TTL cache of `source IP → attested identity`, so a burst of claim calls from
+    /// one pod does not hammer the kube API. Unused when `attest` is `false`.
+    ip_cache: Arc<attest::IpIdentityCache>,
 }
 
 #[tokio::main]
@@ -145,11 +162,45 @@ async fn main() {
         );
     }
 
+    // OPT-IN attested-identity gate (RFC 0015), COORDINATION_ATTEST_IDENTITY. OFF
+    // (default) ⇒ the lease holder is the self-asserted `_meta` agent, exactly as
+    // before, and the server does NO cluster reads. ON ⇒ the holder is derived from
+    // the kernel-set source IP (resolved to the real pod via the kube API), so a
+    // tenant can neither bill a claim to another identity nor ack/renew/release
+    // (settle or steal) another tenant's lease.
+    let attest = attest::attest_enabled_from_env();
+    // The own (control-plane) namespace, from the downward-API POD_NAMESPACE. Read
+    // and logged at startup for parity with the modelgateway; direct source-IP
+    // attestation does not otherwise need it.
+    let pod_namespace = std::env::var("POD_NAMESPACE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let client = if attest {
+        tracing::info!(
+            pod_namespace = %pod_namespace,
+            "COORDINATION_ATTEST_IDENTITY set: claim lifecycle bound to the source-IP-attested \
+             holder (namespace/agent); a tenant cannot settle or steal another tenant's lease"
+        );
+        Some(Client::try_default().await.expect("in-cluster kube client"))
+    } else {
+        tracing::info!(
+            "COORDINATION_ATTEST_IDENTITY unset: lease holder is the self-asserted _meta agent \
+             (token-gated only; back-compat)"
+        );
+        None
+    };
+    let ip_cache = Arc::new(attest::IpIdentityCache::new(attest::DEFAULT_TTL));
+
     let state = AppState {
         store,
         metrics,
         ready,
         auth_token,
+        attest,
+        client,
+        ip_cache,
     };
 
     // The data routes carry the bearer gate via `route_layer` so it runs ONLY for
@@ -169,13 +220,21 @@ async fn main() {
     let listener = TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    tracing::info!(%addr, dedupe_cap, sweep_ms, "agentctl coordination MCP server: serving the work.* claim surface");
+    tracing::info!(%addr, dedupe_cap, sweep_ms, attest, "agentctl coordination MCP server: serving the work.* claim surface");
     // Graceful shutdown on SIGTERM/SIGINT — drain in-flight requests (matches the
     // gateway). A SIGTERM is the normal pod-stop signal.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("serve");
+    //
+    // `into_make_service_with_connect_info::<SocketAddr>()` exposes the peer socket
+    // address to handlers via `ConnectInfo<SocketAddr>` — the kernel-set source IP
+    // the attested-identity gate reads. Harmless in non-attested mode (the extractor
+    // is simply unused for the holder decision).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("serve");
 }
 
 /// Bearer-token gate for the data endpoints. When `state.auth_token` is `None`
@@ -219,11 +278,21 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// `POST /` and `POST /mcp` — one MCP JSON-RPC message (or a batch array). A
 /// notification yields no body (202 Accepted).
-async fn rpc(State(state): State<AppState>, Json(req): Json<Value>) -> Response {
+///
+/// The caller's attested identity is resolved ONCE from the kernel-set source IP
+/// (per-connection, so it applies to every message of a batch) and threaded into
+/// the pure wire layer. In non-attested mode it is [`CallerIdentity::Disabled`].
+async fn rpc(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<Value>,
+) -> Response {
+    let caller = resolve_caller(&state, peer.ip()).await;
     if let Some(batch) = req.as_array() {
         let mut out = Vec::new();
         for item in batch {
-            if let Some(resp) = mcp::handle_rpc(item, state.store.as_ref(), &state.metrics) {
+            if let Some(resp) = mcp::handle_rpc(item, state.store.as_ref(), &state.metrics, &caller)
+            {
                 out.push(resp);
             }
         }
@@ -233,11 +302,65 @@ async fn rpc(State(state): State<AppState>, Json(req): Json<Value>) -> Response 
             Json(Value::Array(out)).into_response()
         }
     } else {
-        match mcp::handle_rpc(&req, state.store.as_ref(), &state.metrics) {
+        match mcp::handle_rpc(&req, state.store.as_ref(), &state.metrics, &caller) {
             Some(resp) => Json(resp).into_response(),
             None => StatusCode::ACCEPTED.into_response(),
         }
     }
+}
+
+/// Resolve the caller's attested identity from its source IP (RFC 0015).
+///
+/// Non-attested mode (the default) ⇒ [`CallerIdentity::Disabled`] (no cluster
+/// read). Attested mode ⇒ a cache-first kube lookup: the source IP is resolved to
+/// its pod and the pod's `namespace/agent` is the attested holder
+/// ([`CallerIdentity::Attested`]). A source IP that owns no attestable pod — or a
+/// kube error — yields [`CallerIdentity::Unresolved`], which **fails closed** on the
+/// claim lifecycle (we never trust the spoofable self-asserted holder in attested
+/// mode).
+async fn resolve_caller(state: &AppState, peer_ip: IpAddr) -> CallerIdentity {
+    if !state.attest {
+        return CallerIdentity::Disabled;
+    }
+    if let Some(id) = state.ip_cache.get(&peer_ip) {
+        return CallerIdentity::Attested(id.holder());
+    }
+    let Some(client) = state.client.as_ref() else {
+        // Unreachable: attest ⇒ Some(client). Fail closed if it ever is not.
+        return CallerIdentity::Unresolved;
+    };
+    match resolve_ip_to_identity(client, peer_ip).await {
+        Ok(Some(id)) => {
+            state.ip_cache.put(peer_ip, id.clone());
+            CallerIdentity::Attested(id.holder())
+        }
+        Ok(None) => CallerIdentity::Unresolved,
+        Err(e) => {
+            // A kube lookup failure cannot safely attest ⇒ fail closed (Unresolved).
+            tracing::warn!(%peer_ip, error = %e, "attest: source IP lookup failed; failing closed");
+            CallerIdentity::Unresolved
+        }
+    }
+}
+
+/// Resolve a source IP to its pod's attested identity (kube glue — needs a cluster
+/// to run, not to compile/test). Lists pods cluster-wide with a `status.podIP`
+/// field selector to narrow, re-verifies the match locally (the selector is
+/// advisory), and derives `{namespace, agent}`. `Ok(None)` ⇒ no pod owns the IP (or
+/// it has no namespace) — cannot attest.
+async fn resolve_ip_to_identity(
+    client: &Client,
+    ip: IpAddr,
+) -> Result<Option<attest::Identity>, String> {
+    let pods: Api<Pod> = Api::all(client.clone());
+    let ip_s = ip.to_string();
+    let lp = ListParams::default().fields(&format!("status.podIP={ip_s}"));
+    let list = pods.list(&lp).await.map_err(|e| e.to_string())?;
+    Ok(list
+        .items
+        .iter()
+        .find(|p| attest::pod_matches_ip(p, &ip_s))
+        .and_then(attest::identity_from_pod))
 }
 
 /// `GET /readyz` — 200 once the sweep loop is running, else 503.

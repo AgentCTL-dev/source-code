@@ -14,8 +14,9 @@
 
 use serde_json::{json, Value};
 
+use crate::attest::{self, CallerIdentity, HolderCheck};
 use crate::metrics::Metrics;
-use crate::store::{ClaimResult, ClaimStore, SubmitOutcome};
+use crate::store::{is_holder_mismatch, ClaimResult, ClaimStore, SubmitOutcome};
 
 /// The MCP protocol version this server advertises (matches the agentd self-server
 /// target, agentd RFC 0004/0005; interop is by capability, not strict version).
@@ -33,7 +34,17 @@ const META_CLAIM_KEY: &str = "agent/claim_key";
 /// notification (no `id` / `notifications/*`) — the caller returns 202 with no
 /// body. The store is the serializing point; this layer only translates wire ⇄
 /// store and counts metrics.
-pub fn handle_rpc(req: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> Option<Value> {
+///
+/// `caller` is the source-IP-attested identity computed by the axum layer (RFC
+/// 0015). [`CallerIdentity::Disabled`] (attest mode off, the default) keeps today's
+/// self-asserted `_meta`-holder behaviour; otherwise the claim lifecycle is bound
+/// to / verified against the attested holder.
+pub fn handle_rpc(
+    req: &Value,
+    store: &dyn ClaimStore,
+    metrics: &Metrics,
+    caller: &CallerIdentity,
+) -> Option<Value> {
     let method = req
         .get("method")
         .and_then(Value::as_str)
@@ -52,7 +63,7 @@ pub fn handle_rpc(req: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> Opt
         "initialize" => ok(id, initialize_result()),
         "ping" => ok(id, json!({})),
         "tools/list" => ok(id, json!({ "tools": tool_defs() })),
-        "tools/call" => tools_call(id, &params, store, metrics),
+        "tools/call" => tools_call(id, &params, store, metrics, caller),
         "resources/list" => ok(id, json!({ "resources": resource_defs() })),
         "resources/read" => resources_read(id, &params, store),
         other => err(id, -32601, &format!("method not found: {other}")),
@@ -79,7 +90,13 @@ fn initialize_result() -> Value {
 
 /// `tools/call` → run the named tool, wrap its outcome in the dual
 /// `content`/`structuredContent` result the agent parses.
-fn tools_call(id: Value, params: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> Value {
+fn tools_call(
+    id: Value,
+    params: &Value,
+    store: &dyn ClaimStore,
+    metrics: &Metrics,
+    caller: &CallerIdentity,
+) -> Value {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -87,7 +104,7 @@ fn tools_call(id: Value, params: &Value, store: &dyn ClaimStore, metrics: &Metri
     let empty = Value::Null;
     let args = params.get("arguments").unwrap_or(&empty);
     let meta = params.get("_meta").unwrap_or(&empty);
-    let (structured, is_error) = dispatch_tool(name, args, meta, store, metrics);
+    let (structured, is_error) = dispatch_tool(name, args, meta, store, metrics, caller);
     ok(id, tool_result(structured, is_error))
 }
 
@@ -111,15 +128,73 @@ fn dispatch_tool(
     meta: &Value,
     store: &dyn ClaimStore,
     metrics: &Metrics,
+    caller: &CallerIdentity,
 ) -> (Value, bool) {
     match name {
-        "work.claim" => tool_claim(args, meta, store, metrics),
-        "work.renew" => tool_renew(args, store, metrics),
-        "work.ack" => tool_ack(args, meta, store, metrics),
-        "work.release" => tool_release(args, store, metrics),
-        "work.submit" => tool_submit(args, store, metrics),
-        "work.stats" => tool_stats(store),
+        "work.claim" => tool_claim(args, meta, store, metrics, caller),
+        "work.renew" => tool_renew(args, store, metrics, caller),
+        "work.ack" => tool_ack(args, meta, store, metrics, caller),
+        "work.release" => tool_release(args, store, metrics, caller),
+        "work.submit" => tool_submit(args, store, metrics, caller),
+        "work.stats" => tool_stats(store, caller),
         other => (json!({ "error": format!("unknown tool: {other}") }), true),
+    }
+}
+
+/// Resolve the `expected_holder` predicate for a verifying lifecycle op
+/// (ack/renew/release) from the attested caller, via the pure [`attest::holder_check`].
+/// `Ok(None)` ⇒ unconstrained (attest off); `Ok(Some(h))` ⇒ constrain the store op
+/// to holder `h`; `Err(reject)` ⇒ the caller is unattestable (fail closed) — the
+/// returned tuple is the JSON-RPC reject body, already counted in `attest_reject`.
+fn resolve_expected_holder(
+    caller: &CallerIdentity,
+    metrics: &Metrics,
+    op: &str,
+) -> Result<Option<String>, (Value, bool)> {
+    match attest::holder_check(caller) {
+        HolderCheck::Unconstrained => Ok(None),
+        HolderCheck::MustMatch(h) => Ok(Some(h)),
+        HolderCheck::Reject => {
+            metrics.inc_attest_reject();
+            tracing::warn!(
+                op,
+                "attest: source IP resolves to no pod; rejecting lifecycle call"
+            );
+            Err((
+                json!({
+                    "error": format!(
+                        "{op}: cannot attest caller identity from source IP (attested mode, fail closed)"
+                    )
+                }),
+                true,
+            ))
+        }
+    }
+}
+
+/// Translate a verifying lifecycle op's store result into the wire tuple, counting
+/// the attestation outcome. `constrained` is whether the op carried an attested
+/// holder (so a success is an attest-ok and a holder mismatch an attest-reject).
+fn finish_verify(
+    result: Result<(), String>,
+    constrained: bool,
+    metrics: &Metrics,
+    ok_body: Value,
+) -> (Value, bool) {
+    match result {
+        Ok(()) => {
+            if constrained {
+                metrics.inc_attest_ok();
+            }
+            (ok_body, false)
+        }
+        Err(e) => {
+            if constrained && is_holder_mismatch(&e) {
+                metrics.inc_attest_reject();
+                tracing::warn!(error = %e, "attest: holder mismatch on lifecycle call; rejecting");
+            }
+            (json!({ "ok": false, "error": e }), true)
+        }
     }
 }
 
@@ -132,6 +207,7 @@ fn tool_claim(
     meta: &Value,
     store: &dyn ClaimStore,
     metrics: &Metrics,
+    caller: &CallerIdentity,
 ) -> (Value, bool) {
     let item = args.get("item").and_then(Value::as_str);
     let ttl_ms = args.get("ttl_ms").and_then(Value::as_u64);
@@ -145,7 +221,29 @@ fn tool_claim(
             )
         }
     };
-    let holder = holder_of(meta);
+    // Holder binding (RFC 0015): in attested mode the lease HOLDER is the
+    // source-IP-attested identity (authoritative — it overrides the self-asserted
+    // `_meta` agent so a tenant cannot bill the lease to another). An unattestable
+    // caller fails closed (the claim is rejected). Attest off ⇒ the self-asserted
+    // holder, unchanged.
+    let self_asserted = holder_of(meta);
+    let holder = match attest::claim_holder(caller, &self_asserted) {
+        Some(h) => h,
+        None => {
+            metrics.inc_attest_reject();
+            tracing::warn!(
+                item,
+                "attest: source IP resolves to no pod; rejecting work.claim"
+            );
+            return (
+                json!({ "error": "work.claim: cannot attest caller identity from source IP (attested mode, fail closed)" }),
+                true,
+            );
+        }
+    };
+    if caller.is_attested() {
+        metrics.inc_attest_ok();
+    }
     match store.claim(item, ttl_ms, claim_key, &holder) {
         ClaimResult::Granted {
             lease_id,
@@ -169,8 +267,15 @@ fn tool_claim(
     }
 }
 
-/// `work.renew` — extend a live, owned lease. arguments `{lease_id, ttl_ms}`.
-fn tool_renew(args: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> (Value, bool) {
+/// `work.renew` — extend a live, owned lease. arguments `{lease_id, ttl_ms}`. In
+/// attested mode the caller's attested identity MUST equal the lease holder (a
+/// tenant cannot renew another tenant's lease); an unattestable caller fails closed.
+fn tool_renew(
+    args: &Value,
+    store: &dyn ClaimStore,
+    metrics: &Metrics,
+    caller: &CallerIdentity,
+) -> (Value, bool) {
     let lease_id = args.get("lease_id").and_then(Value::as_str);
     let ttl_ms = args.get("ttl_ms").and_then(Value::as_u64);
     let (lease_id, ttl_ms) = match (lease_id, ttl_ms) {
@@ -182,16 +287,20 @@ fn tool_renew(args: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> (Value
             )
         }
     };
-    match store.renew(lease_id, ttl_ms) {
-        Ok(()) => {
-            metrics.inc_renewed();
-            (
-                json!({ "ok": true, "renewed": true, "expires_in_ms": ttl_ms }),
-                false,
-            )
-        }
-        Err(e) => (json!({ "ok": false, "error": e }), true),
+    let expected = match resolve_expected_holder(caller, metrics, "work.renew") {
+        Ok(e) => e,
+        Err(reject) => return reject,
+    };
+    let result = store.renew(lease_id, ttl_ms, expected.as_deref());
+    if result.is_ok() {
+        metrics.inc_renewed();
     }
+    finish_verify(
+        result,
+        expected.is_some(),
+        metrics,
+        json!({ "ok": true, "renewed": true, "expires_in_ms": ttl_ms }),
+    )
 }
 
 /// `work.ack` — terminal settle + record the `claim_key` as done (dedupe set).
@@ -201,6 +310,7 @@ fn tool_ack(
     meta: &Value,
     store: &dyn ClaimStore,
     metrics: &Metrics,
+    caller: &CallerIdentity,
 ) -> (Value, bool) {
     let lease_id = args.get("lease_id").and_then(Value::as_str);
     let claim_key = meta.get(META_CLAIM_KEY).and_then(Value::as_str);
@@ -213,18 +323,32 @@ fn tool_ack(
             )
         }
     };
-    match store.ack(lease_id, claim_key) {
-        Ok(()) => {
-            metrics.inc_acked();
-            (json!({ "ok": true, "acked": true }), false)
-        }
-        Err(e) => (json!({ "ok": false, "error": e }), true),
+    let expected = match resolve_expected_holder(caller, metrics, "work.ack") {
+        Ok(e) => e,
+        Err(reject) => return reject,
+    };
+    let result = store.ack(lease_id, claim_key, expected.as_deref());
+    if result.is_ok() {
+        metrics.inc_acked();
     }
+    finish_verify(
+        result,
+        expected.is_some(),
+        metrics,
+        json!({ "ok": true, "acked": true }),
+    )
 }
 
 /// `work.release` — return the item to pending (re-claimable). arguments
-/// `{lease_id, reason}`.
-fn tool_release(args: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> (Value, bool) {
+/// `{lease_id, reason}`. In attested mode the caller's attested identity MUST equal
+/// the lease holder (a tenant cannot release another tenant's lease); an
+/// unattestable caller fails closed.
+fn tool_release(
+    args: &Value,
+    store: &dyn ClaimStore,
+    metrics: &Metrics,
+    caller: &CallerIdentity,
+) -> (Value, bool) {
     let lease_id = match args.get("lease_id").and_then(Value::as_str) {
         Some(l) => l,
         None => {
@@ -235,18 +359,35 @@ fn tool_release(args: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> (Val
         }
     };
     let reason = args.get("reason").and_then(Value::as_str).unwrap_or("");
-    match store.release(lease_id, reason) {
-        Ok(()) => {
-            metrics.inc_released();
-            (json!({ "ok": true, "released": true }), false)
-        }
-        Err(e) => (json!({ "ok": false, "error": e }), true),
+    let expected = match resolve_expected_holder(caller, metrics, "work.release") {
+        Ok(e) => e,
+        Err(reject) => return reject,
+    };
+    let result = store.release(lease_id, reason, expected.as_deref());
+    if result.is_ok() {
+        metrics.inc_released();
     }
+    finish_verify(
+        result,
+        expected.is_some(),
+        metrics,
+        json!({ "ok": true, "released": true }),
+    )
 }
 
 /// `work.submit` — enqueue an item into the backlog (producer side). arguments
 /// `{item, claim_key?}`. Skips if `claim_key` is already done (dedupe).
-fn tool_submit(args: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> (Value, bool) {
+///
+/// Producers may be EXTERNAL (not pod-attestable), so submit is NOT hard-blocked by
+/// attestation — it stays token-gated. We attest-if-resolvable only to LOG the
+/// caller (observability under hostile multi-tenancy).
+fn tool_submit(
+    args: &Value,
+    store: &dyn ClaimStore,
+    metrics: &Metrics,
+    caller: &CallerIdentity,
+) -> (Value, bool) {
+    log_attested_caller("work.submit", caller);
     let item = match args.get("item").and_then(Value::as_str) {
         Some(i) => i,
         None => {
@@ -274,13 +415,24 @@ fn tool_submit(args: &Value, store: &dyn ClaimStore, metrics: &Metrics) -> (Valu
     }
 }
 
-/// `work.stats` — the off-pod backlog snapshot (P9).
-fn tool_stats(store: &dyn ClaimStore) -> (Value, bool) {
+/// `work.stats` — the off-pod backlog snapshot (P9). The scaler reads this and may
+/// not be pod-attestable, so it is NOT hard-blocked by attestation (token-gated);
+/// we attest-if-resolvable only to LOG the caller.
+fn tool_stats(store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) {
+    log_attested_caller("work.stats", caller);
     let s = store.stats();
     (
         json!({ "pending": s.pending, "claimed": s.claimed, "oldest_age_ms": s.oldest_age_ms }),
         false,
     )
+}
+
+/// Log the attested caller for a NON-blocking (token-gated) call (`work.submit` /
+/// `work.stats`). Only logs when attest mode resolved an identity; never blocks.
+fn log_attested_caller(op: &str, caller: &CallerIdentity) {
+    if let CallerIdentity::Attested(id) = caller {
+        tracing::debug!(op, attested = %id, "attest: producer/reader caller attested (not blocked)");
+    }
 }
 
 /// `resources/read` — only `work://pending` is served: the pending count + items,
@@ -426,6 +578,8 @@ mod tests {
         (InMemoryStore::new(4096), Metrics::new())
     }
 
+    /// A `tools/call` with attestation DISABLED (back-compat) — the default for the
+    /// existing behaviour tests.
     fn call(
         store: &dyn ClaimStore,
         metrics: &Metrics,
@@ -434,13 +588,39 @@ mod tests {
         args: Value,
         meta: Value,
     ) -> Value {
+        call_as(
+            store,
+            metrics,
+            id,
+            name,
+            args,
+            meta,
+            &CallerIdentity::Disabled,
+        )
+    }
+
+    /// A `tools/call` with an explicit attested caller (attested-mode tests).
+    fn call_as(
+        store: &dyn ClaimStore,
+        metrics: &Metrics,
+        id: i64,
+        name: &str,
+        args: Value,
+        meta: Value,
+        caller: &CallerIdentity,
+    ) -> Value {
         let req = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "tools/call",
             "params": { "name": name, "arguments": args, "_meta": meta }
         });
-        handle_rpc(&req, store, metrics).expect("tools/call yields a response")
+        handle_rpc(&req, store, metrics, caller).expect("tools/call yields a response")
+    }
+
+    /// An attested caller whose holder string is `ns/agent`.
+    fn attested(ns: &str, agent: &str) -> CallerIdentity {
+        CallerIdentity::Attested(format!("{ns}/{agent}"))
     }
 
     // (7) The JSON-RPC envelope + the EXACT work.claim result shape round-trip:
@@ -519,6 +699,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
             &store,
             &metrics,
+            &CallerIdentity::Disabled,
         )
         .unwrap();
         assert_eq!(init["result"]["protocolVersion"], PROTOCOL_VERSION);
@@ -531,6 +712,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
             &store,
             &metrics,
+            &CallerIdentity::Disabled,
         )
         .unwrap();
         let names: Vec<&str> = tl["result"]["tools"]
@@ -555,6 +737,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" }),
             &store,
             &metrics,
+            &CallerIdentity::Disabled,
         )
         .unwrap();
         assert_eq!(rl["result"]["resources"][0]["uri"], PENDING_URI);
@@ -563,6 +746,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": PENDING_URI } }),
             &store,
             &metrics,
+            &CallerIdentity::Disabled,
         )
         .unwrap();
         let text = rr["result"]["contents"][0]["text"].as_str().unwrap();
@@ -638,6 +822,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "id": 9, "method": "bogus/thing" }),
             &store,
             &metrics,
+            &CallerIdentity::Disabled,
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32601);
@@ -650,6 +835,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
             &store,
             &metrics,
+            &CallerIdentity::Disabled,
         )
         .is_none());
         // A request missing its id is, by JSON-RPC, a notification ⇒ no response.
@@ -657,6 +843,7 @@ mod tests {
             &json!({ "jsonrpc": "2.0", "method": "ping" }),
             &store,
             &metrics,
+            &CallerIdentity::Disabled,
         )
         .is_none());
     }
@@ -666,5 +853,230 @@ mod tests {
         let (store, metrics) = ctx();
         let r = call(&store, &metrics, 1, "work.bogus", json!({}), Value::Null);
         assert_eq!(r["result"]["isError"], true);
+    }
+
+    // --- attested mode (RFC 0015) -----------------------------------------
+
+    // In attested mode the lease HOLDER is the source-IP-attested identity, NOT the
+    // self-asserted `_meta` agent: a tenant cannot bill/route the lease to another.
+    #[test]
+    fn attested_claim_binds_attested_holder_over_self_asserted() {
+        let (store, metrics) = ctx();
+        // The caller is attested as team-a/checkout but self-asserts a DIFFERENT
+        // holder in `_meta`. The attested identity must win.
+        let r = call_as(
+            &store,
+            &metrics,
+            1,
+            "work.claim",
+            json!({ "item": "file:///x", "ttl_ms": 30_000 }),
+            json!({ "agent/claim_key": "ck1", "agent/instance": "i-am-someone-else" }),
+            &attested("team-a", "checkout"),
+        );
+        assert_eq!(r["result"]["structuredContent"]["granted"], true);
+        // A contending claim sees the ATTESTED holder, not "i-am-someone-else".
+        let r2 = call_as(
+            &store,
+            &metrics,
+            2,
+            "work.claim",
+            json!({ "item": "file:///x", "ttl_ms": 30_000 }),
+            json!({ "agent/claim_key": "ck1", "agent/instance": "other" }),
+            &attested("team-b", "evil"),
+        );
+        assert_eq!(r2["result"]["structuredContent"]["granted"], false);
+        assert_eq!(
+            r2["result"]["structuredContent"]["held_by"],
+            "team-a/checkout"
+        );
+    }
+
+    // ack isolation: the holder may settle its own lease; a DIFFERENT attested
+    // tenant cannot (mismatch ⇒ isError, lease untouched). caller==holder allows;
+    // caller!=holder rejects.
+    #[test]
+    fn attested_ack_isolation_holder_allowed_other_rejected() {
+        let (store, metrics) = ctx();
+        let granted = call_as(
+            &store,
+            &metrics,
+            1,
+            "work.claim",
+            json!({ "item": "file:///x", "ttl_ms": 30_000 }),
+            json!({ "agent/claim_key": "ck1" }),
+            &attested("team-a", "checkout"),
+        );
+        let lease = granted["result"]["structuredContent"]["lease_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A DIFFERENT tenant cannot ack it (cannot settle/steal another's lease).
+        let stolen = call_as(
+            &store,
+            &metrics,
+            2,
+            "work.ack",
+            json!({ "lease_id": lease }),
+            json!({ "agent/claim_key": "ck1" }),
+            &attested("team-b", "evil"),
+        );
+        assert_eq!(stolen["result"]["isError"], true);
+
+        // The lease is still held by team-a (the failed ack did not settle it):
+        // a renew by the wrong tenant is also rejected...
+        let bad_renew = call_as(
+            &store,
+            &metrics,
+            3,
+            "work.renew",
+            json!({ "lease_id": lease, "ttl_ms": 1000 }),
+            Value::Null,
+            &attested("team-b", "evil"),
+        );
+        assert_eq!(bad_renew["result"]["isError"], true);
+
+        // ...while the rightful holder renews and then acks successfully.
+        let ok_renew = call_as(
+            &store,
+            &metrics,
+            4,
+            "work.renew",
+            json!({ "lease_id": lease, "ttl_ms": 1000 }),
+            Value::Null,
+            &attested("team-a", "checkout"),
+        );
+        assert_eq!(ok_renew["result"]["isError"], false);
+        let ok_ack = call_as(
+            &store,
+            &metrics,
+            5,
+            "work.ack",
+            json!({ "lease_id": lease }),
+            json!({ "agent/claim_key": "ck1" }),
+            &attested("team-a", "checkout"),
+        );
+        assert_eq!(ok_ack["result"]["isError"], false);
+        assert_eq!(ok_ack["result"]["structuredContent"]["acked"], true);
+    }
+
+    // release isolation: a different tenant cannot return another's lease to
+    // pending; the rightful holder can.
+    #[test]
+    fn attested_release_isolation() {
+        let (store, metrics) = ctx();
+        let granted = call_as(
+            &store,
+            &metrics,
+            1,
+            "work.claim",
+            json!({ "item": "file:///r", "ttl_ms": 30_000 }),
+            json!({ "agent/claim_key": "ckr" }),
+            &attested("team-a", "checkout"),
+        );
+        let lease = granted["result"]["structuredContent"]["lease_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let bad = call_as(
+            &store,
+            &metrics,
+            2,
+            "work.release",
+            json!({ "lease_id": lease, "reason": "x" }),
+            Value::Null,
+            &attested("team-b", "evil"),
+        );
+        assert_eq!(bad["result"]["isError"], true);
+        assert!(
+            !store.pending_items().contains(&"file:///r".to_string()),
+            "a rejected release must not return the item to pending"
+        );
+        let ok = call_as(
+            &store,
+            &metrics,
+            3,
+            "work.release",
+            json!({ "lease_id": lease, "reason": "drain" }),
+            Value::Null,
+            &attested("team-a", "checkout"),
+        );
+        assert_eq!(ok["result"]["isError"], false);
+        assert!(store.pending_items().contains(&"file:///r".to_string()));
+    }
+
+    // An UNATTESTABLE caller (source IP owns no pod) fails closed on EVERY
+    // claim-lifecycle call (claim/ack/renew/release) in attested mode.
+    #[test]
+    fn attested_unresolved_caller_rejects_every_lifecycle_call() {
+        let (store, metrics) = ctx();
+        let unres = CallerIdentity::Unresolved;
+
+        let claim = call_as(
+            &store,
+            &metrics,
+            1,
+            "work.claim",
+            json!({ "item": "file:///x", "ttl_ms": 30_000 }),
+            json!({ "agent/claim_key": "ck1" }),
+            &unres,
+        );
+        assert_eq!(claim["result"]["isError"], true);
+        // The claim was rejected ⇒ nothing is held.
+        assert_eq!(store.stats().claimed, 0);
+
+        for (id, name, args, meta) in [
+            (
+                2,
+                "work.ack",
+                json!({ "lease_id": "whatever" }),
+                json!({ "agent/claim_key": "ck1" }),
+            ),
+            (
+                3,
+                "work.renew",
+                json!({ "lease_id": "whatever", "ttl_ms": 1000 }),
+                Value::Null,
+            ),
+            (
+                4,
+                "work.release",
+                json!({ "lease_id": "whatever", "reason": "x" }),
+                Value::Null,
+            ),
+        ] {
+            let r = call_as(&store, &metrics, id, name, args, meta, &unres);
+            assert_eq!(r["result"]["isError"], true, "{name} must fail closed");
+        }
+    }
+
+    // work.submit / work.stats are NOT hard-blocked by attestation — an unresolved
+    // caller still succeeds (producers/scaler may be external; token-gated only).
+    #[test]
+    fn attested_submit_and_stats_are_not_hard_blocked() {
+        let (store, metrics) = ctx();
+        let s = call_as(
+            &store,
+            &metrics,
+            1,
+            "work.submit",
+            json!({ "item": "p1", "claim_key": "kp1" }),
+            Value::Null,
+            &CallerIdentity::Unresolved,
+        );
+        assert_eq!(s["result"]["isError"], false);
+        assert_eq!(s["result"]["structuredContent"]["submitted"], true);
+
+        let st = call_as(
+            &store,
+            &metrics,
+            2,
+            "work.stats",
+            json!({}),
+            Value::Null,
+            &CallerIdentity::Unresolved,
+        );
+        assert_eq!(st["result"]["isError"], false);
+        assert_eq!(st["result"]["structuredContent"]["pending"], 1);
     }
 }

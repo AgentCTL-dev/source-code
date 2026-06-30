@@ -20,6 +20,27 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Sentinel prefix on the error returned by a verifying lifecycle op
+/// (`ack`/`renew`/`release`) when the caller's attested identity is NOT the lease's
+/// recorded holder — i.e. a tenant tried to settle or steal another tenant's lease.
+/// Centralised so the wire layer can recognise the rejection (via
+/// [`is_holder_mismatch`]) and count an attestation reject, without coupling to the
+/// exact message text.
+pub const HOLDER_MISMATCH_PREFIX: &str = "forbidden(holder-mismatch):";
+
+/// The error a verifying lifecycle op returns on a holder mismatch. See
+/// [`HOLDER_MISMATCH_PREFIX`].
+pub fn holder_mismatch_error(lease_id: &str) -> String {
+    format!("{HOLDER_MISMATCH_PREFIX} lease {lease_id} is held by a different identity")
+}
+
+/// Whether an error string is a holder-mismatch rejection (see
+/// [`holder_mismatch_error`]). The wire layer uses this to count the rejection as
+/// an attestation reject and surface a 403-style error to the caller.
+pub fn is_holder_mismatch(err: &str) -> bool {
+    err.starts_with(HOLDER_MISMATCH_PREFIX)
+}
+
 /// Outcome of a `work.claim` round-trip — the atomic grant decision (agentd RFC
 /// 0019 §3.3). Exactly one of these is returned under the store mutex.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,12 +98,45 @@ pub trait ClaimStore: Send + Sync {
     fn claim(&self, item: &str, ttl_ms: u64, claim_key: &str, holder: &str) -> ClaimResult;
     /// Extend a live, owned lease. `Err` for an unknown or stale (expired) lease —
     /// renew NEVER resurrects an expired lease (agentd RFC 0019 §3.6).
-    fn renew(&self, lease_id: &str, ttl_ms: u64) -> Result<(), String>;
+    ///
+    /// `expected_holder` is the attested-identity gate (RFC 0015): `None` ⇒ no
+    /// constraint (attest mode off, back-compat); `Some(h)` ⇒ the op is allowed
+    /// ONLY when the lease's recorded holder equals `h`, else it returns the
+    /// [`holder_mismatch_error`] (a tenant cannot renew another tenant's lease).
+    /// Implementations MUST enforce this ATOMICALLY with the mutation.
+    fn renew(
+        &self,
+        lease_id: &str,
+        ttl_ms: u64,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String>;
     /// Settle a lease AND record its `claim_key` in the done set (terminal). The
     /// passed `claim_key` lets an already-acked item resolve idempotently.
-    fn ack(&self, lease_id: &str, claim_key: &str) -> Result<(), String>;
+    ///
+    /// `expected_holder` gates the settle to the attested holder (see [`renew`] —
+    /// `None` ⇒ unconstrained; `Some(h)` ⇒ holder must match, else
+    /// [`holder_mismatch_error`]).
+    ///
+    /// [`renew`]: ClaimStore::renew
+    fn ack(
+        &self,
+        lease_id: &str,
+        claim_key: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String>;
     /// Return a held item to `pending` (re-claimable). `Err` for an unknown lease.
-    fn release(&self, lease_id: &str, reason: &str) -> Result<(), String>;
+    ///
+    /// `expected_holder` gates the release to the attested holder (see [`renew`] —
+    /// `None` ⇒ unconstrained; `Some(h)` ⇒ holder must match, else
+    /// [`holder_mismatch_error`]).
+    ///
+    /// [`renew`]: ClaimStore::renew
+    fn release(
+        &self,
+        lease_id: &str,
+        reason: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String>;
     /// Move every expired lease back to `pending`; returns how many were swept.
     fn sweep_expired(&self) -> usize;
     /// Current queue depth (P9 backlog snapshot).
@@ -248,7 +302,12 @@ impl ClaimStore for InMemoryStore {
         }
     }
 
-    fn renew(&self, lease_id: &str, ttl_ms: u64) -> Result<(), String> {
+    fn renew(
+        &self,
+        lease_id: &str,
+        ttl_ms: u64,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         let now = Instant::now();
         let item = g
@@ -260,6 +319,12 @@ impl ClaimStore for InMemoryStore {
             .claimed
             .get_mut(&item)
             .ok_or_else(|| format!("lease not active: {lease_id}"))?;
+        // Attested-identity gate: a tenant may renew ONLY its own lease.
+        if let Some(expected) = expected_holder {
+            if lease.holder != expected {
+                return Err(holder_mismatch_error(lease_id));
+            }
+        }
         if lease.expires_at <= now {
             // Stale: expired but not yet swept. Never resurrect it.
             return Err(format!("lease expired: {lease_id}"));
@@ -268,9 +333,23 @@ impl ClaimStore for InMemoryStore {
         Ok(())
     }
 
-    fn ack(&self, lease_id: &str, claim_key: &str) -> Result<(), String> {
+    fn ack(
+        &self,
+        lease_id: &str,
+        claim_key: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
-        if let Some(item) = g.lease_index.remove(lease_id) {
+        if let Some(item) = g.lease_index.get(lease_id).cloned() {
+            // Attested-identity gate: a tenant may settle ONLY its own lease.
+            if let Some(expected) = expected_holder {
+                if let Some(lease) = g.claimed.get(&item) {
+                    if lease.holder != expected {
+                        return Err(holder_mismatch_error(lease_id));
+                    }
+                }
+            }
+            g.lease_index.remove(lease_id);
             // Record the lease's OWN claim_key (authoritative — what claim used).
             if let Some(lease) = g.claimed.remove(&item) {
                 g.done.insert(lease.claim_key);
@@ -290,12 +369,27 @@ impl ClaimStore for InMemoryStore {
         Err(format!("unknown lease_id: {lease_id}"))
     }
 
-    fn release(&self, lease_id: &str, _reason: &str) -> Result<(), String> {
+    fn release(
+        &self,
+        lease_id: &str,
+        _reason: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         let item = g
             .lease_index
-            .remove(lease_id)
+            .get(lease_id)
+            .cloned()
             .ok_or_else(|| format!("unknown lease_id: {lease_id}"))?;
+        // Attested-identity gate: a tenant may release ONLY its own lease.
+        if let Some(expected) = expected_holder {
+            if let Some(lease) = g.claimed.get(&item) {
+                if lease.holder != expected {
+                    return Err(holder_mismatch_error(lease_id));
+                }
+            }
+        }
+        g.lease_index.remove(lease_id);
         g.claimed.remove(&item);
         g.pending.insert(item, Instant::now());
         Ok(())
@@ -423,14 +517,14 @@ mod tests {
     fn ack_records_claim_key_dedupes() {
         let store = InMemoryStore::new(4096);
         let lease = lease_of(store.claim("item-a", 60_000, "ck-a", "h1"));
-        store.ack(&lease, "ck-a").expect("ack");
+        store.ack(&lease, "ck-a", None).expect("ack");
         // Same key again ⇒ never re-granted.
         assert_eq!(
             store.claim("item-a", 60_000, "ck-a", "h2"),
             ClaimResult::Deduped
         );
         // ack is idempotent: re-acking the gone lease, key already done ⇒ Ok.
-        assert!(store.ack(&lease, "ck-a").is_ok());
+        assert!(store.ack(&lease, "ck-a", None).is_ok());
     }
 
     // (3) release returns the item to pending ⇒ immediately re-claimable.
@@ -438,7 +532,7 @@ mod tests {
     fn release_returns_to_pending_reclaimable() {
         let store = InMemoryStore::new(4096);
         let lease = lease_of(store.claim("item-r", 60_000, "ck-r", "h1"));
-        store.release(&lease, "draining").expect("release");
+        store.release(&lease, "draining", None).expect("release");
         assert!(store.pending_items().contains(&"item-r".to_string()));
         // Re-claimable (release did NOT record the key as done).
         assert!(matches!(
@@ -480,7 +574,7 @@ mod tests {
         // renew extends: claim short, renew long, sleep past the ORIGINAL ttl,
         // sweep — the item is still held because the renew moved expiry out.
         let lease = lease_of(store.claim("item-x", 30, "ck-x", "h1"));
-        store.renew(&lease, 60_000).expect("renew live lease");
+        store.renew(&lease, 60_000, None).expect("renew live lease");
         thread::sleep(Duration::from_millis(60));
         store.sweep_expired();
         assert!(!store.pending_items().contains(&"item-x".to_string()));
@@ -490,14 +584,14 @@ mod tests {
         ));
 
         // Unknown lease ⇒ all three error.
-        assert!(store.renew("bogus", 1_000).is_err());
-        assert!(store.ack("bogus", "no-such-key").is_err());
-        assert!(store.release("bogus", "x").is_err());
+        assert!(store.renew("bogus", 1_000, None).is_err());
+        assert!(store.ack("bogus", "no-such-key", None).is_err());
+        assert!(store.release("bogus", "x", None).is_err());
 
         // Stale (expired) lease ⇒ renew errors (never resurrects).
         let stale = lease_of(store.claim("item-s", 5, "ck-s", "h1"));
         thread::sleep(Duration::from_millis(40));
-        assert!(store.renew(&stale, 1_000).is_err());
+        assert!(store.renew(&stale, 1_000, None).is_err());
     }
 
     // (6) work.stats counts pending and live-claimed correctly.
@@ -522,9 +616,74 @@ mod tests {
     fn submit_dedupes_acked_key() {
         let store = InMemoryStore::new(4096);
         let lease = lease_of(store.claim("d1", 60_000, "kd1", "h1"));
-        store.ack(&lease, "kd1").expect("ack");
+        store.ack(&lease, "kd1", None).expect("ack");
         assert_eq!(store.submit("d1", Some("kd1")), SubmitOutcome::Deduped);
         assert_eq!(store.stats().pending, 0);
+    }
+
+    // (9) Attested-holder predicate (RFC 0015): a lifecycle op gated with an
+    //     `expected_holder` succeeds ONLY when it equals the lease's recorded
+    //     holder. A wrong holder is rejected with the holder-mismatch error and the
+    //     lease is left untouched (a tenant cannot settle/steal another's lease);
+    //     the right holder proceeds. `None` (attest off) is unconstrained.
+    #[test]
+    fn expected_holder_gates_ack_renew_release() {
+        let store = InMemoryStore::new(4096);
+
+        // renew: wrong holder rejected (and recognised as a mismatch), right OK.
+        let l_renew = lease_of(store.claim("w-renew", 60_000, "k-renew", "team-a/checkout"));
+        let err = store
+            .renew(&l_renew, 1_000, Some("team-b/evil"))
+            .unwrap_err();
+        assert!(is_holder_mismatch(&err), "mismatch error expected: {err}");
+        store
+            .renew(&l_renew, 1_000, Some("team-a/checkout"))
+            .expect("right holder renews");
+
+        // release: wrong holder rejected, the lease stays held (NOT returned).
+        let l_rel = lease_of(store.claim("w-rel", 60_000, "k-rel", "team-a/checkout"));
+        assert!(is_holder_mismatch(
+            &store.release(&l_rel, "x", Some("team-b/evil")).unwrap_err()
+        ));
+        assert!(
+            !store.pending_items().contains(&"w-rel".to_string()),
+            "a rejected release must not return the item to pending"
+        );
+        store
+            .release(&l_rel, "drain", Some("team-a/checkout"))
+            .expect("right holder releases");
+        assert!(store.pending_items().contains(&"w-rel".to_string()));
+
+        // ack: wrong holder rejected, the key is NOT marked done (still claimable
+        // by the true holder); the right holder settles + dedupes.
+        let l_ack = lease_of(store.claim("w-ack", 60_000, "k-ack", "team-a/checkout"));
+        assert!(is_holder_mismatch(
+            &store.ack(&l_ack, "k-ack", Some("team-b/evil")).unwrap_err()
+        ));
+        store
+            .ack(&l_ack, "k-ack", Some("team-a/checkout"))
+            .expect("right holder acks");
+        assert_eq!(
+            store.claim("w-ack", 60_000, "k-ack", "team-a/checkout"),
+            ClaimResult::Deduped
+        );
+
+        // `None` (attest off) is unconstrained — back-compat.
+        let l_none = lease_of(store.claim("w-none", 60_000, "k-none", "whoever"));
+        store
+            .ack(&l_none, "k-none", None)
+            .expect("unconstrained ack");
+    }
+
+    // (10) The holder-mismatch error is recognised by `is_holder_mismatch` and
+    //      distinct from the unknown-lease error (so the wire layer reports a
+    //      403-style reject only for true mismatches).
+    #[test]
+    fn holder_mismatch_error_is_recognised_and_distinct() {
+        assert!(is_holder_mismatch(&holder_mismatch_error("lease-x")));
+        assert!(holder_mismatch_error("lease-x").contains("lease-x"));
+        assert!(!is_holder_mismatch("unknown lease_id: lease-x"));
+        assert!(!is_holder_mismatch("lease expired: lease-x"));
     }
 
     // (8) Extra: the dedupe set honours its FIFO bound (no unbounded growth).

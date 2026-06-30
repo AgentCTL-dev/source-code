@@ -15,7 +15,7 @@ utility paths** (intelligence, coordination, A2A-inbound) are **network-isolated
 | **node-agent → agent** (unix socket) | unix socket (hostPath) | **`SO_PEERCRED`** → `/proc` cgroup → pod uid | file perms + attestation | node-agent (local) |
 | **ModelGateway** :8080 (`/v1/infer`) | HTTP (+ optional Bearer) | identity header-asserted (`X-Agent-Namespace`/`-Name`), **source-IP attested** (`modelgateway.attestIdentity` — kube pod lookup, anti-spoof), **or pod-uid attested** via the node-agent forwarder (`X-Agent-Pod-Uid`, networkless/routed-infer tier — `SO_PEERCRED`); optional **`AGENTCTL_API_TOKEN`** bearer gate | ModelPool existence + budget | agents (NetworkPolicy-scoped) |
 | **A2A gateway** :8080 (plaintext) + **:8443 trusted-proxy mTLS** (opt-in) | HTTP/SSE (+ optional Bearer); **trusted-proxy mTLS** when `trustedProxy.enabled` | optional **`AGENTCTL_API_TOKEN`** bearer gate (cards are JWS-signed for the *caller* to verify); per-agent **OIDC** (JWKS JWT); **trusted-proxy** — front-proxy client cert verified vs the agentctl CA + `allowedNames`, then asserted `<prefix>-subject/-email/-groups` trusted (prefix `trustedProxy.headerPrefix`, default `x-agentctl`; stripped from untrusted plaintext callers) | per-agent **`requiredClaims`** (OIDC native or trusted-proxy pass-through) | A2A clients / peer agents / fronting API gateway (APISIX) |
-| **coordination server** :8080 (`work.*`) | HTTP (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate | — | producers + agents + scaler |
+| **coordination server** :8080 (`work.*`) | HTTP (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate; optional **source-IP attested** (`coordination.attestIdentity` — kube pod lookup, anti-spoof) binding claim ownership | claim ownership **bound to the attested identity** (blocks cross-tenant ack/release) when `attestIdentity` | producers + agents + scaler |
 | **scaler** gRPC :9100 | gRPC | none (in-cluster, KEDA-only) | — | KEDA |
 | **admission webhook** :8443 | HTTPS, `with_no_client_auth` | kube-apiserver trusted (caBundle lets *it* verify the webhook) | the gate logic | kube-apiserver |
 | **`/healthz` `/readyz` `/metrics`** :8080 | plaintext | none (intentional) | — | probes + Prometheus |
@@ -48,7 +48,8 @@ The **front-proxy CA** is read at runtime from `kube-system/extension-apiserver-
 | gateway | `pods` + `agents/agentfleets` get/list |
 | modelgateway | `modelpools` get/list/watch + `/status`; `secrets` get/list — **scoped** to `secretsNamespaces`; `pods` get/list (source-IP identity attestation, `modelgateway.attestIdentity`) |
 | admission | `modelpools` get/list |
-| node-agent / coordination / scaler | none / minimal (no cluster reads — discovery is local hostPath) |
+| coordination | none by default; `pods` get/list (source-IP claim-ownership attestation, `coordination.attestIdentity`) when enabled |
+| node-agent / scaler | none / minimal (no cluster reads — discovery is local hostPath) |
 
 The management path is **doubly authorized**: kube RBAC (reach the APIService) *then* the
 agentctl apiserver's own SAR per verb.
@@ -375,6 +376,31 @@ tenant), so a confined tenant has no way to assert a different identity.
 agent in with the `agentctl.dev/routed-infer` annotation (the operator points
 `AGENT_INTELLIGENCE` at the socket and mounts the dir **read-only** into the agent pod).
 
+## Attested claim ownership (coordination)
+
+By default the claim-mode **coordination server** authenticates callers only with the
+optional `AGENTCTL_API_TOKEN` bearer (a coarse, shared in-cluster gate) and trusts the
+claim metadata a caller asserts — so any in-cluster pod holding the token could ack or
+release another tenant's work claim.
+
+Enabling **`coordination.attestIdentity`** (default **off**) binds each claim's lifecycle to
+a **source-IP attestation**: the server reads the connection's source IP and resolves it to
+the calling pod via a kube `pods` lookup (matching `status.podIP`), then binds claim ownership
+to that attested identity. Ack/release is authorized against the attested owner, so a tenant
+**cannot ack or release another tenant's claim** (cross-tenant claim tampering blocked).
+
+- **Why it is robust:** confined tenant pods run with `drop: ["ALL"]` capabilities — no
+  `CAP_NET_RAW` — so they cannot spoof a source IP; the kernel-attributed source IP is a
+  trustworthy identity (the same property the ModelGateway source-IP attestation relies on).
+- **RBAC:** needs cluster-wide `pods` get/list. Unlike the ModelGateway (which grants it
+  unconditionally), the coordination server holds **no cluster RBAC by default**, so the chart
+  renders the `agentctl-coordination` ClusterRole + ClusterRoleBinding **only** when
+  `attestIdentity` is on.
+- **Enable:** `helm upgrade --set coordination.enabled=true --set coordination.attestIdentity=true`
+  — the chart then sets `COORDINATION_ATTEST_IDENTITY=true` + `POD_NAMESPACE` (downward API
+  `metadata.namespace`) on the Deployment (default off renders no env + no RBAC, so the code
+  keeps the token-only path).
+
 ## Supply chain
 
 cosign keyless (OIDC) signatures on every image **and** the chart by digest; SBOM +
@@ -434,6 +460,11 @@ pinning close the loop at deploy.
   Postgres/node-agent ingress allow-lists enforce by pod label, the ModelGateway
   `namespaceSelector` restricts to the tenant namespace, and agent egress is limited to DNS +
   the gateway/ModelGateway pods (cross-tenant + wrong-port + admission-webhook traffic dropped).
-- [ ] coordination/scaler stronger-than-token (attested) auth — the `AGENTCTL_API_TOKEN` bearer
-  is a coarse in-cluster gate; per-caller source-IP/pod attestation (as on the ModelGateway) or
-  mTLS is the follow-up.
+- [x] **Coordination stronger-than-token (attested) auth** — `coordination.attestIdentity`
+  (default off) binds the **claim lifecycle to a source-IP-attested identity** (the server
+  resolves the caller's source IP to the owning pod via a kube `pods` lookup), so the
+  `AGENTCTL_API_TOKEN` bearer is no longer the only gate: a tenant **cannot ack/release another
+  tenant's claim** (cross-tenant ack/release blocked). Robust because confined tenant pods drop
+  `CAP_NET_RAW` and cannot spoof their source IP; needs cluster-wide `pods` get/list (rendered
+  only when enabled). See "Attested claim ownership (coordination)". The **scaler** gRPC path
+  remains token / in-cluster-only (mTLS is the residual follow-up).
