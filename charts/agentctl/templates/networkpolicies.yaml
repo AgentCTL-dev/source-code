@@ -203,14 +203,21 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
-    # The control plane: node-agent (bridge), A2A gateway, ModelGateway.
+    # The control plane: the A2A gateway + ModelGateway ONLY, over HTTP :8080,
+    # scoped to those specific pods (podSelector) — NOT any control-plane pod.
+    # Defense in depth under hostile multi-tenancy: a bare namespaceSelector would
+    # also let a tenant agent reach e.g. the admission webhook on :8443; the
+    # podSelector forbids that. The node-agent is reached over the SO_PEERCRED
+    # unix socket (routed-infer) / not a TCP dial, so it needs no egress allow.
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ns }}
+          podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: ["agentctl-gateway", "agentctl-modelgateway"] }
       ports:
-        - { protocol: TCP, port: 8443 }  # node-agent control API (mTLS)
-        - { protocol: TCP, port: 8080 }  # gateway / modelgateway
+        - { protocol: TCP, port: 8080 }  # A2A gateway + ModelGateway (HTTP)
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane
 # (no cross-tenant pod-to-pod traffic).
