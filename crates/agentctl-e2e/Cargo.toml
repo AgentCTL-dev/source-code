@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: BUSL-1.1
+#
+# agentctl end-to-end + scale/resource benchmark harness (agentctl Phase 4).
+#
+# This crate is DELIBERATELY excluded from the root workspace (`[workspace].exclude`
+# in ../../Cargo.toml). It is a cluster-driving tool — its two binaries `e2e` and
+# `bench` apply CRs with kube-rs and shell out to kubectl/helm, then assert against
+# a live cluster's `/metrics` + CR status. Excluding it keeps `cargo test
+# --workspace` hermetic (it never compiles or runs this crate, so the default test
+# run needs no cluster). Build it on its own with `cargo build` from this directory.
+#
+# Because it is excluded it cannot inherit `[workspace.package]`/`[workspace.dependencies]`,
+# so every field + dependency is spelled out here. The whole stack is rustls/ring
+# (no openssl, no aws-lc-rs, no C toolchain) — matching the rest of agentctl.
+[package]
+name = "agentctl-e2e"
+version = "0.1.0"
+description = "agentctl end-to-end + scale/resource benchmark harness (Phase 4): drives every plane against a real conformant agent (agentd) on kind, asserts via /metrics + CR-status oracles, and quantifies per-agent overhead, control-plane scaling trends, coordination throughput, and scale latency. Excluded from the workspace; needs a cluster to run."
+edition = "2021"
+rust-version = "1.89"
+license = "BUSL-1.1"  # control-plane tooling — source-available (see ../../LICENSE-BUSL)
+repository = "https://github.com/AgentCTL-dev/source-code"
+publish = false
+
+[lib]
+name = "agentctl_e2e"
+path = "src/lib.rs"
+
+# The functional scenario runner (~25 asserted scenarios; nonzero exit on any fail).
+[[bin]]
+name = "e2e"
+path = "src/bin/e2e.rs"
+
+# The scale/resource benchmark sweeps + the docs/benchmarks.md report renderer.
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+# kube-rs: typed CR apply/watch/status (client) + the derive'd Agent/AgentFleet/
+# ModelPool from agent-api + runtime wait conditions. rustls/ring → no aws-lc-rs.
+kube = { version = "4", default-features = false, features = [
+    "client",
+    "rustls-tls",
+    "ring",
+    "derive",
+    "runtime",
+] }
+# kube-core needs a k8s-openapi version feature selected; `latest` tracks newest.
+k8s-openapi = { version = "0.28", features = ["latest"] }
+# The agentctl CRD types (Agent / AgentFleet / ModelPool) — reuse, never redefine.
+agent-api = { path = "../agent-api" }
+# Contract manifest parsing/validation (capabilities manifest, version negotiate).
+agent-contract-client = { path = "../agent-contract-client" }
+# HTTP client for: /metrics scrapes over a port-forward, the A2A gateway card/RPC/
+# SSE surface, the ModelGateway, and the coordination /mcp throughput load-gen.
+# `rustls-tls` is ring-backed in reqwest 0.12 (→ no aws-lc-rs, no C toolchain).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "stream",
+] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

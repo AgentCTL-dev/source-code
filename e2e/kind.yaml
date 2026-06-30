@@ -1,0 +1,32 @@
+# Single-node kind cluster for the agentctl e2e + benchmark harness.
+#
+# One node on purpose: the density/overhead benchmark is HOST-BOUND on a single
+# node (the report stamps a prominent caveat and the re-run-on-a-real-cluster
+# command). The default CNI (kindnet) does NOT enforce NetworkPolicy, so the
+# NetworkPolicy lane uses kind-calico.yaml instead (Calico, disableDefaultCNI).
+#
+# Disk headroom note: cargo target rebuilds + repeated image loads fill the node
+# disk, which silently crash-loops the bundled Postgres (looks like a connect
+# bug). The extraMounts below let you back the node's containerd/image store with
+# a roomy host path; `make clean-disk` is the recovery valve. Adjust HOSTPATH or
+# delete the mount if your Docker root already has space.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: agentctl-e2e
+nodes:
+  - role: control-plane
+    # Single node also acts as a worker (no control-plane taint to schedule
+    # around) so agent/data-plane pods land here in the host-bound bench.
+    kubeadmConfigPatches:
+      # Surface the node-allocatable headroom; keep kubelet image GC from
+      # evicting freshly loaded e2e images mid-run under disk pressure.
+      - |
+        kind: KubeletConfiguration
+        imageGCHighThresholdPercent: 95
+        imageGCLowThresholdPercent: 90
+    # Optional disk headroom: point an emptyish host dir at the image/layer store.
+    # Uncomment + set HOSTPATH to a roomy filesystem if the default Docker root
+    # is tight (the documented kind disk-full -> Postgres crash failure mode).
+    # extraMounts:
+    #   - hostPath: /var/tmp/agentctl-e2e-kind
+    #     containerPath: /var/lib/containerd

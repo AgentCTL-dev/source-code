@@ -27,6 +27,17 @@ members = [
     "crates/agentctl-scaler",
 ]
 
+# The end-to-end + scale-benchmark harness (agentctl Phase 4) is DELIBERATELY
+# excluded from the workspace: it is a cluster-driving tool (kube-rs + kubectl +
+# helm shell-outs) whose binaries assert against a live cluster. Keeping it out of
+# `[workspace].members` means `cargo test --workspace` never compiles or runs it,
+# so the default test run stays hermetic and requires NO cluster. Build it on its
+# own with `cargo build` from `crates/agentctl-e2e/` (it resolves as a standalone
+# package against this same `[workspace.package]`/path deps via the exclude rule).
+exclude = [
+    "crates/agentctl-e2e",
+]
+
 [workspace.package]
 edition = "2021"
 rust-version = "1.89"   # resolved deps (enum-ordinalize 1.89, kube 4.0.0 1.88) require it

@@ -1,0 +1,86 @@
+# e2e: the REAL agentd<->coordination claim loop (plan Finding B).
+#
+# agentd's MCP client is stdio-only and the coordination server speaks HTTP
+# JSON-RPC, so a tiny stdio->HTTP bridge sits between them. Because agentd's image
+# is `scratch`, it cannot carry the bridge; instead an initContainer (the busybox-
+# based work-mcp-bridge image) COPIES the static bridge binary onto a shared
+# emptyDir, and the agentd container execs it as its `--mcp` child:
+#
+#   agentd  --mode reactive
+#           --mcp coord=/shared/work-mcp-bridge        (stdio child; reads COORDINATION_URL)
+#           --claim queue://jobs=coord                 (lease before processing)
+#           --intelligence unix:/run/agentctl/infer/infer.sock
+#
+# This is a RAW Deployment (not operator-rendered), so the routed-infer socket is
+# wired by hand: the node-agent's infer.sock hostPath (nodeAgent.inferProxy in
+# values/e2e-base.yaml) is mounted read-only at the same path the operator uses,
+# giving agentd a secretless intelligence endpoint without a key.
+#
+# NOTE: requires the agentctl/work-mcp-bridge:dev image (built by images.sh once
+# crates/agentctl-coordination/src/bin/work-mcp-bridge.rs lands) and a running
+# coordination server (coordination.enabled in e2e-base). Scenario: submit work
+# over /mcp, assert agentd claims + acks it (atomic single-grant, dedupe, re-offer).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claim-worker
+  namespace: default
+  labels:
+    app.kubernetes.io/name: claim-worker
+spec:
+  replicas: 2                      # contention: two workers race work.claim
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: claim-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: claim-worker
+    spec:
+      terminationGracePeriodSeconds: 30   # > agentd --drain-timeout (25s default)
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      volumes:
+        - name: shared-bin
+          emptyDir: {}
+        # node-agent-owned infer socket dir (host). Mounted read-only, same path
+        # the operator uses for the routed-infer path.
+        - name: infer-sock
+          hostPath:
+            path: /run/agentctl/infer
+            type: DirectoryOrCreate
+      initContainers:
+        # Stage the static bridge binary onto the shared volume so the scratch
+        # agentd container can exec it.
+        - name: install-bridge
+          image: agentctl/work-mcp-bridge:dev
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "/usr/local/bin/work-mcp-bridge", "/shared/work-mcp-bridge"]
+          volumeMounts:
+            - { name: shared-bin, mountPath: /shared }
+      containers:
+        - name: agentd
+          image: agentd:1.0.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--mode"
+            - "reactive"
+            - "--mcp"
+            - "coord=/shared/work-mcp-bridge"
+            - "--claim"
+            - "queue://jobs=coord"
+            - "--intelligence"
+            - "unix:/run/agentctl/infer/infer.sock"
+            - "--metrics-addr"
+            - ":9090"
+          env:
+            # The bridge (spawned as the `coord` MCP child) dials coordination here.
+            - name: COORDINATION_URL
+              value: "http://agentctl-coordination.agentctl-system/"
+          ports:
+            - { containerPort: 9090, name: metrics }
+          volumeMounts:
+            - { name: shared-bin, mountPath: /shared, readOnly: true }
+            - { name: infer-sock, mountPath: /run/agentctl/infer, readOnly: true }

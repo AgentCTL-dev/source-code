@@ -1,0 +1,8 @@
+# Security gate: coordination attested claim ownership (cross-tenant block).
+# Flips charts/agentctl/values.yaml `coordination.attestIdentity`. The
+# coordination server binds each work claim to the caller's source-IP-attested
+# identity (kube pods lookup on status.podIP) instead of self-asserted claim
+# metadata, blocking cross-tenant ack/release. Scenario: tenant B cannot ack or
+# release tenant A's claim. (coordination.enabled comes from e2e-base.)
+coordination:
+  attestIdentity: true

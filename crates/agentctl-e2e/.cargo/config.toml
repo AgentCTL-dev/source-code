@@ -1,0 +1,11 @@
+# This crate is EXCLUDED from the root workspace (../../Cargo.toml `[workspace].exclude`)
+# so `cargo test --workspace` never compiles or runs it (the suite needs a cluster).
+# Build it from this directory: `cargo build`, `cargo build --bin e2e`, etc.
+#
+# Point the build at the SHARED workspace target dir so the standalone build reuses
+# the control-plane crates that are already compiled there (kube, k8s-openapi,
+# reqwest, …) instead of doing a full from-scratch rebuild into a second target tree
+# (which would burn several GB of disk — and a full node disk crash-loops the bundled
+# Postgres). The path is relative to this `.cargo` directory's parent (the crate root).
+[build]
+target-dir = "../../target"

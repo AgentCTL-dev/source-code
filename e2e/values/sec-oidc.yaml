@@ -1,0 +1,13 @@
+# Security gate: per-agent OIDC authorization for inbound A2A.
+#
+# NOTE: OIDC is NOT a chart-level toggle — there is no matching gate in
+# charts/agentctl/values.yaml. The A2A gateway enforces it PER Agent/AgentFleet,
+# from the CR's `spec.template.access.oidc` (issuer/jwksUri + audiences +
+# requiredClaims, per the agentfleet CRD). The e2e OIDC scenario therefore stands
+# up a static test JWKS and applies an AgentFleet carrying `access.oidc`, then
+# asserts allow (valid token w/ required claims) vs deny (missing/invalid).
+#
+# This overlay exists so the overlay set is symmetric and the gateway is up; it
+# makes no chart change beyond pinning the gateway on (already the default).
+gateway:
+  enabled: true

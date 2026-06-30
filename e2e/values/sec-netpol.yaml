@@ -1,0 +1,12 @@
+# Security gate: defense-in-depth NetworkPolicies.
+# Flips charts/agentctl/values.yaml `networkPolicies.enabled`. Renders the
+# control-plane default-deny-ingress + sanctioned-flow allows, plus per-agent-
+# namespace default-deny + sanctioned egress/ingress for each agentNamespaces
+# entry. REQUIRES a policy-enforcing CNI — kindnet IGNORES NetworkPolicy, so the
+# enforce assertions only run on the Calico lane (E2E_CNI=calico up.sh +
+# kind-calico.yaml); on kindnet the scenario is skipped-with-reason.
+networkPolicies:
+  enabled: true
+  # default already covers the bundled examples' tenant namespace.
+  agentNamespaces:
+    - default

@@ -1,0 +1,39 @@
+# Base values for the e2e suite. Layered UNDER every security overlay; turns on
+# the planes the functional + benchmark scenarios drive, while leaving every
+# security gate at its secure default (each overlay flips exactly one).
+#
+# image.registry is intentionally NOT set here — install.sh passes it (default ""
+# = local kind-loaded names: agentctl/<comp>:dev). The 8 control-plane images are
+# loaded by images.sh.
+
+# Claim-mode coordination server (work.* over HTTP/MCP). Needed by the
+# coordination-throughput bench, the claim scenarios, and KEDA scale-from-zero.
+coordination:
+  enabled: true
+  store: memory                 # overlay store-postgres.yaml flips this
+
+# Secretless/budgeted intelligence plane (routed-infer -> ModelGateway ->
+# mock-provider). Enabled by default in the chart; pinned here for clarity.
+modelgateway:
+  enabled: true
+
+# KEDA external scaler — claim-depth autoscaling (0->N->0). Enabling it also
+# flips the operator's SCALER_ENABLED so it renders a ScaledObject per claim
+# fleet. Requires KEDA in the cluster (up.sh installs it).
+scaler:
+  enabled: true
+
+# Routed-infer proxy on the node-agent: binds the infer.sock the operator points
+# agentd's AGENT_INTELLIGENCE at when the Agent carries the routed-infer
+# annotation (the intelligence scenarios + manifests/agentd-agent.yaml rely on it).
+nodeAgent:
+  inferProxy:
+    enabled: true
+
+# Emit ServiceMonitors so the opt-in PromQL bench lane (up.sh E2E_PROMETHEUS=1,
+# which installs kube-prometheus-stack + the monitoring.coreos.com CRDs) scrapes
+# every target. NOTE: applying these requires those CRDs present — run the
+# install lane with E2E_PROMETHEUS=1 (or pre-install the ServiceMonitor CRD).
+metrics:
+  serviceMonitor:
+    enabled: true

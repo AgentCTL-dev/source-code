@@ -1,0 +1,8 @@
+# Security gate: ModelGateway attested agent identity (anti-spoof).
+# Flips charts/agentctl/values.yaml `modelgateway.attestIdentity`. The
+# ModelGateway derives the agent namespace from the caller's source IP (a kube
+# pod lookup on status.podIP) instead of trusting the X-Agent-Namespace header,
+# so a tenant cannot impersonate another namespace's ModelPool/budget. Scenario:
+# spoofed X-Agent-Namespace header is ignored (attested namespace wins).
+modelgateway:
+  attestIdentity: true

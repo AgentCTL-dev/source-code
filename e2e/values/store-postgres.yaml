@@ -1,0 +1,10 @@
+# Store gate: durable Postgres-backed coordination queue.
+# Flips charts/agentctl/values.yaml `coordination.store` from memory to postgres
+# (reusing the bundled-or-external Postgres / the DATABASE_URL helper). Claims
+# then survive restarts and the queue is shared across replicas. The bench (d)
+# runs coordination throughput memory-vs-postgres; this overlay is the postgres
+# arm. postgres.mode stays bundled (the chart default) for the kind lane.
+coordination:
+  store: postgres
+postgres:
+  mode: bundled

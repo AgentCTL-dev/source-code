@@ -1,0 +1,23 @@
+# e2e: a SHARD-mode AgentFleet (fixed partition) backed by the real agentd.
+#
+# The operator renders shard mode to a StatefulSet with replicas = scaling.shards
+# (NOT KEDA-owned) and injects AGENT_SHARD=<ordinal>/<N> from each pod's
+# StatefulSet ordinal. Each agentd replica then owns shard K of N via its
+# FNV-1a/64 hash gate and SKIPS out-of-shard work. Scenario: assert each pod gets
+# its K/N identity and out-of-shard items are skipped.
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: AgentFleet
+metadata:
+  name: shardfleet
+  namespace: default
+spec:
+  template:
+    mode: reactive
+    image: agentd:1.0.0
+    subscribe: ["queue://shards"]
+  scaling:
+    mode: shard
+    # Fixed partition count N -> StatefulSet replicas. Required for shard mode
+    # (the operator errors without it: "shard-mode fleet requires scaling.shards").
+    shards: 3
+  workSource: "queue://shards"

@@ -1,0 +1,7 @@
+# Security gate: TRUSTED-PROXY mode for the A2A gateway (RFC 0013/0014).
+# Flips charts/agentctl/values.yaml `trustedProxy.enabled`. The gateway opens a
+# second mTLS listener on :8443 that only the fronting proxy (CN in allowedNames)
+# may connect to; it trusts the proxy's identity headers on that listener and
+# STRIPS them from plaintext callers. Scenario: mTLS accept + plaintext-strip.
+trustedProxy:
+  enabled: true
