@@ -19,6 +19,46 @@
 //! end-to-end attestation needs `hostPID` + `/proc` and a real socket, so it is
 //! not unit-testable.
 
+/// Read the connected peer's **kernel-attested** pid (`SO_PEERCRED`) off a
+/// connected `AF_UNIX` stream by raw fd.
+///
+/// `SO_PEERCRED` reports the credentials of the process on the OTHER end of the
+/// socket, so the SAME getsockopt works from either side:
+///
+/// * the management bridge dials a per-pod socket → the peer is the agent SERVER
+///   ([`crate::ManagementClient::peer_pid`]);
+/// * the infer-proxy ACCEPTS connections on its own socket → the peer is the
+///   agent CLIENT that dialed in ([`crate::infer`]).
+///
+/// `std::os::unix::net::UnixStream::peer_cred` is still nightly-only
+/// (`peer_credentials_unix_socket`), so we read `SO_PEERCRED` directly with
+/// `getsockopt` (Linux). A non-positive pid (e.g. the kernel could not attribute
+/// the peer) is reported as `None`.
+pub fn peer_pid_of_fd(fd: std::os::unix::io::RawFd) -> Option<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred`/`len` are valid, correctly sized out-params for the
+    // SO_PEERCRED getsockopt on a connected AF_UNIX stream; `fd` is a borrowed
+    // raw fd owned by the caller's live socket and outlives the call.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
+            &mut len,
+        )
+    };
+    if rc != 0 || cred.pid <= 0 {
+        return None;
+    }
+    Some(cred.pid as u32)
+}
+
 /// Resolve the Kubernetes pod UID from the text of a `/proc/<pid>/cgroup` file.
 ///
 /// Handles BOTH cgroup drivers:

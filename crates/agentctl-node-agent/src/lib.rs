@@ -15,9 +15,10 @@
 
 pub mod attest;
 pub mod discovery;
+pub mod infer;
 pub mod metrics;
 pub mod mgmt;
 
-pub use attest::{attest_decision, pod_uid_for_pid, AttestMode, Attestation};
+pub use attest::{attest_decision, peer_pid_of_fd, pod_uid_for_pid, AttestMode, Attestation};
 pub use discovery::{discover, DiscoveredAgent};
 pub use mgmt::{Error, ManagementClient};

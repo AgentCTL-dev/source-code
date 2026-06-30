@@ -25,6 +25,14 @@
         "allowedRegistries": { "type": "string" },
         "secretsNamespaces": { "type": "array" },
         "attestIdentity": { "type": "boolean" },
+        "inferProxy": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "socketDir": { "type": "string" }
+          }
+        },
         "store": { "type": "string", "enum": ["memory", "postgres"] },
         "federationPeers": { "type": "string" },
         "address": { "type": "string" },

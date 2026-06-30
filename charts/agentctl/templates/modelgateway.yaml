@@ -172,6 +172,16 @@ spec:
             # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
             {{- . | nindent 12 }}
             {{- end }}
+            # Downward API: the ModelGateway's own (control-plane) namespace. Source-IP
+            # attestation (modelgateway.attestIdentity) uses it to anchor the trusted
+            # node-agent forwarder to a pod in THIS namespace running the
+            # agentctl-node-agent ServiceAccount — an anchor a tenant cannot forge.
+            # Unset/empty -> NO forwarder is trusted (fail closed). Harmless when attest
+            # is off, so it is unconditional (keeps the env stable across the toggle).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- if .Values.modelgateway.attestIdentity }}
             # Source-IP identity attestation (modelgateway.attestIdentity): derive the
             # agent namespace from the caller's source IP (kube pod lookup) instead of

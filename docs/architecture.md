@@ -175,6 +175,29 @@ sequenceDiagram
   end
 ```
 
+### 6a. Routed-infer attestation — the networkless (Kata) tier
+
+On the networkless tier the agent has no routable pod IP, so the ModelGateway cannot attest it
+by source IP. Opt-in (`nodeAgent.inferProxy.enabled` + the operator annotation
+`agentctl.dev/routed-infer: "true"`) routes inference through the node-agent's unix-socket
+forwarder, which kernel-attests the peer (`SO_PEERCRED`) and re-stamps the identity so the
+client cannot self-assert. See docs/security.md → "Networkless-tier infer attestation".
+
+```mermaid
+sequenceDiagram
+  participant AG as agentd (networkless)
+  participant NA as node-agent (infer-proxy)
+  participant MG as ModelGateway
+  Note over AG: AGENT_INTELLIGENCE = unix:/run/agentctl/infer/infer.sock (read-only mount)
+  AG->>NA: infer over unix socket (no IP, may assert any header)
+  NA->>NA: SO_PEERCRED -> /proc cgroup -> pod uid
+  NA->>NA: strip client identity; re-stamp X-Agent-Pod-Uid
+  NA->>MG: infer + X-Agent-Pod-Uid (trusted forwarder, source IP)
+  MG->>MG: trust forwarder IP; resolve uid -> namespace/identity
+  MG-->>NA: completion (metered + budgeted)
+  NA-->>AG: completion
+```
+
 ---
 
 ## 7. A2A path — agents reachable by other agents

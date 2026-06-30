@@ -183,6 +183,22 @@ nodeAgent:
   envFrom: []
   serviceAccount:
     annotations: {}
+  # Networkless/routed-infer proxy (RFC 0012). DISABLED by default — a stock
+  # install renders no infer-proxy env/mount. When enabled the node-agent binds
+  # an infer-proxy unix socket on a node-agent-owned hostPath dir (socketDir,
+  # mounted read-WRITE here) and forwards attested inference to the in-cluster
+  # ModelGateway Service. Agents opt in per-pod via the operator annotation
+  # `agentctl.dev/routed-infer: "true"` (the Kata/networkless tier defaults it on
+  # later); the operator then points the agent's AGENT_INTELLIGENCE at this
+  # socket and mounts socketDir READ-ONLY into the agent pod. The node-agent
+  # attests the unix-socket peer (SO_PEERCRED -> pod-uid -> X-Agent-Pod-Uid), the
+  # SO_PEERCRED complement to modelgateway.attestIdentity for the tier where pods
+  # have no routable IP. See docs/security.md.
+  inferProxy:
+    enabled: false
+    # node-agent-owned hostPath dir the infer-proxy socket (infer.sock) is bound
+    # in. Agents mount this dir read-only; keep it distinct from substrate.socketRoot.
+    socketDir: /run/agentctl/infer
 
 apiserver:
   enabled: true

@@ -28,6 +28,9 @@ pub struct Metrics {
     /// Requests where the `X-Agent-Namespace` header disagreed with the
     /// attested namespace (a spoof attempt; the attested one is used).
     identity_spoof: AtomicU64,
+    /// Requests whose identity was attested via the trusted node-agent forwarder
+    /// (the real caller asserted in `X-Agent-Pod-Uid`).
+    identity_forwarded: AtomicU64,
 }
 
 impl Metrics {
@@ -42,6 +45,7 @@ impl Metrics {
             auth_rejected: AtomicU64::new(0),
             identity_attested: AtomicU64::new(0),
             identity_spoof: AtomicU64::new(0),
+            identity_forwarded: AtomicU64::new(0),
         }
     }
 
@@ -74,6 +78,12 @@ impl Metrics {
     /// namespace (a spoof attempt; the attested namespace is used regardless).
     pub fn inc_identity_spoof(&self) {
         self.identity_spoof.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A request's identity was attested via the trusted node-agent forwarder
+    /// (the real caller resolved from `X-Agent-Pod-Uid`).
+    pub fn inc_identity_forwarded(&self) {
+        self.identity_forwarded.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Meter `tokens` provider tokens (negative/absent counts are clamped to 0).
@@ -133,6 +143,12 @@ impl Metrics {
             "Requests where the X-Agent-Namespace header disagreed with the attested namespace.",
             self.identity_spoof.load(Ordering::Relaxed),
         );
+        counter(
+            &mut out,
+            "agentctl_modelgateway_identity_forwarded_total",
+            "Requests whose identity was attested via the trusted node-agent forwarder.",
+            self.identity_forwarded.load(Ordering::Relaxed),
+        );
         out
     }
 }
@@ -185,5 +201,15 @@ mod tests {
         assert!(body.contains("agentctl_modelgateway_budget_rejections_total 1"));
         assert!(body.contains("agentctl_modelgateway_tokens_total 150"));
         assert!(body.contains("# TYPE process_start_time_seconds gauge"));
+    }
+
+    #[test]
+    fn render_reports_forwarded_identity_counter() {
+        let m = Metrics::new();
+        m.inc_identity_forwarded();
+        m.inc_identity_forwarded();
+        let body = m.render();
+        assert!(body.contains("# TYPE agentctl_modelgateway_identity_forwarded_total counter"));
+        assert!(body.contains("agentctl_modelgateway_identity_forwarded_total 2"));
     }
 }

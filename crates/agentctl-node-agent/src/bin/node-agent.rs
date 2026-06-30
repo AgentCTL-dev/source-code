@@ -38,8 +38,8 @@ use std::time::Duration;
 
 use agentctl_node_agent::mgmt::URI_CAPABILITIES;
 use agentctl_node_agent::{
-    attest_decision, discover, metrics, pod_uid_for_pid, AttestMode, Attestation, DiscoveredAgent,
-    Error, ManagementClient,
+    attest_decision, discover, infer, metrics, pod_uid_for_pid, AttestMode, Attestation,
+    DiscoveredAgent, Error, ManagementClient,
 };
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -123,7 +123,27 @@ async fn main() {
     eprintln!("node-agent: plaintext (healthz, metrics) on {plain_addr}");
     eprintln!("node-agent: mTLS control API on {tls_addr}");
 
-    // Run both listeners concurrently; if either exits the process should fail.
+    // Infer-proxy (RFC 0012, networkless/Kata tier): enabled only when
+    // NODE_AGENT_INFER_SOCKET *and* MODELGATEWAY_URL are both set. Networkless
+    // agents have no pod IP, so the ModelGateway cannot source-IP-attest them;
+    // they dial this unix socket and the node-agent SO_PEERCRED-attests the
+    // caller, then forwards to the ModelGateway with the attested pod UID.
+    let infer_cfg = infer::ProxyConfig::from_env();
+    match &infer_cfg {
+        Some(cfg) => eprintln!(
+            "node-agent: infer-proxy ENABLED on {} -> {}",
+            cfg.socket_path.display(),
+            cfg.target
+        ),
+        None if std::env::var_os("NODE_AGENT_INFER_SOCKET").is_some() => eprintln!(
+            "node-agent: NODE_AGENT_INFER_SOCKET set but MODELGATEWAY_URL missing — infer-proxy DISABLED"
+        ),
+        None => {}
+    }
+
+    // Run all listeners concurrently; if any exits the process should fail. When
+    // the infer-proxy is disabled its slot is a never-resolving future so the
+    // join arity stays fixed without affecting the other servers.
     let plain_srv = async move {
         axum::serve(listener, plain).await.expect("serve plaintext");
     };
@@ -133,7 +153,13 @@ async fn main() {
             .await
             .expect("serve mTLS");
     };
-    tokio::join!(plain_srv, tls_srv);
+    let infer_srv = async move {
+        match infer_cfg {
+            Some(cfg) => infer::serve(cfg).await.expect("serve infer-proxy"),
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::join!(plain_srv, tls_srv, infer_srv);
 }
 
 // --- mTLS server config (RFC 0015) -----------------------------------------

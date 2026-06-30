@@ -34,6 +34,31 @@ const SOCKET_HOSTPATH_ROOT: &str = "/run/agentctl/sockets";
 const SOCKET_MOUNT: &str = "/run/agent";
 const SOCKET_VOLUME: &str = "agentctl-sockets";
 
+/// Annotation that opts a single Agent/Pod into the **routed-infer** path (RFC
+/// 0012 node-local proxy topology). When present and `"true"`, the agent's
+/// `AGENT_INTELLIGENCE` is pointed at the node-agent's infer-proxy unix socket
+/// (a read-only hostPath) instead of dialing the ModelGateway Service directly;
+/// the node-agent forwards to the ModelGateway with an SO_PEERCRED-attested
+/// pod-uid (`X-Agent-Pod-Uid`). This is the NETWORKLESS-tier identity path:
+/// confined pods on the Kata tier have no routable pod IP for the ModelGateway
+/// to attest, so the unix-socket peer credential is the substrate-local
+/// attestation. The Kata/networkless tier defaults this on later (RFC 0002);
+/// for now it is explicit opt-in so the default direct-dial wiring is UNCHANGED.
+pub const ROUTED_INFER_ANNOTATION: &str = "agentctl.dev/routed-infer";
+
+/// The node-agent-owned hostPath dir holding the infer-proxy unix socket (chart
+/// `nodeAgent.inferProxy`, mounted read-write on the node-agent DaemonSet).
+/// Agent pods on the routed-infer path mount it READ-ONLY.
+const INFER_SOCKET_HOSTPATH_DIR: &str = "/run/agentctl/infer";
+/// Socket filename inside [`INFER_SOCKET_HOSTPATH_DIR`] the node-agent binds and
+/// the agent dials (`AGENT_INTELLIGENCE=unix:<dir>/<file>`). Kept in sync with
+/// the chart's `NODE_AGENT_INFER_SOCKET` (charts/agentctl/templates/node-agent.yaml).
+const INFER_SOCKET_NAME: &str = "infer.sock";
+/// In-pod mount point for the routed-infer socket dir (same path as on the host
+/// for a stable `AGENT_INTELLIGENCE` URI).
+const INFER_SOCKET_MOUNT: &str = "/run/agentctl/infer";
+const INFER_SOCKET_VOLUME: &str = "agentctl-infer";
+
 /// Writable scratch dir mounted over the read-only root filesystem. With
 /// `readOnlyRootFilesystem: true` (see `container_security_context`) the
 /// container cannot write to `/`, so the agent's temp scratch needs an explicit
@@ -114,7 +139,12 @@ pub fn render_agent(agent: &Agent) -> Result<Rendered, RenderError> {
         &labels,
         owner_ref("Agent", &name, uid_of(&agent.metadata.uid)),
     );
-    let pod = pod_template(&agent.spec, &image, &labels);
+    let pod = pod_template(
+        &agent.spec,
+        &image,
+        &labels,
+        routed_infer_enabled(&agent.metadata.annotations),
+    );
 
     match agent.spec.mode {
         Mode::Once | Mode::Schedule => {
@@ -165,7 +195,12 @@ pub fn render_fleet(fleet: &AgentFleet) -> Result<Rendered, RenderError> {
         &labels,
         owner_ref("AgentFleet", &name, uid_of(&fleet.metadata.uid)),
     );
-    let pod = pod_template(spec, &image, &labels);
+    let pod = pod_template(
+        spec,
+        &image,
+        &labels,
+        routed_infer_enabled(&fleet.metadata.annotations),
+    );
 
     match fleet.spec.scaling.mode {
         ScaleMode::Claim => Ok(Rendered::Deployment(Box::new(Deployment {
@@ -433,6 +468,7 @@ fn pod_template(
     spec: &AgentSpec,
     image: &str,
     labels: &BTreeMap<String, String>,
+    routed_infer: bool,
 ) -> PodTemplateSpec {
     let restart_policy = match spec.mode {
         Mode::Once | Mode::Schedule => Some("Never".to_string()),
@@ -440,32 +476,82 @@ fn pod_template(
         Mode::Loop | Mode::Reactive => None,
     };
 
+    let mut env = downward_env();
+    let mut volume_mounts = vec![
+        VolumeMount {
+            name: SOCKET_VOLUME.to_string(),
+            mount_path: SOCKET_MOUNT.to_string(),
+            // Per RFC 0002 §6.1: the per-pod subdir is selected by the pod UID
+            // via subPathExpr, so the path is unique WITHOUT the operator
+            // knowing the UID at render time. NOT marked readOnly: the agent
+            // binds its management socket here.
+            sub_path_expr: Some("$(AGENT_POD_UID)".to_string()),
+            ..Default::default()
+        },
+        // Writable scratch: `readOnlyRootFilesystem` makes `/` read-only, so
+        // give the agent an explicit writable `/tmp`.
+        VolumeMount {
+            name: TMP_VOLUME.to_string(),
+            mount_path: TMP_MOUNT.to_string(),
+            ..Default::default()
+        },
+    ];
+    let mut volumes = vec![
+        Volume {
+            name: SOCKET_VOLUME.to_string(),
+            host_path: Some(HostPathVolumeSource {
+                path: SOCKET_HOSTPATH_ROOT.to_string(),
+                type_: Some("DirectoryOrCreate".to_string()),
+            }),
+            ..Default::default()
+        },
+        // Backs the writable `/tmp` mount above.
+        Volume {
+            name: TMP_VOLUME.to_string(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        },
+    ];
+
+    // Routed-infer opt-in (annotation `agentctl.dev/routed-infer: "true"`): point
+    // the agent's intelligence endpoint at the node-agent infer-proxy unix socket
+    // on a READ-ONLY hostPath, instead of the direct ModelGateway dial. The
+    // node-agent attests the peer (SO_PEERCRED) and forwards upstream. Default
+    // (no annotation) leaves this OFF, so the direct ModelGateway wiring is
+    // unchanged. See [`ROUTED_INFER_ANNOTATION`].
+    if routed_infer {
+        env.push(EnvVar {
+            name: "AGENT_INTELLIGENCE".to_string(),
+            value: Some(format!("unix:{INFER_SOCKET_MOUNT}/{INFER_SOCKET_NAME}")),
+            ..Default::default()
+        });
+        volume_mounts.push(VolumeMount {
+            name: INFER_SOCKET_VOLUME.to_string(),
+            mount_path: INFER_SOCKET_MOUNT.to_string(),
+            // READ-ONLY: the agent only dials the socket; it never binds it (the
+            // node-agent owns the bind). A confined tenant cannot tamper with or
+            // re-bind the forwarder's socket.
+            read_only: Some(true),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: INFER_SOCKET_VOLUME.to_string(),
+            host_path: Some(HostPathVolumeSource {
+                path: INFER_SOCKET_HOSTPATH_DIR.to_string(),
+                type_: Some("DirectoryOrCreate".to_string()),
+            }),
+            ..Default::default()
+        });
+    }
+
     let container = Container {
         name: "agent".to_string(),
         image: Some(image.to_string()),
         args: Some(agent_args(spec)),
-        env: Some(downward_env()),
+        env: Some(env),
         // Confine the tenant container (hostile multi-tenancy P0).
         security_context: Some(container_security_context()),
-        volume_mounts: Some(vec![
-            VolumeMount {
-                name: SOCKET_VOLUME.to_string(),
-                mount_path: SOCKET_MOUNT.to_string(),
-                // Per RFC 0002 §6.1: the per-pod subdir is selected by the pod UID
-                // via subPathExpr, so the path is unique WITHOUT the operator
-                // knowing the UID at render time. NOT marked readOnly: the agent
-                // binds its management socket here.
-                sub_path_expr: Some("$(AGENT_POD_UID)".to_string()),
-                ..Default::default()
-            },
-            // Writable scratch: `readOnlyRootFilesystem` makes `/` read-only, so
-            // give the agent an explicit writable `/tmp`.
-            VolumeMount {
-                name: TMP_VOLUME.to_string(),
-                mount_path: TMP_MOUNT.to_string(),
-                ..Default::default()
-            },
-        ]),
+        volume_mounts: Some(volume_mounts),
         ..Default::default()
     };
 
@@ -479,25 +565,21 @@ fn pod_template(
             restart_policy,
             // Pod-level hardening (hostile multi-tenancy P0).
             security_context: Some(pod_security_context()),
-            volumes: Some(vec![
-                Volume {
-                    name: SOCKET_VOLUME.to_string(),
-                    host_path: Some(HostPathVolumeSource {
-                        path: SOCKET_HOSTPATH_ROOT.to_string(),
-                        type_: Some("DirectoryOrCreate".to_string()),
-                    }),
-                    ..Default::default()
-                },
-                // Backs the writable `/tmp` mount above.
-                Volume {
-                    name: TMP_VOLUME.to_string(),
-                    empty_dir: Some(EmptyDirVolumeSource::default()),
-                    ..Default::default()
-                },
-            ]),
+            volumes: Some(volumes),
             ..Default::default()
         }),
     }
+}
+
+/// Whether an object's annotations opt it into the routed-infer path
+/// ([`ROUTED_INFER_ANNOTATION`] == `"true"`). Absent/any-other value = off, so
+/// the default direct-dial ModelGateway wiring is preserved.
+fn routed_infer_enabled(annotations: &Option<BTreeMap<String, String>>) -> bool {
+    annotations
+        .as_ref()
+        .and_then(|a| a.get(ROUTED_INFER_ANNOTATION))
+        .map(|v| v == "true")
+        .unwrap_or(false)
 }
 
 /// Container-level confinement for the tenant agent (hostile multi-tenancy P0):
@@ -800,6 +882,126 @@ mod tests {
             .find(|m| m.mount_path == "/run/agent")
             .expect("socket mount present");
         assert_ne!(sock_mount.read_only, Some(true));
+    }
+
+    #[test]
+    fn default_render_has_no_routed_infer_wiring() {
+        // No annotation → the direct-dial ModelGateway path: NO AGENT_INTELLIGENCE
+        // env, NO infer socket mount/volume. Default output is unchanged.
+        let r = render_agent(&agent(Mode::Reactive)).unwrap();
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
+        let pod = dep.spec.unwrap().template;
+        let c = container_of(&pod);
+
+        assert!(
+            !c.env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "AGENT_INTELLIGENCE"),
+            "default render must not set AGENT_INTELLIGENCE (direct-dial unchanged)"
+        );
+        assert!(
+            !c.volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| m.name == INFER_SOCKET_VOLUME),
+            "default render must not mount the infer socket"
+        );
+        assert!(
+            !pod.spec
+                .as_ref()
+                .unwrap()
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == INFER_SOCKET_VOLUME),
+            "default render must not declare the infer socket volume"
+        );
+    }
+
+    #[test]
+    fn routed_infer_annotation_wires_node_agent_socket() {
+        let mut a = agent(Mode::Reactive);
+        a.metadata.annotations = Some(BTreeMap::from([(
+            ROUTED_INFER_ANNOTATION.to_string(),
+            "true".to_string(),
+        )]));
+        let r = render_agent(&a).unwrap();
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
+        let pod = dep.spec.unwrap().template;
+        let podspec = pod.spec.as_ref().unwrap();
+        let c = container_of(&pod);
+
+        // AGENT_INTELLIGENCE points at the node-agent infer-proxy unix socket.
+        let intel = c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "AGENT_INTELLIGENCE")
+            .expect("AGENT_INTELLIGENCE set on the routed-infer path");
+        assert_eq!(
+            intel.value.as_deref(),
+            Some("unix:/run/agentctl/infer/infer.sock")
+        );
+
+        // The infer socket dir is mounted READ-ONLY (the agent dials, never binds).
+        let mount = c
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == INFER_SOCKET_VOLUME)
+            .expect("infer socket mounted");
+        assert_eq!(mount.mount_path, "/run/agentctl/infer");
+        assert_eq!(mount.read_only, Some(true));
+
+        // Backed by a hostPath to the node-agent-owned dir.
+        let vol = podspec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == INFER_SOCKET_VOLUME)
+            .expect("infer socket volume declared");
+        assert_eq!(vol.host_path.as_ref().unwrap().path, "/run/agentctl/infer");
+
+        // The downward-API identity + mgmt-socket wiring is untouched.
+        assert!(c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "AGENT_POD_UID"));
+    }
+
+    #[test]
+    fn routed_infer_off_for_non_true_annotation_value() {
+        // Only the exact "true" opts in; any other value is the default path.
+        let mut a = agent(Mode::Once);
+        a.metadata.annotations = Some(BTreeMap::from([(
+            ROUTED_INFER_ANNOTATION.to_string(),
+            "false".to_string(),
+        )]));
+        let r = render_agent(&a).unwrap();
+        let Rendered::Job(job) = r else {
+            unreachable!()
+        };
+        let pod = job.spec.unwrap().template;
+        let c = container_of(&pod);
+        assert!(!c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "AGENT_INTELLIGENCE"));
     }
 
     #[test]

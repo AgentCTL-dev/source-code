@@ -150,6 +150,7 @@ dependencies = [
  "axum",
  "axum-server",
  "libc",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "serde",

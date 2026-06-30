@@ -44,6 +44,10 @@ const H_NAMESPACE: &str = "X-Agent-Namespace";
 const H_AGENT: &str = "X-Agent-Name";
 /// Routing header: which `ModelPool` to use (optional; defaults to the first in ns).
 const H_POOL: &str = "X-Model-Pool";
+/// Forwarder header: the real caller's pod UID, asserted by the node-agent after
+/// it SO_PEERCRED-attested that caller. Trusted ONLY when the source IP resolves
+/// to a node-agent pod; ignored from any other (direct) caller.
+const H_POD_UID: &str = "X-Agent-Pod-Uid";
 
 #[derive(Clone)]
 struct AppState {
@@ -56,6 +60,13 @@ struct AppState {
     /// `X-Agent-Namespace` header is never trusted for the tenant. When `false`
     /// (default), the header carries the identity (back-compat).
     attest: bool,
+    /// The ModelGateway's own (control-plane) namespace, read from `POD_NAMESPACE`
+    /// at startup. It anchors the trusted node-agent **forwarder**: only a pod in
+    /// THIS namespace running the `agentctl-node-agent` ServiceAccount is trusted
+    /// to forward another tenant's identity — an anchor a tenant cannot forge.
+    /// **Fail closed:** empty (`POD_NAMESPACE` unset/empty) ⇒ NO forwarder is
+    /// trusted; every source is attested directly by its own source IP.
+    control_plane_ns: String,
     /// TTL cache of `source IP → attested identity`, so a burst from one pod
     /// does not hammer the kube API. Unused when `attest` is `false`.
     ip_cache: Arc<attest::IpIdentityCache>,
@@ -100,6 +111,34 @@ async fn main() {
             "IDENTITY_ATTEST unset: caller identity taken from X-Agent-* headers (spoofable; back-compat)"
         );
     }
+
+    // The control-plane (own) namespace, from the downward-API POD_NAMESPACE. It
+    // anchors the trusted node-agent forwarder to a pod in THIS namespace running
+    // the agentctl-node-agent ServiceAccount — unforgeable by a tenant. Empty
+    // (unset) ⇒ fail closed: NO forwarder is trusted (warn once below); direct
+    // source-IP attestation still works.
+    let control_plane_ns = std::env::var("POD_NAMESPACE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    if attest {
+        if control_plane_ns.is_empty() {
+            tracing::warn!(
+                "IDENTITY_ATTEST set but POD_NAMESPACE is unset/empty: NO forwarder will be \
+                 trusted (fail closed) — better to refuse forwarder trust than anchor it weakly. \
+                 Direct source-IP attestation still works; set POD_NAMESPACE (downward API \
+                 metadata.namespace) to anchor the node-agent forwarder to the control-plane \
+                 namespace + ServiceAccount."
+            );
+        } else {
+            tracing::info!(
+                control_plane_ns = %control_plane_ns,
+                "attest: node-agent forwarder anchored to the control-plane namespace + \
+                 agentctl-node-agent ServiceAccount (unforgeable by a tenant)"
+            );
+        }
+    }
     let ip_cache = Arc::new(attest::IpIdentityCache::new(attest::DEFAULT_TTL));
     // Optional bearer-token access gate (AGENTCTL_API_TOKEN). Unset → no-op; set
     // → enforced on the data routes, with /healthz /readyz /metrics exempt. The
@@ -120,6 +159,7 @@ async fn main() {
             pool,
             metrics,
             attest,
+            control_plane_ns,
             ip_cache,
         });
 
@@ -352,23 +392,45 @@ async fn resolve_identity(
         return Ok((ns, agent));
     }
 
-    // Attested mode: resolve the source IP to a pod identity — cache first,
-    // then a kube lookup memoized on a short TTL. A kube error is a 500 (we
-    // cannot safely attest); `None` (no pod owns the IP) becomes a reject below.
-    let looked_up = match state.ip_cache.get(&peer_ip) {
-        Some(id) => Some(id),
-        None => match resolve_ip_to_identity(&state.client, peer_ip).await {
-            Ok(Some(id)) => {
-                state.ip_cache.put(peer_ip, id.clone());
-                Some(id)
+    // Attested mode: resolve the source IP to a pod, classified for attestation —
+    // cache first (direct identities only), then a kube lookup memoized on a short
+    // TTL. A kube error is a 500 (we cannot safely attest).
+    let source = match state.ip_cache.get(&peer_ip) {
+        Some(id) => attest::SourcePod::Direct(id),
+        None => match resolve_ip_to_source(&state.client, peer_ip, &state.control_plane_ns).await {
+            Ok(src) => {
+                // Cache ONLY a direct agent's identity. The node-agent forwarder
+                // serves many agents from one IP and its caller varies per request
+                // (the `X-Agent-Pod-Uid` header), so its IP must never be cached.
+                if let attest::SourcePod::Direct(id) = &src {
+                    state.ip_cache.put(peer_ip, id.clone());
+                }
+                src
             }
-            Ok(None) => None,
             Err(e) => return Err(internal(&format!("attest source IP {peer_ip}: {e}"))),
         },
     };
 
-    // Pure policy: attest / flag-spoof / reject.
-    match attest::decide(looked_up, header_ns.as_deref()) {
+    // The trusted node-agent forwarder asserts the real caller's pod UID in
+    // `X-Agent-Pod-Uid` (it has already SO_PEERCRED-attested that caller). Resolve
+    // that UID to the real agent. For ANY other source the header is IGNORED —
+    // only the node-agent is trusted to forward identity, so a random pod cannot
+    // bill/route as another tenant by setting `X-Agent-Pod-Uid`.
+    let is_forwarder = matches!(source, attest::SourcePod::Forwarder);
+    let forwarded = if is_forwarder {
+        match header_str(headers, H_POD_UID) {
+            Some(uid) => match resolve_uid_to_identity(&state.client, &uid).await {
+                Ok(id) => id,
+                Err(e) => return Err(internal(&format!("attest forwarded uid {uid}: {e}"))),
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // Pure policy: attest (direct) / forward (node-agent) / flag-spoof / reject.
+    match attest::decide(source, forwarded, header_ns.as_deref()) {
         attest::Decision::Use { identity, spoofed } => {
             state.metrics.inc_identity_attested();
             if spoofed {
@@ -383,8 +445,25 @@ async fn resolve_identity(
             }
             Ok((identity.namespace, identity.agent))
         }
+        attest::Decision::Forwarded { identity } => {
+            state.metrics.inc_identity_forwarded();
+            tracing::debug!(
+                %peer_ip,
+                ns = %identity.namespace,
+                agent = %identity.agent,
+                "attest: identity forwarded by the trusted node-agent (X-Agent-Pod-Uid)",
+            );
+            Ok((identity.namespace, identity.agent))
+        }
         attest::Decision::Reject => {
-            tracing::warn!(%peer_ip, "attest: source IP resolves to no pod; rejecting");
+            if is_forwarder {
+                tracing::warn!(
+                    %peer_ip,
+                    "attest: node-agent forwarder asserted no resolvable caller (missing/unknown X-Agent-Pod-Uid); rejecting",
+                );
+            } else {
+                tracing::warn!(%peer_ip, "attest: source IP resolves to no pod; rejecting");
+            }
             Err(forbidden("cannot attest caller identity from source IP"))
         }
     }
@@ -392,23 +471,57 @@ async fn resolve_identity(
 
 // --- kube glue (needs a cluster to run, not to compile/test) ---------------
 
-/// Resolve a source IP to its pod's attested identity. Lists pods cluster-wide
-/// with a `status.podIP` field selector to narrow, then re-verifies the match
-/// locally (the selector is advisory) before deriving the identity from the
-/// pod's namespace + `agentctl.dev/agent` label. `Ok(None)` ⇒ no pod owns the
-/// IP (cannot attest).
-async fn resolve_ip_to_identity(
+/// Resolve a source IP to its pod, classified for attestation. Lists pods
+/// cluster-wide with a `status.podIP` field selector to narrow, then re-verifies
+/// the match locally (the selector is advisory) and classifies the pod: a genuine
+/// node-agent — a pod in `control_plane_ns` running the `agentctl-node-agent`
+/// ServiceAccount (an anchor a tenant cannot forge) → [`attest::SourcePod::Forwarder`]
+/// (trusted to forward another agent's identity); any other pod →
+/// [`attest::SourcePod::Direct`] with its own namespace + `agentctl.dev/agent`
+/// identity. No matching pod (or a pod with no namespace) →
+/// [`attest::SourcePod::Unresolved`] (cannot attest). When `control_plane_ns` is
+/// empty (`POD_NAMESPACE` unset) the forwarder anchor cannot be verified, so no
+/// pod is classified as a forwarder (fail closed) — it is attested directly or not
+/// at all.
+async fn resolve_ip_to_source(
     client: &Client,
     ip: IpAddr,
-) -> Result<Option<attest::Identity>, String> {
+    control_plane_ns: &str,
+) -> Result<attest::SourcePod, String> {
     let pods: Api<Pod> = Api::all(client.clone());
     let ip_s = ip.to_string();
     let lp = ListParams::default().fields(&format!("status.podIP={ip_s}"));
     let list = pods.list(&lp).await.map_err(|e| e.to_string())?;
+    let Some(pod) = list.items.iter().find(|p| attest::pod_matches_ip(p, &ip_s)) else {
+        return Ok(attest::SourcePod::Unresolved);
+    };
+    if attest::is_node_agent_pod(pod, control_plane_ns) {
+        return Ok(attest::SourcePod::Forwarder);
+    }
+    Ok(match attest::identity_from_pod(pod) {
+        Some(id) => attest::SourcePod::Direct(id),
+        None => attest::SourcePod::Unresolved,
+    })
+}
+
+/// Resolve a node-agent-asserted pod UID to the real agent's attested identity.
+/// Mirrors [`resolve_ip_to_source`] but matches on `metadata.uid` — which is not
+/// a kube field selector, so we list pods cluster-wide and match locally — then
+/// derives the identity from the matched pod. `Ok(None)` ⇒ no pod has that UID
+/// (the forwarder asserted an unknown caller; reject).
+async fn resolve_uid_to_identity(
+    client: &Client,
+    uid: &str,
+) -> Result<Option<attest::Identity>, String> {
+    let pods: Api<Pod> = Api::all(client.clone());
+    let list = pods
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(list
         .items
         .iter()
-        .find(|p| attest::pod_matches_ip(p, &ip_s))
+        .find(|p| attest::pod_matches_uid(p, uid))
         .and_then(attest::identity_from_pod))
 }
 

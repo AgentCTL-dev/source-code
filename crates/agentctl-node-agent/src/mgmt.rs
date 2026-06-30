@@ -99,29 +99,9 @@ impl ManagementClient {
     /// attribute the peer) is reported as `None`.
     pub fn peer_pid(&self) -> Option<u32> {
         use std::os::unix::io::AsRawFd;
-        let fd = self.writer.as_raw_fd();
-        let mut cred = libc::ucred {
-            pid: 0,
-            uid: 0,
-            gid: 0,
-        };
-        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        // SAFETY: `cred`/`len` are valid, correctly sized out-params for the
-        // SO_PEERCRED getsockopt on a connected AF_UNIX stream; `fd` is owned by
-        // `self.writer` and outlives the call.
-        let rc = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_PEERCRED,
-                std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
-                &mut len,
-            )
-        };
-        if rc != 0 || cred.pid <= 0 {
-            return None;
-        }
-        Some(cred.pid as u32)
+        // The shared `SO_PEERCRED` reader (reused by the infer-proxy, which is the
+        // socket SERVER rather than the client); see [`crate::attest::peer_pid_of_fd`].
+        crate::attest::peer_pid_of_fd(self.writer.as_raw_fd())
     }
 
     /// The MCP handshake: `initialize`, then the `initialized` notification.

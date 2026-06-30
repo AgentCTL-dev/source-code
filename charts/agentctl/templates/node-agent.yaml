@@ -76,6 +76,32 @@ spec:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "nodeAgent") | nindent 12 }}
             - name: AGENTCTL_SOCKET_ROOT
               value: {{ .Values.substrate.socketRoot | quote }}
+            {{- if .Values.nodeAgent.inferProxy.enabled }}
+            # Networkless/routed-infer (RFC 0012): the node-agent binds an
+            # infer-proxy unix socket on a node-agent-owned hostPath dir. Agents
+            # on the routed-infer path (operator annotation agentctl.dev/routed-infer)
+            # dial this socket instead of the ModelGateway directly; the node-agent
+            # attests the peer via SO_PEERCRED (-> X-Agent-Pod-Uid) and forwards to
+            # the in-cluster ModelGateway Service. See docs/security.md.
+            - name: NODE_AGENT_INFER_SOCKET
+              value: {{ printf "%s/infer.sock" .Values.nodeAgent.inferProxy.socketDir | quote }}
+            # Trailing dot = ABSOLUTE (fully-qualified) name: a 4-dot Service name
+            # is < ndots:5, so without it the stub resolver walks the `search`
+            # list FIRST and a node-inherited wildcard search domain can capture
+            # the lookup, sending the forward to a foreign host. The node-agent
+            # also absolutizes this defensively, but emit it correct at the source.
+            - name: MODELGATEWAY_URL
+              value: {{ printf "http://agentctl-modelgateway.%s.svc.cluster.local." $ns | quote }}
+            {{- if .Values.apiToken.enabled }}
+            # The infer-proxy forwards to the ModelGateway, which is behind the
+            # apiToken bearer gate when apiToken.enabled — present the same token.
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+            {{- end }}
+            {{- end }}
           {{- with (index .Values "nodeAgent").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
@@ -94,6 +120,12 @@ spec:
           volumeMounts:
             - name: sockets
               mountPath: /run/agentctl/sockets
+            {{- if .Values.nodeAgent.inferProxy.enabled }}
+            # Read-WRITE: the node-agent owns + binds the infer-proxy socket here.
+            # Agent pods mount this same hostPath dir READ-ONLY (via the operator).
+            - name: infer
+              mountPath: {{ .Values.nodeAgent.inferProxy.socketDir | quote }}
+            {{- end }}
             - name: tls
               mountPath: /etc/agentctl-node-agent/tls
               readOnly: true
@@ -108,6 +140,13 @@ spec:
           hostPath:
             path: {{ .Values.substrate.socketRoot }}
             type: DirectoryOrCreate
+        {{- if .Values.nodeAgent.inferProxy.enabled }}
+        # node-agent-owned infer-proxy socket dir (routed-infer / networkless tier).
+        - name: infer
+          hostPath:
+            path: {{ .Values.nodeAgent.inferProxy.socketDir }}
+            type: DirectoryOrCreate
+        {{- end }}
         - name: tls
           secret:
             secretName: agentctl-node-agent-tls
