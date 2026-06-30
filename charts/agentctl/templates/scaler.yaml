@@ -75,6 +75,16 @@ spec:
             - { containerPort: 8080, name: http }    # /healthz, /readyz, /metrics
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "scaler") | nindent 12 }}
+            {{- if .Values.apiToken.enabled }}
+            # In-cluster bearer-token gate (apiToken.enabled): the scaler presents
+            # this token to the coordination server when reading the backlog so a
+            # token-gated coordination server still answers it (default off).
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+            {{- end }}
           {{- with .Values.scaler.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

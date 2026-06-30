@@ -163,16 +163,27 @@ pub struct Scaler {
     last_active: Arc<Mutex<HashMap<String, bool>>>,
     /// `StreamIsActive` poll cadence.
     poll_interval: Duration,
+    /// Optional bearer token presented to the coordination server (read from
+    /// `AGENTCTL_API_TOKEN` at startup). `Some` ⇒ add `Authorization: Bearer <token>`
+    /// to every `work.stats` request; `None` (env unset/empty) ⇒ no header (back-compat).
+    auth_token: Option<Arc<String>>,
 }
 
 impl Scaler {
-    /// Construct from a shared HTTP client + metrics and the stream poll cadence.
-    pub fn new(http: reqwest::Client, metrics: Arc<Metrics>, poll_interval: Duration) -> Self {
+    /// Construct from a shared HTTP client + metrics, the stream poll cadence, and
+    /// the optional bearer token to present to the coordination server.
+    pub fn new(
+        http: reqwest::Client,
+        metrics: Arc<Metrics>,
+        poll_interval: Duration,
+        auth_token: Option<Arc<String>>,
+    ) -> Self {
         Self {
             http,
             metrics,
             last_active: Arc::new(Mutex::new(HashMap::new())),
             poll_interval,
+            auth_token,
         }
     }
 
@@ -189,10 +200,13 @@ impl Scaler {
             "method": "tools/call",
             "params": { "name": "work.stats", "arguments": {} }
         });
-        let resp = self
-            .http
-            .post(&cfg.coordination_url)
-            .json(&body)
+        let mut request = self.http.post(&cfg.coordination_url).json(&body);
+        // Present the bearer token when the operator/chart set AGENTCTL_API_TOKEN;
+        // when unset, no header (back-compat with an unauthenticated coordinator).
+        if let Some(token) = &self.auth_token {
+            request = request.bearer_auth(token);
+        }
+        let resp = request
             .send()
             .await
             .map_err(|e| format!("POST {}: {e}", cfg.coordination_url));

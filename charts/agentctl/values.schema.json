@@ -166,6 +166,14 @@
     "admission": { "$ref": "#/definitions/component" },
     "coordination": { "$ref": "#/definitions/component" },
     "scaler": { "$ref": "#/definitions/component" },
+    "apiToken": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "value": { "type": "string" }
+      }
+    },
     "networkPolicies": {
       "type": "object",
       "additionalProperties": true,

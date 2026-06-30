@@ -153,6 +153,17 @@ spec:
               value: {{ ($opScaler.address | default $scaler.address | default (printf "agentctl-scaler.%s:9100" $ns)) | quote }}
             - name: COORDINATION_URL
               value: {{ ($opScaler.coordinationUrl | default $scaler.coordinationUrl | default (printf "http://agentctl-coordination.%s/" $ns)) | quote }}
+            # In-cluster bearer-token injection (apiToken.enabled). When set, the
+            # operator injects the bearer token (valueFrom secretKeyRef on the
+            # agentctl-api-token Secret) into rendered agent pods so a conformant
+            # agent can present it to the coordination server / ModelGateway. A
+            # secretKeyRef cannot cross namespaces, so the operator only injects
+            # for agents IN the control-plane namespace (it reads POD_NAMESPACE
+            # above); agents elsewhere need the Secret replicated. Default off ->
+            # no injection (unchanged). No extra RBAC: the kubelet resolves the
+            # secretKeyRef at pod start, not the operator.
+            - name: API_TOKEN_ENABLED
+              value: {{ .Values.apiToken.enabled | default false | quote }}
           {{- with .Values.operator.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

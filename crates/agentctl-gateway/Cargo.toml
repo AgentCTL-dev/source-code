@@ -51,3 +51,6 @@ agentctl-telemetry = { path = "../agentctl-telemetry" }
 # toolchain (keep the gateway image dependency-free of a C compiler).
 ed25519-dalek = "2"
 base64 = "0.22"
+# Constant-time byte comparison for the optional bearer-token access gate
+# (avoids a timing side-channel on token compare). Pure Rust, no C toolchain.
+subtle = "2"

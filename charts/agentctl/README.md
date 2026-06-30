@@ -83,6 +83,8 @@ runs `helm upgrade --install` (pass `--registry`, `--tag`, `--version`, `--set`)
 | `apiserver.enabled` / `gateway.enabled` / `modelgateway.enabled` / `admission.enabled` | `true` | toggle planes (operator + node-agent always install) |
 | `admission.allowedRegistries` | (CSV) | image-registry prefixes the webhook permits |
 | `networkPolicies.enabled` | `false` | ship egress/tenant NetworkPolicies (needs a policy CNI) |
+| `apiToken.enabled` | `false` | in-cluster bearer-token gate (`AGENTCTL_API_TOKEN`) on coordination/modelgateway/A2A-gateway; injected into scaler + control-plane-namespace agents (see [security.md](../../docs/security.md)) |
+| `apiToken.value` | `""` | override the generated token with a managed value (empty ⇒ chart generates a lookup-stable random one) |
 | `substrate.socketRoot` | `/run/agentctl/sockets` | on-node socket root the node-agent watches |
 
 ## Observability (day-2)

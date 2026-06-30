@@ -33,6 +33,9 @@ tokio-postgres-rustls = { version = "0.14", default-features = false, features =
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 serde_json.workspace = true
+# Constant-time byte comparison for the optional bearer-token access gate
+# (avoids a timing side-channel on token compare). Pure Rust, no C toolchain.
+subtle = "2"
 tracing = "0.1"
 # Shared tracing init: fmt-only by default, OTLP export when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set.

@@ -120,6 +120,16 @@ spec:
             - name: FEDERATION_PEERS
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.apiToken.enabled }}
+            # In-cluster bearer-token gate (apiToken.enabled): require
+            # `Authorization: Bearer <this>` on A2A ingress (default off -> open).
+            # External A2A clients must send this token; cards stay JWS-signed.
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+            {{- end }}
           {{- with (index .Values "gateway").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

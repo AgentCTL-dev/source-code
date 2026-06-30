@@ -1,0 +1,42 @@
+{{- $ns := include "agentctl.namespace" . }}
+{{- if .Values.apiToken.enabled }}
+# Optional in-cluster bearer-token gate (apiToken.enabled). When enabled, the
+# coordination server, ModelGateway, and A2A gateway require
+# `Authorization: Bearer <AGENTCTL_API_TOKEN>` on their data-plane endpoints
+# (the code reads AGENTCTL_API_TOKEN from env; default off -> services run open).
+# The scaler and control-plane-namespace agents get the token injected; external
+# A2A clients / producers must send it explicitly. Chart-generated and kept
+# across upgrades (helm.sh/resource-policy: keep + lookup-stable) so the value is
+# consistent for every consumer. Override with apiToken.value for a managed token.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentctl-api-token
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-api-token
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+  annotations:
+    "helm.sh/resource-policy": keep
+{{/* Reuse the existing token on upgrade so every gated consumer keeps verifying
+     the same value across replicas + upgrades. Precedence: an explicit
+     apiToken.value override wins; else the existing Secret value (lookup, empty
+     on a fresh install); else a freshly generated 40-char token. The data field
+     carries the base64 form: the override/random branches b64enc once, while the
+     lookup branch reuses the already-encoded stored value verbatim. */}}
+{{- $existing := (lookup "v1" "Secret" $ns "agentctl-api-token") }}
+{{- $token := "" }}
+{{- if .Values.apiToken.value }}
+{{-   $token = .Values.apiToken.value | b64enc }}
+{{- else if and $existing $existing.data (hasKey $existing.data "AGENTCTL_API_TOKEN") }}
+{{-   $token = index $existing.data "AGENTCTL_API_TOKEN" }}
+{{- else }}
+{{-   $token = randAlphaNum 40 | b64enc }}
+{{- end }}
+type: Opaque
+data:
+  AGENTCTL_API_TOKEN: {{ $token }}
+{{- end }}

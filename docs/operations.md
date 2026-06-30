@@ -415,3 +415,74 @@ production-blocking, but operators should know them:
   operator `status.replicas`/`status.selector` write-back for `AgentFleet` HPA read-back,
   and NetworkPolicy enforcement (manifests ship via `networkPolicies.enabled`, but
   enforcement needs a policy CNI such as Calico/Cilium — kindnet ignores them).
+
+---
+
+## 7. API token (in-cluster auth gate)
+
+The data-plane utility paths — the coordination server (`work.*`), the ModelGateway
+(`/v1/infer`), and the A2A gateway ingress — are network-isolated but **open by
+default**: any pod that can reach them may call them. The optional
+**`AGENTCTL_API_TOKEN`** bearer gate (`apiToken.enabled`, default **off**) closes
+that with a single shared in-cluster token. Disabled installs are unchanged (the
+services run open, no token Secret, no env wired).
+
+### Enable
+
+```sh
+helm upgrade agentctl charts/agentctl -n agentctl-system --reuse-values \
+  --set apiToken.enabled=true
+# (optional) pin a managed token instead of the generated one:
+#   --set apiToken.value=$(openssl rand -hex 24)
+```
+
+This creates a **lookup-stable** Secret `agentctl-api-token` (key
+`AGENTCTL_API_TOKEN`, `helm.sh/resource-policy: keep`) holding a random 40-char
+token that is **kept across upgrades** (same idempotency pattern as the gateway
+signing seed, §1). The chart then wires that token (via `secretKeyRef`) into the
+coordination server, ModelGateway, A2A gateway, and the scaler. The services'
+code requires `Authorization: Bearer <token>`; the scaler presents it when reading
+the coordination backlog.
+
+### Who must send the token
+
+- **Producers + external A2A clients** must add `Authorization: Bearer <token>`.
+  Read the value with:
+
+  ```sh
+  kubectl -n agentctl-system get secret agentctl-api-token \
+    -o jsonpath='{.data.AGENTCTL_API_TOKEN}' | base64 -d
+  ```
+
+- **Scaler + control-plane-namespace agents** get it **injected automatically** —
+  the scaler from the chart, and agent pods from the operator (`API_TOKEN_ENABLED`,
+  set from `apiToken.enabled`). No extra RBAC is needed: the kubelet resolves the
+  `secretKeyRef` at pod start, not the operator.
+
+### Cross-namespace caveat (important)
+
+A `secretKeyRef` resolves **only within the pod's own namespace**, and the
+`agentctl-api-token` Secret lives in the control-plane namespace
+(`agentctl-system`). So the operator injects the token **only for agents running in
+the control-plane namespace**. For agents in **other** namespaces the operator does
+**not** inject (it would render a pod that cannot start because the Secret is
+absent there). To token-gate those agents, **replicate** the Secret into their
+namespace, e.g.:
+
+```sh
+kubectl -n agentctl-system get secret agentctl-api-token -o yaml \
+  | sed 's/namespace: agentctl-system/namespace: my-agents/' \
+  | kubectl -n my-agents apply -f -
+```
+
+then provide it to the agent (e.g. via the agent spec's own env / `extraEnv`).
+Keep the replicas in sync if you rotate the token.
+
+### Rotate
+
+Edit the Secret (or `helm upgrade --set apiToken.value=<new>`), then
+`kubectl -n agentctl-system rollout restart deploy/agentctl-coordination
+deploy/agentctl-modelgateway deploy/agentctl-gateway deploy/agentctl-scaler` and
+restart the agent pods so every consumer re-reads it. Update any replicated copies
+and external clients. This shared token is a coarse v1 access gate, not per-pod
+identity — see `docs/security.md` for the attested-identity follow-ups.

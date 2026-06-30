@@ -15,6 +15,7 @@ pub mod serve;
 
 pub use metrics::Metrics;
 pub use render::{
-    fleet_selector_string, render_agent, render_fleet, render_scaled_object, RenderError, Rendered,
-    DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
+    fleet_selector_string, inject_api_token, render_agent, render_fleet, render_scaled_object,
+    RenderError, Rendered, API_TOKEN_ENV, API_TOKEN_SECRET, DEFAULT_COORDINATION_URL,
+    DEFAULT_SCALER_ADDRESS,
 };

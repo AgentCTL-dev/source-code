@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use agent_api::{Agent, AgentFleet};
 use agentctl_operator::controller::{
-    error_policy, error_policy_fleet, reconcile, reconcile_fleet, Ctx, ScalerConfig,
+    error_policy, error_policy_fleet, reconcile, reconcile_fleet, ApiTokenConfig, Ctx, ScalerConfig,
 };
 use agentctl_operator::{lease, serve, Metrics};
 use futures::StreamExt;
@@ -99,11 +99,24 @@ async fn main() -> Result<(), kube::Error> {
         "KEDA scaler config"
     );
 
+    // Optional in-cluster bearer-token injection (chart apiToken.enabled), read
+    // from API_TOKEN_ENABLED + POD_NAMESPACE. When on, the operator injects
+    // AGENTCTL_API_TOKEN (a secretKeyRef on agentctl-api-token) into rendered
+    // agent pods — but ONLY for agents in the control-plane namespace, since a
+    // secretKeyRef cannot cross namespaces. Default off (no injection).
+    let api_token = ApiTokenConfig::from_env();
+    info!(
+        enabled = api_token.enabled,
+        namespace = ?api_token.namespace,
+        "API token injection config"
+    );
+
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
         recorder,
         scaler,
+        api_token,
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");

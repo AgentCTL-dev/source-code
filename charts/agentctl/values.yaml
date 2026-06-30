@@ -371,6 +371,23 @@ scaler:
     maxReplicas: 3
     targetCPUUtilizationPercentage: 80
 
+# Optional in-cluster bearer-token auth gate (AGENTCTL_API_TOKEN). DISABLED by
+# default so a stock install runs the data-plane utility paths open (unchanged).
+# When apiToken.enabled=true the chart creates a lookup-stable Secret
+# (agentctl-api-token, key AGENTCTL_API_TOKEN, helm.sh/resource-policy: keep) and
+# wires that token into the coordination server, ModelGateway, A2A gateway, and
+# scaler; the code on those services then requires `Authorization: Bearer <token>`.
+# The operator also injects it into rendered agent pods, but ONLY for agents in
+# the control-plane namespace (a secretKeyRef cannot cross namespaces). Agents in
+# other namespaces, and any external A2A client / producer, must obtain the token
+# from the agentctl-api-token Secret and (for cross-namespace agents) have it
+# replicated into their namespace. See docs/security.md + docs/operations.md.
+apiToken:
+  enabled: false
+  # Override the generated token with a fixed/managed value (wins over the
+  # lookup-stable generated one). Empty = chart generates + keeps a random token.
+  value: ""
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the

@@ -23,6 +23,7 @@ pub struct Metrics {
     acked: AtomicU64,
     released: AtomicU64,
     expired: AtomicU64,
+    auth_rejected: AtomicU64,
 }
 
 impl Metrics {
@@ -38,6 +39,7 @@ impl Metrics {
             acked: AtomicU64::new(0),
             released: AtomicU64::new(0),
             expired: AtomicU64::new(0),
+            auth_rejected: AtomicU64::new(0),
         }
     }
 
@@ -72,6 +74,10 @@ impl Metrics {
     /// `n` expired leases were swept back to pending.
     pub fn add_expired(&self, n: usize) {
         self.expired.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    /// A request to a data endpoint was rejected (401) by the bearer-token gate.
+    pub fn inc_auth_rejected(&self) {
+        self.auth_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render the Prometheus exposition body. `pending`/`claimed` are the live
@@ -131,6 +137,12 @@ impl Metrics {
             "agentctl_coordination_expired_total",
             "Leases swept back to pending after TTL expiry.",
             self.expired.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_coordination_auth_rejected_total",
+            "Requests to data endpoints rejected (401) by the bearer-token gate.",
+            self.auth_rejected.load(Ordering::Relaxed),
         );
         gauge(
             &mut out,
@@ -192,6 +204,8 @@ mod tests {
         m.inc_acked();
         m.inc_released();
         m.add_expired(3);
+        m.inc_auth_rejected();
+        m.inc_auth_rejected();
         let body = m.render(5, 2);
 
         assert!(body.contains("# TYPE agentctl_coordination_claims_granted_total counter"));
@@ -203,6 +217,8 @@ mod tests {
         assert!(body.contains("agentctl_coordination_acked_total 1"));
         assert!(body.contains("agentctl_coordination_released_total 1"));
         assert!(body.contains("agentctl_coordination_expired_total 3"));
+        assert!(body.contains("# TYPE agentctl_coordination_auth_rejected_total counter"));
+        assert!(body.contains("agentctl_coordination_auth_rejected_total 2"));
         assert!(body.contains("# TYPE agentctl_coordination_pending gauge"));
         assert!(body.contains("agentctl_coordination_pending 5"));
         assert!(body.contains("agentctl_coordination_claimed 2"));

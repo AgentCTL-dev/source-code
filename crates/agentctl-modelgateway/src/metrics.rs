@@ -21,6 +21,8 @@ pub struct Metrics {
     budget_rejections: AtomicU64,
     /// Total provider tokens metered through the gateway.
     tokens: AtomicU64,
+    /// Requests rejected (401) by the bearer-token access gate.
+    auth_rejected: AtomicU64,
 }
 
 impl Metrics {
@@ -32,6 +34,7 @@ impl Metrics {
             infer_errors: AtomicU64::new(0),
             budget_rejections: AtomicU64::new(0),
             tokens: AtomicU64::new(0),
+            auth_rejected: AtomicU64::new(0),
         }
     }
 
@@ -48,6 +51,11 @@ impl Metrics {
     /// A request was rejected because the pool budget was exhausted.
     pub fn inc_budget_rejection(&self) {
         self.budget_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A request was rejected (401) by the bearer-token access gate.
+    pub fn inc_auth_rejected(&self) {
+        self.auth_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Meter `tokens` provider tokens (negative/absent counts are clamped to 0).
@@ -88,6 +96,12 @@ impl Metrics {
             "agentctl_modelgateway_tokens_total",
             "Total provider tokens metered through the gateway.",
             self.tokens.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_modelgateway_auth_rejected_total",
+            "Requests rejected (401) by the bearer-token access gate.",
+            self.auth_rejected.load(Ordering::Relaxed),
         );
         out
     }

@@ -160,6 +160,15 @@ spec:
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "modelgateway") | nindent 12 }}
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            {{- if .Values.apiToken.enabled }}
+            # In-cluster bearer-token gate (apiToken.enabled): require
+            # `Authorization: Bearer <this>` on /v1/infer (default off -> open).
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+            {{- end }}
           {{- with (index .Values "modelgateway").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

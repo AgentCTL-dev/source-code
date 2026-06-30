@@ -34,8 +34,8 @@ use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
 use crate::{
-    fleet_selector_string, render_agent, render_fleet, render_scaled_object, RenderError, Rendered,
-    DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
+    fleet_selector_string, inject_api_token, render_agent, render_fleet, render_scaled_object,
+    RenderError, Rendered, DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
@@ -58,6 +58,56 @@ pub struct Ctx {
     pub recorder: Recorder,
     /// KEDA scaler wiring for claim-mode fleets (RFC 0011).
     pub scaler: ScalerConfig,
+    /// Optional in-cluster bearer-token injection into rendered agent pods
+    /// (chart `apiToken.enabled`).
+    pub api_token: ApiTokenConfig,
+}
+
+/// Operator-side wiring for the optional in-cluster bearer-token gate (chart
+/// `apiToken.enabled`). Read once at startup ([`ApiTokenConfig::from_env`]) and
+/// carried on [`Ctx`]. When `enabled` (env `API_TOKEN_ENABLED`, default
+/// `false`), the operator injects `AGENTCTL_API_TOKEN` (a `secretKeyRef` on the
+/// chart-created `agentctl-api-token` Secret) into rendered agent pods so a
+/// conformant agent can present it to the token-gated coordination server /
+/// ModelGateway.
+///
+/// CROSS-NAMESPACE LIMITATION: a `secretKeyRef` resolves only within the pod's
+/// own namespace, and the chart creates the token Secret in the control-plane
+/// namespace ([`namespace`](Self::namespace), the operator's `POD_NAMESPACE`).
+/// Injecting the ref into an agent in *another* namespace would produce a pod
+/// that cannot start (the Secret is absent there). So injection is gated on the
+/// agent being in the control-plane namespace ([`should_inject`](Self::should_inject));
+/// for agents elsewhere the operator does NOT inject — the Secret must be
+/// replicated into their namespace and wired by other means (documented in
+/// docs/security.md). This keeps default + cross-namespace installs from breaking.
+#[derive(Clone, Debug, Default)]
+pub struct ApiTokenConfig {
+    /// Inject the token into agent pods. `API_TOKEN_ENABLED`, default `false`.
+    pub enabled: bool,
+    /// Control-plane namespace the `agentctl-api-token` Secret lives in
+    /// (the operator's `POD_NAMESPACE`). Injection only fires for agents here,
+    /// since a `secretKeyRef` cannot cross namespaces.
+    pub namespace: Option<String>,
+}
+
+impl ApiTokenConfig {
+    /// Build from the operator environment. Disabled unless `API_TOKEN_ENABLED`
+    /// is truthy; the control-plane namespace is the operator's `POD_NAMESPACE`.
+    pub fn from_env() -> Self {
+        Self {
+            enabled: std::env::var("API_TOKEN_ENABLED")
+                .map(|v| parse_bool(&v))
+                .unwrap_or(false),
+            namespace: non_empty_env("POD_NAMESPACE"),
+        }
+    }
+
+    /// Whether to inject the token env into an agent rendered into `agent_ns`.
+    /// True only when enabled AND the agent is in the control-plane namespace
+    /// (where the `secretKeyRef` actually resolves).
+    pub fn should_inject(&self, agent_ns: &str) -> bool {
+        self.enabled && self.namespace.as_deref() == Some(agent_ns)
+    }
 }
 
 /// Operator-side KEDA scaler wiring for claim-mode fleets (RFC 0011). Read once
@@ -223,8 +273,14 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     // Render + apply the workload, then derive the desired status. A RenderError
     // is a user error (invalid spec) → Validated=False, not a retried failure.
     let (condition, phase, contract) = match render_agent(&agent) {
-        Ok(rendered) => {
+        Ok(mut rendered) => {
             let kind = rendered_kind(&rendered);
+            // Optional in-cluster bearer-token injection (chart apiToken.enabled).
+            // Only fires for agents in the control-plane namespace (a secretKeyRef
+            // cannot cross namespaces — see ApiTokenConfig::should_inject).
+            if ctx.api_token.should_inject(ns) {
+                inject_api_token(&mut rendered);
+            }
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(agent = %name, workload = kind, "applied workload");
             publish_event(
@@ -448,8 +504,14 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // `kubectl get agentfleet` shows replicas and an HPA can read both back. On a
     // render error we leave them unset (the merge patch keeps the last value).
     let (condition, replicas, selector, scaler_condition) = match render_fleet(&fleet) {
-        Ok(rendered) => {
+        Ok(mut rendered) => {
             let kind = rendered_kind(&rendered);
+            // Optional in-cluster bearer-token injection (chart apiToken.enabled);
+            // gated to the control-plane namespace (secretKeyRef cannot cross
+            // namespaces). Fleet pods are agents too, so inject before applying.
+            if ctx.api_token.should_inject(ns) {
+                inject_api_token(&mut rendered);
+            }
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(fleet = %name, workload = kind, "applied fleet workload");
             publish_event(
@@ -925,6 +987,36 @@ mod tests {
         assert!(d.enabled);
         assert_eq!(d.scaler_address, DEFAULT_SCALER_ADDRESS);
         assert_eq!(d.coordination_url, DEFAULT_COORDINATION_URL);
+    }
+
+    #[test]
+    fn api_token_injection_is_gated_on_namespace_and_enabled() {
+        // disabled → never inject, regardless of namespace match.
+        let off = ApiTokenConfig {
+            enabled: false,
+            namespace: Some("agentctl-system".into()),
+        };
+        assert!(!off.should_inject("agentctl-system"));
+
+        // enabled + agent in the control-plane namespace → inject.
+        let on = ApiTokenConfig {
+            enabled: true,
+            namespace: Some("agentctl-system".into()),
+        };
+        assert!(on.should_inject("agentctl-system"));
+        // enabled but agent in another namespace → do NOT inject (secretKeyRef
+        // cannot cross namespaces; the Secret must be replicated there instead).
+        assert!(!on.should_inject("team-a"));
+
+        // enabled but the operator could not resolve its own namespace → no inject.
+        let no_ns = ApiTokenConfig {
+            enabled: true,
+            namespace: None,
+        };
+        assert!(!no_ns.should_inject("agentctl-system"));
+
+        // default is fully off.
+        assert!(!ApiTokenConfig::default().enabled);
     }
 
     #[test]

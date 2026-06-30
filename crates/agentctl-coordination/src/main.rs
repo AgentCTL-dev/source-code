@@ -31,8 +31,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -61,6 +62,10 @@ struct AppState {
     metrics: Arc<Metrics>,
     /// Flipped true once the sweep loop is running (drives `/readyz`).
     ready: Arc<AtomicBool>,
+    /// Optional bearer token gating the data endpoints (`POST /`, `POST /mcp`).
+    /// `Some` ⇒ enforce `Authorization: Bearer <token>`; `None` (env unset/empty)
+    /// ⇒ no auth (back-compat). Read once from `AGENTCTL_API_TOKEN` at startup.
+    auth_token: Option<Arc<String>>,
 }
 
 #[tokio::main]
@@ -97,15 +102,36 @@ async fn main() {
         });
     }
 
+    // Bearer-token gate (agentctl RFC 0011 §3.4 hardening): read AGENTCTL_API_TOKEN
+    // once. Unset/empty ⇒ no auth (back-compat); set ⇒ enforce on the data routes.
+    let auth_token = std::env::var("AGENTCTL_API_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(Arc::new);
+    if auth_token.is_some() {
+        tracing::info!(
+            "AGENTCTL_API_TOKEN set: bearer-token gate enforced on POST / and POST /mcp"
+        );
+    } else {
+        tracing::info!(
+            "AGENTCTL_API_TOKEN unset: data endpoints are unauthenticated (back-compat)"
+        );
+    }
+
     let state = AppState {
         store,
         metrics,
         ready,
+        auth_token,
     };
 
+    // The data routes carry the bearer gate via `route_layer` so it runs ONLY for
+    // `POST /` and `POST /mcp`; the probe/metrics routes added afterwards are always
+    // exempt (never require the token).
     let app = Router::new()
         .route("/", post(rpc))
         .route("/mcp", post(rpc))
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth_gate))
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(serve_metrics))
@@ -123,6 +149,45 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("serve");
+}
+
+/// Bearer-token gate for the data endpoints. When `state.auth_token` is `None`
+/// (env unset/empty) every request passes through unchanged (back-compat). When
+/// `Some`, the request MUST carry `Authorization: Bearer <token>` with a token
+/// that matches in constant time; otherwise it is rejected with a bare 401 (no
+/// body, no detail leak) and counted in `agentctl_coordination_auth_rejected_total`.
+/// This layer wraps only `POST /` and `POST /mcp` — the probes/metrics are exempt.
+async fn auth_gate(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let Some(expected) = &state.auth_token else {
+        // No token configured ⇒ auth disabled.
+        return next.run(req).await;
+    };
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let ok = presented.is_some_and(|tok| constant_time_eq(tok.as_bytes(), expected.as_bytes()));
+    if ok {
+        next.run(req).await
+    } else {
+        state.metrics.inc_auth_rejected();
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+/// Constant-time byte-slice equality — avoids the early-exit timing side-channel of
+/// `==` when comparing the secret token. Unequal lengths are not equal (length is
+/// not itself the secret here); equal-length inputs are compared in full every time.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// `POST /` and `POST /mcp` — one MCP JSON-RPC message (or a batch array). A
@@ -234,5 +299,14 @@ mod tests {
     fn env_helpers_fall_back_on_absent_or_garbage() {
         assert_eq!(env_usize("COORDINATION_NOPE_USIZE", 7), 7);
         assert_eq!(env_u64("COORDINATION_NOPE_U64", 9), 9);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_bytes() {
+        assert!(constant_time_eq(b"s3cret-token", b"s3cret-token"));
+        assert!(!constant_time_eq(b"s3cret-token", b"s3cret-toker"));
+        assert!(!constant_time_eq(b"s3cret-token", b"s3cret")); // length mismatch
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

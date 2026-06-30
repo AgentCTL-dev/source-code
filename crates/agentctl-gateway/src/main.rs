@@ -36,6 +36,7 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 use serde_json::{json, Value};
 
+mod auth;
 mod db_tls;
 mod metrics;
 mod na_client;
@@ -87,6 +88,14 @@ async fn main() {
         }
     }
 
+    // Shared metrics surface (also feeds the access gate's rejection counter).
+    let metrics = Arc::new(metrics::Metrics::new());
+    // Optional bearer-token access gate (AGENTCTL_API_TOKEN). Unset → no-op; set
+    // → enforced on the A2A surface, with /healthz /readyz /metrics AND the public
+    // JWKS (/.well-known/jwks.json) exempt. The middleware short-circuits the
+    // exempt paths, so it can wrap the whole router.
+    let gate = auth::Auth::from_env(metrics.clone());
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         // `/metrics` rides the EXISTING plaintext :8080 (the chart's `http` port),
@@ -103,12 +112,13 @@ async fn main() {
             get(fleet_card),
         )
         .route("/agents/{ns}/{name}", post(a2a_rpc))
+        .layer(axum::middleware::from_fn_with_state(gate, auth::gate))
         .with_state(AppState {
             client,
             pool,
             signer,
             na: na_client::node_agent_client(),
-            metrics: Arc::new(metrics::Metrics::new()),
+            metrics,
         });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();

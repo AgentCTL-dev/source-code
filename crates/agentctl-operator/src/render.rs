@@ -20,7 +20,7 @@ use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, HostPathVolumeSource,
     ObjectFieldSelector, PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile,
-    SecurityContext, Volume, VolumeMount,
+    SecretKeySelector, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 
@@ -41,6 +41,13 @@ const SOCKET_VOLUME: &str = "agentctl-sockets";
 /// separate mounted volume and stays writable on its own.
 const TMP_MOUNT: &str = "/tmp";
 const TMP_VOLUME: &str = "tmp";
+
+/// Secret holding the optional in-cluster bearer token (chart `apiToken.enabled`),
+/// created by the chart in the control-plane namespace. Both the Secret name and
+/// its single key are `AGENTCTL_API_TOKEN`.
+pub const API_TOKEN_SECRET: &str = "agentctl-api-token";
+/// Env var (and Secret key) the gated services read the bearer token from.
+pub const API_TOKEN_ENV: &str = "AGENTCTL_API_TOKEN";
 
 /// What the renderer produced. Boxed to keep the enum small (clippy).
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +200,51 @@ pub fn render_fleet(fleet: &AgentFleet) -> Result<Rendered, RenderError> {
             })))
         }
     }
+}
+
+/// Inject the optional in-cluster bearer token (`AGENTCTL_API_TOKEN`, `valueFrom`
+/// a `secretKeyRef` on [`API_TOKEN_SECRET`]) into the rendered agent pod's first
+/// container env, so a conformant agent can present it to the token-gated
+/// coordination server / ModelGateway (chart `apiToken.enabled`). Idempotent: a
+/// no-op if the env var is already set (e.g. a user `extraEnv`).
+///
+/// LIMITATION (documented, not silently broken): a `secretKeyRef` resolves only
+/// within the pod's OWN namespace. The chart creates [`API_TOKEN_SECRET`] in the
+/// control-plane namespace, so this injection only yields a *resolvable* ref for
+/// agents in that namespace. The caller therefore gates injection on the agent
+/// being in the control-plane namespace (see
+/// `controller::ApiTokenConfig::should_inject`); agents in other namespaces need
+/// the Secret replicated there before the operator should inject it.
+pub fn inject_api_token(rendered: &mut Rendered) {
+    let pod = match rendered {
+        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
+        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
+    };
+    let Some(pod) = pod else { return };
+    let Some(spec) = pod.spec.as_mut() else {
+        return;
+    };
+    let Some(container) = spec.containers.first_mut() else {
+        return;
+    };
+    let env = container.env.get_or_insert_with(Vec::new);
+    // Idempotent: never duplicate (or shadow) an existing AGENTCTL_API_TOKEN.
+    if env.iter().any(|e| e.name == API_TOKEN_ENV) {
+        return;
+    }
+    env.push(EnvVar {
+        name: API_TOKEN_ENV.to_string(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: API_TOKEN_SECRET.to_string(),
+                key: API_TOKEN_ENV.to_string(),
+                optional: None,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
 }
 
 /// Default in-cluster address of the agentctl KEDA external scaler (gRPC). The
@@ -748,6 +800,58 @@ mod tests {
             .find(|m| m.mount_path == "/run/agent")
             .expect("socket mount present");
         assert_ne!(sock_mount.read_only, Some(true));
+    }
+
+    #[test]
+    fn inject_api_token_adds_secret_key_ref_env() {
+        let mut r = render_agent(&agent(Mode::Reactive)).unwrap();
+        inject_api_token(&mut r);
+        let Rendered::Deployment(dep) = &r else {
+            unreachable!()
+        };
+        let c = container_of(&dep.spec.as_ref().unwrap().template);
+        let token = c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == API_TOKEN_ENV)
+            .expect("AGENTCTL_API_TOKEN env injected");
+        let sel = token
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
+        assert_eq!(sel.name, API_TOKEN_SECRET);
+        assert_eq!(sel.key, API_TOKEN_ENV);
+        // The downward-API identity env is preserved alongside the injected token.
+        assert!(c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "AGENT_POD_UID"));
+    }
+
+    #[test]
+    fn inject_api_token_is_idempotent() {
+        let mut r = render_agent(&agent(Mode::Once)).unwrap();
+        inject_api_token(&mut r);
+        inject_api_token(&mut r);
+        let Rendered::Job(job) = &r else {
+            unreachable!()
+        };
+        let c = container_of(&job.spec.as_ref().unwrap().template);
+        let n = c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|e| e.name == API_TOKEN_ENV)
+            .count();
+        assert_eq!(n, 1, "token env must not be duplicated");
     }
 
     #[test]

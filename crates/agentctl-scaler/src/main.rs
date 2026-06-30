@@ -71,7 +71,23 @@ async fn main() {
     let http = reqwest::Client::builder()
         .build()
         .expect("build reqwest client");
-    let svc = Scaler::new(http, metrics.clone(), Duration::from_millis(poll_ms.max(1)));
+
+    // Bearer token presented to the coordination server's gated work.stats endpoint
+    // (agentctl RFC 0011 §3.4). Read once from AGENTCTL_API_TOKEN (set by the
+    // operator/chart). Unset/empty ⇒ no header (back-compat with an open coordinator).
+    let auth_token = std::env::var("AGENTCTL_API_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(Arc::new);
+    if auth_token.is_some() {
+        tracing::info!("AGENTCTL_API_TOKEN set: presenting bearer token on work.stats requests");
+    }
+    let svc = Scaler::new(
+        http,
+        metrics.clone(),
+        Duration::from_millis(poll_ms.max(1)),
+        auth_token,
+    );
 
     // One shutdown signal fans out to both servers via a watch channel.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

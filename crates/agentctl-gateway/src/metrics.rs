@@ -23,6 +23,8 @@ pub struct Metrics {
     tasks: AtomicU64,
     /// Requests that failed at the node-agent/upstream hop.
     upstream_errors: AtomicU64,
+    /// Requests rejected (401) by the bearer-token access gate.
+    auth_rejected: AtomicU64,
 }
 
 impl Metrics {
@@ -35,6 +37,7 @@ impl Metrics {
             card_requests: AtomicU64::new(0),
             tasks: AtomicU64::new(0),
             upstream_errors: AtomicU64::new(0),
+            auth_rejected: AtomicU64::new(0),
         }
     }
 
@@ -61,6 +64,11 @@ impl Metrics {
     /// An upstream (node-agent) hop failed.
     pub fn inc_upstream_error(&self) {
         self.upstream_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A request was rejected (401) by the bearer-token access gate.
+    pub fn inc_auth_rejected(&self) {
+        self.auth_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render the Prometheus exposition body.
@@ -101,6 +109,12 @@ impl Metrics {
             "agentctl_gateway_upstream_errors_total",
             "Requests that failed at the node-agent/upstream hop.",
             self.upstream_errors.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_auth_rejected_total",
+            "Requests rejected (401) by the bearer-token access gate.",
+            self.auth_rejected.load(Ordering::Relaxed),
         );
         out
     }

@@ -69,6 +69,15 @@ spec:
             - { containerPort: 8080, name: http }
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "coordination") | nindent 12 }}
+            {{- if .Values.apiToken.enabled }}
+            # In-cluster bearer-token gate (apiToken.enabled): require
+            # `Authorization: Bearer <this>` on work.* (default off -> open).
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+            {{- end }}
           {{- with (index .Values "coordination").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
