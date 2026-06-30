@@ -13,7 +13,7 @@ utility paths** (intelligence, coordination, A2A-inbound) are **network-isolated
 | **Aggregated APIServer** :6443 (`drain`/`status`) | HTTPS, front-proxy mTLS | aggregator client cert (requestheader CA from `kube-system`); identity via `X-Remote-User/Group` | **SubjectAccessReview** per verb (kube RBAC) | kube-apiserver on behalf of an RBAC'd user (`--as=nobody`→403) |
 | **node-agent control API** :8443 | HTTPS, **mTLS** (`WebPkiClientVerifier`) | CA-signed **client cert** (`agentctl-client-tls`) | + **`SO_PEERCRED` attestation**: 403 unless the attested pod-uid matches the requested `<uid>` | apiserver + gateway |
 | **node-agent → agent** (unix socket) | unix socket (hostPath) | **`SO_PEERCRED`** → `/proc` cgroup → pod uid | file perms + attestation | node-agent (local) |
-| **ModelGateway** :8080 (`/v1/infer`) | HTTP (+ optional Bearer) | identity header-asserted (`X-Agent-Namespace`/`-Name`); optional **`AGENTCTL_API_TOKEN`** bearer gate | ModelPool existence + budget | agents (NetworkPolicy-scoped) |
+| **ModelGateway** :8080 (`/v1/infer`) | HTTP (+ optional Bearer) | identity header-asserted (`X-Agent-Namespace`/`-Name`) **or source-IP attested** (`modelgateway.attestIdentity` — kube pod lookup, anti-spoof); optional **`AGENTCTL_API_TOKEN`** bearer gate | ModelPool existence + budget | agents (NetworkPolicy-scoped) |
 | **A2A gateway** :8080 | HTTP/SSE (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate (cards are JWS-signed for the *caller* to verify) | — | A2A clients / peer agents |
 | **coordination server** :8080 (`work.*`) | HTTP (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate | — | producers + agents + scaler |
 | **scaler** gRPC :9100 | gRPC | none (in-cluster, KEDA-only) | — | KEDA |
@@ -44,7 +44,7 @@ The **front-proxy CA** is read at runtime from `kube-system/extension-apiserver-
 | operator | `agents/agentfleets` get/list/watch/update/patch + `/status` + `/finalizers`; `apps` deploy/sts + `batch` jobs CRUD; `events` (core + `events.k8s.io`); `coordination.k8s.io/leases` (leader election); `keda.sh/scaledobjects` CRUD |
 | apiserver | `system:auth-delegator` (SAR/TokenReview) + `extension-apiserver-authentication-reader` (kube-system); `pods` get/list |
 | gateway | `pods` + `agents/agentfleets` get/list |
-| modelgateway | `modelpools` get/list/watch + `/status`; `secrets` get/list — **scoped** to `secretsNamespaces` |
+| modelgateway | `modelpools` get/list/watch + `/status`; `secrets` get/list — **scoped** to `secretsNamespaces`; `pods` get/list (source-IP identity attestation, `modelgateway.attestIdentity`) |
 | admission | `modelpools` get/list |
 | node-agent / coordination / scaler | none / minimal (no cluster reads — discovery is local hostPath) |
 
@@ -194,6 +194,34 @@ external API-gateway/service-mesh (e.g. emitting equivalent mesh `AuthorizationP
 standardize identity at the mesh edge. The native per-agent gate above is the v1
 path and needs none of that.
 
+## Attested agent identity (ModelGateway)
+
+By default the ModelGateway trusts the `X-Agent-Namespace`/`X-Agent-Name` headers the
+caller asserts to pick the ModelPool, meter tokens, and enforce the budget — any pod
+that can reach `:8080` could set those headers and bill/borrow another tenant's pool.
+
+Enabling **`modelgateway.attestIdentity`** (default **off**) replaces that trust with a
+**source-IP attestation**: the gateway reads the connection's source IP and resolves it
+to the calling pod via a kube `pods` lookup (matching `status.podIP`), deriving the agent
+**namespace** from the real pod rather than the header. The header becomes advisory.
+
+- **Why it is robust:** confined tenant pods run with `drop: ["ALL"]` capabilities, so
+  they have **no `CAP_NET_RAW`** and cannot craft raw packets to spoof a source IP. The
+  kernel-attributed source IP is therefore a trustworthy identity for the default
+  (networked) tier — a tenant cannot impersonate another namespace's pool or budget.
+- **RBAC:** this needs cluster-wide `pods` get/list, granted unconditionally in the
+  modelgateway ClusterRole (harmless when the toggle is off, and it keeps the role stable
+  across the flag).
+- **Enable:** `helm upgrade --set modelgateway.attestIdentity=true` — the chart then sets
+  `IDENTITY_ATTEST=true` on the Deployment (default off renders no env, so the code keeps
+  the header-asserted path).
+- **Complement for the NETWORKLESS (Kata) tier:** hardened agents on the Kata substrate
+  have **no NIC / no pod IP**, so there is nothing to attest by source IP; their infer
+  traffic rides the substrate egress and is identified by the node-agent's `SO_PEERCRED`
+  attestation (kernel peer-credential → `/proc` cgroup → pod uid) when infer is routed
+  through the node-agent. Source-IP attestation covers the networked tier; `SO_PEERCRED`
+  infer-routing covers the networkless tier.
+
 ## Supply chain
 
 cosign keyless (OIDC) signatures on every image **and** the chart by digest; SBOM +
@@ -208,9 +236,12 @@ pinning close the loop at deploy.
 - [x] **Optional bearer-token (`AGENTCTL_API_TOKEN`) on the coordination server, ModelGateway,
   and A2A gateway** — closes "any in-cluster pod can call these" when enabled
   (`apiToken.enabled`); the scaler presents it; the operator injects it into agent pods.
-- [ ] **Attested ModelGateway identity** — replace the header-asserted `X-Agent-*` with
-  `SO_PEERCRED`-attested identity by routing infer through the node-agent (anti-spoof within
-  the trusted set; the token closes *access*, not per-pod identity).
+- [x] **Attested ModelGateway identity** — source-IP attestation (`modelgateway.attestIdentity`)
+  derives the agent namespace from the caller's source IP via a kube pod lookup, replacing the
+  spoofable header-asserted `X-Agent-*` for the default (networked) tier. Robust because confined
+  tenant pods drop `CAP_NET_RAW` and so cannot spoof their source IP. The node-agent
+  `SO_PEERCRED` infer-routing remains the **complement** for the NETWORKLESS (Kata) tier, where
+  pods have no IP to attest. See "Attested agent identity (ModelGateway)" below.
 - [x] **Authenticated A2A *ingress*** for internet exposure — **per-agent OIDC**
   (`spec.access.oidc`, admission-validated) gives the A2A gateway a JWKS-verified JWT +
   required-claims authz + identity forwarding, native to the CR (front it with an

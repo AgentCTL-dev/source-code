@@ -23,6 +23,11 @@ pub struct Metrics {
     tokens: AtomicU64,
     /// Requests rejected (401) by the bearer-token access gate.
     auth_rejected: AtomicU64,
+    /// Requests whose identity was attested from the source IP (RFC 0015).
+    identity_attested: AtomicU64,
+    /// Requests where the `X-Agent-Namespace` header disagreed with the
+    /// attested namespace (a spoof attempt; the attested one is used).
+    identity_spoof: AtomicU64,
 }
 
 impl Metrics {
@@ -35,6 +40,8 @@ impl Metrics {
             budget_rejections: AtomicU64::new(0),
             tokens: AtomicU64::new(0),
             auth_rejected: AtomicU64::new(0),
+            identity_attested: AtomicU64::new(0),
+            identity_spoof: AtomicU64::new(0),
         }
     }
 
@@ -56,6 +63,17 @@ impl Metrics {
     /// A request was rejected (401) by the bearer-token access gate.
     pub fn inc_auth_rejected(&self) {
         self.auth_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A request's identity was attested from its source IP.
+    pub fn inc_identity_attested(&self) {
+        self.identity_attested.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A request's `X-Agent-Namespace` header disagreed with the attested
+    /// namespace (a spoof attempt; the attested namespace is used regardless).
+    pub fn inc_identity_spoof(&self) {
+        self.identity_spoof.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Meter `tokens` provider tokens (negative/absent counts are clamped to 0).
@@ -102,6 +120,18 @@ impl Metrics {
             "agentctl_modelgateway_auth_rejected_total",
             "Requests rejected (401) by the bearer-token access gate.",
             self.auth_rejected.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_modelgateway_identity_attested_total",
+            "Requests whose identity was attested from the source IP.",
+            self.identity_attested.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_modelgateway_identity_spoof_total",
+            "Requests where the X-Agent-Namespace header disagreed with the attested namespace.",
+            self.identity_spoof.load(Ordering::Relaxed),
         );
         out
     }

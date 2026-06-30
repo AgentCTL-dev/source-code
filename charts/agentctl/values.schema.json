@@ -24,6 +24,7 @@
         "envFrom": { "type": "array" },
         "allowedRegistries": { "type": "string" },
         "secretsNamespaces": { "type": "array" },
+        "attestIdentity": { "type": "boolean" },
         "federationPeers": { "type": "string" },
         "address": { "type": "string" },
         "coordinationUrl": { "type": "string" },

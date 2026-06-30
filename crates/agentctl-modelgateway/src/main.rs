@@ -17,21 +17,22 @@
 //! contract/wire, never on a specific agent or provider SDK (P0).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use agent_api::{ModelPool, ModelPoolSpec};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use deadpool_postgres::Pool;
-use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::api::core::v1::{Pod, Secret};
 use kube::api::ListParams;
 use kube::{Api, Client};
 use serde_json::{json, Value};
 
+mod attest;
 mod auth;
 mod db_tls;
 mod metrics;
@@ -50,6 +51,14 @@ struct AppState {
     pool: Pool,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
+    /// When `true`, the caller's identity is **attested** from its source IP
+    /// (resolved to the real pod via the kube API) and the spoofable
+    /// `X-Agent-Namespace` header is never trusted for the tenant. When `false`
+    /// (default), the header carries the identity (back-compat).
+    attest: bool,
+    /// TTL cache of `source IP → attested identity`, so a burst from one pod
+    /// does not hammer the kube API. Unused when `attest` is `false`.
+    ip_cache: Arc<attest::IpIdentityCache>,
 }
 
 #[tokio::main]
@@ -75,6 +84,23 @@ async fn main() {
 
     // Shared metrics surface (also feeds the access gate's rejection counter).
     let metrics = Arc::new(metrics::Metrics::new());
+
+    // Identity attestation gate (RFC 0015). OFF (default) → the agent's
+    // identity is read from the spoofable X-Agent-* headers, exactly as before.
+    // ON → the identity is derived from the kernel-set source IP, resolved to
+    // the real pod via the kube API; the header can no longer impersonate a
+    // tenant.
+    let attest = attest::attest_enabled_from_env();
+    if attest {
+        tracing::info!(
+            "IDENTITY_ATTEST set: caller identity ATTESTED from source IP (X-Agent-Namespace is advisory)"
+        );
+    } else {
+        tracing::info!(
+            "IDENTITY_ATTEST unset: caller identity taken from X-Agent-* headers (spoofable; back-compat)"
+        );
+    }
+    let ip_cache = Arc::new(attest::IpIdentityCache::new(attest::DEFAULT_TTL));
     // Optional bearer-token access gate (AGENTCTL_API_TOKEN). Unset → no-op; set
     // → enforced on the data routes, with /healthz /readyz /metrics exempt. The
     // middleware itself short-circuits the exempt paths, so it can wrap the whole
@@ -93,6 +119,8 @@ async fn main() {
             client,
             pool,
             metrics,
+            attest,
+            ip_cache,
         });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
@@ -102,10 +130,18 @@ async fn main() {
     tracing::info!(%addr, "agentctl modelgateway serving the intelligence plane");
     // Graceful shutdown: on SIGTERM/SIGINT, stop accepting and drain in-flight
     // requests (hyper's `with_graceful_shutdown`).
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("serve");
+    //
+    // `into_make_service_with_connect_info::<SocketAddr>()` makes the peer
+    // socket address available to handlers via `ConnectInfo<SocketAddr>` — the
+    // kernel-set source IP attestation reads from there. This is harmless in
+    // header (non-attested) mode; the extractor is simply unused.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("serve");
 }
 
 // --- graceful shutdown -----------------------------------------------------
@@ -153,16 +189,17 @@ async fn serve_metrics(
 #[tracing::instrument(name = "modelgateway.infer", skip_all)]
 async fn infer(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response {
     state.metrics.inc_request();
-    // a. identity headers.
-    let ns = match header_str(&headers, H_NAMESPACE) {
-        Some(ns) => ns,
-        None => return bad_request(&format!("{H_NAMESPACE} header required")),
+    // a. identity — attested from the source IP (RFC 0015) or, by default, from
+    //    the X-Agent-* headers (back-compat).
+    let (ns, agent) = match resolve_identity(&state, peer.ip(), &headers).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
-    let agent = header_str(&headers, H_AGENT).unwrap_or_else(|| "unknown".to_string());
     let want_pool = header_str(&headers, H_POOL);
 
     // b. select the ModelPool.
@@ -287,7 +324,93 @@ async fn usage(
     Json(usage_json(&ns, &pool_name, used, requests, budget)).into_response()
 }
 
+// --- identity -------------------------------------------------------------
+
+/// Resolve the caller's `(namespace, agent)` for a request.
+///
+/// In **header mode** (`attest` off, the default) this is purely the
+/// `X-Agent-Namespace`/`X-Agent-Name` headers, unchanged from before.
+///
+/// In **attested mode** (`attest` on) the identity is derived from the
+/// kernel-set source IP — resolved to the real pod via the kube API — and the
+/// pod's namespace is authoritative. If the request also carries an
+/// `X-Agent-Namespace` that disagrees, the attested namespace wins and the
+/// disagreement is recorded as a spoof attempt. A source IP that resolves to no
+/// pod is rejected (`403`) — in attested mode we never fall back to the header.
+async fn resolve_identity(
+    state: &AppState,
+    peer_ip: IpAddr,
+    headers: &HeaderMap,
+) -> Result<(String, String), Response> {
+    let header_ns = header_str(headers, H_NAMESPACE);
+    if !state.attest {
+        let ns = match header_ns {
+            Some(ns) => ns,
+            None => return Err(bad_request(&format!("{H_NAMESPACE} header required"))),
+        };
+        let agent = header_str(headers, H_AGENT).unwrap_or_else(|| "unknown".to_string());
+        return Ok((ns, agent));
+    }
+
+    // Attested mode: resolve the source IP to a pod identity — cache first,
+    // then a kube lookup memoized on a short TTL. A kube error is a 500 (we
+    // cannot safely attest); `None` (no pod owns the IP) becomes a reject below.
+    let looked_up = match state.ip_cache.get(&peer_ip) {
+        Some(id) => Some(id),
+        None => match resolve_ip_to_identity(&state.client, peer_ip).await {
+            Ok(Some(id)) => {
+                state.ip_cache.put(peer_ip, id.clone());
+                Some(id)
+            }
+            Ok(None) => None,
+            Err(e) => return Err(internal(&format!("attest source IP {peer_ip}: {e}"))),
+        },
+    };
+
+    // Pure policy: attest / flag-spoof / reject.
+    match attest::decide(looked_up, header_ns.as_deref()) {
+        attest::Decision::Use { identity, spoofed } => {
+            state.metrics.inc_identity_attested();
+            if spoofed {
+                state.metrics.inc_identity_spoof();
+                tracing::warn!(
+                    %peer_ip,
+                    attested_ns = %identity.namespace,
+                    header_ns = header_ns.as_deref().unwrap_or(""),
+                    agent = %identity.agent,
+                    "attest: X-Agent-Namespace disagrees with attested namespace (spoof attempt); using attested",
+                );
+            }
+            Ok((identity.namespace, identity.agent))
+        }
+        attest::Decision::Reject => {
+            tracing::warn!(%peer_ip, "attest: source IP resolves to no pod; rejecting");
+            Err(forbidden("cannot attest caller identity from source IP"))
+        }
+    }
+}
+
 // --- kube glue (needs a cluster to run, not to compile/test) ---------------
+
+/// Resolve a source IP to its pod's attested identity. Lists pods cluster-wide
+/// with a `status.podIP` field selector to narrow, then re-verifies the match
+/// locally (the selector is advisory) before deriving the identity from the
+/// pod's namespace + `agentctl.dev/agent` label. `Ok(None)` ⇒ no pod owns the
+/// IP (cannot attest).
+async fn resolve_ip_to_identity(
+    client: &Client,
+    ip: IpAddr,
+) -> Result<Option<attest::Identity>, String> {
+    let pods: Api<Pod> = Api::all(client.clone());
+    let ip_s = ip.to_string();
+    let lp = ListParams::default().fields(&format!("status.podIP={ip_s}"));
+    let list = pods.list(&lp).await.map_err(|e| e.to_string())?;
+    Ok(list
+        .items
+        .iter()
+        .find(|p| attest::pod_matches_ip(p, &ip_s))
+        .and_then(attest::identity_from_pod))
+}
 
 /// Select the `ModelPool` for a request: by name when `want` is given (404 if
 /// absent), else the first pool in the namespace. `Ok(None)` ⇒ no matching pool.
@@ -410,6 +533,13 @@ fn internal(msg: &str) -> Response {
 
 fn bad_gateway(msg: &str) -> Response {
     (StatusCode::BAD_GATEWAY, Json(json!({ "error": msg }))).into_response()
+}
+
+/// `403 Forbidden` — used when attested mode cannot derive a caller identity
+/// from the source IP (the IP resolves to no pod). We never fall back to the
+/// spoofable header in attested mode.
+fn forbidden(msg: &str) -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
 }
 
 /// Build the Postgres connection pool for the usage meter from `DATABASE_URL`

@@ -241,6 +241,16 @@ modelgateway:
   # credential Secrets — the chart then drops the cluster-wide secrets rule and
   # renders a namespaced Role + RoleBinding (secrets get/list) in each instead.
   secretsNamespaces: []
+  # Attested agent identity: when true the ModelGateway derives the agent namespace
+  # from the caller's source IP (a kube pod lookup keyed on pod status.podIP)
+  # instead of trusting the X-Agent-Namespace request header. Robust because
+  # confined tenant pods drop CAP_NET_RAW and so cannot spoof their source IP, so a
+  # tenant cannot impersonate another namespace's ModelPool/budget. Requires the
+  # cluster-wide pods get/list grant (always present in the ClusterRole). Default
+  # false keeps the back-compat header-asserted identity. The node-agent
+  # SO_PEERCRED infer-routing is the complement for the NETWORKLESS (Kata) tier
+  # where pods have no IP to attest.
+  attestIdentity: false
   # Inference proxy: small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }

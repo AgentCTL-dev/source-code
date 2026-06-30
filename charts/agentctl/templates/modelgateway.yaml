@@ -41,6 +41,14 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["modelpools/status"]
     verbs: ["get", "update", "patch"]
+  # Source-IP identity attestation (modelgateway.attestIdentity): the gateway looks
+  # up the calling pod by its source IP to derive the agent namespace, instead of
+  # trusting the X-Agent-Namespace header. Needs cluster-wide pods get/list. The
+  # grant is harmless when attestIdentity is off, so it is unconditional (keeps the
+  # ClusterRole stable across the toggle).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
   {{- if not $secretsNs }}
   # No secretsNamespaces set -> cluster-wide secrets read (dev default). Scope it
   # via modelgateway.secretsNamespaces to render namespaced Roles instead.
@@ -160,6 +168,14 @@ spec:
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "modelgateway") | nindent 12 }}
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            {{- if .Values.modelgateway.attestIdentity }}
+            # Source-IP identity attestation (modelgateway.attestIdentity): derive the
+            # agent namespace from the caller's source IP (kube pod lookup) instead of
+            # trusting the X-Agent-Namespace header. Confined tenant pods drop
+            # CAP_NET_RAW, so they cannot spoof the source IP. Default off renders no env.
+            - name: IDENTITY_ATTEST
+              value: "true"
+            {{- end }}
             {{- if .Values.apiToken.enabled }}
             # In-cluster bearer-token gate (apiToken.enabled): require
             # `Authorization: Bearer <this>` on /v1/infer (default off -> open).
