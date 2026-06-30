@@ -1,0 +1,54 @@
+---
+title: Security overview
+description: The shape of the agentctl security model — strongly-authenticated management path, network-isolated data-plane paths, and the opt-in gates layered on top.
+---
+
+The guiding shape: the **management / control path is strongly authenticated**
+(mTLS + kernel attestation + `SubjectAccessReview`); the **data-plane utility
+paths** (intelligence, coordination, A2A-inbound) are **network-isolated**
+(NetworkPolicy + cluster boundary), with per-call auth added opt-in. Every gate
+is **default-off**.
+
+This page is the map; the full endpoint-by-endpoint reference (the auth map, RBAC
+table, hardening checklist) is the [security & auth model](/docs/security).
+
+## The opt-in gates
+
+| Gate | What it adds | Page |
+|---|---|---|
+| **API token** | a coarse in-cluster bearer gate (`AGENTCTL_API_TOKEN`) on coordination / ModelGateway / A2A ingress | [API token](/docs/guides/security/api-token) |
+| **OIDC** | per-agent JWKS JWT verification + `requiredClaims` authz for inbound A2A | [OIDC](/docs/guides/security/oidc) |
+| **Trusted proxy** | edge auth at an external API gateway asserted over mTLS, with anti-spoof header stripping | [Trusted proxy](/docs/guides/security/trusted-proxy) |
+| **Attested identity** | source-IP / pod-uid attestation binding identity at the ModelGateway and coordination server | [Attested identity](/docs/guides/security/attested) |
+| **NetworkPolicies** | default-deny + narrow allows (needs a policy CNI) | [NetworkPolicies](/docs/guides/security/netpol) |
+
+## Always-on properties
+
+- **Certificate fabric.** A self-signed bootstrap `Issuer` mints the agentctl CA;
+  a CA `Issuer` mints every serving / mTLS leaf, and cert-manager's cainjector
+  populates the `caBundle` on the `APIService` and webhooks. All leaves are
+  rustls/`ring` (no OpenSSL), auto-rotated (`renewBefore: 720h`). See
+  [the certificate fabric](/docs/security#certificate-fabric-cert-manager).
+- **Doubly-authorized management.** The management path is authorized twice: kube
+  RBAC to reach the `APIService`, then the agentctl APIServer's own SAR per verb.
+  `kubectl ... --as=nobody` -> 403.
+- **Kernel attestation.** node-agent -> agent runs over a unix socket attested by
+  `SO_PEERCRED` -> `/proc` cgroup -> pod UID; a mismatch is refused.
+- **Least-privilege RBAC.** Each ServiceAccount gets the minimum grants; the
+  ModelGateway's `secrets` read is **scoped** to `secretsNamespaces`. See the
+  [RBAC table](/docs/security#rbac-least-privilege-per-serviceaccount).
+- **Confined pods.** Every control-plane pod *and* every operator-rendered tenant
+  pod drops all caps, sets `seccomp: RuntimeDefault`, `readOnlyRootFilesystem`,
+  no privilege escalation.
+
+## The admission gate
+
+The webhook denies the **lethal trifecta** (`exec && egress && secrets`) without
+`agentctl.dev/allow-trifecta: "true"`, enforces an image-registry allow-list, and
+checks cross-object `modelPool` existence. See [provisioning](/docs/guides/provisioning).
+
+## Secretless + networkless agents
+
+The agent holds **no provider key** (the [ModelGateway](/docs/guides/intelligence)
+holds it) and, on the hardened [substrate tier](/docs/concepts/substrate), no NIC
+— outbound `work.*` / infer ride the substrate egress.

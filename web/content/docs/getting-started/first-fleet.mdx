@@ -1,0 +1,90 @@
+---
+title: Your first fleet
+description: Declare a claim-mode AgentFleet of agentd workers that KEDA scales from zero on work backlog.
+---
+
+An [`AgentFleet`](/docs/concepts/crds) is a replicated, autoscaled set of agents.
+It renders to a `Deployment` (claim mode) or `StatefulSet` (shard mode). In
+**claim mode**, KEDA owns `.spec.replicas` — the rendered workload omits it — and
+scales the pool elastically on a work-backlog signal, including **from zero**.
+
+## A claim-mode fleet
+
+```yaml
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: AgentFleet
+metadata:
+  name: workers
+  namespace: default
+spec:
+  template:
+    mode: reactive
+    image: ghcr.io/agentd-dev/agentd:1.0.0
+    subscribe: ["queue://jobs"]
+  scaling:
+    mode: claim
+    min: 0
+    max: 10
+    target:
+      signal: pending_events
+      value: "5"
+  workSource: "queue://jobs"
+```
+
+- `template` is the per-replica [`Agent`](/docs/concepts/crds) definition.
+- `scaling.mode: claim` selects elastic KEDA scaling (vs `shard` for fixed,
+  keyed partitions — see [scaling](/docs/guides/scaling)).
+- `scaling.target.signal` is a **contract-neutral** metric token; the operator
+  maps it onto the agent's negotiated [metrics schema](/docs/reference/metrics)
+  (it never hard-codes the branded literal).
+- `min: 0` allows scale-to-zero.
+
+Apply and observe:
+
+```console
+kubectl apply -f agentfleet-claim.yaml
+kubectl get agentfleet workers -o wide
+kubectl get pods -l app.kubernetes.io/name=workers -w
+```
+
+## Scale from zero on backlog
+
+```mermaid
+sequenceDiagram
+  participant PR as Producer
+  participant CO as coordination server
+  participant SC as scaler
+  participant KE as KEDA
+  participant FL as fleet 0..N agentd
+  PR->>CO: work.submit(item, claim_key)
+  loop polling
+    KE->>SC: IsActive / GetMetrics (gRPC)
+    SC->>CO: work.stats -> pending
+  end
+  KE->>FL: scale 0 -> N (from zero)
+  FL->>CO: work.claim(item) + claim_key  (N agents race)
+  CO-->>FL: granted=true to ONE; held_by to the rest
+  FL->>CO: work.ack(lease, claim_key)
+  SC->>CO: work.stats -> 0
+  KE->>FL: scale N -> 0
+```
+
+Distribution is **pull/claim**, not push: the only "assignment" is the atomic
+claim that picks one winner of N racers. Producers `work.submit` references (not
+payloads). See [work distribution](/docs/guides/work) for the full loop and the
+`work.*` surface.
+
+## Claim vs shard
+
+| Mode | Workload | Replicas | Use when |
+|---|---|---|---|
+| **claim** | `Deployment` | KEDA-elastic (0..max) | unordered, elastic worker pools |
+| **shard** | `StatefulSet` | fixed `N` partitions | keyed / ordered work, stable identity |
+
+[Scaling guide ->](/docs/guides/scaling)
+
+## Next
+
+- Give the fleet a model: [intelligence + ModelPool + budgets](/docs/guides/intelligence).
+- Make it reachable by peers: [the A2A mesh](/docs/guides/a2a).
+- Lock it down: [the security model](/docs/guides/security/overview).

@@ -1,0 +1,43 @@
+---
+title: Design record
+description: Where the agentctl design decisions live — the binding decision record (RFC 0001), the RFC track, and the architecture brainstorm.
+---
+
+agentctl's design is recorded across three layers, all in the repository.
+
+## The binding decision record
+
+[**RFC 0001 — Stack & repo decision record**](/docs/rfc-0001) is the binding
+record: the locked architectural choices (Rust-only control plane, the
+substrate/transport abstraction, the contract-not-a-vendor **[P0](/docs/contract)**
+principle, multi-tenancy posture, and the plane decomposition). It is the document
+the rest of the RFC track elaborates.
+
+## The RFC track
+
+The [**RFC index**](/docs/rfcs) lists the full set (0001–0018), each a deep-dive on
+one plane or cross-cutting concern — the CRDs (0003), admission ladder (0007),
+node-agent (0008), management/RBAC (0009), observability (0010), scaling (0011),
+intelligence (0012), A2A (0013), mesh identity (0014), security & multi-tenancy
+(0015), and codegen/conformance (0018). The RFCs are mirrored verbatim from
+`rfcs/` and are the normative design source.
+
+## The architecture brainstorm
+
+The pre-RFC exploration that seeded the decisions lives at
+[`docs/design/agentctl-architecture-brainstorm.md`](https://github.com/agentctl-dev/source-code/blob/main/docs/design/agentctl-architecture-brainstorm.md)
+— non-normative, but useful context for *why* the locked choices were made.
+
+## What's built vs deferred
+
+- [**Project status**](/docs/status) — what is built and verified end-to-end on
+  kind today.
+- [**Roadmap**](/docs/roadmap) — the cloud-native productization waves and the
+  explicitly-deferred tail.
+
+## Open contract question (P0)
+
+The contract currently lives inside the agentctl working tree but is designed to
+lift into its **own neutral repository** so that neither agentctl nor any agent
+owns it — the `$id` namespace (`https://agentctl.dev/contract/v1/...`) already
+anticipates that home. See [the ACC](/docs/contract).

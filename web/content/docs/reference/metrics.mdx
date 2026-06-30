@@ -1,0 +1,73 @@
+---
+title: Metrics
+description: A summary of the Agent Control Contract agent_* metrics registry (metrics_schema 1.0) plus the agentctl_* control-plane series.
+---
+
+There are two metric namespaces: the contract's **`agent_*`** series (emitted by
+the agent) and the control plane's **`agentctl_*`** series (emitted by the
+components). This page summarizes the contract registry; for wiring Prometheus /
+Grafana see [observability](/docs/guides/observability).
+
+## The `agent_*` registry
+
+The contract registry (`metrics.registry.json`, `metrics_schema 1.0`) freezes 51
+series under the neutral `agent_` prefix. Exposition is Prometheus text — **do not
+validate `/metrics` output against the JSON registry**. Highlights by area:
+
+### Lifecycle & runs
+| Metric | Type | Help |
+|---|---|---|
+| `agent_up` | gauge | 1 while the process is alive |
+| `agent_ready` | gauge | 1 when ready to accept work (not draining / lame-ducked) |
+| `agent_paused` | gauge | 1 while the agentic tree is paused at turn boundaries |
+| `agent_runs_total` | counter | runs by terminal status |
+| `agent_drains_total` | counter | drain phase transitions |
+| `agent_restarts_total` | counter | supervisor process restarts observed |
+
+### Intelligence & cost
+| Metric | Type | Help |
+|---|---|---|
+| `agent_tokens_total` | counter | model tokens by direction |
+| `agent_intel_calls_total` | counter | intelligence calls made |
+| `agent_intel_up` | gauge | 1 when the intelligence endpoint is reachable |
+| `agent_intel_all_down` | gauge | 1 while all intelligence endpoints are down |
+| `agent_intel_errors_total` | counter | intelligence-endpoint errors by reason |
+
+### Reactive & autoscaling
+| Metric | Type | Help |
+|---|---|---|
+| `agent_pending_events` | gauge | reactive events received but not yet routed (**primary autoscaling signal**) |
+| `agent_inflight_reactions` | gauge | reactions currently executing |
+| `agent_reaction_lag_ms` | gauge | age of the oldest un-routed pending event |
+| `agent_saturation` | gauge | in-flight / capacity utilization in `[0,1]` |
+
+### Coordination & sharding
+| Metric | Type | Help |
+|---|---|---|
+| `agent_claims_granted_total` | counter | work claims granted to this replica |
+| `agent_claims_lost_total` | counter | work claims lost to another replica |
+| `agent_claims_released_total` | counter | held claims released back to the fleet |
+| `agent_shard_skipped_total` | counter | items dropped as out-of-shard |
+
+### Subagent tree
+`agent_active_subagents`, `agent_tree_depth`, `agent_tree_breadth`,
+`agent_subagents_spawned_total`, `agent_subagents_exited_total`,
+`agent_subagent_restarts_total`, `agent_subagent_stuck_kills_total`.
+
+> **Autoscaling note.** `agent_pending_events` is the primary signal;
+> `agent_reactive_backlog` is recorded as a scaling alias. An `AgentFleet`'s
+> `scaling.target.signal` is a contract-neutral token the operator maps onto these.
+
+## The `agentctl_*` control-plane series
+
+Emitted by each component on `/metrics` (plus `process_start_time_seconds`):
+
+| Series | Component |
+|---|---|
+| `agentctl_operator_reconcile_duration_seconds` (+ error/leader gauges) | operator |
+| `agentctl_gateway_*` | A2A gateway |
+| `agentctl_modelgateway_{infer_requests,tokens,budget_rejections}_total` | ModelGateway |
+| `agentctl_admission_*` | admission webhook |
+| `agentctl_apiserver_verb_*` | aggregated APIServer |
+
+See [observability](/docs/guides/observability) for the dashboard and alerts.

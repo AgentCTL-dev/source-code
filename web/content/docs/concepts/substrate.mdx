@@ -1,0 +1,64 @@
+---
+title: Substrate tiers
+description: The three substrate tiers agentctl programs against — stock-unix, Kata-hybrid, sidecar-emptydir — and how tenancy picks the default.
+---
+
+The **substrate** is how the control plane reaches an agent's management socket
+and how that reach is attested. agentctl programs against a single pluggable
+abstraction (an *endpoint descriptor*) with three tiers, so the wiring is
+identical regardless of isolation strength. The source of truth is
+[RFC 0002](/docs/rfc-0002).
+
+## The three tiers
+
+| Tier | Transport | Isolation boundary | Runtime | Use for |
+|---|---|---|---|---|
+| **`stock-unix`** (primary) | `unix:PATH` on a hostPath, per-pod subdir | shared host kernel; filesystem ACLs + `SO_PEERCRED` | any stock runc/containerd | dev, single-tenant, conformance |
+| **`kata-hybrid`** (hardened) | `vsock:PORT` + per-VM uds | **microVM kernel boundary** | Kata-Containers (Firecracker / Cloud-Hypervisor) | **hostile multi-tenant production** |
+| **`sidecar-emptydir`** (portable) | `unix:PATH` on a shared emptyDir | weakest — shared pod netns | none (Autopilot / Fargate / PSS-restricted) | clusters with no hostPath / DaemonSet |
+
+The tier is set per agent via `spec.substrate` (see the
+[CRDs](/docs/concepts/crds)); the operator does **not** hard-default it.
+
+## Pod-to-socket attestation
+
+Each tier carries its own attestation so a squatting pod cannot impersonate
+another agent:
+
+- **`stock-unix`** — `getsockopt(SO_PEERCRED)` on the connected stream returns the
+  peer `(pid, uid, gid)`; the node-agent maps `pid -> /proc/<pid>/cgroup -> pod
+  UID` and requires it to equal the expected `pod_uid`. A mismatch is refused and
+  alerted.
+- **`kata-hybrid`** — the per-VM uds is created by the runtime and bound to the
+  sandbox; the guest cannot create a host uds. Isolation is *natural* — there is
+  no squattable shared path.
+- **`sidecar-emptydir`** — the socket lives in the pod's emptyDir, reachable from
+  no other pod. Attestation is the pod boundary itself.
+
+This is why `stock-unix` is dev / single-tenant by default: `SO_PEERCRED` returns
+the peer credentials as of `listen()`, so the host-shared filesystem path is the
+weak link the per-pod subdir layout hardens.
+
+## Tenancy picks the default
+
+The forced resolution between *"stock-unix is the primary substrate"* and
+*"hostile multi-tenancy is a v1 fork"*: cluster **tenancy** sets the default tier.
+
+- A `tenancy: hostile` cluster defaults every tenant workload to **`kata-hybrid`**
+  (the microVM boundary), with `stock-unix` available only as an explicit
+  per-namespace opt-in.
+- A `tenancy: single` (or development) cluster defaults to **`stock-unix`**, and
+  Kata-hybrid is an opt-in upgrade.
+
+> **v1 scope:** the locked architecture targets the **stock-unix + Kata-hybrid**
+> pair as the supported substrate set; `sidecar-emptydir` is the portability
+> escape hatch.
+
+## Networkless probes
+
+On networkless tiers (Kata, off-pod) the agent has no routable pod IP, so HTTP /
+TCP / gRPC probes are unusable — the **`exec` health verb** is the only option.
+This is also why secretless inference is routed through the node-agent's
+unix-socket forwarder on the networkless tier — see
+[attested identity](/docs/guides/security/attested) and
+[the intelligence guide](/docs/guides/intelligence).

@@ -1,0 +1,89 @@
+---
+title: Intelligence + ModelPool + budgets
+description: Secretless, metered, budget-enforced model access through the ModelGateway — the agent never holds a provider key.
+---
+
+agentctl agents are **networkless and secretless**: they never hold a provider
+API key and (on the hardened tier) have no outbound NIC. Model access is supplied
+by the **ModelGateway**, a credential-injecting, metering, budget-enforcing proxy
+configured by a [`ModelPool`](/docs/concepts/crds). The source of truth is
+[RFC 0012](/docs/rfc-0012).
+
+## The secretless path
+
+```mermaid
+sequenceDiagram
+  participant AG as agentd
+  participant MG as ModelGateway
+  participant K8 as kube Secret via ModelPool
+  participant P as Provider
+  Note over AG: networkless + secretless
+  AG->>MG: infer (X-Agent identity, no key)
+  MG->>K8: read ModelPool credentialSecretRef
+  MG->>MG: meter tokens; check budget
+  alt within budget
+    MG->>P: provider call (real key injected)
+    P-->>MG: completion + usage
+    MG-->>AG: completion
+  else over budget
+    MG-->>AG: HTTP 429
+  end
+```
+
+Only the ModelGateway can read the provider credential (scoped RBAC over
+`secretsNamespaces`); the agent sends identity headers, never a key.
+
+## Bind a ModelPool
+
+```yaml
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: ModelPool
+metadata:
+  name: mockpool
+  namespace: default
+spec:
+  provider: mock
+  endpoint: http://mock-provider.default:8080
+  credentialSecretRef: { name: provider-credentials, key: api-key }
+  models: ["mock-model-v1"]
+  defaultModel: mock-model-v1
+  budget:
+    maxTokens: 150
+```
+
+Bind it from an agent with `spec.modelPool: mockpool`. The operator wires
+`AGENT_INTELLIGENCE` into the pod; admission validates the pool exists and is
+permitted for the tenant.
+
+> **Worked example.** With the mock provider returning 100 tokens/call and a pool
+> `budget.maxTokens: 150`, the first call succeeds (used 100), and the **third
+> call is rejected with HTTP 429** — counted by
+> `agentctl_modelgateway_budget_rejections_total`. `agentd` only infers when it
+> does work, so an intelligence scenario uses `mode: once` with an instruction
+> (an idle `reactive` agent never infers).
+
+## Budgets and metering
+
+- `ModelPool.spec.budget.maxTokens` caps total pool consumption; the gateway meters
+  every call and rejects with **429** once exhausted.
+- `ModelPool.status.usedTokens` is the running meter (surfaced as a printer column).
+- Per-agent overrides live in `Agent.spec.limits` (`maxTokens`, `maxSteps`,
+  `maxDepth`, `treeTokenBudget`). Hitting a hard bound exits the agent with
+  [`EXIT_BUDGET` (7)](/docs/reference/exit-codes).
+- Gateway metrics: `agentctl_modelgateway_infer_requests_total`,
+  `agentctl_modelgateway_tokens_total`, `agentctl_modelgateway_budget_rejections_total`.
+  See [observability](/docs/guides/observability).
+
+## Networkless-tier attestation (routed infer)
+
+On the [networkless (Kata) tier](/docs/concepts/substrate) the agent has no
+routable pod IP, so the gateway cannot attest it by source IP. Opt-in routed-infer
+sends inference through the node-agent's unix-socket forwarder, which
+kernel-attests the peer (`SO_PEERCRED`) and re-stamps the identity so the client
+cannot self-assert. See [attested identity](/docs/guides/security/attested) and
+[architecture §6a](/docs/architecture).
+
+## Next
+
+- [Security: attested identity](/docs/guides/security/attested).
+- [Work distribution](/docs/guides/work) — combine inference with a claim loop.

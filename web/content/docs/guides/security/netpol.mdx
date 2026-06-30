@@ -1,0 +1,37 @@
+---
+title: NetworkPolicies
+description: The opt-in default-deny NetworkPolicy set — control-plane isolation and narrow agent egress — and why it needs a policy-enforcing CNI.
+---
+
+agentctl ships a defense-in-depth NetworkPolicy set that is **off by default**.
+Enabling it applies a default-deny posture plus narrow allows around the control
+plane and the agents.
+
+```console
+helm upgrade agentctl ./charts/agentctl -n agentctl-system --set networkPolicies.enabled=true
+```
+
+> **Needs a policy CNI.** NetworkPolicies are enforced only by a policy-enforcing
+> CNI (Calico, Cilium). **kindnet ignores them**, so on a default kind cluster the
+> manifests ship but are not enforced. Use a Calico-enabled cluster to verify.
+
+## What the policies enforce
+
+- **Default-deny** ingress/egress, then narrow allows.
+- **Postgres** ingress only from the A2A gateway + ModelGateway.
+- **Agent egress** restricted to DNS + the control plane only.
+
+This is the network-isolation half of the model: the data-plane utility paths are
+boundary-isolated so that "any in-cluster pod can call these" is not the resting
+state. Pair it with the per-call gates — the [API token](/docs/guides/security/api-token),
+[OIDC](/docs/guides/security/oidc), and [attested identity](/docs/guides/security/attested)
+— for defense in depth.
+
+## Verification status
+
+The default-deny + narrow allows are **verified under Calico** (control-plane
+default-deny holds; agent egress is constrained). On kindnet the policies are
+inert. See the
+[hardening checklist](/docs/security#hardening-checklist-posture--whats-resolved)
+in the full security model and the [operations runbook](/docs/operations) for the
+day-2 view.

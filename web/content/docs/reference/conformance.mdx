@@ -1,0 +1,67 @@
+---
+title: Contract & conformance
+description: How agentctl consumes the Agent Control Contract and how a new agent self-certifies as conformant — by behavior, never by sharing code.
+---
+
+agentctl depends on the **[Agent Control Contract (ACC)](/docs/contract)**,
+never on a specific agent (**[P0](/docs/contract)**). The contract is a
+set of published JSON Schemas (draft 2020-12), frozen DATA catalogues, and golden
+fixtures. This page is the conformance checklist; the full overview is
+[the ACC](/docs/contract) and the [ACC spec](/docs/contract-spec).
+
+## The artifacts
+
+`contract/schemas/` is the single canonical set (every `$id` unified under
+`https://agentctl.dev/contract/v1/<file>`):
+
+| Artifact | Kind | Reference |
+|---|---|---|
+| `manifest.schema.json` | validator | capabilities manifest (the discovery spine) |
+| `config.schema.json` | validator | agent config-file schema |
+| `report.schema.json` | validator | run-outcome report |
+| `events.schema.json` | validator | `agent://events` stream envelope |
+| `metrics.registry.json` | DATA | frozen [metrics](/docs/reference/metrics) registry (`metrics_schema 1.0`) |
+| `exit-codes.table.json` | DATA | frozen [exit-code table](/docs/reference/exit-codes) |
+| `a2a.methods.json` | DATA | [A2A](/docs/guides/a2a) method registry |
+| `management-profile.json` | DATA | operator tools + `agent://` resources |
+| `env-convention.json` | DATA | [downward-API env](/docs/reference/env-convention) |
+
+A validator validates an instance; a DATA catalogue is reference data for codegen,
+not an instance validator.
+
+## How agentctl consumes it
+
+1. Point the resolver at `schemas/` — the single canonical set.
+2. **Sum-type fields** (`management`, `metrics`, `a2a`, `claim`, `shard`,
+   `intelligence.healthy`) need hand-written deserializers — codegen cannot derive
+   the `bool | string | object` discriminations.
+3. **Tolerate unknown additive content** (open objects, unknown surface keys /
+   tools / metrics). Refuse only an unknown `contract_version` **MAJOR**.
+4. Target the **neutral** spellings (`AGENT_*`, `agent://`, `agent_`).
+
+## How a new agent self-certifies
+
+Conformance is by **behavior**, not by sharing code with the reference:
+
+1. Emit a `--capabilities` manifest that validates against `manifest.schema.json`,
+   declaring `contract_version` and an honest `surfaces{}` block.
+2. Honor the frozen [exit-code table](/docs/reference/exit-codes) and emit a
+   run-outcome report valid against `report.schema.json`.
+3. For each surface declared served in `surfaces{}`, serve it per its schema:
+   management tools, [metrics](/docs/reference/metrics), [A2A](/docs/guides/a2a),
+   config, the `agent://events` stream.
+4. Honor the [downward-API env convention](/docs/reference/env-convention) and the
+   `agent://` resource naming.
+5. Pass the behavioral conformance suite. The golden fixtures in
+   `fixtures/capabilities/` are the ground-truth: `default.json` and
+   `full-features.json` are **real captures** from the reference `agentd` binary
+   (carrying `agent_version: "1.0.0"`) that exercise both branches of every
+   sum-type surface key.
+
+## Version negotiation
+
+`contract_version` is **major.minor** (reference `"1.0"`): additive growth is a
+MINOR bump that consumers must tolerate; a breaking change is a MAJOR bump that a
+consumer refuses only if unknown. `surfaces{}` is the single discovery point — a
+key absent means the surface is unbuilt, so degrade gracefully. Full rules:
+[the ACC](/docs/contract) and [the spec](/docs/contract-spec).

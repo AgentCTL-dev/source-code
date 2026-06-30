@@ -1,0 +1,59 @@
+---
+title: Attested identity
+description: Source-IP and pod-uid attestation that binds caller identity at the ModelGateway and coordination server — anti-spoof on networked and networkless tiers.
+---
+
+The data-plane utility paths accept an *asserted* identity header by default. The
+**attested-identity** gates upgrade that to a *verified* identity: the control
+plane resolves the caller's real pod and refuses a mismatch, so a pod cannot
+self-assert another tenant's identity.
+
+## ModelGateway — attest the infer caller
+
+Two attestation modes, by [substrate tier](/docs/concepts/substrate):
+
+- **Networked (`modelgateway.attestIdentity`).** The gateway resolves the request
+  **source IP** to a pod via the kube API and binds the asserted
+  `X-Agent-Namespace`/`-Name` to it — anti-spoof.
+- **Networkless / routed-infer.** On the Kata tier the agent has no routable IP,
+  so inference is routed through the node-agent's unix-socket **infer-proxy**,
+  which kernel-attests the peer and re-stamps the identity:
+
+```mermaid
+sequenceDiagram
+  participant AG as agentd (networkless)
+  participant NA as node-agent (infer-proxy)
+  participant MG as ModelGateway
+  Note over AG: AGENT_INTELLIGENCE = unix:/run/agentctl/infer/infer.sock (read-only mount)
+  AG->>NA: infer over unix socket (no IP, may assert any header)
+  NA->>NA: SO_PEERCRED -> /proc cgroup -> pod uid
+  NA->>NA: strip client identity; re-stamp X-Agent-Pod-Uid
+  NA->>MG: infer + X-Agent-Pod-Uid (trusted forwarder, source IP)
+  MG->>MG: trust forwarder IP; resolve uid -> namespace/identity
+  MG-->>NA: completion (metered + budgeted)
+  NA-->>AG: completion
+```
+
+Routed-infer is opt-in: `nodeAgent.inferProxy.enabled` plus the operator
+annotation `agentctl.dev/routed-infer: "true"`, which makes the operator wire
+`AGENT_INTELLIGENCE=unix:/run/agentctl/infer/infer.sock`. See
+[the intelligence guide](/docs/guides/intelligence) and
+[architecture §6a](/docs/architecture).
+
+Full detail:
+[security model -> attested agent identity](/docs/security#attested-agent-identity-modelgateway).
+
+## Coordination — attest claim ownership
+
+When `coordination.attestIdentity` is on, the coordination server resolves the
+caller's source IP to a pod and **binds claim ownership to the attested identity**.
+This blocks cross-tenant `ack`/`release`: a pod cannot acknowledge or release a
+claim it does not own. See [work distribution](/docs/guides/work) and
+[security model -> attested claim ownership](/docs/security#attested-claim-ownership-coordination).
+
+## scaler / coordination mTLS
+
+Independently, `coordination.mtls.enabled` adds an mTLS listener on the
+coordination `:8443` port; the KEDA scaler verifies it with a CA-signed client
+cert (`agentctl-scaler-client-tls`) checked against
+`coordination.mtls.allowedNames`. This protects the backlog read path.

@@ -170,7 +170,7 @@ that would accept any `aud`) or downgrade JWKS to MITM-able plaintext.
 ### Worked example — an Agent served only to group "support"
 
 ```yaml
-apiVersion: agentctl.dev/v1
+apiVersion: agents.x-k8s.io/v1alpha1
 kind: Agent
 metadata:
   name: support-bot

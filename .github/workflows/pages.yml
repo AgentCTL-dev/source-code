@@ -1,0 +1,73 @@
+name: pages
+
+# GitHub Pages from Actions. Builds the static site in web/ and, on pushes to
+# main, deploys it. Pull requests build only (no deploy) so site changes are
+# validated without publishing.
+#
+# Project pages live under https://<org>.github.io/source-code/, so the build
+# uses PAGES_BASE_PATH (repo variable, default '/source-code'). To switch to an
+# apex domain later: set the repo variable PAGES_BASE_PATH='' and add
+# web/public/CNAME — no code change.
+#
+# One manual step the first time: Settings -> Pages -> Source = GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "docs/**"
+      - "contract/**"
+      - "rfcs/**"
+      - "charts/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "docs/**"
+      - "contract/**"
+      - "rfcs/**"
+      - "charts/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+        env:
+          PAGES_BASE_PATH: ${{ vars.PAGES_BASE_PATH || '/source-code' }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/out
+
+  deploy:
+    # PRs build only; deploy runs on pushes to main (and manual dispatch).
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,57 @@
+---
+title: Observability
+description: Control-plane agentctl_* metrics, agent agent_* metrics, the node-agent scrape-proxy, and the optional Grafana dashboard + Prometheus alerts shipped by the chart.
+---
+
+Every component exposes Prometheus metrics on its `/metrics` endpoint, and the
+node-agent scrape-proxies agent metrics so Prometheus never has to reach into the
+data plane. The chart can optionally ship a `ServiceMonitor`, a Grafana
+dashboard, and a `PrometheusRule` — all **off by default**.
+
+## Two metric namespaces
+
+| Prefix | Source | Examples |
+|---|---|---|
+| `agentctl_*` | control-plane components | `agentctl_operator_reconcile_duration_seconds`, `agentctl_modelgateway_tokens_total`, `agentctl_admission_*` |
+| `agent_*` | the agent (the contract) | `agent_pending_events`, `agent_tokens_total`, `agent_claims_granted_total` |
+
+The `agent_*` series are part of the [Agent Control Contract metrics
+registry](/docs/reference/metrics) — a frozen `metrics_schema 1.0` catalogue. The
+operator maps a fleet's contract-neutral `scaling.target.signal` onto these.
+
+## Wire it up
+
+```console
+helm upgrade agentctl ./charts/agentctl -n agentctl-system \
+  --set metrics.serviceMonitor.enabled=true \
+  --set observability.dashboards.enabled=true \
+  --set observability.alerts.enabled=true \
+  --set observability.alerts.labels.release=prometheus
+```
+
+- **`metrics.serviceMonitor.enabled`** — a Prometheus-Operator `ServiceMonitor`
+  per scrape target (jobs `agentctl-<comp>`).
+- **`observability.dashboards.enabled`** — a Grafana dashboard `ConfigMap`
+  (`grafana_dashboard: "1"` sidecar auto-discovery; uid `agentctl-control-plane`)
+  charting the operator (reconcile / error rate, latency, leader), the A2A
+  gateway, the ModelGateway (inference, tokens, budget rejections), and admission.
+- **`observability.alerts.enabled`** — a `PrometheusRule` with
+  `AgentctlOperatorNoLeader`, `AgentctlReconcileErrors`, `AgentctlComponentDown`,
+  `AgentctlAdmissionDenySpike`, `AgentctlBudgetRejections`.
+
+All three need the Prometheus-Operator CRDs; a stock install needs neither Grafana
+nor those CRDs.
+
+## Key signals
+
+- **Autoscaling** — `agent_pending_events` (primary signal),
+  `agent_reactive_backlog` (alias), `agent_saturation`.
+- **Cost** — `agent_tokens_total`, `agentctl_modelgateway_tokens_total`,
+  `agentctl_modelgateway_budget_rejections_total`.
+- **Coordination** — `agent_claims_granted_total`, `agent_claims_lost_total`,
+  `agent_shard_skipped_total`.
+- **Operator health** — `agentctl_operator_reconcile_duration_seconds` (p50/p95),
+  reconcile errors, leader gauge.
+
+See the [metrics reference](/docs/reference/metrics) for the full catalogue and
+the [operations runbook](/docs/operations) for SLOs and dashboards.

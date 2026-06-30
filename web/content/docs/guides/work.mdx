@@ -1,0 +1,74 @@
+---
+title: Work distribution
+description: The coordination server's work.* claim ledger — atomic single-grant claims, dedupe by claim_key, lease expiry, and how it drives scale-from-zero.
+---
+
+The **coordination server** is agentctl's work ledger. Producers `work.submit`
+references; agents `work.claim`/`work.ack` them; the backlog drives
+[KEDA scale-from-zero](/docs/guides/scaling). Distribution is **pull/claim**, not
+push — the only assignment is the atomic claim that picks one winner of N racers.
+The source of truth is [RFC 0011](/docs/rfc-0011).
+
+## The claim loop
+
+```mermaid
+sequenceDiagram
+  participant PR as Producer
+  participant CO as coordination server
+  participant FL as fleet 0..N agentd
+  PR->>CO: work.submit(item, claim_key)
+  FL->>CO: work.claim(item) + claim_key   (N agents race)
+  CO-->>FL: granted=true to ONE; held_by to the rest
+  FL->>FL: process the item
+  FL->>CO: work.ack(lease, claim_key)
+  Note over CO: claim_key recorded -> redelivery deduped; lease expiry re-offers on crash
+```
+
+Guarantees:
+
+- **Atomic single-grant** — under contention exactly one claimant wins; the rest
+  get `held_by`.
+- **Dedupe by `claim_key`** — a recorded key suppresses redelivery.
+- **Lease expiry re-offer** — if a claimant crashes before `ack`, the lease
+  expires and the item is re-offered.
+- Producers submit **references**, not payloads — the bytes live in your store.
+
+## The `work.*` surface
+
+The coordination server speaks MCP JSON-RPC over HTTP (`/` and `/mcp`):
+
+| Method | Caller | Purpose |
+|---|---|---|
+| `work.submit` | producers | enqueue an item reference + `claim_key` |
+| `work.claim` | agents | atomically claim one item (lease) |
+| `work.ack` | agents | acknowledge completion (records `claim_key`) |
+| `work.release` | agents | release a held claim back to the fleet |
+| `work.stats` | scaler | backlog depth (drives KEDA) |
+
+## agentd and the bridge
+
+`agentd`'s MCP client is **stdio-only** (NDJSON over a spawned child), while the
+coordination server serves `work.*` over **HTTP JSON-RPC**. To run the real
+`agentd` claim loop end to end, a small **stdio-to-HTTP bridge** sidecar
+(`work-mcp-bridge`) adapts the two. For throughput measurement and for driving
+KEDA, an HTTP `work.submit` producer hits `/mcp` directly — the backlog drives the
+scaler regardless of the claimant.
+
+## Scaling on backlog
+
+The KEDA external scaler reads `work.stats` and reports `IsActive`/`GetMetrics`,
+so a non-empty backlog scales the fleet up (including from zero) and an empty one
+scales it back down. See [scaling](/docs/guides/scaling).
+
+## State
+
+The claim ledger is in-memory behind a `ClaimStore` trait (a future durable
+backend can swap in), deliberately separate from the Postgres that backs A2A
+tasks and token usage. A single mutex guards the ledger — the throughput ceiling
+to be aware of under heavy concurrency (see the [operations runbook](/docs/operations)).
+
+## Cross-tenant safety
+
+When `coordination.attestIdentity` is on, claim ownership is bound to the attested
+identity, which blocks cross-tenant `ack`/`release`. See
+[attested identity](/docs/guides/security/attested).

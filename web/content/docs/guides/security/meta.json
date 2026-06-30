@@ -1,0 +1,12 @@
+{
+  "title": "Security",
+  "pages": [
+    "overview",
+    "api-token",
+    "oidc",
+    "trusted-proxy",
+    "attested",
+    "netpol",
+    "../../(generated)/security"
+  ]
+}

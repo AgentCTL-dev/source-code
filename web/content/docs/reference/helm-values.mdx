@@ -1,0 +1,73 @@
+---
+title: Helm values
+description: The agentctl chart's key values — images, cert-manager, Postgres, per-component toggles, and the opt-in security and observability gates.
+---
+
+The most-used `charts/agentctl` values. The full set is `values.yaml`, validated
+by `values.schema.json`; for install steps see [install on kind](/docs/getting-started/install)
+and the [chart README](https://github.com/agentctl-dev/source-code/blob/main/charts/agentctl/README.md).
+
+## Images
+
+| Key | Default | Purpose |
+|---|---|---|
+| `image.registry` | `""` | image registry; empty ⇒ local `agentctl/<comp>:<tag>` (kind-loaded) |
+| `image.tag` | `dev` | image tag for all components |
+| `image.pullPolicy` | — | `Always` / `IfNotPresent` / `Never` |
+| `image.digests.<comp>` | — | pin a component by digest (renders `…@sha256:…`) for tamper-evident installs |
+| `image.pullSecrets` | `[]` | private-registry pull secrets |
+| `referenceAgent.image` | — | the reference agent image used by examples |
+
+## Core platform
+
+| Key | Default | Purpose |
+|---|---|---|
+| `certManager.enabled` | `true` | issue all certs via cert-manager (required) |
+| `certManager.caIssuerRef` | `""` | chain into an existing CA `ClusterIssuer` instead of the bundled self-signed CA |
+| `postgres.mode` | `bundled` | `bundled` (in-cluster) or `external` |
+| `postgres.external.dsnSecretName` | `""` | Secret holding `DATABASE_URL` when `mode=external` |
+| `substrate.socketRoot` | `/run/agentctl/sockets` | on-node socket root the node-agent watches |
+| `namespace.podSecurity` | — | PodSecurity level for the control-plane namespace |
+
+## Per-component toggles
+
+`operator` and `nodeAgent` always install. Each of `apiserver`, `gateway`,
+`modelgateway`, `admission`, `coordination`, `scaler` is a *component* object
+supporting `enabled`, `replicas`, `logLevel`, `resources`, scheduling
+(`nodeSelector`/`affinity`/`tolerations`/`topologySpreadConstraints`), `pdb`,
+`autoscaling`, `extraEnv`, and `serviceAccount.annotations`.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `apiserver.enabled` / `gateway.enabled` / `modelgateway.enabled` / `admission.enabled` | `true` | toggle planes |
+| `admission.allowedRegistries` | (CSV) | image-registry prefixes the webhook permits |
+| `modelgateway.secretsNamespaces` | — | namespaces the ModelGateway may read provider Secrets from |
+| `modelgateway.attestIdentity` | `false` | source-IP attest the infer caller ([attested identity](/docs/guides/security/attested)) |
+| `nodeAgent.inferProxy.enabled` | `false` | unix-socket infer forwarder (routed-infer / networkless tier) |
+| `coordination.store` | `memory` | `memory` or `postgres` claim ledger |
+| `coordination.attestIdentity` | `false` | bind claim ownership to the attested identity |
+| `coordination.mtls.enabled` | `false` | mTLS on the coordination `:8443` scaler port |
+| `coordination.mtls.allowedNames` | `[]` | client names accepted on the mTLS listener |
+
+## Security gates (opt-in)
+
+| Key | Default | Purpose | Guide |
+|---|---|---|---|
+| `apiToken.enabled` | `false` | in-cluster bearer-token gate | [API token](/docs/guides/security/api-token) |
+| `apiToken.value` | `""` | pin a managed token (empty ⇒ chart generates a stable random one) | |
+| `trustedProxy.enabled` | `false` | front-proxy mTLS + asserted identity | [Trusted proxy](/docs/guides/security/trusted-proxy) |
+| `trustedProxy.headerPrefix` | `x-agentctl` | asserted identity header prefix | |
+| `trustedProxy.allowedNames` | `[]` | allow-listed front-proxy client cert names | |
+| `networkPolicies.enabled` | `false` | ship default-deny + narrow allows (needs a policy CNI) | [NetworkPolicies](/docs/guides/security/netpol) |
+| `networkPolicies.agentNamespaces` | `[]` | namespaces to apply agent policies to | |
+
+## Observability (opt-in)
+
+| Key | Default | Purpose |
+|---|---|---|
+| `metrics.serviceMonitor.enabled` | `false` | a Prometheus-Operator `ServiceMonitor` per scrape target |
+| `observability.dashboards.enabled` | `false` | ship a Grafana dashboard `ConfigMap` (sidecar auto-discovery) |
+| `observability.alerts.enabled` | `false` | ship a `PrometheusRule` (needs Prometheus-Operator CRDs) |
+| `observability.alerts.labels` | `{}` | extra labels so your `ruleSelector` picks up the rule |
+
+See [observability](/docs/guides/observability).

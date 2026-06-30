@@ -1,0 +1,66 @@
+---
+title: Trusted front-proxy
+description: Terminate edge auth at an external API gateway (e.g. APISIX) and assert the caller identity to the A2A gateway over mTLS, with anti-spoof header stripping.
+---
+
+When `trustedProxy.enabled` is set, a fronting API gateway (e.g. APISIX)
+terminates edge auth and asserts the caller identity over an **mTLS channel**. The
+[A2A gateway](/docs/guides/a2a) authenticates the *proxy* (client cert vs the
+agentctl CA + an `allowedNames` list), trusts the asserted identity headers,
+**strips** those headers from any untrusted plaintext caller, enforces the agent's
+`requiredClaims`, and forwards the identity to the agent. This mirrors the
+aggregated-apiserver front-proxy.
+
+Full detail + APISIX config sketch:
+[security model -> trusted front-proxy](/docs/security#trusted-front-proxy-external-api-gateway).
+
+## The 3-step model
+
+1. **Authenticate the proxy.** The front-proxy presents a client cert from the
+   agentctl CA on the gateway's `:8443` trusted-proxy mTLS listener; the gateway
+   verifies it and checks the client name against `trustedProxy.allowedNames`.
+2. **Trust the asserted identity.** Over that trusted channel the gateway trusts
+   `<prefix>-subject` / `-email` / `-groups` (prefix `trustedProxy.headerPrefix`,
+   default `x-agentctl`) and enforces the agent's `requiredClaims`.
+3. **Strip on untrusted callers.** On any untrusted (plaintext, or name not
+   allow-listed) channel the gateway **strips** `x-agentctl-*` and legacy
+   `X-Forwarded-*` headers — anti-spoof, so a direct caller cannot self-assert.
+
+```mermaid
+sequenceDiagram
+  participant C as External client
+  participant PX as APISIX (front-proxy)
+  participant IdP as OIDC issuer
+  participant GW as A2A gateway
+  participant AG as agentd
+  C->>PX: request + Authorization: Bearer <JWT>
+  PX->>IdP: terminate edge auth (verify JWT)
+  IdP-->>PX: verified identity (sub / email / groups)
+  PX->>GW: mTLS (client cert) + x-agentctl-subject/-email/-groups
+  Note over GW: verify client cert vs agentctl CA; name allow-listed?
+  alt untrusted channel
+    GW->>GW: STRIP x-agentctl-* + X-Forwarded-* (anti-spoof)
+    GW-->>C: 401/403 — no asserted identity honored
+  else trusted proxy channel
+    Note over GW: trust x-agentctl-*; enforce requiredClaims
+    GW->>AG: forward + caller identity
+    AG-->>GW: result / SSE frames
+    GW-->>PX: result / SSE
+    PX-->>C: result / SSE
+  end
+```
+
+## Certificates
+
+Enabling `trustedProxy.enabled` provisions two extra cert-manager leaves: the A2A
+gateway trusted-proxy mTLS **server** cert (`agentctl-trusted-proxy-tls`, + the CA
+to verify the proxy) and the **client** cert the front-proxy presents
+(`agentctl-trusted-proxy-client-tls`). See the
+[certificate fabric](/docs/security#certificate-fabric-cert-manager) and
+[architecture §7b](/docs/architecture).
+
+## How it composes
+
+The trusted-proxy path can pass `requiredClaims` through from the edge, or compose
+with native per-agent [OIDC](/docs/guides/security/oidc) and the
+[API token](/docs/guides/security/api-token) gate.
