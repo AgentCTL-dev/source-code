@@ -1,0 +1,93 @@
+# e2e mock model provider (OpenAI chat/completions shape).
+#
+# Same role as deploy/examples/mock-provider.yaml — it REQUIRES an Authorization
+# header (proving the ModelGateway injected the pool credential; the agent never
+# sends one) and reports token usage so the gateway meters/budgets — but it
+# answers in the **OpenAI `chat/completions`** envelope (`choices[].message` +
+# `usage`). That matters for the routed-infer scenarios driven by the REAL
+# agentd: agentd dials its `AGENT_INTELLIGENCE` endpoint as an OpenAI-compatible
+# provider (it POSTs `/v1/chat/completions` and parses `choices[0].message`), so
+# a bare `{content,usage}` body (the deploy/examples mock) lets the gateway meter
+# but makes agentd's run fail to parse a result. This shape lets a once-mode
+# agentd COMPLETE (exit 0) while still carrying `usage.total_tokens` for metering.
+# Dev/test only. Served on the same Service name/namespace as the example mock so
+# e2e/manifests/modelpool-mock.yaml (endpoint http://mock-provider.default:8080)
+# binds it unchanged.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-provider
+  namespace: default
+  labels:
+    app.kubernetes.io/name: mock-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mock-provider
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mock-provider
+    spec:
+      containers:
+        - name: provider
+          image: python:3.12-alpine
+          command:
+            - python3
+            - -c
+            - |
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+              import json
+              class H(BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      auth = self.headers.get('authorization')
+                      n = int(self.headers.get('content-length', 0))
+                      body = self.rfile.read(n)
+                      if not auth:
+                          print('PROVIDER 401 - no credential injected', flush=True)
+                          self.send_response(401); self.send_header('content-type','application/json'); self.end_headers()
+                          self.wfile.write(b'{"error":"missing credential"}'); return
+                      try: req = json.loads(body or b'{}')
+                      except Exception: req = {}
+                      model = req.get('model') or 'mock-model-v1'
+                      user = ''
+                      for m in req.get('messages', []):
+                          if m.get('role') == 'user':
+                              c = m.get('content', '')
+                              user = c if isinstance(c, str) else json.dumps(c)
+                      # OpenAI chat/completions envelope so a real agent (agentd)
+                      # parses a final assistant message and COMPLETES; usage is
+                      # kept so the ModelGateway meters/budgets (100 tok/call).
+                      resp = {
+                          "id": "mock-cmpl-1",
+                          "object": "chat.completion",
+                          "model": model,
+                          "choices": [{
+                              "index": 0,
+                              "message": {"role": "assistant", "content": "mock completion for: " + user},
+                              "finish_reason": "stop",
+                          }],
+                          "usage": {"prompt_tokens": 90, "completion_tokens": 10, "total_tokens": 100},
+                      }
+                      print('PROVIDER 200 auth=' + auth[:18] + ' model=' + model, flush=True)
+                      out = json.dumps(resp).encode()
+                      self.send_response(200); self.send_header('content-type','application/json'); self.end_headers(); self.wfile.write(out)
+                  def log_message(self, *a): pass
+              print('mock-provider (openai shape) listening on :8080', flush=True)
+              HTTPServer(('', 8080), H).serve_forever()
+          ports:
+            - { containerPort: 8080, name: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-provider
+  namespace: default
+  labels:
+    app.kubernetes.io/name: mock-provider
+spec:
+  selector:
+    app.kubernetes.io/name: mock-provider
+  ports:
+    - { port: 8080, targetPort: 8080, name: http }

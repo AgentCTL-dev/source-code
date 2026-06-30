@@ -14,8 +14,19 @@ coordination:
 
 # Secretless/budgeted intelligence plane (routed-infer -> ModelGateway ->
 # mock-provider). Enabled by default in the chart; pinned here for clarity.
+#
+# attestIdentity is ON in the base because the routed-infer path REQUIRES it: a
+# networkless/socket agent reaches the ModelGateway only through the node-agent
+# infer-proxy, which forwards the caller's kernel-attested pod UID in
+# `X-Agent-Pod-Uid`. The ModelGateway trusts that forwarder header ONLY in attest
+# mode (otherwise it demands a spoofable `X-Agent-Namespace` the proxy strips), so
+# without attest the operator-wired routed-infer agent cannot resolve its
+# ModelPool. The intelligence scenarios (intel-infer, plus prov-once /
+# conf-exit-codes — agentd once-mode REQUIRES an intelligence endpoint) all ride
+# this path; sec-mg-attest exercises the anti-spoof rejection on top of it.
 modelgateway:
   enabled: true
+  attestIdentity: true
 
 # KEDA external scaler — claim-depth autoscaling (0->N->0). Enabling it also
 # flips the operator's SCALER_ENABLED so it renders a ScaledObject per claim

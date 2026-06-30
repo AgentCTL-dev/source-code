@@ -35,6 +35,11 @@ use agentctl_e2e::{host, prom, results, shell, Ctx};
 const SVC_COORDINATION: &str = "agentctl-coordination";
 const SVC_OPERATOR: &str = "agentctl-operator";
 
+/// The coordination http Service port (chart Service.port `:80` -> container
+/// `:8080`); kubectl port-forward addresses the Service port, not the targetPort.
+/// (The operator Service is genuinely `:8080`, so its scrape keeps that literal.)
+const PORT_HTTP: u16 = 80;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "bench",
@@ -371,7 +376,7 @@ async fn sweep_throughput(
     duration_secs: u64,
 ) -> Result<Value> {
     let store = std::env::var("AGENTCTL_E2E_STORE").unwrap_or_else(|_| "memory".to_string());
-    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_COORDINATION, 8080, 18200)?;
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_COORDINATION, PORT_HTTP, 18200)?;
     let base = pf.base_url();
 
     let mut rows: Vec<Vec<String>> = Vec::new();
@@ -580,29 +585,47 @@ async fn sweep_latency(ctx: &Ctx, rd: &results::ResultsDir, max_n: u32) -> Resul
 // ===========================================================================
 
 /// Create-or-scale a Deployment of `replicas` idle agentd pods (label `app=<name>`).
+///
+/// agentd is NOT a bare idle binary: in EVERY mode it validates an intelligence
+/// endpoint at boot (exits 2/USAGE without one), and a `reactive` daemon needs a
+/// mode + trigger. So a plain `kubectl create deployment --image agentd` pod
+/// crash-loops and never reaches Running — bogus density/overhead numbers. We
+/// instead render a Deployment running `agentd --mode reactive` with a dummy
+/// (never-dialed, since idle) unix intelligence endpoint and a trigger; the pod
+/// arms its reactor and idles, which is exactly the per-agent footprint the sweep
+/// measures. `imagePullPolicy: IfNotPresent` keeps it on the kind-loaded image.
 fn scale_idle(ctx: &Ctx, name: &str, replicas: u32) -> Result<()> {
-    // create is idempotent here: ignore an AlreadyExists, then scale to the target.
-    let _ = shell::kubectl(&[
-        "create",
-        "deployment",
-        name,
-        "-n",
-        &ctx.cfg.ns,
-        "--image",
-        &ctx.cfg.agentd_image,
-        "--replicas",
-        &replicas.to_string(),
-    ]);
-    shell::kubectl(&[
-        "scale",
-        "deployment",
-        name,
-        "-n",
-        &ctx.cfg.ns,
-        &format!("--replicas={replicas}"),
-    ])
-    .map(|_| ())
-    .with_context(|| format!("scale {name} to {replicas}"))
+    let manifest = format!(
+        "apiVersion: apps/v1\n\
+         kind: Deployment\n\
+         metadata:\n\
+         \x20 name: {name}\n\
+         \x20 namespace: {ns}\n\
+         \x20 labels: {{ app: {name} }}\n\
+         spec:\n\
+         \x20 replicas: {replicas}\n\
+         \x20 selector: {{ matchLabels: {{ app: {name} }} }}\n\
+         \x20 template:\n\
+         \x20   metadata:\n\
+         \x20     labels: {{ app: {name} }}\n\
+         \x20   spec:\n\
+         \x20     terminationGracePeriodSeconds: 2\n\
+         \x20     shareProcessNamespace: true\n\
+         \x20     containers:\n\
+         \x20       - name: agentd\n\
+         \x20         image: {image}\n\
+         \x20         imagePullPolicy: IfNotPresent\n\
+         \x20         args: [\"--mode\",\"reactive\",\"--instruction\",\"idle\",\"--subscribe\",\"file:///tmp/inbox\",\"--intelligence\",\"unix:/tmp/llm.sock\"]\n",
+        name = name,
+        ns = ctx.cfg.ns,
+        replicas = replicas,
+        image = ctx.cfg.agentd_image,
+    );
+    let path = std::env::temp_dir().join(format!("agentctl-bench-{name}.yaml"));
+    fs::write(&path, manifest).with_context(|| format!("write {path:?}"))?;
+    shell::kubectl(&["apply", "-f", path.to_str().unwrap_or_default()])
+        .map(|_| ())
+        .with_context(|| format!("apply idle deployment {name} (replicas={replicas})"))
 }
 
 /// Best-effort delete of the bench Deployment.
@@ -708,7 +731,7 @@ fn render_report(cli: &Cli) -> Result<()> {
         .read_json("summary")
         .with_context(|| format!("read summary.json under {}", dir.display()))?;
 
-    let md = render_markdown(&summary);
+    let md = render_markdown(&summary, &rd);
     let out = Path::new(&cli.report_out);
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {parent:?}"))?;
@@ -740,8 +763,39 @@ fn latest_run_dir(base: &Path) -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("no run dirs under {}", base.display()))
 }
 
-/// Build the benchmark report markdown from a `summary.json` value.
-fn render_markdown(summary: &Value) -> String {
+/// Read a results CSV and render it as a GitHub-flavoured Markdown table. Returns
+/// `None` when the file is absent (the sweep was not run) or has no data rows, so
+/// the committed report only ever shows real measured numbers.
+fn csv_table(rd: &results::ResultsDir, name: &str) -> Option<String> {
+    let path = rd.dir.join(format!("{name}.csv"));
+    let body = fs::read_to_string(path).ok()?;
+    let mut lines = body.lines().filter(|l| !l.trim().is_empty());
+    let header = lines.next()?;
+    let rows: Vec<&str> = lines.collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let cols: Vec<&str> = header.split(',').collect();
+    let mut t = String::new();
+    t.push_str("| ");
+    t.push_str(&cols.join(" | "));
+    t.push_str(" |\n|");
+    for _ in &cols {
+        t.push_str("---|");
+    }
+    t.push('\n');
+    for r in rows {
+        t.push_str("| ");
+        t.push_str(&r.split(',').collect::<Vec<_>>().join(" | "));
+        t.push_str(" |\n");
+    }
+    Some(t)
+}
+
+/// Build the benchmark report markdown from a `summary.json` value + the run dir's
+/// CSVs (inlined as tables so the committed doc carries the real numbers; the
+/// CSVs themselves are git-ignored under `e2e/results/`).
+fn render_markdown(summary: &Value, rd: &results::ResultsDir) -> String {
     let mut s = String::new();
     s.push_str("# agentctl benchmarks\n\n");
     s.push_str(
@@ -787,27 +841,56 @@ fn render_markdown(summary: &Value) -> String {
         s.push_str(&format!(
             "- Max running idle agents on this host: **{max_running}**\n- Binding resource: **{binding}**\n\n"
         ));
+        if let Some(t) = csv_table(rd, "density") {
+            s.push_str("Requested vs scheduled (the sweep stops at the first `Pending`):\n\n");
+            s.push_str(&t);
+            s.push('\n');
+        }
     }
 
     // (d) coordination throughput.
     if let Some(d) = sweeps.get("d") {
         let store = d.get("store").and_then(Value::as_str).unwrap_or("memory");
+        s.push_str("## Coordination throughput\n\n");
         s.push_str(&format!(
-            "## Coordination throughput\n\nLoad-gen on `/mcp` submit→claim→ack (store: **{store}**). \
-             See `throughput.csv` for ops/sec + p50/p99 per concurrency step. The single \
-             serializing `Mutex` is the in-memory ceiling; the Postgres store trades \
+            "Concurrent load-gen on `/mcp` submit→claim→ack (store: **{store}**). The single \
+             serializing `Mutex` is the in-memory ceiling; the Postgres store trades raw \
              throughput for durability/HA.\n\n",
         ));
+        if let Some(t) = csv_table(rd, "throughput") {
+            s.push_str(&t);
+            s.push('\n');
+        }
     }
 
-    // (c) trends + (e) latency are tabular — point at the CSVs.
+    // (c) control-plane scaling trends.
     if sweeps.get("c").is_some() {
-        s.push_str("## Control-plane scaling trends\n\nSee `cp_trends.csv` (operator reconcile p50/p95 + control-plane CPU/mem vs N).\n\n");
-    }
-    if sweeps.get("e").is_some() {
+        s.push_str("## Control-plane scaling trends\n\n");
         s.push_str(
-            "## Latency\n\nSee `latency.csv` (provisioning + scale-from-zero, 0→1 / 0→N).\n\n",
+            "Operator reconcile p50/p95 (from the `agentctl_operator_reconcile_duration_seconds` \
+             histogram) and total control-plane CPU/mem as the agent count `n` grows:\n\n",
         );
+        if let Some(t) = csv_table(rd, "cp_trends") {
+            s.push_str(&t);
+            s.push('\n');
+        } else {
+            s.push_str("_(no data captured)_\n\n");
+        }
+    }
+
+    // (e) latency.
+    if sweeps.get("e").is_some() {
+        s.push_str("## Latency\n\n");
+        s.push_str(
+            "Provisioning wall-clock (apply N idle agents → all Running). `reached_target=false` \
+             means the host could not fit N (host-bound, not an agentctl limit):\n\n",
+        );
+        if let Some(t) = csv_table(rd, "latency") {
+            s.push_str(&t);
+            s.push('\n');
+        } else {
+            s.push_str("_(no data captured)_\n\n");
+        }
     }
 
     s.push_str("## Re-run on a real cluster\n\n");

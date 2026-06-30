@@ -1,0 +1,36 @@
+# e2e ModelPool wired to the e2e mock provider, plus the provider-credential
+# Secret it references. The ModelGateway reads this Secret and injects the key on
+# each request — the agent never holds it (zero-secret-in-pod, RFC 0012). This is
+# the HEADROOM pool for the metering + once-mode-complete scenarios (intel-infer,
+# prov-once): a high budget so an inference always succeeds and the routed-infer
+# agentd run reaches a clean exit 0. The ModelGateway's per-pool usage is durable
+# (Postgres), cumulative, and NOT reset by deleting/recreating the CR, so a small
+# budget here would make repeated runs flake; the budget-REJECTION path is proven
+# by the separate low-budget e2e/manifests/modelpool-budget.yaml instead. Pairs
+# with e2e/manifests/mock-provider.yaml (the OpenAI-shaped mock).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: provider-credentials
+  namespace: default
+  labels:
+    app.kubernetes.io/name: modelpool-mock
+type: Opaque
+stringData:
+  api-key: sk-mock-provider-secret-do-not-ship
+---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: ModelPool
+metadata:
+  name: mockpool
+  namespace: default
+spec:
+  provider: mock
+  endpoint: http://mock-provider.default:8080
+  credentialSecretRef:
+    name: provider-credentials
+    key: api-key
+  models: ["mock-model-v1"]
+  defaultModel: mock-model-v1
+  budget:
+    maxTokens: 100000

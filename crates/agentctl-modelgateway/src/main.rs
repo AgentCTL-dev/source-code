@@ -152,6 +152,13 @@ async fn main() {
         // alongside /healthz — no new port; scraped scheme=http.
         .route("/metrics", get(serve_metrics))
         .route("/v1/infer", post(infer))
+        // OpenAI-compatible alias: a conformant agent (e.g. agentd) dialing its
+        // `AGENT_INTELLIGENCE` endpoint as an OpenAI provider POSTs the default
+        // path `/v1/chat/completions`. The gateway is provider-neutral on the
+        // wire, so this aliases to the SAME identity/pool/budget/credential-inject
+        // path as `/v1/infer` — the routed-infer agent loop reaches the gateway
+        // without the agent knowing the gateway's native path.
+        .route("/v1/chat/completions", post(infer))
         .route("/v1/usage", get(usage))
         .layer(axum::middleware::from_fn_with_state(gate, auth::gate))
         .with_state(AppState {

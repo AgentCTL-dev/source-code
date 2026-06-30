@@ -565,6 +565,14 @@ fn pod_template(
             restart_policy,
             // Pod-level hardening (hostile multi-tenancy P0).
             security_context: Some(pod_security_context()),
+            // Share the pod PID namespace so the pod's infra (pause) container is
+            // PID 1 and the agent is NOT. A conformant agent (e.g. agentd) forks a
+            // worker subagent guarded by an orphan check (`getppid() == 1` ⇒ the
+            // supervisor died, bail): with the agent running as PID 1 (scratch
+            // image, agent as ENTRYPOINT) that check misfires — the worker's parent
+            // IS pid 1 — so EVERY run aborts before doing any work. Sharing the PID
+            // namespace gives the agent a non-1 pid so the guard is correct.
+            share_process_namespace: Some(true),
             volumes: Some(volumes),
             ..Default::default()
         }),
@@ -587,14 +595,19 @@ fn routed_infer_enabled(annotations: &Option<BTreeMap<String, String>>) -> bool 
 /// filesystem read-only (writable paths are explicit volumes — see `/tmp` and
 /// the management socket mount).
 ///
-/// NOTE: `runAsNonRoot`/`runAsUser` are deliberately NOT set here. On the
-/// stock-unix substrate the agent binds its management socket into a hostPath
-/// `subPath` dir the kubelet creates `root:root`, so a nonroot UID could not
-/// write it and the socket bind would fail. Forcing nonroot is a FOLLOW-UP
-/// gated on substrate socket-perms (RFC 0002 §6.1). When that lands, a
-/// user-supplied Agent-spec securityContext override should win.
+/// NOTE: the agent runs as `runAsUser: 0` (root) on the stock-unix substrate. It
+/// binds its management/A2A socket into a hostPath `subPath` dir the kubelet
+/// creates `root:root`; a nonroot UID could not write it and the socket bind
+/// fails (`Permission denied`), so a reference agent image that ships `USER
+/// 65532` (e.g. agentd) would never serve its management surface. We therefore
+/// pin root here so the bind succeeds regardless of the image's default user.
+/// Forcing nonroot is a FOLLOW-UP gated on substrate socket-perms (RFC 0002
+/// §6.1: node-agent-chowned per-pod dirs); when that lands a user-supplied
+/// Agent-spec securityContext override should win. Privilege escalation is still
+/// blocked, all capabilities dropped, and the root filesystem read-only.
 fn container_security_context() -> SecurityContext {
     SecurityContext {
+        run_as_user: Some(0),
         allow_privilege_escalation: Some(false),
         read_only_root_filesystem: Some(true),
         capabilities: Some(Capabilities {
@@ -856,8 +869,10 @@ mod tests {
             sc.capabilities.as_ref().unwrap().drop.as_deref(),
             Some(["ALL".to_string()].as_slice())
         );
+        // Pinned root so the agent can bind its socket into the kubelet's
+        // root:root hostPath dir even when the image ships USER 65532 (agentd).
         assert_eq!(sc.run_as_non_root, None);
-        assert_eq!(sc.run_as_user, None);
+        assert_eq!(sc.run_as_user, Some(0));
 
         // Writable /tmp emptyDir backs the read-only root filesystem.
         let mounts = c.volume_mounts.as_ref().unwrap();
