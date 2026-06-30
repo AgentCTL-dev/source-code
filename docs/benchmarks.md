@@ -49,10 +49,16 @@ Requested vs. scheduled on this single node (agentd at the default 100m CPU requ
 | 50 | 50 | 0 |
 | 100 | **82** | 18 |
 
-Ceiling on this host: **~82 agentd pods**, bound by schedulable CPU
-(82 × 100m ≈ 8.2 cores of the node's allocatable). The 18 "pending" are
-`Insufficient cpu`, not an agentctl limit — raise the node count (or lower the
-agent CPU request) to go higher.
+Ceiling on this host: **~82 agentd pods** — and the binding constraint is the
+**kubelet's pods-per-node cap**, *not* CPU, memory, or anything in agentctl.
+Confirmed: the node reports `capacity.pods: 110` (the Kubernetes default), and with
+~28 control-plane + system pods already resident (operator, node-agent, gateway,
+ModelGateway, coordination, scaler, Postgres, admission, apiserver, KEDA,
+cert-manager, metrics-server, …), only ~82 agent slots remain (82 + 28 ≈ 110). On
+CPU this node had ~8× headroom (82 × 100m ≈ 8.2 of 16 cores) and on memory ~6×
+(82 × 128 MiB ≈ 10.5 of 64 GiB). The cap is purely configurational — raise
+`--max-pods` (kubelet), lower the agent's CPU/memory requests toward the measured
+~1.3m / sub-MiB for idle fleets, or add nodes, and density rises directly.
 
 ## Control-plane scaling trends
 
@@ -88,6 +94,30 @@ over 41k+ operations — the atomic single-grant invariant holds under contentio
 load. (Earlier dedicated correctness runs: 72 concurrent claims over 12 items →
 exactly 12 grants, **0 double-grants**, including across 2 Postgres-backed replicas.)
 
+The same sweep against the **durable Postgres store** (`coordination.store=postgres`,
+the bundled single Postgres, untuned `emptyDir`):
+
+| Clients | Ops/sec | p50 | p99 | Ops | Errors |
+|---|---|---|---|---|---|
+| 1 | 192 | 5.1 ms | 6.8 ms | 1,535 | 0 |
+| 4 | **538** | 5.8 ms | 34.6 ms | 4,308 | 0 |
+| 16 | 514 | 9.7 ms | 84.4 ms | 4,145 | 0 |
+| 64 | 532 | 108 ms | 187 ms | 4,301 | 0 |
+| 256 | 526 | 510 ms | 597 ms | 4,318 | 0 |
+
+**Memory vs. Postgres — the durability/HA trade.** Postgres tops out at **~530
+ops/sec — roughly 10× lower than the in-memory store (~5,100)** — and saturates
+much earlier (its knee is ~4 clients; beyond that you only add latency, p50 reaching
+510 ms at 256 clients). Still **zero errors** across every level. This is the
+expected cost of durability: each grant is a row-locked SQL `UPSERT` (a disk write +
+fsync) instead of an in-process `Mutex`. In return you get a **durable, restart-safe
+claim ledger that runs across multiple HA replicas** (the atomic grant-one invariant
+is preserved by the conditional row lock — verified at 0 double-grants across 2
+replicas). Choose memory for raw single-replica throughput, Postgres when you need
+durability/HA; scale Postgres throughput horizontally with replicas + a tuned,
+provisioned database (the bundled `emptyDir` Postgres here is the floor, not a
+production config).
+
 ## Functional end-to-end (real agentd)
 
 The harness drives every plane with the real agent — and that first contact with
@@ -113,13 +143,36 @@ JWS + message/send/stream), conformance (exit codes, metric-registry membership)
 and the security gates (OIDC, trusted-proxy, attested identity, coordination
 attest, mTLS, apiToken; NetworkPolicy on the Calico lane).
 
-## Not yet measured (host-bound / re-run on a real cluster)
+## Provisioning & scale-from-zero latency
 
-- **Scale-from-zero & provisioning latency sweep** (0→1, 0→N): the 0→100 sweep is
-  host-bound on a single node and was cut; re-run on a multi-node cluster.
-- **Postgres-store throughput**: the throughput sweep above is the in-memory store;
-  the `store=postgres` (durable/HA) comparison is wired (`AGENTCTL_E2E_STORE=postgres`)
-  but not run here.
+Time to bring agents up:
+
+| Phase | Measured |
+|---|---|
+| Provisioning 0→1 (apply Agent → pod Running) | **~2.2 s** |
+| Provisioning 0→5 (apply Fleet → all 5 Running) | **~2.2 s** |
+
+Provisioning is dominated by pod start — the agentd image is ~1.3 MB and cached, so
+five agents come up as fast as one.
+
+**Scale-from-zero (KEDA: backlog → first worker)** is **functionally verified** — a
+claim fleet scales 0→N on backlog and back to 0, observed repeatedly (the
+elastic-from-zero loop, and again under the OIDC / attested-identity / scaler-mTLS
+gates). A precise *fresh timing* on this shared, stateful cluster is confounded:
+residual unclaimed backlog from mock-agent fleets — which submit work but don't
+claim it — keeps a worker correctly running, so the fleet never settles cleanly to 0
+to be timed (the bench's own latency sweep hit the same wall). The end-to-end
+latency decomposes as **scaler poll interval** (operator-configurable, typically
+10–30 s) **+ KEDA activation + pod start (~2.2 s, measured)** — the poll interval
+dominates. For a precise figure, re-run with a real claimer (`agentd` + the
+`work-mcp-bridge`) draining the queue, in a dedicated empty namespace.
+
+## Not yet measured (re-run on a real / drained cluster)
+
+- **Scale-from-zero precise timing** — functionally verified (above); a clean timed
+  number needs a drained queue / real claimer (mock agents don't drain backlog).
+- **Density beyond the pods-per-node cap** — this node's 110-pod cap bound the
+  ceiling, not resources; raise `--max-pods` and/or add nodes for true capacity.
 
 ## Reproduce
 
