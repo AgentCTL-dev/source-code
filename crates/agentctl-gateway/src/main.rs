@@ -40,6 +40,7 @@ mod auth;
 mod db_tls;
 mod metrics;
 mod na_client;
+mod oidc;
 mod signing;
 mod store;
 
@@ -55,6 +56,13 @@ struct AppState {
     na: reqwest::Client,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
+    /// Per-agent OIDC/JWT verifier (RFC: native A2A authn/authz). Holds the
+    /// per-issuer JWKS cache; built once.
+    oidc: Arc<oidc::Verifier>,
+    /// The coarse bearer-token gate, threaded in so the A2A RPC handler can apply
+    /// it inline for agents WITHOUT per-agent OIDC (the gate middleware defers the
+    /// POST RPC route — see [`auth::gate`]).
+    auth: auth::Auth,
 }
 
 #[tokio::main]
@@ -112,13 +120,21 @@ async fn main() {
             get(fleet_card),
         )
         .route("/agents/{ns}/{name}", post(a2a_rpc))
-        .layer(axum::middleware::from_fn_with_state(gate, auth::gate))
+        .layer(axum::middleware::from_fn_with_state(
+            gate.clone(),
+            auth::gate,
+        ))
         .with_state(AppState {
             client,
             pool,
             signer,
             na: na_client::node_agent_client(),
             metrics,
+            // Per-agent OIDC verifier (public-CA JWKS HTTP client, ring-backed).
+            oidc: Arc::new(oidc::Verifier::new()),
+            // Same coarse gate the middleware uses; the RPC handler falls back to
+            // it for non-OIDC agents.
+            auth: gate,
         });
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
@@ -259,10 +275,21 @@ async fn fleet_card(
 async fn a2a_rpc(
     State(state): State<AppState>,
     Path((ns, name)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(mut req): Json<Value>,
 ) -> Response {
     state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
+
+    // Per-agent access enforcement, BEFORE any method handling. Per-agent OIDC
+    // (spec.access.oidc) takes precedence over the coarse bearer gate; absent it,
+    // we apply the same coarse token the gate middleware would have. On success
+    // with `forward_identity`, the verified caller identity is forwarded to the
+    // agent as X-Auth-* headers.
+    let (identity, forward_identity) = match enforce_access(&state, &ns, &name, &headers).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
     let spec = req
         .get("method")
         .and_then(Value::as_str)
@@ -361,7 +388,8 @@ async fn a2a_rpc(
         // frames (transparent byte pipe; the node-agent already framed them).
         state.metrics.inc_stream();
         let url = format!("https://{na_ip}:8443/v1/agents/{uid}/a2a/stream");
-        return match state.na.post(&url).json(&req).send().await {
+        let forwarded = forward_request(&state, &url, &req, &identity, forward_identity);
+        return match forwarded.send().await {
             Ok(resp) => (
                 [(header::CONTENT_TYPE, "text/event-stream")],
                 Body::from_stream(resp.bytes_stream()),
@@ -380,7 +408,8 @@ async fn a2a_rpc(
     }
 
     let url = format!("https://{na_ip}:8443/v1/agents/{uid}/a2a");
-    let body = match state.na.post(&url).json(&req).send().await {
+    let forwarded = forward_request(&state, &url, &req, &identity, forward_identity);
+    let body = match forwarded.send().await {
         Ok(resp) => match resp.json::<Value>().await {
             Ok(b) => b,
             Err(e) => {
@@ -712,6 +741,114 @@ fn build_pool() -> Pool {
         .max_size(8)
         .build()
         .expect("build postgres pool")
+}
+
+// --- per-agent access enforcement (OIDC) -----------------------------------
+
+/// Enforce the per-agent access policy for an inbound A2A RPC, BEFORE method
+/// handling. Returns `(identity, forward_identity)` on success — `identity` is
+/// `Some` only for an OIDC agent (so the caller can forward it). On any failure it
+/// returns the terminal [`Response`] to send (401 authN / 403 authZ / 502 lookup).
+///
+/// Precedence: when `spec.access.oidc` is set, the JWT is required + validated for
+/// THIS agent and the coarse bearer gate is bypassed; otherwise the same coarse
+/// token the gate middleware enforces is applied inline (back-compat).
+async fn enforce_access(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+    headers: &HeaderMap,
+) -> Result<(Option<oidc::Identity>, bool), Response> {
+    let access = match read_access(&state.client, ns, name).await {
+        Ok(a) => a,
+        Err(e) => {
+            // A hard error reading the CR (not a clean NotFound) → fail closed.
+            state.metrics.inc_upstream_error();
+            tracing::warn!(%ns, agent = %name, error = %e, "read access policy failed");
+            return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response());
+        }
+    };
+
+    let Some(oidc_cfg) = access.as_ref().and_then(|a| a.oidc.as_ref()) else {
+        // No per-agent OIDC → fall back to the coarse bearer gate.
+        if state.auth.authorize(headers) {
+            return Ok((None, false));
+        }
+        state.metrics.inc_auth_rejected();
+        return Err(StatusCode::UNAUTHORIZED.into_response());
+    };
+
+    // OIDC agent: require + validate a bearer JWT scoped to THIS agent.
+    let Some(token) = bearer_token(headers) else {
+        state.metrics.inc_oidc_deny();
+        return Err(StatusCode::UNAUTHORIZED.into_response());
+    };
+    match state.oidc.verify(oidc_cfg, token).await {
+        Ok(identity) => {
+            state.metrics.inc_oidc_allow();
+            Ok((Some(identity), oidc_cfg.forward_identity.unwrap_or(false)))
+        }
+        // No token detail leaks to the client (body is the bare status); the
+        // reason is logged server-side only.
+        Err(oidc::AuthError::Unauthorized(reason)) => {
+            state.metrics.inc_oidc_deny();
+            tracing::warn!(%ns, agent = %name, reason = %reason, "oidc authN denied");
+            Err(StatusCode::UNAUTHORIZED.into_response())
+        }
+        Err(oidc::AuthError::Forbidden(reason)) => {
+            state.metrics.inc_oidc_deny();
+            tracing::warn!(%ns, agent = %name, reason = %reason, "oidc authZ denied");
+            Err(StatusCode::FORBIDDEN.into_response())
+        }
+    }
+}
+
+/// Read `spec.access` for an `Agent`, falling back to an `AgentFleet`'s
+/// `spec.template.access`. A clean 404 on both kinds ⇒ `Ok(None)` (no policy; the
+/// later [`resolve`] surfaces "no running pod"); a transport/permission error ⇒
+/// `Err` so the caller fails closed.
+async fn read_access(
+    client: &Client,
+    ns: &str,
+    name: &str,
+) -> Result<Option<agent_api::Access>, String> {
+    let agents: Api<Agent> = Api::namespaced(client.clone(), ns);
+    match agents.get_opt(name).await {
+        Ok(Some(a)) => return Ok(a.spec.access),
+        Ok(None) => {}
+        Err(e) => return Err(format!("get Agent {ns}/{name}: {e}")),
+    }
+    let fleets: Api<AgentFleet> = Api::namespaced(client.clone(), ns);
+    match fleets.get_opt(name).await {
+        Ok(Some(f)) => Ok(f.spec.template.access),
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("get AgentFleet {ns}/{name}: {e}")),
+    }
+}
+
+/// Extract `<JWT>` from an `Authorization: Bearer <JWT>` header (non-empty).
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|t| !t.is_empty())
+}
+
+/// Build the forwarded node-agent request, injecting the verified caller identity
+/// as `X-Auth-*` headers when `forward_identity` is enabled for an OIDC agent.
+fn forward_request(
+    state: &AppState,
+    url: &str,
+    req: &Value,
+    identity: &Option<oidc::Identity>,
+    forward_identity: bool,
+) -> reqwest::RequestBuilder {
+    let rb = state.na.post(url).json(req);
+    match (forward_identity, identity) {
+        (true, Some(id)) => id.inject(rb),
+        _ => rb,
+    }
 }
 
 // --- routing (kube; needs a cluster to run, not to compile/test) -----------

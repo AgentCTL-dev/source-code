@@ -198,6 +198,32 @@ sequenceDiagram
   GW-->>C: result / SSE: working -> artifact -> completed
 ```
 
+### 7a. OIDC-gated A2A request — per-agent caller identity
+
+When an `Agent` declares `spec.access.oidc` (see security.md), the gateway gates the
+A2A surface on a JWKS-verified JWT + required-claims authz before forwarding, and
+passes the verified identity to the agent.
+
+```mermaid
+sequenceDiagram
+  participant C as A2A client (caller)
+  participant GW as A2A gateway
+  participant IdP as OIDC issuer (JWKS)
+  participant AG as agentd
+  Note over GW: agent's spec.access.oidc = {issuer, audiences, requiredClaims}
+  C->>GW: message/send + Authorization: Bearer <JWT>
+  GW->>IdP: fetch/cache JWKS (jwksUri or discovery off issuer)
+  IdP-->>GW: signing keys
+  Note over GW: verify signature + iss/aud/exp, then requiredClaims (e.g. groups has support)
+  alt JWT invalid or claims unmet
+    GW-->>C: 401/403 deny
+  else verified + authorized
+    GW->>AG: forward + caller identity (sub/email/groups, if forwardIdentity)
+    AG-->>GW: result / SSE frames
+    GW-->>C: result / SSE
+  end
+```
+
 ---
 
 ## 8. Claim-mode work distribution — elastic from zero

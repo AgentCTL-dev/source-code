@@ -54,3 +54,12 @@ base64 = "0.22"
 # Constant-time byte comparison for the optional bearer-token access gate
 # (avoids a timing side-channel on token compare). Pure Rust, no C toolchain.
 subtle = "2"
+# Per-agent OIDC/JWT verification (native A2A authn/authz). v9 is **ring-backed**
+# (no openssl, no aws-lc-rs → no C toolchain), matching the rustls/ring stack. The
+# default `use_pem` feature (pem + simple_asn1, both pure Rust) lets the tests mint
+# EncodingKeys from PEM; production builds DecodingKeys from JWK components.
+jsonwebtoken = "9"
+# Mozilla root trust anchors for the JWKS discovery/fetch HTTPS client (public
+# OIDC issuers are reached over the open internet — distinct from the internal
+# node-agent CA used by the mTLS control hop). Pure Rust, no C toolchain.
+webpki-roots = "1"

@@ -102,6 +102,63 @@ spec:
               template:
                 description: The per-replica agent definition.
                 properties:
+                  access:
+                    description: |-
+                      Declarative per-agent access policy (authn/authz at the A2A gateway). In
+                      v1 `public` is documentation-only; `oidc` configures JWT verification and
+                      claim-based authorization for inbound A2A calls.
+                    nullable: true
+                    properties:
+                      oidc:
+                        description: OIDC/JWT authentication + authorization for inbound A2A calls.
+                        nullable: true
+                        properties:
+                          audiences:
+                            description: Accepted `aud` (audience) claims.
+                            items:
+                              type: string
+                            type: array
+                          forwardIdentity:
+                            description: Inject the caller's `sub`/`email`/`groups` identity to the agent.
+                            nullable: true
+                            type: boolean
+                          issuer:
+                            description: |-
+                              OIDC issuer URL. JWKS is auto-discovered from
+                              `issuer/.well-known/openid-configuration` unless `jwks_uri` is set.
+                            type: string
+                          jwksUri:
+                            description: Explicit JWKS URI override (skips OIDC discovery when set).
+                            nullable: true
+                            type: string
+                          requiredClaims:
+                            description: 'Authorization: ALL listed claim requirements must hold for the caller.'
+                            items:
+                              description: A single claim-based authorization requirement.
+                              properties:
+                                anyOf:
+                                  description: The caller's claim (array contains OR scalar equals) must be one of these.
+                                  items:
+                                    type: string
+                                  type: array
+                                claim:
+                                  description: The claim name, e.g. `"groups"` or `"email"`.
+                                  type: string
+                              required:
+                              - claim
+                              type: object
+                            nullable: true
+                            type: array
+                        required:
+                        - issuer
+                        type: object
+                      public:
+                        description: |-
+                          Whether this agent is served publicly via the A2A gateway. **Doc-only in
+                          v1** (no enforcement yet); records intent.
+                        nullable: true
+                        type: boolean
+                    type: object
                   classRef:
                     description: |-
                       Reference to an `AgentClass` (RFC 0004) supplying the ops profile +

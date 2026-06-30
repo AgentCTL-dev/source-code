@@ -129,6 +129,65 @@ pub struct AgentSpec {
     /// pool exists / is permitted for this tenant).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_pool: Option<String>,
+
+    /// Declarative per-agent access policy (authn/authz at the A2A gateway). In
+    /// v1 `public` is documentation-only; `oidc` configures JWT verification and
+    /// claim-based authorization for inbound A2A calls.
+    #[serde(rename = "access", default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+}
+
+/// Per-agent access policy for the A2A surface.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Access {
+    /// Whether this agent is served publicly via the A2A gateway. **Doc-only in
+    /// v1** (no enforcement yet); records intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
+    /// OIDC/JWT authentication + authorization for inbound A2A calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcAccess>,
+}
+
+/// OIDC/JWT verification + claim-based authorization config for the A2A gateway.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcAccess {
+    /// OIDC issuer URL. JWKS is auto-discovered from
+    /// `issuer/.well-known/openid-configuration` unless `jwks_uri` is set.
+    pub issuer: String,
+    /// Accepted `aud` (audience) claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audiences: Vec<String>,
+    /// Explicit JWKS URI override (skips OIDC discovery when set).
+    #[serde(rename = "jwksUri", default, skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    /// Authorization: ALL listed claim requirements must hold for the caller.
+    #[serde(
+        rename = "requiredClaims",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub required_claims: Option<Vec<ClaimRequirement>>,
+    /// Inject the caller's `sub`/`email`/`groups` identity to the agent.
+    #[serde(
+        rename = "forwardIdentity",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub forward_identity: Option<bool>,
+}
+
+/// A single claim-based authorization requirement.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimRequirement {
+    /// The claim name, e.g. `"groups"` or `"email"`.
+    pub claim: String,
+    /// The caller's claim (array contains OR scalar equals) must be one of these.
+    #[serde(rename = "anyOf", default, skip_serializing_if = "Vec::is_empty")]
+    pub any_of: Vec<String>,
 }
 
 /// The run shape (RFC 0003 §5 / agentd RFC 0008).

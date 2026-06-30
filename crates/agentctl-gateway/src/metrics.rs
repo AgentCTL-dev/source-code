@@ -25,6 +25,10 @@ pub struct Metrics {
     upstream_errors: AtomicU64,
     /// Requests rejected (401) by the bearer-token access gate.
     auth_rejected: AtomicU64,
+    /// Per-agent OIDC requests allowed (valid JWT + claims) on the A2A surface.
+    oidc_allow: AtomicU64,
+    /// Per-agent OIDC requests denied (authN 401 or authZ 403) on the A2A surface.
+    oidc_deny: AtomicU64,
 }
 
 impl Metrics {
@@ -38,6 +42,8 @@ impl Metrics {
             tasks: AtomicU64::new(0),
             upstream_errors: AtomicU64::new(0),
             auth_rejected: AtomicU64::new(0),
+            oidc_allow: AtomicU64::new(0),
+            oidc_deny: AtomicU64::new(0),
         }
     }
 
@@ -69,6 +75,16 @@ impl Metrics {
     /// A request was rejected (401) by the bearer-token access gate.
     pub fn inc_auth_rejected(&self) {
         self.auth_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A per-agent OIDC request was allowed (valid JWT + satisfied claims).
+    pub fn inc_oidc_allow(&self) {
+        self.oidc_allow.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A per-agent OIDC request was denied (authN 401 or authZ 403).
+    pub fn inc_oidc_deny(&self) {
+        self.oidc_deny.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render the Prometheus exposition body.
@@ -115,6 +131,18 @@ impl Metrics {
             "agentctl_gateway_auth_rejected_total",
             "Requests rejected (401) by the bearer-token access gate.",
             self.auth_rejected.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_oidc_allow_total",
+            "Per-agent OIDC requests allowed (valid JWT + satisfied claims).",
+            self.oidc_allow.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_oidc_deny_total",
+            "Per-agent OIDC requests denied (authN 401 or authZ 403).",
+            self.oidc_deny.load(Ordering::Relaxed),
         );
         out
     }

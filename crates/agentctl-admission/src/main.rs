@@ -11,7 +11,10 @@
 //!    annotation). These checks cover **both** `Agent` (at `spec.*`) and
 //!    `AgentFleet` (at `spec.template.*`, an `AgentSpec`) so a fleet cannot smuggle
 //!    a disallowed image or an ungated trifecta past the gate (the bypass this
-//!    server closes).
+//!    server closes). It also validates the per-agent **`spec.access.oidc`** A2A
+//!    caller-identity policy (issuer is a non-empty `https://` URL, `audiences`
+//!    is non-empty, any `jwksUri` override is `https://`) so a malformed OIDC
+//!    gate is rejected at admission rather than failing opaquely at the gateway.
 //! 2. **Defaulting** (`POST /mutate`): a mutating webhook that returns a base64
 //!    JSONPatch of **secure defaults** — the standard `app.kubernetes.io/*` labels,
 //!    a conservative `mode`, and a minimal-exposure `surfaces` set. It deliberately
@@ -345,6 +348,8 @@ fn parse_registries(csv: Option<String>) -> Vec<String> {
 /// 2. The lethal trifecta (`exec` && `egress` && a non-empty `secrets`) is
 ///    requested without the `agentctl.dev/allow-trifecta: "true"` annotation.
 /// 3. `spec.modelPool` is named but `model_pool_exists == Some(false)`.
+/// 4. `spec.access.oidc` is present but malformed (non-https/empty `issuer`,
+///    empty `audiences`, or a non-https `jwksUri`) — see [`validate_oidc`].
 fn evaluate(
     spec: &Value,
     annotations: &Map<String, Value>,
@@ -391,7 +396,71 @@ fn evaluate(
         }
     }
 
+    // 4. Per-agent OIDC access policy (`spec.access.oidc`) must be well-formed:
+    // the gateway can only enforce a verifiable issuer + a bounded audience.
+    if let Some(oidc) = spec
+        .get("access")
+        .and_then(|a| a.get("oidc"))
+        .filter(|v| !v.is_null())
+    {
+        validate_oidc(oidc)?;
+    }
+
     Ok(())
+}
+
+/// Validate a `spec.access.oidc` block (the per-agent A2A caller-identity policy,
+/// also reached at `spec.template.access.oidc` for an `AgentFleet`). The gateway
+/// turns this into a JWKS-verified JWT gate, so the fields it needs must be
+/// well-formed at admission time rather than failing opaquely at request time:
+///
+/// 1. `issuer` is a non-empty `https://` URL — JWKS discovery and the `iss` check
+///    both key off it, and a plaintext issuer would let JWKS be MITM'd.
+/// 2. `audiences` is non-empty — an empty audience set accepts *any* `aud`, which
+///    silently widens the gate to tokens minted for other services.
+/// 3. `jwksUri`, when set (the discovery override), is itself `https://`.
+fn validate_oidc(oidc: &Value) -> Result<(), String> {
+    let issuer = oidc.get("issuer").and_then(Value::as_str).unwrap_or("");
+    if issuer.is_empty() {
+        return Err(
+            "spec.access.oidc.issuer is required and must be a non-empty https:// URL".to_string(),
+        );
+    }
+    if !is_https_url(issuer) {
+        return Err(format!(
+            "spec.access.oidc.issuer must be an https:// URL (got '{issuer}')"
+        ));
+    }
+
+    let audiences_non_empty = oidc
+        .get("audiences")
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(|v| v.as_str().is_some_and(|s| !s.is_empty())));
+    if !audiences_non_empty {
+        return Err(
+            "spec.access.oidc.audiences must list at least one non-empty audience".to_string(),
+        );
+    }
+
+    if let Some(jwks) = oidc.get("jwksUri").and_then(Value::as_str) {
+        if !is_https_url(jwks) {
+            return Err(format!(
+                "spec.access.oidc.jwksUri must be an https:// URL (got '{jwks}')"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// A pragmatic `https://` URL check for admission: an `https://` scheme (ASCII,
+/// case-insensitive) with a non-empty authority after it. The gateway does the
+/// full RFC parse at runtime; admission only rejects the obvious foot-guns
+/// (plaintext `http://`, a bare host, an empty URL).
+fn is_https_url(s: &str) -> bool {
+    s.len() > "https://".len()
+        && s.get(.."https://".len())
+            .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
 }
 
 // --- defaulting (pure) -----------------------------------------------------
@@ -614,6 +683,133 @@ mod tests {
         let spec = json!({ "mode": "once" });
         // Even if the resolver reported a negative, no pool is named ⇒ no deny.
         assert!(evaluate(&spec, &Map::new(), &[], Some(false), "default").is_ok());
+    }
+
+    // --- per-agent OIDC access policy (spec.access.oidc) -------------------
+
+    #[test]
+    fn oidc_well_formed_is_allowed() {
+        let spec = json!({
+            "access": { "oidc": {
+                "issuer": "https://idp.example.com",
+                "audiences": ["agentctl-a2a"],
+                "jwksUri": "https://idp.example.com/keys",
+                "requiredClaims": [{ "claim": "groups", "anyOf": ["support"] }],
+                "forwardIdentity": true
+            }}
+        });
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+    }
+
+    #[test]
+    fn oidc_without_jwks_uri_is_allowed() {
+        // jwksUri is optional (auto-discovery from the issuer).
+        let spec = json!({
+            "access": { "oidc": {
+                "issuer": "https://idp.example.com",
+                "audiences": ["agentctl-a2a"]
+            }}
+        });
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+    }
+
+    #[test]
+    fn oidc_absent_or_public_only_access_is_allowed() {
+        // No access block at all.
+        let spec = json!({ "mode": "once" });
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        // access present but only the doc-only `public` flag, no oidc.
+        let spec = json!({ "access": { "public": true } });
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        // explicit null oidc is treated as absent.
+        let spec = json!({ "access": { "oidc": null } });
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+    }
+
+    #[test]
+    fn oidc_missing_issuer_is_denied() {
+        let spec = json!({ "access": { "oidc": { "audiences": ["a"] } } });
+        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("issuer"));
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn oidc_empty_issuer_is_denied() {
+        let spec = json!({ "access": { "oidc": { "issuer": "", "audiences": ["a"] } } });
+        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("issuer"));
+    }
+
+    #[test]
+    fn oidc_non_https_issuer_is_denied() {
+        let spec = json!({
+            "access": { "oidc": { "issuer": "http://idp.example.com", "audiences": ["a"] } }
+        });
+        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("issuer"));
+        assert!(err.contains("https://"));
+    }
+
+    #[test]
+    fn oidc_empty_audiences_is_denied() {
+        // Missing audiences.
+        let spec = json!({ "access": { "oidc": { "issuer": "https://idp.example.com" } } });
+        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("audiences"));
+        // Present but empty array.
+        let spec = json!({
+            "access": { "oidc": { "issuer": "https://idp.example.com", "audiences": [] } }
+        });
+        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("audiences"));
+        // Present but only a blank string ⇒ still effectively empty.
+        let spec = json!({
+            "access": { "oidc": { "issuer": "https://idp.example.com", "audiences": [""] } }
+        });
+        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("audiences"));
+    }
+
+    #[test]
+    fn oidc_non_https_jwks_uri_is_denied() {
+        let spec = json!({
+            "access": { "oidc": {
+                "issuer": "https://idp.example.com",
+                "audiences": ["a"],
+                "jwksUri": "http://idp.example.com/keys"
+            }}
+        });
+        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("jwksUri"));
+        assert!(err.contains("https://"));
+    }
+
+    #[test]
+    fn oidc_validated_for_agentfleet_template() {
+        // The same OIDC policy under an AgentFleet's template must be validated —
+        // the fleet view is `spec.template`, an AgentSpec.
+        let spec = json!({
+            "template": { "access": { "oidc": {
+                "issuer": "ftp://nope",
+                "audiences": ["a"]
+            }}},
+            "scaling": { "mode": "claim" }
+        });
+        let empty = Value::Object(Map::new());
+        let view = agent_spec_view("AgentFleet", &spec, &empty);
+        let err = evaluate(view, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("issuer"));
+    }
+
+    #[test]
+    fn is_https_url_accepts_only_https() {
+        assert!(is_https_url("https://idp.example.com"));
+        assert!(is_https_url("HTTPS://idp.example.com")); // scheme is case-insensitive
+        assert!(!is_https_url("http://idp.example.com"));
+        assert!(!is_https_url("https://")); // scheme only, no authority
+        assert!(!is_https_url("idp.example.com"));
+        assert!(!is_https_url(""));
     }
 
     #[test]

@@ -111,6 +111,89 @@ reach them may call them. The optional **`AGENTCTL_API_TOKEN`** bearer gate clos
   agent's namespace and wire it there. This is a coarse v1 access gate, not per-pod
   identity — see the Hardening checklist for the attested-identity follow-ups.
 
+## OIDC per agent/fleet (caller identity)
+
+The shared `AGENTCTL_API_TOKEN` above is a coarse, in-cluster gate (one token,
+no per-caller identity). For **internet-exposed A2A ingress** an `Agent` (or an
+`AgentFleet`, via `spec.template`) can instead declare a **per-agent OIDC policy**
+in the CR. The A2A gateway turns it into a real authn+authz gate: it verifies the
+caller's JWT against the agent's **own issuer JWKS**, enforces **required claims**,
+and forwards the caller identity to the agent.
+
+This is **native**: the `Agent` CR is the single source of truth — no extra
+infrastructure (no service mesh, no external API-gateway policy CRDs, no sidecar)
+is required to gate traffic. Because the gateway terminates plain HTTP, you still
+**front it with an Ingress/LoadBalancer for TLS** (and to expose it to the
+internet); OIDC is the per-caller identity layer on top of that transport.
+
+### The `spec.access.oidc` block
+
+```yaml
+spec:
+  access:
+    public: false                       # doc-only intent flag (v1)
+    oidc:
+      issuer: https://idp.example.com    # required, https:// — JWKS discovered from
+                                         #   <issuer>/.well-known/openid-configuration
+      audiences: [agentctl-a2a]          # required, non-empty — accepted `aud` claims
+      jwksUri: https://idp.example.com/keys   # optional https:// override (skips discovery)
+      requiredClaims:                    # authz: ALL requirements must hold (AND of claims)
+        - claim: groups                  #   a claim's value (array-contains OR scalar-equals)
+          anyOf: [support]               #   must match one of `anyOf` (OR within a claim)
+      forwardIdentity: true              # inject caller sub/email/groups to the agent
+```
+
+### How the gateway enforces it
+
+1. **JWKS-verified JWT** — the caller presents `Authorization: Bearer <jwt>`. The
+   gateway fetches/caches the issuer's JWKS (from `jwksUri`, else OIDC discovery
+   off `issuer`), verifies the signature, and checks `iss` + `exp`/`nbf` + that
+   `aud` is one of `audiences`.
+2. **Required-claims authz** — every entry in `requiredClaims` must be satisfied;
+   each is an OR over `anyOf` (array claims match by contains, scalar claims by
+   equals). All-of across entries, any-of within one.
+3. **Identity forwarding** — with `forwardIdentity: true` the gateway passes the
+   verified `sub`/`email`/`groups` to the agent so the workload can do its own
+   fine-grained decisions. The agent never sees or verifies the raw token.
+
+**Admission-validated.** The webhook (Agent `spec.access.oidc` and AgentFleet
+`spec.template.access.oidc`) rejects a malformed gate up front: `issuer` must be a
+non-empty `https://` URL, `audiences` must be non-empty, and any `jwksUri` must be
+`https://` — so a typo can't silently widen the gate (e.g. an empty `audiences`
+that would accept any `aud`) or downgrade JWKS to MITM-able plaintext.
+
+### Worked example — an Agent served only to group "support"
+
+```yaml
+apiVersion: agentctl.dev/v1
+kind: Agent
+metadata:
+  name: support-bot
+  namespace: support
+spec:
+  image: ghcr.io/acme/support-bot:v1
+  surfaces:
+    a2a: true                            # expose the A2A surface
+  access:
+    oidc:
+      issuer: https://login.acme.example
+      audiences: [support-bot]
+      requiredClaims:
+        - claim: groups
+          anyOf: [support]               # only callers whose `groups` include "support"
+      forwardIdentity: true
+```
+
+Front the gateway with an Ingress/LB for TLS; callers from your IdP that present a
+JWT for `aud: support-bot` whose `groups` include `support` are admitted, and the
+agent receives their identity. Everyone else is rejected at the gateway.
+
+**Future option (documented, not v1 default):** exporting enforcement to an
+external API-gateway/service-mesh (e.g. emitting equivalent mesh `AuthorizationPolicy`
+/ ingress JWT config from the same CR) is a planned alternative for orgs that
+standardize identity at the mesh edge. The native per-agent gate above is the v1
+path and needs none of that.
+
 ## Supply chain
 
 cosign keyless (OIDC) signatures on every image **and** the chart by digest; SBOM +
@@ -128,8 +211,11 @@ pinning close the loop at deploy.
 - [ ] **Attested ModelGateway identity** — replace the header-asserted `X-Agent-*` with
   `SO_PEERCRED`-attested identity by routing infer through the node-agent (anti-spoof within
   the trusted set; the token closes *access*, not per-pod identity).
-- [ ] **Authenticated A2A *ingress*** for internet exposure — per-client mTLS/JWT at an
-  ingress/API-gateway + the card `securitySchemes` (the shared token is a coarse v1 gate).
+- [x] **Authenticated A2A *ingress*** for internet exposure — **per-agent OIDC**
+  (`spec.access.oidc`, admission-validated) gives the A2A gateway a JWKS-verified JWT +
+  required-claims authz + identity forwarding, native to the CR (front it with an
+  Ingress/LB for TLS). See "OIDC per agent/fleet". Exporting enforcement to an external
+  API-gateway/mesh is a documented future option.
 - [ ] NetworkPolicy enforcement — needs Calico/Cilium (kindnet ignores).
 - [ ] Postgres `verify-full` (client CA pinning) — today `sslmode=require` (encrypt, no CA verify).
 - [ ] coordination/scaler stronger-than-token (attested) auth; coordination HA/durability.

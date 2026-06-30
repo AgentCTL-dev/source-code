@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use subtle::ConstantTimeEq;
@@ -52,12 +52,38 @@ impl Auth {
         }
         Self { token, metrics }
     }
+
+    /// The coarse bearer-token check, evaluated inline by the A2A RPC handler for
+    /// agents WITHOUT per-agent OIDC. Returns `true` when the gate is disabled
+    /// (no token configured) or the request carries the matching bearer token.
+    ///
+    /// This is the same decision [`gate`] makes, exposed so the RPC handler can
+    /// fall back to it once it has determined the agent has no `spec.access.oidc`
+    /// (per-agent OIDC takes precedence — see [`gate`]).
+    pub fn authorize(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = self.token.as_deref() else {
+            return true;
+        };
+        authorized(headers.get(header::AUTHORIZATION), expected)
+    }
 }
 
 /// axum middleware enforcing the bearer-token gate. No token configured → pass
 /// through; exempt path (probes/metrics/JWKS) → pass through; otherwise require a
 /// matching `Authorization: Bearer` header, returning `401` (no body) on failure.
+///
+/// The A2A JSON-RPC route — the gateway's only `POST` (`POST /agents/{ns}/{name}`)
+/// — is ALWAYS deferred to its handler, which performs per-agent enforcement:
+/// per-agent OIDC ([`crate::oidc`]) when `spec.access.oidc` is set (precedence),
+/// otherwise this same coarse token via [`Auth::authorize`]. The registry
+/// `GET /agents` and the card endpoints stay on this coarse gate (signed
+/// discovery).
 pub async fn gate(State(auth): State<Auth>, req: Request, next: Next) -> Response {
+    // Defer the A2A RPC route (the only POST) to its handler so per-agent OIDC can
+    // take precedence over the coarse bearer token.
+    if req.method() == Method::POST {
+        return next.run(req).await;
+    }
     let Some(expected) = auth.token.as_deref() else {
         return next.run(req).await;
     };
@@ -125,5 +151,34 @@ mod tests {
         assert!(!authorized(Some(&hv("Basic s3cr3t")), b"s3cr3t"));
         assert!(!authorized(Some(&hv("Bearer ")), b"s3cr3t"));
         assert!(!authorized(Some(&hv("Bearer s3cr3t")), b"s3cr3t-longer"));
+    }
+
+    fn auth_with(token: Option<&str>) -> Auth {
+        Auth {
+            token: token.map(|t| Arc::from(t.as_bytes().to_vec().into_boxed_slice())),
+            metrics: Arc::new(Metrics::new()),
+        }
+    }
+
+    #[test]
+    fn authorize_passes_when_gate_disabled() {
+        // No token configured → the inline fallback always allows (back-compat).
+        let auth = auth_with(None);
+        assert!(auth.authorize(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn authorize_enforces_configured_token() {
+        let auth = auth_with(Some("s3cr3t"));
+        // Missing header → rejected.
+        assert!(!auth.authorize(&HeaderMap::new()));
+        // Matching bearer → allowed.
+        let mut ok = HeaderMap::new();
+        ok.insert(header::AUTHORIZATION, hv("Bearer s3cr3t"));
+        assert!(auth.authorize(&ok));
+        // Wrong token → rejected.
+        let mut bad = HeaderMap::new();
+        bad.insert(header::AUTHORIZATION, hv("Bearer nope"));
+        assert!(!auth.authorize(&bad));
     }
 }
