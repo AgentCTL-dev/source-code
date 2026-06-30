@@ -85,9 +85,31 @@ spec:
                   name: agentctl-api-token
                   key: AGENTCTL_API_TOKEN
             {{- end }}
+            {{- if .Values.coordination.mtls.enabled }}
+            # COORDINATION mTLS (scaler -> coordination): present a CA-signed client
+            # cert when reading the backlog over the coordination server's mTLS :8443
+            # listener, and verify the coordination serving cert against the agentctl
+            # CA (ca.crt). The reqwest client built from these presents the client
+            # cert + verifies the coordination serving cert; the actual stats URL
+            # (https :8443) comes from the ScaledObject the OPERATOR renders
+            # (operator COORDINATION_URL, set to the mTLS endpoint when mtls.enabled).
+            # Default off keeps the http + token path.
+            - name: COORDINATION_CLIENT_CERT_DIR
+              value: /etc/agentctl-scaler-mtls
+            - name: COORDINATION_CA
+              value: /etc/agentctl-scaler-mtls/ca.crt
+            {{- end }}
           {{- with .Values.scaler.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.coordination.mtls.enabled }}
+          volumeMounts:
+            # Scaler client cert (tls.crt/tls.key) + the agentctl CA bundle (ca.crt)
+            # used to verify the coordination server's mTLS serving cert.
+            - name: scaler-mtls
+              mountPath: /etc/agentctl-scaler-mtls
+              readOnly: true
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -106,6 +128,12 @@ spec:
             periodSeconds: 5
           resources:
             {{- toYaml .Values.scaler.resources | nindent 12 }}
+      {{- if .Values.coordination.mtls.enabled }}
+      volumes:
+        - name: scaler-mtls
+          secret:
+            secretName: agentctl-scaler-client-tls
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

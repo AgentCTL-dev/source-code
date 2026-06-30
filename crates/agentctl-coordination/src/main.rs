@@ -47,6 +47,7 @@ mod attest;
 mod db_tls;
 mod mcp;
 mod metrics;
+mod mtls;
 mod pg_store;
 mod store;
 
@@ -213,28 +214,98 @@ async fn main() {
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(serve_metrics))
-        .with_state(state);
+        .with_state(state.clone());
 
     let port = port_from_env();
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    tracing::info!(%addr, dedupe_cap, sweep_ms, attest, "agentctl coordination MCP server: serving the work.* claim surface");
-    // Graceful shutdown on SIGTERM/SIGINT — drain in-flight requests (matches the
-    // gateway). A SIGTERM is the normal pod-stop signal.
-    //
-    // `into_make_service_with_connect_info::<SocketAddr>()` exposes the peer socket
-    // address to handlers via `ConnectInfo<SocketAddr>` — the kernel-set source IP
-    // the attested-identity gate reads. Harmless in non-attested mode (the extractor
-    // is simply unused for the holder decision).
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .expect("serve");
+
+    // OPTIONAL mTLS listener (COORDINATION_MTLS_ADDR, RFC 0015). UNSET ⇒ OFF: the
+    // plaintext path below is byte-identical to before (no second listener, no crypto
+    // provider install, no extra cluster work). SET ⇒ a SECOND mTLS listener runs
+    // alongside :8080, where a verified + allow-listed client cert authenticates the
+    // caller (the scaler) in place of the coarse AGENTCTL_API_TOKEN.
+    let Some(mtls_cfg) = mtls::Config::from_env() else {
+        tracing::info!(%addr, dedupe_cap, sweep_ms, attest, "agentctl coordination MCP server: serving the work.* claim surface");
+        // Graceful shutdown on SIGTERM/SIGINT — drain in-flight requests (matches the
+        // gateway). A SIGTERM is the normal pod-stop signal.
+        //
+        // `into_make_service_with_connect_info::<SocketAddr>()` exposes the peer socket
+        // address to handlers via `ConnectInfo<SocketAddr>` — the kernel-set source IP
+        // the attested-identity gate reads. Harmless in non-attested mode (the extractor
+        // is simply unused for the holder decision).
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("serve");
+        return;
+    };
+
+    // mTLS enabled: install the process-default ring provider (ignore an
+    // already-installed error — the kube client may install one in attested mode),
+    // then build the rustls server config that REQUIRES a CA-signed client cert.
+    // Missing/invalid material panics at startup (like the gateway/node-agent).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let tls_addr: SocketAddr = mtls_cfg
+        .addr
+        .parse()
+        .unwrap_or_else(|e| panic!("parse COORDINATION_MTLS_ADDR {}: {e}", mtls_cfg.addr));
+    let server_config = mtls::build_tls_config(&mtls_cfg.tls_dir, &mtls_cfg.ca_path)
+        .unwrap_or_else(|e| panic!("build coordination mTLS server config: {e}"));
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+    let acceptor = mtls::PeerCertAcceptor::new(rustls_config);
+
+    // The mTLS router shares the SAME routes; its gate enforces the CN/SAN allow-list
+    // (403 on miss) and marks the request authenticated so the bearer gate is skipped.
+    let mtls_ctx = mtls::MtlsCtx {
+        cfg: Arc::new(mtls_cfg.clone()),
+        metrics: state.metrics.clone(),
+    };
+    let mtls_app = app
+        .clone()
+        .layer(middleware::from_fn_with_state(mtls_ctx, mtls::mtls_gate))
+        .into_make_service_with_connect_info::<SocketAddr>();
+
+    tracing::info!(
+        %addr, tls_addr = %mtls_cfg.addr, ca = %mtls_cfg.ca_path.display(),
+        allowed = ?mtls_cfg.allowed_names, dedupe_cap, sweep_ms, attest,
+        "agentctl coordination MCP server: plaintext :8080 (token-gated) + OPTIONAL mTLS listener (client-cert authenticated, token skipped)"
+    );
+
+    // Both listeners run concurrently (tokio::join!, mirroring the node-agent). A
+    // shared axum_server Handle wires SIGTERM/SIGINT to the mTLS listener's graceful
+    // drain so the join completes and the process exits cleanly on a pod stop.
+    let handle = axum_server::Handle::new();
+    {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            handle.graceful_shutdown(Some(Duration::from_secs(10)));
+        });
+    }
+    let plain_srv = async {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("serve plaintext");
+    };
+    let mtls_srv = async {
+        axum_server::bind(tls_addr)
+            .handle(handle)
+            .acceptor(acceptor)
+            .serve(mtls_app)
+            .await
+            .expect("serve mTLS");
+    };
+    tokio::join!(plain_srv, mtls_srv);
 }
 
 /// Bearer-token gate for the data endpoints. When `state.auth_token` is `None`
@@ -244,6 +315,12 @@ async fn main() {
 /// body, no detail leak) and counted in `agentctl_coordination_auth_rejected_total`.
 /// This layer wraps only `POST /` and `POST /mcp` — the probes/metrics are exempt.
 async fn auth_gate(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    // mTLS listener: a verified + allow-listed client cert IS the authentication
+    // (the `mtls::mtls_gate` layer set this marker upstream), so skip the coarse
+    // bearer-token gate for those connections. The plaintext listener never sets it.
+    if req.extensions().get::<mtls::MtlsVerified>().is_some() {
+        return next.run(req).await;
+    }
     let Some(expected) = &state.auth_token else {
         // No token configured ⇒ auth disabled.
         return next.run(req).await;

@@ -26,6 +26,8 @@ pub struct Metrics {
     auth_rejected: AtomicU64,
     attest_ok: AtomicU64,
     attest_reject: AtomicU64,
+    mtls_accepted: AtomicU64,
+    mtls_rejected: AtomicU64,
 }
 
 impl Metrics {
@@ -44,6 +46,8 @@ impl Metrics {
             auth_rejected: AtomicU64::new(0),
             attest_ok: AtomicU64::new(0),
             attest_reject: AtomicU64::new(0),
+            mtls_accepted: AtomicU64::new(0),
+            mtls_rejected: AtomicU64::new(0),
         }
     }
 
@@ -93,6 +97,16 @@ impl Metrics {
     /// (a tenant tried to settle/steal another tenant's lease).
     pub fn inc_attest_reject(&self) {
         self.attest_reject.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A request on the mTLS listener presented a verified + allow-listed client
+    /// cert (authenticated by cert; the bearer-token gate is skipped for it).
+    pub fn inc_mtls_accepted(&self) {
+        self.mtls_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A request on the mTLS listener was rejected (403): its verified client cert's
+    /// CN/SAN is not in `COORDINATION_MTLS_ALLOWED_NAMES` (empty list ⇒ fail closed).
+    pub fn inc_mtls_rejected(&self) {
+        self.mtls_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render the Prometheus exposition body. `pending`/`claimed` are the live
@@ -171,6 +185,18 @@ impl Metrics {
             "Claim-lifecycle calls rejected by attestation (unattestable caller or holder mismatch).",
             self.attest_reject.load(Ordering::Relaxed),
         );
+        counter(
+            &mut out,
+            "agentctl_coordination_mtls_accepted_total",
+            "Requests on the mTLS listener with a verified + allow-listed client cert (bearer gate skipped).",
+            self.mtls_accepted.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_coordination_mtls_rejected_total",
+            "Requests on the mTLS listener rejected (403): client-cert CN/SAN not in COORDINATION_MTLS_ALLOWED_NAMES.",
+            self.mtls_rejected.load(Ordering::Relaxed),
+        );
         gauge(
             &mut out,
             "agentctl_coordination_pending",
@@ -237,6 +263,9 @@ mod tests {
         m.inc_attest_ok();
         m.inc_attest_ok();
         m.inc_attest_reject();
+        m.inc_mtls_accepted();
+        m.inc_mtls_accepted();
+        m.inc_mtls_rejected();
         let body = m.render(5, 2);
 
         assert!(body.contains("# TYPE agentctl_coordination_claims_granted_total counter"));
@@ -254,6 +283,10 @@ mod tests {
         assert!(body.contains("agentctl_coordination_attest_ok_total 3"));
         assert!(body.contains("# TYPE agentctl_coordination_attest_reject_total counter"));
         assert!(body.contains("agentctl_coordination_attest_reject_total 1"));
+        assert!(body.contains("# TYPE agentctl_coordination_mtls_accepted_total counter"));
+        assert!(body.contains("agentctl_coordination_mtls_accepted_total 2"));
+        assert!(body.contains("# TYPE agentctl_coordination_mtls_rejected_total counter"));
+        assert!(body.contains("agentctl_coordination_mtls_rejected_total 1"));
         assert!(body.contains("# TYPE agentctl_coordination_pending gauge"));
         assert!(body.contains("agentctl_coordination_pending 5"));
         assert!(body.contains("agentctl_coordination_claimed 2"));

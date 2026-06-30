@@ -31,6 +31,7 @@ use axum::routing::get;
 use axum::Router;
 use tokio::net::TcpListener;
 
+mod client;
 mod metrics;
 mod pb;
 mod scaler;
@@ -58,6 +59,13 @@ async fn main() {
     // OTEL_EXPORTER_OTLP_ENDPOINT is set — matches every other control-plane bin.
     agentctl_telemetry::init("agentctl-scaler");
 
+    // ring crypto provider as the process default: no aws-lc-rs → no C toolchain.
+    // Required so reqwest's rustls backend resolves a provider when building the
+    // coordination-hop client (both the plaintext and the mTLS path).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install ring crypto provider");
+
     let grpc_port = env_u16("GRPC_PORT", DEFAULT_GRPC_PORT);
     let health_port = env_u16("HEALTH_PORT", DEFAULT_HEALTH_PORT);
     let poll_ms = env_u64("STREAM_POLL_INTERVAL_MS", DEFAULT_STREAM_POLL_INTERVAL_MS);
@@ -65,12 +73,21 @@ async fn main() {
     let metrics = Arc::new(Metrics::new());
     let ready = Arc::new(AtomicBool::new(false));
 
-    // reqwest with rustls + the ring provider (webpki roots), no native-tls → no
-    // openssl/aws-lc, no C toolchain. Plain HTTP is the in-cluster norm; https
-    // works too if a coordinationUrl ever uses it.
-    let http = reqwest::Client::builder()
-        .build()
-        .expect("build reqwest client");
+    // Coordination-hop client. Gated on COORDINATION_CLIENT_CERT_DIR: unset ⇒
+    // today's plaintext-http client (optional bearer applied per-request); set ⇒ a
+    // ring-backed mTLS client presenting the scaler's client cert and verifying the
+    // coordination server cert against COORDINATION_CA (see src/client.rs). No
+    // native-tls/openssl/aws-lc → no C toolchain.
+    let client_mode = client::mode_from_env();
+    if let client::ClientMode::Mtls { cert, ca, .. } = &client_mode {
+        tracing::info!(
+            cert = %cert.display(),
+            ca = %ca.display(),
+            "{} set: presenting client cert (mTLS) on work.stats requests",
+            client::ENV_CLIENT_CERT_DIR,
+        );
+    }
+    let http = client::build_client(&client_mode).expect("build coordination HTTP client");
 
     // Bearer token presented to the coordination server's gated work.stats endpoint
     // (agentctl RFC 0011 §3.4). Read once from AGENTCTL_API_TOKEN (set by the

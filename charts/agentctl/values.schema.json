@@ -34,6 +34,15 @@
           }
         },
         "store": { "type": "string", "enum": ["memory", "postgres"] },
+        "mtls": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allowedNames": { "type": "array", "items": { "type": "string" } },
+            "scalerCommonName": { "type": "string" }
+          }
+        },
         "federationPeers": { "type": "string" },
         "address": { "type": "string" },
         "coordinationUrl": { "type": "string" },

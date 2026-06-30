@@ -377,6 +377,23 @@ coordination:
   # when this is on) and sets COORDINATION_ATTEST_IDENTITY + POD_NAMESPACE on the
   # Deployment. Default false renders no RBAC and no env (today's output unchanged).
   attestIdentity: false
+  # Scaler -> coordination mTLS (RFC 0011). When enabled (and certManager.enabled),
+  # the chart issues a SERVING cert (agentctl-coordination-mtls-tls) for a second
+  # coordination listener on :8443 and a CLIENT cert (agentctl-scaler-client-tls) the
+  # scaler presents, both signed by the agentctl CA (both secrets carry ca.crt). The
+  # coordination server verifies the scaler's client cert against the CA + allowedNames;
+  # the scaler verifies the coordination serving cert against the CA and reads the
+  # backlog over https://agentctl-coordination.<ns>.svc.cluster.local.:8443. Default
+  # off keeps the plaintext http + token path (today's output unchanged). Requires
+  # certManager.enabled (the certs come off the agentctl CA Issuer).
+  mtls:
+    enabled: false
+    # Client-cert CN/SANs the coordination :8443 listener accepts.
+    # -> COORDINATION_MTLS_ALLOWED_NAMES (CSV)
+    allowedNames: ["agentctl-scaler"]
+    # CommonName minted on the scaler's client cert (agentctl-scaler-client-tls).
+    # Keep in sync with allowedNames.
+    scalerCommonName: agentctl-scaler
   # 1 is the safe default. With store=postgres the queue is durable + shared, so you
   # may raise this for HA; with store=memory keep it at 1 (per-pod in-process queue).
   replicas: 1

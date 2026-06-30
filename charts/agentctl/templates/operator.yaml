@@ -151,8 +151,16 @@ spec:
               value: {{ $scalerEnabled | quote }}
             - name: SCALER_ADDRESS
               value: {{ ($opScaler.address | default $scaler.address | default (printf "agentctl-scaler.%s:9100" $ns)) | quote }}
+            # When coordination.mtls.enabled the scaler reads work.stats over the
+            # coordination mTLS listener (:8443, https, trailing-dot FQDN), so the
+            # rendered ScaledObject's coordinationUrl must point there (the scaler
+            # presents its client cert). Else the plaintext :8080 (token) endpoint.
+            {{- $coordDefault := printf "http://agentctl-coordination.%s/" $ns }}
+            {{- if .Values.coordination.mtls.enabled }}
+            {{- $coordDefault = printf "https://agentctl-coordination.%s.svc.cluster.local.:8443/" $ns }}
+            {{- end }}
             - name: COORDINATION_URL
-              value: {{ ($opScaler.coordinationUrl | default $scaler.coordinationUrl | default (printf "http://agentctl-coordination.%s/" $ns)) | quote }}
+              value: {{ ($opScaler.coordinationUrl | default $scaler.coordinationUrl | default $coordDefault) | quote }}
             # In-cluster bearer-token injection (apiToken.enabled). When set, the
             # operator injects the bearer token (valueFrom secretKeyRef on the
             # agentctl-api-token Secret) into rendered agent pods so a conformant

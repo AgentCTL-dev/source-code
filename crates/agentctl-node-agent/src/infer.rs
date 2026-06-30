@@ -370,6 +370,14 @@ mod tests {
         map.get(name).map(|v| v.to_str().unwrap().to_string())
     }
 
+    /// reqwest's rustls backend resolves the process-default crypto provider when
+    /// building any client; install ring (idempotent — the binary does the same in
+    /// `main()`). Required because reqwest is wired with the `-no-provider` feature
+    /// (ring-only, no aws-lc-rs) across the workspace.
+    fn install_ring_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn strips_client_identity_and_injects_attested() {
         let mut inbound = HeaderMap::new();
@@ -484,6 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn unattested_caller_is_denied_403() {
+        install_ring_provider();
         // attested_uid = None short-circuits BEFORE any network call, so a bogus
         // target is never dialed.
         let state = ProxyState {
@@ -513,6 +522,7 @@ mod tests {
     async fn forwards_attested_identity_and_relays_response() {
         use axum::routing::any;
 
+        install_ring_provider();
         let captured: Arc<Mutex<Captured>> = Arc::new(Mutex::new(Captured::default()));
         let cap = captured.clone();
         let app = Router::new().fallback(any(

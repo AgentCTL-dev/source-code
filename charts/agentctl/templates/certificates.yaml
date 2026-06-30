@@ -163,4 +163,48 @@ spec:
   issuerRef:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
 {{- end }}
+{{- if .Values.coordination.mtls.enabled }}
+---
+# COORDINATION mTLS: serving cert for the coordination server's mTLS :8443 listener,
+# so the scaler can verify the coordination server. Secret carries ca.crt, which the
+# coordination server also loads (COORDINATION_MTLS_CA) to verify the scaler's client
+# cert. Rendered only when coordination.mtls.enabled (default off renders nothing).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-coordination-mtls
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-coordination-mtls-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-coordination.{{ $ns }}.svc
+    - agentctl-coordination.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+---
+# COORDINATION mTLS: client cert the scaler presents to the coordination server's
+# :8443 listener. Signed by the agentctl CA; CN must be in
+# coordination.mtls.allowedNames (default "agentctl-scaler"). Secret carries ca.crt,
+# which the scaler loads (COORDINATION_CA) to verify the coordination serving cert.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-scaler-client
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-scaler-client-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: {{ .Values.coordination.mtls.scalerCommonName | default "agentctl-scaler" | quote }}
+  usages: ["client auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- end }}
 {{- end }}

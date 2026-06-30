@@ -15,8 +15,8 @@ utility paths** (intelligence, coordination, A2A-inbound) are **network-isolated
 | **node-agent → agent** (unix socket) | unix socket (hostPath) | **`SO_PEERCRED`** → `/proc` cgroup → pod uid | file perms + attestation | node-agent (local) |
 | **ModelGateway** :8080 (`/v1/infer`) | HTTP (+ optional Bearer) | identity header-asserted (`X-Agent-Namespace`/`-Name`), **source-IP attested** (`modelgateway.attestIdentity` — kube pod lookup, anti-spoof), **or pod-uid attested** via the node-agent forwarder (`X-Agent-Pod-Uid`, networkless/routed-infer tier — `SO_PEERCRED`); optional **`AGENTCTL_API_TOKEN`** bearer gate | ModelPool existence + budget | agents (NetworkPolicy-scoped) |
 | **A2A gateway** :8080 (plaintext) + **:8443 trusted-proxy mTLS** (opt-in) | HTTP/SSE (+ optional Bearer); **trusted-proxy mTLS** when `trustedProxy.enabled` | optional **`AGENTCTL_API_TOKEN`** bearer gate (cards are JWS-signed for the *caller* to verify); per-agent **OIDC** (JWKS JWT); **trusted-proxy** — front-proxy client cert verified vs the agentctl CA + `allowedNames`, then asserted `<prefix>-subject/-email/-groups` trusted (prefix `trustedProxy.headerPrefix`, default `x-agentctl`; stripped from untrusted plaintext callers) | per-agent **`requiredClaims`** (OIDC native or trusted-proxy pass-through) | A2A clients / peer agents / fronting API gateway (APISIX) |
-| **coordination server** :8080 (`work.*`) | HTTP (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate; optional **source-IP attested** (`coordination.attestIdentity` — kube pod lookup, anti-spoof) binding claim ownership | claim ownership **bound to the attested identity** (blocks cross-tenant ack/release) when `attestIdentity` | producers + agents + scaler |
-| **scaler** gRPC :9100 | gRPC | none (in-cluster, KEDA-only) | — | KEDA |
+| **coordination server** :8080 (`work.*`) + **:8443 scaler mTLS** (opt-in) | HTTP (+ optional Bearer); **mTLS** on :8443 when `coordination.mtls.enabled` | optional **`AGENTCTL_API_TOKEN`** bearer gate; optional **source-IP attested** (`coordination.attestIdentity` — kube pod lookup, anti-spoof) binding claim ownership; **scaler mTLS** — scaler client cert verified vs the agentctl CA + `coordination.mtls.allowedNames` on the :8443 listener | claim ownership **bound to the attested identity** (blocks cross-tenant ack/release) when `attestIdentity` | producers + agents + scaler |
+| **scaler** gRPC :9100 | gRPC | none (in-cluster, KEDA-only); reads the coordination backlog over **mTLS** (CA-signed client cert) when `coordination.mtls.enabled` | — | KEDA |
 | **admission webhook** :8443 | HTTPS, `with_no_client_auth` | kube-apiserver trusted (caBundle lets *it* verify the webhook) | the gate logic | kube-apiserver |
 | **`/healthz` `/readyz` `/metrics`** :8080 | plaintext | none (intentional) | — | probes + Prometheus |
 | agent → model provider | via ModelGateway | the real key is **injected by the gateway** | provider-side | only the ModelGateway egresses |
@@ -34,6 +34,8 @@ SelfSigned Issuer → agentctl CA → CA Issuer →
   agentctl-client-tls      (mTLS client cert: apiserver + gateway → node-agent)
   agentctl-trusted-proxy-tls         (A2A gateway trusted-proxy mTLS server + ca.crt to verify the front-proxy — `trustedProxy.enabled`)
   agentctl-trusted-proxy-client-tls  (mTLS client cert for the front-proxy/APISIX → A2A gateway — `trustedProxy.enabled`)
+  agentctl-coordination-mtls-tls     (coordination mTLS server on :8443 + ca.crt to verify the scaler — `coordination.mtls.enabled`)
+  agentctl-scaler-client-tls         (mTLS client cert for the scaler → coordination :8443 — `coordination.mtls.enabled`)
 ```
 The **front-proxy CA** is read at runtime from `kube-system/extension-apiserver-authentication`
 (not cert-manager) — it's what authenticates the aggregator. All leaves are rustls/`ring`
@@ -466,5 +468,15 @@ pinning close the loop at deploy.
   `AGENTCTL_API_TOKEN` bearer is no longer the only gate: a tenant **cannot ack/release another
   tenant's claim** (cross-tenant ack/release blocked). Robust because confined tenant pods drop
   `CAP_NET_RAW` and cannot spoof their source IP; needs cluster-wide `pods` get/list (rendered
-  only when enabled). See "Attested claim ownership (coordination)". The **scaler** gRPC path
-  remains token / in-cluster-only (mTLS is the residual follow-up).
+  only when enabled). See "Attested claim ownership (coordination)".
+- [x] **Scaler → coordination mTLS** — `coordination.mtls.enabled` (default off) opens a second
+  coordination listener on **:8443** and has the **scaler** read the claim backlog over it with a
+  CA-signed **client cert** (`agentctl-scaler-client-tls`), verified against the agentctl CA +
+  `coordination.mtls.allowedNames`; the scaler verifies the coordination serving cert
+  (`agentctl-coordination-mtls-tls`) against the same CA. The scaler dials the URL the
+  **operator** renders into the ScaledObject (`scalerMetadata.coordinationUrl`), which the
+  chart points at `https://agentctl-coordination.<ns>.svc.cluster.local.:8443` (trailing-dot
+  FQDN) when `coordination.mtls.enabled`. Both leaves come off the agentctl
+  CA Issuer (requires `certManager.enabled`). This closes the residual "scaler path is
+  token / in-cluster-only" gap — the scaler hop is now mutually authenticated. Default off keeps
+  the plaintext http + token path.

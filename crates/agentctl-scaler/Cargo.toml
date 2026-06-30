@@ -26,10 +26,20 @@ tokio-stream = "0.1"
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal", "net", "sync"] }
 serde_json.workspace = true
-# HTTP client for the coordination-server MCP hop. rustls + the **ring** provider
-# (webpki roots), default-features off, NO native-tls → no openssl/aws-lc, no C
-# toolchain. Same reqwest the gateway uses for its node-agent hop.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# HTTP client for the coordination-server MCP hop. default-features off, NO
+# native-tls → no openssl/aws-lc, no C toolchain. `rustls-tls-manual-roots-no-provider`
+# enables `use_preconfigured_tls` WITHOUT pulling a default crypto provider (no
+# aws-lc-rs); we hand it a ring-backed ClientConfig for the optional client-cert
+# (mTLS) hop (see src/client.rs). Same reqwest wiring the gateway uses.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-manual-roots-no-provider",
+] }
+# rustls (ring provider) for the optional mTLS ClientConfig presenting the scaler's
+# client identity to the coordination server. ring, never aws-lc-rs → no C toolchain.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Parse the mounted client cert / key / CA PEMs. Pure Rust, no C toolchain.
+rustls-pemfile = "2"
 tracing = "0.1"
 # Shared tracing init: fmt-only by default, OTLP export when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set (matches every other control-plane binary).

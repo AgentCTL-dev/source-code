@@ -324,6 +324,28 @@ scaler off (`scaler.enabled=false`, the default) on a non-KEDA cluster and scale
 claim-mode fleets manually (see above). Shard-mode fleets are a fixed partition
 count and never get a ScaledObject.
 
+**Scaler → coordination mTLS (opt-in).** By default the scaler reads the coordination
+backlog over plaintext HTTP (gated only by the optional `AGENTCTL_API_TOKEN`). Set
+`coordination.mtls.enabled=true` (requires `certManager.enabled`) to mutually authenticate
+that hop:
+
+```sh
+helm upgrade --install agentctl charts/agentctl \
+  --set coordination.enabled=true \
+  --set scaler.enabled=true \
+  --set coordination.mtls.enabled=true
+```
+
+This issues a serving cert (`agentctl-coordination-mtls-tls`) for a second coordination
+listener on `:8443` and a client cert (`agentctl-scaler-client-tls`) the scaler presents —
+both off the agentctl CA Issuer, both carrying `ca.crt`. The coordination server verifies
+the scaler's client cert against the CA + `coordination.mtls.allowedNames` (default
+`agentctl-scaler`); the scaler verifies the serving cert against the CA and points
+`COORDINATION_URL` at `https://agentctl-coordination.<ns>.svc.cluster.local.:8443` (the
+trailing dot makes it an absolute FQDN so the `ndots` search list cannot capture it). The
+client-cert CN is `coordination.mtls.scalerCommonName` — keep it in sync with `allowedNames`.
+Default off keeps the plaintext http + token path. See security.md "Certificate fabric".
+
 ### Control-plane components
 
 - **operator** — leader-elected singleton. Raise `operator.replicas` for HA (1 active +

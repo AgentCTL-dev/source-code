@@ -33,6 +33,21 @@ deadpool-postgres = "0.14"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# OPTIONAL mTLS listener (COORDINATION_MTLS_ADDR, RFC 0015): a SECOND listener that
+# REQUIRES a CA-signed client cert so internal callers (the scaler) authenticate
+# with a cert instead of the coarse AGENTCTL_API_TOKEN. SAME ring-only stack the
+# gateway's trusted-proxy / node-agent listeners use — no aws-lc-rs, no C toolchain.
+rustls-pemfile = "2"
+# `tls-rustls-no-provider` keeps it ring-only (the binary installs the ring provider
+# when the feature is enabled); the custom acceptor captures the verified peer cert.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+# The TlsStream type the custom acceptor reads the verified peer cert off of.
+tokio-rustls = { version = "0.26", default-features = false }
+# `tower::Layer` so the acceptor can inject the captured peer cert as an extension.
+tower = { version = "0.5", default-features = false }
+# Parse the verified peer cert's CN/SAN for the mTLS allow-list. Pure Rust, no C
+# toolchain.
+x509-cert = "0.2"
 # Shared tracing init: fmt-only by default, OTLP export when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set (matches every other control-plane binary).
 agentctl-telemetry = { path = "../agentctl-telemetry" }
