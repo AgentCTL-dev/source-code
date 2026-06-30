@@ -14,7 +14,7 @@ utility paths** (intelligence, coordination, A2A-inbound) are **network-isolated
 | **node-agent control API** :8443 | HTTPS, **mTLS** (`WebPkiClientVerifier`) | CA-signed **client cert** (`agentctl-client-tls`) | + **`SO_PEERCRED` attestation**: 403 unless the attested pod-uid matches the requested `<uid>` | apiserver + gateway |
 | **node-agent → agent** (unix socket) | unix socket (hostPath) | **`SO_PEERCRED`** → `/proc` cgroup → pod uid | file perms + attestation | node-agent (local) |
 | **ModelGateway** :8080 (`/v1/infer`) | HTTP (+ optional Bearer) | identity header-asserted (`X-Agent-Namespace`/`-Name`), **source-IP attested** (`modelgateway.attestIdentity` — kube pod lookup, anti-spoof), **or pod-uid attested** via the node-agent forwarder (`X-Agent-Pod-Uid`, networkless/routed-infer tier — `SO_PEERCRED`); optional **`AGENTCTL_API_TOKEN`** bearer gate | ModelPool existence + budget | agents (NetworkPolicy-scoped) |
-| **A2A gateway** :8080 | HTTP/SSE (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate (cards are JWS-signed for the *caller* to verify) | — | A2A clients / peer agents |
+| **A2A gateway** :8080 (plaintext) + **:8443 trusted-proxy mTLS** (opt-in) | HTTP/SSE (+ optional Bearer); **trusted-proxy mTLS** when `trustedProxy.enabled` | optional **`AGENTCTL_API_TOKEN`** bearer gate (cards are JWS-signed for the *caller* to verify); per-agent **OIDC** (JWKS JWT); **trusted-proxy** — front-proxy client cert verified vs the agentctl CA + `allowedClientNames`, then asserted `X-Forwarded-User/-Email/-Groups` trusted (stripped from untrusted plaintext callers) | per-agent **`requiredClaims`** (OIDC native or trusted-proxy pass-through) | A2A clients / peer agents / fronting API gateway (APISIX) |
 | **coordination server** :8080 (`work.*`) | HTTP (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate | — | producers + agents + scaler |
 | **scaler** gRPC :9100 | gRPC | none (in-cluster, KEDA-only) | — | KEDA |
 | **admission webhook** :8443 | HTTPS, `with_no_client_auth` | kube-apiserver trusted (caBundle lets *it* verify the webhook) | the gate logic | kube-apiserver |
@@ -32,6 +32,8 @@ SelfSigned Issuer → agentctl CA → CA Issuer →
   agentctl-admission-tls   (webhook serving)     → caBundle injected into the webhooks
   agentctl-node-agent-tls  (node-agent mTLS server + ca.crt to verify clients)
   agentctl-client-tls      (mTLS client cert: apiserver + gateway → node-agent)
+  agentctl-trusted-proxy-tls         (A2A gateway trusted-proxy mTLS server + ca.crt to verify the front-proxy — `trustedProxy.enabled`)
+  agentctl-trusted-proxy-client-tls  (mTLS client cert for the front-proxy/APISIX → A2A gateway — `trustedProxy.enabled`)
 ```
 The **front-proxy CA** is read at runtime from `kube-system/extension-apiserver-authentication`
 (not cert-manager) — it's what authenticates the aggregator. All leaves are rustls/`ring`
@@ -194,6 +196,106 @@ external API-gateway/service-mesh (e.g. emitting equivalent mesh `AuthorizationP
 standardize identity at the mesh edge. The native per-agent gate above is the v1
 path and needs none of that.
 
+## Trusted front-proxy (external API gateway)
+
+The OIDC gate above makes the A2A **gateway itself** the policy decision point (it verifies
+the JWT). Many orgs instead standardize edge auth at a **fronting API gateway** (APISIX,
+Kong, Envoy, …) that terminates OIDC/SAML/mTLS at the internet edge and then asserts the
+authenticated identity to upstreams as headers (`X-Forwarded-User`/`-Email`/`-Groups`).
+
+**The problem:** those headers are only trustworthy if the upstream trusts the *channel*,
+not anyone who can set them — any in-cluster pod that reaches the gateway's plaintext
+`:8080` could forge `X-Forwarded-User: admin`. So agentctl must trust **the channel, not
+headers from anyone**.
+
+The **trusted front-proxy** mode (`trustedProxy.enabled`, default **off**) closes that with
+the same pattern the Kubernetes **aggregated-apiserver front-proxy** uses (requestheader-CA +
+`X-Remote-User/Group`): authenticate the *proxy* over an mTLS channel, and only then trust
+the identity headers it asserts.
+
+### The 3-step model
+
+1. **Authenticate the proxy — mTLS client cert + allowed-names.** The gateway serves a
+   trusted-proxy mTLS listener (`:8443`): it verifies the front-proxy's **client cert against
+   the agentctl CA** and checks the cert's subject/SAN against an **allowed-client-names**
+   list (`trustedProxy.allowedClientNames`). Only a connection presenting a CA-signed cert
+   whose name is allow-listed is a *trusted channel*. The CA + name allow-list are exactly
+   what make the asserted identity headers trustworthy — mirroring the aggregated-apiserver
+   requestheader-CA.
+2. **Trust the asserted `X-Forwarded-*`.** Over a trusted channel the gateway reads the
+   proxy-asserted identity (`X-Forwarded-User` → `sub`, `X-Forwarded-Email`,
+   `X-Forwarded-Groups`) — exactly as the apiserver trusts `X-Remote-User/Group` from the
+   aggregator.
+3. **Enforce `requiredClaims` + authorize, then forward.** The gateway runs the target
+   agent's `spec.access.oidc.requiredClaims` against the asserted identity (e.g. `groups`
+   must contain `support`), denies on mismatch, and **forwards the identity to the agent**
+   (the same `X-Forwarded-*` the OIDC pass-through path forwards). The agent does its own
+   fine-grained checks; it never sees or verifies a raw token.
+
+### Anti-spoof: strip on untrusted callers
+
+The protection is symmetric. On **any plaintext / non-trusted-proxy** path the gateway
+**strips** inbound `X-Forwarded-User`/`-Email`/`-Groups` before processing, so a caller that
+did *not* arrive over the authenticated mTLS channel can never assert an identity — the
+headers are honored **only** over the trusted-proxy channel. This is the direct analogue of
+the apiserver discarding `X-Remote-*` from anyone but the front-proxy.
+
+### How it composes
+
+- **Mirrors the aggregated-apiserver front-proxy** (requestheader-CA + `X-Remote-*`): the
+  same trust-the-channel-not-the-header shape, reused for the data-plane A2A edge. See the
+  management-APIServer row in the auth map.
+- **Composes with per-agent OIDC (pass-through).** When the front-proxy terminates OIDC,
+  agentctl runs in *pass-through*: the proxy verified the JWT, agentctl trusts the asserted
+  identity over mTLS and still enforces the agent's `requiredClaims`. The native OIDC gate
+  (gateway verifies the JWT itself) and the trusted-proxy gate are two front-ends to the
+  **same** `requiredClaims` authz + identity-forwarding core — pick where the JWT is verified
+  (at the gateway, or at the edge proxy).
+- **Composes with `apiToken` (coarse).** The shared `AGENTCTL_API_TOKEN` stays a coarse
+  in-cluster gate; the trusted-proxy channel is the per-caller identity layer on top of it.
+
+### Worked APISIX config sketch
+
+Edge OIDC termination + upstream mTLS with a client cert minted from the agentctl CA +
+`proxy-rewrite` asserting the `X-Forwarded-*` identity:
+
+```yaml
+# APISIX route → agentctl A2A gateway (trusted-proxy mTLS listener)
+routes:
+  - uri: /a2a/*
+    plugins:
+      openid-connect:                         # edge auth: terminate OIDC at the proxy
+        client_id: agentctl-a2a
+        discovery: https://login.acme.example/.well-known/openid-configuration
+        bearer_only: true
+      proxy-rewrite:                          # assert the verified identity upstream
+        headers:
+          set:
+            X-Forwarded-User:   "$http_x_userinfo_sub"
+            X-Forwarded-Email:  "$http_x_userinfo_email"
+            X-Forwarded-Groups: "$http_x_userinfo_groups"
+    upstream:
+      scheme: https                           # mTLS to the gateway trusted-proxy listener
+      nodes: { "agentctl-gateway.agentctl-system.svc:8443": 1 }
+      tls:
+        client_cert: |                        # APISIX client cert (from the agentctl CA)
+          -----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----
+        client_key: |
+          -----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----
+        # verify the gateway serving cert against the agentctl CA (ca.crt from the secret)
+```
+
+The APISIX client cert/key come from the chart-issued **`agentctl-trusted-proxy-client-tls`**
+Secret (retrieval in operations.md §8). Its subject/SAN **must** be on
+`trustedProxy.allowedClientNames`, or the gateway rejects the channel and strips the headers.
+
+**Pass-through alternative.** If you prefer agentctl to verify the JWT itself (native OIDC,
+above) while still fronting with APISIX for TLS/routing, **drop** the `openid-connect` +
+`proxy-rewrite` plugins and simply proxy the caller's `Authorization: Bearer <jwt>` through;
+the gateway's `spec.access.oidc` gate verifies it against the issuer JWKS. Use **trusted-proxy
+mode** when edge auth is terminated at APISIX; use **native OIDC pass-through** when you want
+the gateway to be the verification point.
+
 ## Attested agent identity (ModelGateway)
 
 By default the ModelGateway trusts the `X-Agent-Namespace`/`X-Agent-Name` headers the
@@ -302,6 +404,14 @@ pinning close the loop at deploy.
   required-claims authz + identity forwarding, native to the CR (front it with an
   Ingress/LB for TLS). See "OIDC per agent/fleet". Exporting enforcement to an external
   API-gateway/mesh is a documented future option.
+- [x] **Trusted front-proxy (external API gateway)** — `trustedProxy.enabled` (default off)
+  lets a fronting gateway (e.g. APISIX) terminate edge auth and assert identity: the A2A
+  gateway authenticates the *proxy* over **mTLS** (client cert vs the agentctl CA +
+  `allowedClientNames`), then trusts the asserted `X-Forwarded-User/-Email/-Groups`,
+  **strips** those headers from untrusted plaintext callers (anti-spoof), enforces the
+  agent's `requiredClaims`, and forwards the identity to the agent. Mirrors the
+  aggregated-apiserver front-proxy (requestheader-CA + `X-Remote-*`); composes with per-agent
+  OIDC (pass-through) and the `apiToken` gate. See "Trusted front-proxy (external API gateway)".
 - [x] **Postgres `verify-full` (client CA pinning), opt-in** — `postgres.bundled.tls.verifyFull`
   (with `tls.enabled`) pins the chart CA: the chart mounts `ca.crt` at `/etc/agentctl-pg-ca` in
   the gateway + modelgateway (and the coordination server when `coordination.store=postgres`),

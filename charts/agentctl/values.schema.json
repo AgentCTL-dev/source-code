@@ -192,6 +192,16 @@
         "value": { "type": "string" }
       }
     },
+    "trustedProxy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "allowedNames": { "type": "array", "items": { "type": "string" } },
+        "proxyCommonName": { "type": "string" },
+        "identityHeaders": { "type": "object", "properties": { "user": { "type": "string" }, "email": { "type": "string" }, "groups": { "type": "string" } } }
+      }
+    },
     "networkPolicies": {
       "type": "object",
       "additionalProperties": true,

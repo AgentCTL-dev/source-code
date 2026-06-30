@@ -43,6 +43,7 @@ mod na_client;
 mod oidc;
 mod signing;
 mod store;
+mod trusted_proxy;
 
 /// Namespace the node-agent DaemonSet runs in (same as the apiserver assumes).
 const NODE_AGENT_NS: &str = "agentctl-system";
@@ -98,6 +99,8 @@ async fn main() {
 
     // Shared metrics surface (also feeds the access gate's rejection counter).
     let metrics = Arc::new(metrics::Metrics::new());
+    // Cloned for the trusted-proxy mTLS middleware (the original moves into state).
+    let mw_metrics = metrics.clone();
     // Optional bearer-token access gate (AGENTCTL_API_TOKEN). Unset → no-op; set
     // → enforced on the A2A surface, with /healthz /readyz /metrics AND the public
     // JWKS (/.well-known/jwks.json) exempt. The middleware short-circuits the
@@ -137,17 +140,75 @@ async fn main() {
             auth: gate,
         });
 
+    // TRUSTED-PROXY mode (front-proxy trust over mTLS). OFF by default — when off
+    // this whole block is skipped and the plaintext listener path below is
+    // byte-identical to before.
+    let tp = Arc::new(trusted_proxy::Config::from_env());
+
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    tracing::info!(%addr, "agentctl gateway serving the A2A HTTP surface");
+
     // Graceful shutdown: on SIGTERM/SIGINT, stop accepting and drain in-flight
     // requests (hyper's `with_graceful_shutdown`). In-flight SSE streams
     // (`message/stream`) are short-lived — our agents complete synchronously, so
     // the node-agent emits its terminal frame and the passthrough body ends,
     // letting the connection close cleanly within the drain.
-    axum::serve(listener, app)
+    if !tp.enabled {
+        tracing::info!(%addr, "agentctl gateway serving the A2A HTTP surface");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .expect("serve");
+        return;
+    }
+
+    // Enabled: serve a SECOND mTLS listener (front-proxy trust) concurrently with
+    // the existing plaintext one — mirroring the node-agent's dual listener.
+    let tls_addr: SocketAddr = tp
+        .tls_addr
+        .parse()
+        .unwrap_or_else(|e| panic!("parse AGENTCTL_GATEWAY_TLS_ADDR {}: {e}", tp.tls_addr));
+    let server_config = trusted_proxy::build_tls_config(&tp.tls_dir, &tp.ca_path)
+        .expect("build trusted-proxy mTLS server config");
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+    let acceptor = trusted_proxy::PeerCertAcceptor::new(rustls_config);
+
+    // The mTLS router enforces the allow-list + extracts the asserted identity
+    // (a verified TRUSTED caller); the plaintext router STRIPS the asserted
+    // identity headers (anti-spoof). Both share the same routes + access gate.
+    let mtls_ctx = trusted_proxy::MtlsCtx {
+        cfg: tp.clone(),
+        metrics: mw_metrics,
+    };
+    let mtls_app = app
+        .clone()
+        .layer(axum::middleware::from_fn_with_state(
+            mtls_ctx,
+            trusted_proxy::mtls_decision,
+        ))
+        .into_make_service();
+    let plaintext_app = app.layer(axum::middleware::from_fn_with_state(
+        tp.clone(),
+        trusted_proxy::strip_plaintext,
+    ));
+
+    tracing::info!(
+        %addr, %tls_addr, ca = %tp.ca_path.display(), allowed = ?tp.allowed_names,
+        "trusted-proxy ENABLED: plaintext :8080 (identity headers stripped) + mTLS front-proxy listener"
+    );
+    // The mTLS listener runs as a background task; the plaintext listener keeps the
+    // existing graceful-shutdown behaviour in the foreground. On SIGTERM the
+    // foreground drains and returns, and the process exits (dropping the task).
+    tokio::spawn(async move {
+        axum_server::bind(tls_addr)
+            .acceptor(acceptor)
+            .serve(mtls_app)
+            .await
+            .expect("serve trusted-proxy mTLS");
+    });
+    axum::serve(listener, plaintext_app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("serve");
@@ -275,21 +336,25 @@ async fn fleet_card(
 async fn a2a_rpc(
     State(state): State<AppState>,
     Path((ns, name)): Path<(String, String)>,
+    trusted_proxy::TrustedDecision(decision): trusted_proxy::TrustedDecision,
     headers: HeaderMap,
     Json(mut req): Json<Value>,
 ) -> Response {
     state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
 
-    // Per-agent access enforcement, BEFORE any method handling. Per-agent OIDC
-    // (spec.access.oidc) takes precedence over the coarse bearer gate; absent it,
-    // we apply the same coarse token the gate middleware would have. On success
-    // with `forward_identity`, the verified caller identity is forwarded to the
-    // agent as X-Auth-* headers.
-    let (identity, forward_identity) = match enforce_access(&state, &ns, &name, &headers).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
+    // Per-agent access enforcement, BEFORE any method handling. Precedence:
+    //   (1) a verified trusted-proxy identity (mTLS listener) — trusted, enforce
+    //       any requiredClaims, forward identity;
+    //   (2) per-agent OIDC (spec.access.oidc) — validate the JWT;
+    //   (3) the coarse bearer gate.
+    // On success with identity forwarding, the verified caller identity is sent to
+    // the agent as X-Auth-* headers.
+    let (identity, forward_identity) =
+        match enforce_access(&state, &ns, &name, &headers, &decision).await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
     let spec = req
         .get("method")
         .and_then(Value::as_str)
@@ -767,17 +832,23 @@ fn build_pool() -> Pool {
 
 /// Enforce the per-agent access policy for an inbound A2A RPC, BEFORE method
 /// handling. Returns `(identity, forward_identity)` on success — `identity` is
-/// `Some` only for an OIDC agent (so the caller can forward it). On any failure it
-/// returns the terminal [`Response`] to send (401 authN / 403 authZ / 502 lookup).
+/// `Some` for a trusted-proxy or OIDC caller (so the caller can forward it). On any
+/// failure it returns the terminal [`Response`] to send (401 authN / 403 authZ /
+/// 502 lookup).
 ///
-/// Precedence: when `spec.access.oidc` is set, the JWT is required + validated for
-/// THIS agent and the coarse bearer gate is bypassed; otherwise the same coarse
-/// token the gate middleware enforces is applied inline (back-compat).
+/// Precedence:
+///   1. a verified trusted-proxy identity (`decision == Trusted`, mTLS listener):
+///      authN is satisfied; if the agent declares `spec.access.oidc.requiredClaims`
+///      they are enforced against the asserted identity (403 on miss); the identity
+///      is forwarded to the agent.
+///   2. `spec.access.oidc` set: a bearer JWT is required + validated for THIS agent.
+///   3. otherwise the coarse bearer gate the middleware enforces is applied inline.
 async fn enforce_access(
     state: &AppState,
     ns: &str,
     name: &str,
     headers: &HeaderMap,
+    decision: &trusted_proxy::Decision,
 ) -> Result<(Option<oidc::Identity>, bool), Response> {
     let access = match read_access(&state.client, ns, name).await {
         Ok(a) => a,
@@ -788,6 +859,26 @@ async fn enforce_access(
             return Err((StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response());
         }
     };
+
+    // (1) Verified trusted-proxy identity (mTLS listener). The front proxy already
+    // performed edge authN; we only apply authZ (requiredClaims) and forward the
+    // asserted identity to the agent.
+    if let trusted_proxy::Decision::Trusted(identity) = decision {
+        if let Some(rules) = access
+            .as_ref()
+            .and_then(|a| a.oidc.as_ref())
+            .and_then(|o| o.required_claims.as_deref())
+        {
+            let claims = trusted_proxy::identity_claims(identity);
+            if oidc::enforce_claims(&claims, Some(rules)).is_err() {
+                state.metrics.inc_trusted_proxy_rejected();
+                tracing::warn!(%ns, agent = %name, sub = %identity.sub, "trusted-proxy authZ denied: requiredClaims unsatisfied");
+                return Err(StatusCode::FORBIDDEN.into_response());
+            }
+        }
+        state.metrics.inc_trusted_proxy_accepted();
+        return Ok((Some(identity.clone()), true));
+    }
 
     let Some(oidc_cfg) = access.as_ref().and_then(|a| a.oidc.as_ref()) else {
         // No per-agent OIDC → fall back to the coarse bearer gate.

@@ -256,6 +256,29 @@ gateway:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 80
 
+# TRUSTED-PROXY mode for the A2A gateway (RFC 0013/0014). When enabled the gateway
+# opens a second, mTLS-protected listener on :8443 that ONLY a trusted fronting
+# proxy (e.g. APISIX) may connect to. The proxy authenticates the external caller,
+# then forwards the request with the verified identity carried in the
+# identityHeaders. The gateway verifies the proxy's client cert against the
+# agentctl CA bundle and the allowedNames allow-list (CN/SAN). Default OFF — no
+# extra listener, certs, or env are rendered.
+trustedProxy:
+  enabled: false
+  # Allow-list of client-cert CN/SANs the gateway accepts on the :8443 listener.
+  # Defaults to the fronting proxy's CN ("apisix"). -> TRUSTED_PROXY_ALLOWED_NAMES
+  allowedNames: ["apisix"]
+  # CommonName minted on the client cert handed to the fronting proxy
+  # (secret agentctl-trusted-proxy-client-tls). Keep in sync with allowedNames.
+  proxyCommonName: apisix
+  # Request headers the trusted proxy injects with the verified caller identity;
+  # the gateway trusts these ONLY on the mTLS listener (and strips them from any
+  # plaintext caller). -> TRUSTED_PROXY_IDENTITY_HEADERS (rendered user=..,email=..,groups=..)
+  identityHeaders:
+    user: x-agentctl-subject
+    email: x-agentctl-email
+    groups: x-agentctl-groups
+
 modelgateway:
   enabled: true
   replicas: 1

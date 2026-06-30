@@ -29,6 +29,12 @@ pub struct Metrics {
     oidc_allow: AtomicU64,
     /// Per-agent OIDC requests denied (authN 401 or authZ 403) on the A2A surface.
     oidc_deny: AtomicU64,
+    /// Trusted-proxy requests accepted on the verified mTLS listener (allow-listed
+    /// peer + asserted identity + any requiredClaims satisfied).
+    trusted_proxy_accepted: AtomicU64,
+    /// Trusted-proxy requests rejected (peer-cert name not allow-listed, or the
+    /// agent's requiredClaims unsatisfied by the asserted identity) → 403.
+    trusted_proxy_rejected: AtomicU64,
 }
 
 impl Metrics {
@@ -44,6 +50,8 @@ impl Metrics {
             auth_rejected: AtomicU64::new(0),
             oidc_allow: AtomicU64::new(0),
             oidc_deny: AtomicU64::new(0),
+            trusted_proxy_accepted: AtomicU64::new(0),
+            trusted_proxy_rejected: AtomicU64::new(0),
         }
     }
 
@@ -85,6 +93,17 @@ impl Metrics {
     /// A per-agent OIDC request was denied (authN 401 or authZ 403).
     pub fn inc_oidc_deny(&self) {
         self.oidc_deny.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A trusted-proxy request was accepted on the verified mTLS listener.
+    pub fn inc_trusted_proxy_accepted(&self) {
+        self.trusted_proxy_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A trusted-proxy request was rejected (name not allow-listed, or
+    /// requiredClaims unsatisfied) → 403.
+    pub fn inc_trusted_proxy_rejected(&self) {
+        self.trusted_proxy_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render the Prometheus exposition body.
@@ -143,6 +162,18 @@ impl Metrics {
             "agentctl_gateway_oidc_deny_total",
             "Per-agent OIDC requests denied (authN 401 or authZ 403).",
             self.oidc_deny.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_trusted_proxy_accepted_total",
+            "Trusted-proxy requests accepted on the verified mTLS listener.",
+            self.trusted_proxy_accepted.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_trusted_proxy_rejected_total",
+            "Trusted-proxy requests rejected (name not allow-listed or requiredClaims unsatisfied).",
+            self.trusted_proxy_rejected.load(Ordering::Relaxed),
         );
         out
     }

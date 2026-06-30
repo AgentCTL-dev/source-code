@@ -104,6 +104,9 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - { containerPort: 8080, name: http }
+            {{- if .Values.trustedProxy.enabled }}
+            - { containerPort: 8443, name: https-proxy }   # TRUSTED-PROXY mTLS (RFC 0013)
+            {{- end }}
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "gateway") | nindent 12 }}
             # Durable A2A task store (RFC 0013).
@@ -134,6 +137,28 @@ spec:
                   name: agentctl-api-token
                   key: AGENTCTL_API_TOKEN
             {{- end }}
+            {{- if .Values.trustedProxy.enabled }}
+            # TRUSTED-PROXY mode (RFC 0013): open a second mTLS listener on :8443
+            # that only the fronting proxy (APISIX) may reach. The gateway verifies
+            # the proxy's client cert against the agentctl CA bundle (ca.crt) and the
+            # allow-list, then trusts the identity headers the proxy injects.
+            - name: TRUSTED_PROXY_ENABLED
+              value: "true"
+            - name: AGENTCTL_GATEWAY_TLS_ADDR
+              value: "0.0.0.0:8443"
+            # Serving cert (tls.crt/tls.key) for the :8443 mTLS listener + the CA
+            # to verify the proxy's client cert — both in the mounted secret.
+            - name: AGENTCTL_GATEWAY_TLS_DIR
+              value: /etc/agentctl-trusted-proxy
+            - name: TRUSTED_PROXY_CA
+              value: /etc/agentctl-trusted-proxy/ca.crt
+            - name: TRUSTED_PROXY_ALLOWED_NAMES
+              value: {{ .Values.trustedProxy.allowedNames | default (list "apisix") | join "," | quote }}
+            # key=NAME form the gateway parser expects (user/email/groups -> header name).
+            - name: TRUSTED_PROXY_IDENTITY_HEADERS
+              {{- $ih := .Values.trustedProxy.identityHeaders | default dict }}
+              value: {{ printf "user=%s,email=%s,groups=%s" ($ih.user | default "x-agentctl-subject") ($ih.email | default "x-agentctl-email") ($ih.groups | default "x-agentctl-groups") | quote }}
+            {{- end }}
           {{- with (index .Values "gateway").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
@@ -148,6 +173,13 @@ spec:
             - name: client-tls
               mountPath: /etc/agentctl-client/tls
               readOnly: true
+            {{- if .Values.trustedProxy.enabled }}
+            # Gateway serving cert (tls.crt/tls.key) for the :8443 listener + the
+            # agentctl CA bundle (ca.crt) used to verify the fronting proxy's client cert.
+            - name: trusted-proxy-tls
+              mountPath: /etc/agentctl-trusted-proxy
+              readOnly: true
+            {{- end }}
             {{- with (include "agentctl.pgCaVolumeMount" $) }}
             {{- . | nindent 12 }}
             {{- end }}
@@ -172,6 +204,11 @@ spec:
         - name: client-tls
           secret:
             secretName: agentctl-client-tls
+        {{- if .Values.trustedProxy.enabled }}
+        - name: trusted-proxy-tls
+          secret:
+            secretName: agentctl-trusted-proxy-tls
+        {{- end }}
         {{- with (include "agentctl.pgCaVolume" $) }}
         {{- . | nindent 8 }}
         {{- end }}
@@ -192,6 +229,9 @@ spec:
     app.kubernetes.io/name: agentctl-gateway
   ports:
     - { port: 80, targetPort: 8080, name: http }
+    {{- if .Values.trustedProxy.enabled }}
+    - { port: 8443, targetPort: 8443, name: https-proxy }   # TRUSTED-PROXY mTLS (RFC 0013)
+    {{- end }}
 ---
 # Ed25519 signing key for A2A Agent Card JWS signing (RFC 0014). The gateway
 # loads the 32-byte seed (base64) and serves the public key at

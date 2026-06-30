@@ -31,6 +31,20 @@ reqwest = { version = "0.12", default-features = false, features = [
 # ring, never aws-lc-rs → no C toolchain (matches the apiserver).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
+# TRUSTED-PROXY mode (front-proxy trust over mTLS): a SECOND listener serving
+# rustls TLS that REQUIRES a CA-signed client cert, mirroring the node-agent's
+# dual listener. `tls-rustls-no-provider` keeps it ring-only (no aws-lc-rs, no C
+# toolchain); the binary installs the ring provider in main().
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+# The TlsStream type the custom acceptor reads the verified peer cert off of.
+# default-features off → no aws-lc-rs (rustls/ring is unified across the graph).
+tokio-rustls = { version = "0.26", default-features = false }
+# `tower::Layer` so the acceptor can inject the captured peer cert as an extension
+# (axum's `Extension` is a `Layer`).
+tower = { version = "0.5", default-features = false }
+# Parse the verified peer cert's CN/SAN for the trusted-proxy allow-list. Pure
+# Rust (der/spki), no C toolchain.
+x509-cert = "0.2"
 # CRD types (Agent / AgentFleet) for the mesh discovery registry (GET /agents).
 agent-api = { path = "../agent-api" }
 # Durable A2A task store (RFC 0013). sslmode=disable → NoTls (default); when the

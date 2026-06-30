@@ -294,7 +294,14 @@ fn build_validation(oidc: &OidcAccess, alg: Algorithm) -> Validation {
 
 /// Enforce every `required_claims` rule (logical AND). Each rule passes when the
 /// caller's claim satisfies it ([`claim_satisfied`]); the first miss → 403.
-fn enforce_claims(claims: &Value, required: Option<&[ClaimRequirement]>) -> Result<(), AuthError> {
+///
+/// `pub(crate)` so the trusted-proxy path can reuse the SAME authZ logic against a
+/// caller identity asserted by the front proxy (no JWT) — see
+/// [`crate::trusted_proxy::identity_claims`].
+pub(crate) fn enforce_claims(
+    claims: &Value,
+    required: Option<&[ClaimRequirement]>,
+) -> Result<(), AuthError> {
     let Some(rules) = required else {
         return Ok(());
     };

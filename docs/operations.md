@@ -24,7 +24,7 @@ usage) and in a handful of **secrets** (signing key, cert-manager CA + leaf cert
 | `agentctl-postgres` PVC (`storage=pvc`) | PersistentVolumeClaim | **yes** | volume snapshot |
 | `agentctl-gateway-signing` | Secret (Ed25519 JWS seed) | **yes** | yes — critical |
 | `agentctl-ca-key` | Secret (cert-manager CA, 10y) | no (cert-manager owned) | yes — critical |
-| `agentctl-apiserver-tls` / `-admission-tls` / `-node-agent-tls` / `-client-tls` | Secrets (leaf certs) | no | optional (re-mintable from the CA) |
+| `agentctl-apiserver-tls` / `-admission-tls` / `-node-agent-tls` / `-client-tls` (and `-trusted-proxy-tls` / `-trusted-proxy-client-tls` when `trustedProxy.enabled`) | Secrets (leaf certs) | no | optional (re-mintable from the CA) |
 
 Everything else (Deployments, RBAC, CRD instances) is declarative and recreated by
 `helm upgrade` + `kubectl apply` of your CRs, so it does not need a separate backup.
@@ -516,3 +516,66 @@ deploy/agentctl-modelgateway deploy/agentctl-gateway deploy/agentctl-scaler` and
 restart the agent pods so every consumer re-reads it. Update any replicated copies
 and external clients. This shared token is a coarse v1 access gate, not per-pod
 identity — see `docs/security.md` for the attested-identity follow-ups.
+
+---
+
+## 8. Trusted front-proxy (external API gateway)
+
+A fronting API gateway (e.g. APISIX) can terminate edge auth (OIDC/SAML/mTLS) and assert
+the authenticated identity to the A2A gateway as `X-Forwarded-User/-Email/-Groups`. agentctl
+honors those headers **only** over an authenticated mTLS channel, gated by
+`trustedProxy.enabled` (default **off**). See `docs/security.md` → "Trusted front-proxy
+(external API gateway)" for the full trust model (authenticate the proxy → trust
+`X-Forwarded-*` → enforce `requiredClaims`, strip on untrusted callers).
+
+### Enable
+
+```sh
+helm upgrade agentctl charts/agentctl -n agentctl-system --reuse-values \
+  --set trustedProxy.enabled=true \
+  --set 'trustedProxy.allowedClientNames={apisix}'
+```
+
+This adds a trusted-proxy **mTLS listener** on the gateway (`:8443`), issues a cert-manager
+serving cert (`agentctl-trusted-proxy-tls`, signed by the chart CA) for it, and issues a
+client cert (`agentctl-trusted-proxy-client-tls`) for the front-proxy to present. The gateway
+verifies the proxy's client cert against the **agentctl CA** and checks its subject/SAN
+against `allowedClientNames`; on any other (plaintext) path it **strips** the `X-Forwarded-*`
+headers (anti-spoof).
+
+### Retrieve the APISIX client cert
+
+```sh
+# client cert + key for APISIX to present on the upstream mTLS hop
+kubectl -n agentctl-system get secret agentctl-trusted-proxy-client-tls \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d > apisix-client.crt
+kubectl -n agentctl-system get secret agentctl-trusted-proxy-client-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d > apisix-client.key
+# the agentctl CA, to verify the gateway serving cert
+kubectl -n agentctl-system get secret agentctl-trusted-proxy-client-tls \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > agentctl-ca.crt
+```
+
+### Configure the APISIX route / upstream
+
+Point an APISIX route at the gateway's trusted-proxy mTLS listener, terminate OIDC at the
+edge, and assert the verified identity upstream (full sketch in `docs/security.md`):
+
+- **upstream** — `scheme: https`, node `agentctl-gateway.agentctl-system.svc:8443`,
+  `tls.client_cert`/`tls.client_key` = the `apisix-client.crt`/`.key` above (its subject/SAN
+  must be in `trustedProxy.allowedClientNames`); verify the gateway cert against
+  `agentctl-ca.crt`.
+- **plugins** — `openid-connect` (edge auth) + `proxy-rewrite` setting
+  `X-Forwarded-User/-Email/-Groups` from the verified userinfo. **Pass-through alternative:**
+  omit both plugins and proxy the caller's `Authorization: Bearer` through for the gateway's
+  native `spec.access.oidc` gate to verify.
+
+Pair with the target agent's `spec.access.oidc.requiredClaims` so the asserted identity is
+authorized (e.g. `groups` must contain `support`), and with `forwardIdentity: true` to pass
+it to the agent.
+
+### Default-off note
+
+`trustedProxy.enabled` defaults **off**: no mTLS listener, no extra certs are rendered, and
+the gateway honors **no** `X-Forwarded-*` from anyone (it strips them) — installs are
+unchanged. Turn it on only when a trusted front-proxy fronts the A2A surface.

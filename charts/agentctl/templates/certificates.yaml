@@ -121,4 +121,46 @@ spec:
   usages: ["client auth"]
   issuerRef:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- if and .Values.gateway.enabled .Values.trustedProxy.enabled }}
+---
+# TRUSTED-PROXY (RFC 0013): serving cert for the gateway's mTLS :8443 listener, so
+# the fronting proxy (APISIX) can verify the gateway. Secret carries ca.crt, which
+# the gateway also loads (TRUSTED_PROXY_CA) to verify the proxy's client cert.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-trusted-proxy
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-trusted-proxy-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-gateway.{{ $ns }}.svc
+    - agentctl-gateway.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+---
+# TRUSTED-PROXY (RFC 0013): client cert the operator hands to the fronting proxy
+# (APISIX) so it can connect to the gateway's :8443 listener over mTLS. Signed by
+# the agentctl CA; CN must be in trustedProxy.allowedNames (default "apisix").
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-trusted-proxy-client
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-trusted-proxy-client-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: {{ .Values.trustedProxy.proxyCommonName | default "apisix" | quote }}
+  usages: ["client auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- end }}
 {{- end }}

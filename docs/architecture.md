@@ -247,6 +247,44 @@ sequenceDiagram
   end
 ```
 
+### 7b. Trusted front-proxy A2A request — edge auth at an external API gateway
+
+When `trustedProxy.enabled` is set, a fronting API gateway (e.g. APISIX) terminates edge auth
+and asserts the identity over an **mTLS channel**. The A2A gateway authenticates the *proxy*
+(client cert vs the agentctl CA + an allowed-client-names list), trusts the asserted
+`X-Forwarded-*`, **strips** those headers from any untrusted plaintext caller, enforces the
+agent's `requiredClaims`, and forwards the identity to the agent. Mirrors the
+aggregated-apiserver front-proxy. See security.md → "Trusted front-proxy (external API gateway)".
+
+```mermaid
+sequenceDiagram
+  participant C as External client
+  participant PX as APISIX (front-proxy)
+  participant IdP as OIDC issuer
+  participant GW as A2A gateway
+  participant AG as agentd
+  Note over PX: trustedProxy.enabled; APISIX holds a client cert from the agentctl CA
+  C->>PX: request + Authorization: Bearer <JWT>
+  PX->>IdP: terminate edge auth (verify JWT)
+  IdP-->>PX: verified identity (sub / email / groups)
+  PX->>GW: mTLS (client cert) + X-Forwarded-User/-Email/-Groups
+  Note over GW: verify client cert vs agentctl CA; client name allow-listed?
+  alt untrusted channel (plaintext / name not allow-listed)
+    GW->>GW: STRIP X-Forwarded-* (anti-spoof)
+    GW-->>C: 401/403 — no asserted identity honored
+  else trusted proxy channel
+    Note over GW: trust X-Forwarded-*; enforce agent requiredClaims
+    alt requiredClaims unmet
+      GW-->>PX: 403 deny
+    else authorized
+      GW->>AG: forward + caller identity (X-Forwarded-*)
+      AG-->>GW: result / SSE frames
+      GW-->>PX: result / SSE
+      PX-->>C: result / SSE
+    end
+  end
+```
+
 ---
 
 ## 8. Claim-mode work distribution — elastic from zero
