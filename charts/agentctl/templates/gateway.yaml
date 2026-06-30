@@ -154,10 +154,16 @@ spec:
               value: /etc/agentctl-trusted-proxy/ca.crt
             - name: TRUSTED_PROXY_ALLOWED_NAMES
               value: {{ .Values.trustedProxy.allowedNames | default (list "apisix") | join "," | quote }}
-            # key=NAME form the gateway parser expects (user/email/groups -> header name).
+            # Prefix -> the gateway trusts/strips <prefix>-subject/-email/-groups.
+            - name: TRUSTED_PROXY_HEADER_PREFIX
+              value: {{ .Values.trustedProxy.headerPrefix | default "x-agentctl" | quote }}
+            {{- $ih := .Values.trustedProxy.identityHeaders | default dict }}
+            {{- if or $ih.user $ih.email $ih.groups }}
+            # Optional explicit per-header override (key=NAME); empty keys keep the
+            # prefix-derived name. The gateway parser applies these onto the prefix.
             - name: TRUSTED_PROXY_IDENTITY_HEADERS
-              {{- $ih := .Values.trustedProxy.identityHeaders | default dict }}
-              value: {{ printf "user=%s,email=%s,groups=%s" ($ih.user | default "x-agentctl-subject") ($ih.email | default "x-agentctl-email") ($ih.groups | default "x-agentctl-groups") | quote }}
+              value: {{ printf "user=%s,email=%s,groups=%s" ($ih.user | default "") ($ih.email | default "") ($ih.groups | default "") | quote }}
+            {{- end }}
             {{- end }}
           {{- with (index .Values "gateway").envFrom }}
           envFrom:

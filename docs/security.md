@@ -14,7 +14,7 @@ utility paths** (intelligence, coordination, A2A-inbound) are **network-isolated
 | **node-agent control API** :8443 | HTTPS, **mTLS** (`WebPkiClientVerifier`) | CA-signed **client cert** (`agentctl-client-tls`) | + **`SO_PEERCRED` attestation**: 403 unless the attested pod-uid matches the requested `<uid>` | apiserver + gateway |
 | **node-agent → agent** (unix socket) | unix socket (hostPath) | **`SO_PEERCRED`** → `/proc` cgroup → pod uid | file perms + attestation | node-agent (local) |
 | **ModelGateway** :8080 (`/v1/infer`) | HTTP (+ optional Bearer) | identity header-asserted (`X-Agent-Namespace`/`-Name`), **source-IP attested** (`modelgateway.attestIdentity` — kube pod lookup, anti-spoof), **or pod-uid attested** via the node-agent forwarder (`X-Agent-Pod-Uid`, networkless/routed-infer tier — `SO_PEERCRED`); optional **`AGENTCTL_API_TOKEN`** bearer gate | ModelPool existence + budget | agents (NetworkPolicy-scoped) |
-| **A2A gateway** :8080 (plaintext) + **:8443 trusted-proxy mTLS** (opt-in) | HTTP/SSE (+ optional Bearer); **trusted-proxy mTLS** when `trustedProxy.enabled` | optional **`AGENTCTL_API_TOKEN`** bearer gate (cards are JWS-signed for the *caller* to verify); per-agent **OIDC** (JWKS JWT); **trusted-proxy** — front-proxy client cert verified vs the agentctl CA + `allowedClientNames`, then asserted `X-Forwarded-User/-Email/-Groups` trusted (stripped from untrusted plaintext callers) | per-agent **`requiredClaims`** (OIDC native or trusted-proxy pass-through) | A2A clients / peer agents / fronting API gateway (APISIX) |
+| **A2A gateway** :8080 (plaintext) + **:8443 trusted-proxy mTLS** (opt-in) | HTTP/SSE (+ optional Bearer); **trusted-proxy mTLS** when `trustedProxy.enabled` | optional **`AGENTCTL_API_TOKEN`** bearer gate (cards are JWS-signed for the *caller* to verify); per-agent **OIDC** (JWKS JWT); **trusted-proxy** — front-proxy client cert verified vs the agentctl CA + `allowedNames`, then asserted `<prefix>-subject/-email/-groups` trusted (prefix `trustedProxy.headerPrefix`, default `x-agentctl`; stripped from untrusted plaintext callers) | per-agent **`requiredClaims`** (OIDC native or trusted-proxy pass-through) | A2A clients / peer agents / fronting API gateway (APISIX) |
 | **coordination server** :8080 (`work.*`) | HTTP (+ optional Bearer) | optional **`AGENTCTL_API_TOKEN`** bearer gate | — | producers + agents + scaler |
 | **scaler** gRPC :9100 | gRPC | none (in-cluster, KEDA-only) | — | KEDA |
 | **admission webhook** :8443 | HTTPS, `with_no_client_auth` | kube-apiserver trusted (caBundle lets *it* verify the webhook) | the gate logic | kube-apiserver |
@@ -218,14 +218,16 @@ the identity headers it asserts.
 1. **Authenticate the proxy — mTLS client cert + allowed-names.** The gateway serves a
    trusted-proxy mTLS listener (`:8443`): it verifies the front-proxy's **client cert against
    the agentctl CA** and checks the cert's subject/SAN against an **allowed-client-names**
-   list (`trustedProxy.allowedClientNames`). Only a connection presenting a CA-signed cert
+   list (`trustedProxy.allowedNames`). Only a connection presenting a CA-signed cert
    whose name is allow-listed is a *trusted channel*. The CA + name allow-list are exactly
    what make the asserted identity headers trustworthy — mirroring the aggregated-apiserver
    requestheader-CA.
-2. **Trust the asserted `X-Forwarded-*`.** Over a trusted channel the gateway reads the
-   proxy-asserted identity (`X-Forwarded-User` → `sub`, `X-Forwarded-Email`,
-   `X-Forwarded-Groups`) — exactly as the apiserver trusts `X-Remote-User/Group` from the
-   aggregator.
+2. **Trust the asserted identity headers.** Over a trusted channel the gateway reads the
+   proxy-asserted identity from `<prefix>-subject` → `sub`, `<prefix>-email`,
+   `<prefix>-groups`. The **prefix is configurable** via `trustedProxy.headerPrefix`
+   (default `x-agentctl` → `x-agentctl-subject`/`-email`/`-groups`); individual names can be
+   overridden with `trustedProxy.identityHeaders` (e.g. a proxy that emits `X-Forwarded-User`).
+   This is exactly how the apiserver trusts `X-Remote-User/Group` from the aggregator.
 3. **Enforce `requiredClaims` + authorize, then forward.** The gateway runs the target
    agent's `spec.access.oidc.requiredClaims` against the asserted identity (e.g. `groups`
    must contain `support`), denies on mismatch, and **forwards the identity to the agent**
@@ -235,8 +237,9 @@ the identity headers it asserts.
 ### Anti-spoof: strip on untrusted callers
 
 The protection is symmetric. On **any plaintext / non-trusted-proxy** path the gateway
-**strips** inbound `X-Forwarded-User`/`-Email`/`-Groups` before processing, so a caller that
-did *not* arrive over the authenticated mTLS channel can never assert an identity — the
+**strips** the inbound identity headers (the configured `<prefix>-subject/-email/-groups`,
+plus the legacy `X-Forwarded-*` set as belt-and-suspenders) before processing, so a caller
+that did *not* arrive over the authenticated mTLS channel can never assert an identity — the
 headers are honored **only** over the trusted-proxy channel. This is the direct analogue of
 the apiserver discarding `X-Remote-*` from anyone but the front-proxy.
 
@@ -269,11 +272,11 @@ routes:
         discovery: https://login.acme.example/.well-known/openid-configuration
         bearer_only: true
       proxy-rewrite:                          # assert the verified identity upstream
-        headers:
+        headers:                              # default prefix x-agentctl (trustedProxy.headerPrefix)
           set:
-            X-Forwarded-User:   "$http_x_userinfo_sub"
-            X-Forwarded-Email:  "$http_x_userinfo_email"
-            X-Forwarded-Groups: "$http_x_userinfo_groups"
+            x-agentctl-subject: "$http_x_userinfo_sub"
+            x-agentctl-email:   "$http_x_userinfo_email"
+            x-agentctl-groups:  "$http_x_userinfo_groups"
     upstream:
       scheme: https                           # mTLS to the gateway trusted-proxy listener
       nodes: { "agentctl-gateway.agentctl-system.svc:8443": 1 }
@@ -287,7 +290,7 @@ routes:
 
 The APISIX client cert/key come from the chart-issued **`agentctl-trusted-proxy-client-tls`**
 Secret (retrieval in operations.md §8). Its subject/SAN **must** be on
-`trustedProxy.allowedClientNames`, or the gateway rejects the channel and strips the headers.
+`trustedProxy.allowedNames`, or the gateway rejects the channel and strips the headers.
 
 **Pass-through alternative.** If you prefer agentctl to verify the JWT itself (native OIDC,
 above) while still fronting with APISIX for TLS/routing, **drop** the `openid-connect` +
@@ -407,7 +410,8 @@ pinning close the loop at deploy.
 - [x] **Trusted front-proxy (external API gateway)** — `trustedProxy.enabled` (default off)
   lets a fronting gateway (e.g. APISIX) terminate edge auth and assert identity: the A2A
   gateway authenticates the *proxy* over **mTLS** (client cert vs the agentctl CA +
-  `allowedClientNames`), then trusts the asserted `X-Forwarded-User/-Email/-Groups`,
+  `allowedNames`), then trusts the asserted `<prefix>-subject/-email/-groups` (prefix
+  `trustedProxy.headerPrefix`, default `x-agentctl`; individual names overridable),
   **strips** those headers from untrusted plaintext callers (anti-spoof), enforces the
   agent's `requiredClaims`, and forwards the identity to the agent. Mirrors the
   aggregated-apiserver front-proxy (requestheader-CA + `X-Remote-*`); composes with per-agent

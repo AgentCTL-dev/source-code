@@ -251,8 +251,9 @@ sequenceDiagram
 
 When `trustedProxy.enabled` is set, a fronting API gateway (e.g. APISIX) terminates edge auth
 and asserts the identity over an **mTLS channel**. The A2A gateway authenticates the *proxy*
-(client cert vs the agentctl CA + an allowed-client-names list), trusts the asserted
-`X-Forwarded-*`, **strips** those headers from any untrusted plaintext caller, enforces the
+(client cert vs the agentctl CA + an `allowedNames` list), trusts the asserted
+`<prefix>-subject/-email/-groups` (prefix `trustedProxy.headerPrefix`, default `x-agentctl`),
+**strips** those headers from any untrusted plaintext caller, enforces the
 agent's `requiredClaims`, and forwards the identity to the agent. Mirrors the
 aggregated-apiserver front-proxy. See security.md → "Trusted front-proxy (external API gateway)".
 
@@ -267,17 +268,17 @@ sequenceDiagram
   C->>PX: request + Authorization: Bearer <JWT>
   PX->>IdP: terminate edge auth (verify JWT)
   IdP-->>PX: verified identity (sub / email / groups)
-  PX->>GW: mTLS (client cert) + X-Forwarded-User/-Email/-Groups
+  PX->>GW: mTLS (client cert) + x-agentctl-subject/-email/-groups
   Note over GW: verify client cert vs agentctl CA; client name allow-listed?
   alt untrusted channel (plaintext / name not allow-listed)
-    GW->>GW: STRIP X-Forwarded-* (anti-spoof)
+    GW->>GW: STRIP x-agentctl-* + legacy X-Forwarded-* (anti-spoof)
     GW-->>C: 401/403 — no asserted identity honored
   else trusted proxy channel
-    Note over GW: trust X-Forwarded-*; enforce agent requiredClaims
+    Note over GW: trust x-agentctl-*; enforce agent requiredClaims
     alt requiredClaims unmet
       GW-->>PX: 403 deny
     else authorized
-      GW->>AG: forward + caller identity (X-Forwarded-*)
+      GW->>AG: forward + caller identity
       AG-->>GW: result / SSE frames
       GW-->>PX: result / SSE
       PX-->>C: result / SSE

@@ -199,6 +199,7 @@
         "enabled": { "type": "boolean" },
         "allowedNames": { "type": "array", "items": { "type": "string" } },
         "proxyCommonName": { "type": "string" },
+        "headerPrefix": { "type": "string" },
         "identityHeaders": { "type": "object", "properties": { "user": { "type": "string" }, "email": { "type": "string" }, "groups": { "type": "string" } } }
       }
     },

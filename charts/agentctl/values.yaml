@@ -271,13 +271,14 @@ trustedProxy:
   # CommonName minted on the client cert handed to the fronting proxy
   # (secret agentctl-trusted-proxy-client-tls). Keep in sync with allowedNames.
   proxyCommonName: apisix
-  # Request headers the trusted proxy injects with the verified caller identity;
-  # the gateway trusts these ONLY on the mTLS listener (and strips them from any
-  # plaintext caller). -> TRUSTED_PROXY_IDENTITY_HEADERS (rendered user=..,email=..,groups=..)
-  identityHeaders:
-    user: x-agentctl-subject
-    email: x-agentctl-email
-    groups: x-agentctl-groups
+  # Prefix for the identity headers the trusted proxy asserts. The gateway trusts
+  # (on the mTLS listener) and strips (from plaintext callers) <prefix>-subject,
+  # <prefix>-email, <prefix>-groups. -> TRUSTED_PROXY_HEADER_PREFIX
+  headerPrefix: x-agentctl
+  # Optional ADVANCED override of individual header names (e.g. a proxy that emits
+  # X-Forwarded-User). Empty keys keep the prefix-derived name. Leave {} to use the
+  # prefix. -> TRUSTED_PROXY_IDENTITY_HEADERS
+  identityHeaders: {}
 
 modelgateway:
   enabled: true

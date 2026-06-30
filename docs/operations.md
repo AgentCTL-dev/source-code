@@ -522,26 +522,28 @@ identity — see `docs/security.md` for the attested-identity follow-ups.
 ## 8. Trusted front-proxy (external API gateway)
 
 A fronting API gateway (e.g. APISIX) can terminate edge auth (OIDC/SAML/mTLS) and assert
-the authenticated identity to the A2A gateway as `X-Forwarded-User/-Email/-Groups`. agentctl
-honors those headers **only** over an authenticated mTLS channel, gated by
-`trustedProxy.enabled` (default **off**). See `docs/security.md` → "Trusted front-proxy
-(external API gateway)" for the full trust model (authenticate the proxy → trust
-`X-Forwarded-*` → enforce `requiredClaims`, strip on untrusted callers).
+the authenticated identity to the A2A gateway as `<prefix>-subject/-email/-groups` (prefix
+`trustedProxy.headerPrefix`, default `x-agentctl`). agentctl honors those headers **only**
+over an authenticated mTLS channel, gated by `trustedProxy.enabled` (default **off**). See
+`docs/security.md` → "Trusted front-proxy (external API gateway)" for the full trust model
+(authenticate the proxy → trust the asserted identity → enforce `requiredClaims`, strip on
+untrusted callers).
 
 ### Enable
 
 ```sh
 helm upgrade agentctl charts/agentctl -n agentctl-system --reuse-values \
   --set trustedProxy.enabled=true \
-  --set 'trustedProxy.allowedClientNames={apisix}'
+  --set 'trustedProxy.allowedNames={apisix}'
 ```
 
 This adds a trusted-proxy **mTLS listener** on the gateway (`:8443`), issues a cert-manager
 serving cert (`agentctl-trusted-proxy-tls`, signed by the chart CA) for it, and issues a
 client cert (`agentctl-trusted-proxy-client-tls`) for the front-proxy to present. The gateway
 verifies the proxy's client cert against the **agentctl CA** and checks its subject/SAN
-against `allowedClientNames`; on any other (plaintext) path it **strips** the `X-Forwarded-*`
-headers (anti-spoof).
+against `allowedNames`; on any other (plaintext) path it **strips** the configured
+`<prefix>-*` identity headers (and the legacy `X-Forwarded-*` set) so they can't be
+self-asserted (anti-spoof).
 
 ### Retrieve the APISIX client cert
 
@@ -563,10 +565,11 @@ edge, and assert the verified identity upstream (full sketch in `docs/security.m
 
 - **upstream** — `scheme: https`, node `agentctl-gateway.agentctl-system.svc:8443`,
   `tls.client_cert`/`tls.client_key` = the `apisix-client.crt`/`.key` above (its subject/SAN
-  must be in `trustedProxy.allowedClientNames`); verify the gateway cert against
+  must be in `trustedProxy.allowedNames`); verify the gateway cert against
   `agentctl-ca.crt`.
-- **plugins** — `openid-connect` (edge auth) + `proxy-rewrite` setting
-  `X-Forwarded-User/-Email/-Groups` from the verified userinfo. **Pass-through alternative:**
+- **plugins** — `openid-connect` (edge auth) + `proxy-rewrite` setting the prefix headers
+  `x-agentctl-subject/-email/-groups` (or your `trustedProxy.headerPrefix`) from the verified
+  userinfo. **Pass-through alternative:**
   omit both plugins and proxy the caller's `Authorization: Bearer` through for the gateway's
   native `spec.access.oidc` gate to verify.
 

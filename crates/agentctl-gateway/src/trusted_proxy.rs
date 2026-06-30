@@ -10,9 +10,10 @@
 //! ON the gateway serves a SECOND listener:
 //!
 //! * **`:8080` plaintext** — the existing surface. UNTRUSTED: every inbound
-//!   trusted-proxy identity header (`X-Forwarded-User/-Email/-Groups` and any
-//!   configured names) is STRIPPED before handling, so an in-cluster caller can
-//!   never self-assert identity ([`strip_plaintext`]).
+//!   trusted-proxy identity header (the configured `<prefix>-subject/-email/-groups`,
+//!   default prefix `x-agentctl`, plus the legacy `X-Forwarded-*` set) is STRIPPED
+//!   before handling, so an in-cluster caller can never self-assert identity
+//!   ([`strip_plaintext`]).
 //! * **`AGENTCTL_GATEWAY_TLS_ADDR` (default `:8443`) mTLS** — rustls REQUIRES a
 //!   client cert chained to the trusted-proxy CA (`TRUSTED_PROXY_CA`) via a
 //!   [`WebPkiClientVerifier`]. After the chain verifies, the peer cert's CN/SAN
@@ -57,10 +58,17 @@ const DEFAULT_TLS_DIR: &str = "/etc/agentctl-gateway/tls";
 /// Default mount of the trusted-proxy CA (verifies the proxy's client cert).
 const DEFAULT_CA_PATH: &str = "/etc/agentctl-trusted-proxy/ca.crt";
 
-/// Default identity header names asserted by the trusted proxy.
-const DEFAULT_USER_HEADER: &str = "X-Forwarded-User";
-const DEFAULT_EMAIL_HEADER: &str = "X-Forwarded-Email";
-const DEFAULT_GROUPS_HEADER: &str = "X-Forwarded-Groups";
+/// Default prefix for the identity headers the trusted proxy asserts; the names
+/// derive as `<prefix>-subject`, `<prefix>-email`, `<prefix>-groups` (configurable
+/// via `TRUSTED_PROXY_HEADER_PREFIX`).
+const DEFAULT_HEADER_PREFIX: &str = "x-agentctl";
+
+/// Legacy header names ALSO stripped from plaintext callers (belt-and-suspenders):
+/// a common proxy convention that must never be self-asserted on :8080, regardless
+/// of the configured prefix.
+const LEGACY_USER_HEADER: &str = "X-Forwarded-User";
+const LEGACY_EMAIL_HEADER: &str = "X-Forwarded-Email";
+const LEGACY_GROUPS_HEADER: &str = "X-Forwarded-Groups";
 
 /// X.509 OIDs we read off the verified peer cert (dotted form; `new_unwrap` is a
 /// compile-time const). CN (subject) and SubjectAltName.
@@ -78,13 +86,43 @@ pub struct IdentityHeaders {
     pub groups: String,
 }
 
+impl IdentityHeaders {
+    /// Derive the asserted header names from a prefix: `<prefix>-subject`,
+    /// `<prefix>-email`, `<prefix>-groups`. A trailing `-` on the prefix is ignored.
+    pub fn from_prefix(prefix: &str) -> Self {
+        let p = prefix.trim().trim_end_matches('-');
+        Self {
+            user: format!("{p}-subject"),
+            email: format!("{p}-email"),
+            groups: format!("{p}-groups"),
+        }
+    }
+
+    /// Apply explicit `user=..,email=..,groups=..` overrides onto self; unspecified
+    /// keys keep their (prefix-derived) value.
+    pub fn with_overrides(mut self, spec: &str) -> Self {
+        for part in spec.split(',') {
+            let Some((k, v)) = part.split_once('=') else {
+                continue;
+            };
+            let v = v.trim();
+            if v.is_empty() {
+                continue;
+            }
+            match k.trim().to_ascii_lowercase().as_str() {
+                "user" => self.user = v.to_string(),
+                "email" => self.email = v.to_string(),
+                "groups" => self.groups = v.to_string(),
+                _ => {}
+            }
+        }
+        self
+    }
+}
+
 impl Default for IdentityHeaders {
     fn default() -> Self {
-        Self {
-            user: DEFAULT_USER_HEADER.to_string(),
-            email: DEFAULT_EMAIL_HEADER.to_string(),
-            groups: DEFAULT_GROUPS_HEADER.to_string(),
-        }
+        Self::from_prefix(DEFAULT_HEADER_PREFIX)
     }
 }
 
@@ -121,9 +159,15 @@ impl Config {
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_CA_PATH));
         let allowed_names =
             parse_allowed_names(&std::env::var("TRUSTED_PROXY_ALLOWED_NAMES").unwrap_or_default());
-        let identity_headers = std::env::var("TRUSTED_PROXY_IDENTITY_HEADERS")
-            .map(|s| parse_identity_headers(&s))
-            .unwrap_or_default();
+        // Header names derive from a configurable prefix (TRUSTED_PROXY_HEADER_PREFIX
+        // -> <prefix>-subject/-email/-groups); an explicit TRUSTED_PROXY_IDENTITY_HEADERS
+        // (user=..,email=..,groups=..) overrides individual names on top.
+        let prefix = std::env::var("TRUSTED_PROXY_HEADER_PREFIX")
+            .unwrap_or_else(|_| DEFAULT_HEADER_PREFIX.into());
+        let mut identity_headers = IdentityHeaders::from_prefix(&prefix);
+        if let Ok(spec) = std::env::var("TRUSTED_PROXY_IDENTITY_HEADERS") {
+            identity_headers = identity_headers.with_overrides(&spec);
+        }
         Self {
             enabled,
             tls_addr,
@@ -334,26 +378,13 @@ pub fn parse_allowed_names(csv: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse `TRUSTED_PROXY_IDENTITY_HEADERS` (`user=..,email=..,groups=..`),
-/// overriding only the keys present; unspecified keys keep their default name.
+/// Parse `TRUSTED_PROXY_IDENTITY_HEADERS` (`user=..,email=..,groups=..`) onto the
+/// default (prefix-derived) names — a thin wrapper over
+/// [`IdentityHeaders::with_overrides`]; `Config::from_env` applies overrides onto
+/// the configured prefix directly.
+#[cfg(test)]
 pub fn parse_identity_headers(spec: &str) -> IdentityHeaders {
-    let mut h = IdentityHeaders::default();
-    for part in spec.split(',') {
-        let Some((k, v)) = part.split_once('=') else {
-            continue;
-        };
-        let v = v.trim();
-        if v.is_empty() {
-            continue;
-        }
-        match k.trim().to_ascii_lowercase().as_str() {
-            "user" => h.user = v.to_string(),
-            "email" => h.email = v.to_string(),
-            "groups" => h.groups = v.to_string(),
-            _ => {}
-        }
-    }
-    h
+    IdentityHeaders::default().with_overrides(spec)
 }
 
 /// Extract the CN (subject) and every DNS SubjectAltName from a DER cert. A parse
@@ -439,9 +470,9 @@ pub fn strip_identity_headers(headers: &mut HeaderMap, h: &IdentityHeaders) {
         h.user.as_str(),
         h.email.as_str(),
         h.groups.as_str(),
-        DEFAULT_USER_HEADER,
-        DEFAULT_EMAIL_HEADER,
-        DEFAULT_GROUPS_HEADER,
+        LEGACY_USER_HEADER,
+        LEGACY_EMAIL_HEADER,
+        LEGACY_GROUPS_HEADER,
     ] {
         headers.remove(name);
     }
@@ -565,14 +596,34 @@ mod tests {
         assert_eq!(h.email, "X-Edge-Email");
         assert_eq!(h.groups, "X-Edge-Groups");
 
-        // Partial spec keeps defaults for the unspecified keys.
+        // Partial spec keeps the (prefix-derived) defaults for unspecified keys.
         let h2 = parse_identity_headers("user=X-Only-User");
         assert_eq!(h2.user, "X-Only-User");
-        assert_eq!(h2.email, DEFAULT_EMAIL_HEADER);
-        assert_eq!(h2.groups, DEFAULT_GROUPS_HEADER);
+        assert_eq!(h2.email, "x-agentctl-email");
+        assert_eq!(h2.groups, "x-agentctl-groups");
 
         // Empty spec ⇒ all defaults.
         assert_eq!(parse_identity_headers(""), IdentityHeaders::default());
+    }
+
+    #[test]
+    fn header_names_derive_from_prefix() {
+        // Default prefix.
+        let d = IdentityHeaders::default();
+        assert_eq!(d.user, "x-agentctl-subject");
+        assert_eq!(d.email, "x-agentctl-email");
+        assert_eq!(d.groups, "x-agentctl-groups");
+
+        // Custom prefix (trailing '-' tolerated).
+        let h = IdentityHeaders::from_prefix("x-acme-");
+        assert_eq!(h.user, "x-acme-subject");
+        assert_eq!(h.email, "x-acme-email");
+        assert_eq!(h.groups, "x-acme-groups");
+
+        // Prefix + an explicit per-key override compose.
+        let h2 = IdentityHeaders::from_prefix("x-acme").with_overrides("groups=X-Acme-Roles");
+        assert_eq!(h2.user, "x-acme-subject");
+        assert_eq!(h2.groups, "X-Acme-Roles");
     }
 
     // --- identity-header extraction ----------------------------------------
@@ -580,9 +631,9 @@ mod tests {
     #[test]
     fn extract_identity_from_default_headers() {
         let mut h = HeaderMap::new();
-        hv(&mut h, "X-Forwarded-User", "alice");
-        hv(&mut h, "X-Forwarded-Email", "alice@corp.example");
-        hv(&mut h, "X-Forwarded-Groups", "eng, oncall");
+        hv(&mut h, "x-agentctl-subject", "alice");
+        hv(&mut h, "x-agentctl-email", "alice@corp.example");
+        hv(&mut h, "x-agentctl-groups", "eng, oncall");
         let id = extract_asserted_identity(&h, &IdentityHeaders::default()).expect("identity");
         assert_eq!(id.sub, "alice");
         assert_eq!(id.email.as_deref(), Some("alice@corp.example"));
@@ -592,7 +643,7 @@ mod tests {
     #[test]
     fn extract_identity_none_without_user_header() {
         let mut h = HeaderMap::new();
-        hv(&mut h, "X-Forwarded-Groups", "eng");
+        hv(&mut h, "x-agentctl-groups", "eng");
         assert!(extract_asserted_identity(&h, &IdentityHeaders::default()).is_none());
     }
 
