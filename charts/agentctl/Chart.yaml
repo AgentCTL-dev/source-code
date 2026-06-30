@@ -18,4 +18,6 @@ maintainers:
 annotations:
   # cert-manager is a hard prerequisite (TLS for the apiserver, admission webhook,
   # and node-agent mTLS). The chart does not vendor it — install it first.
-  agentctl.dev/requires: "cert-manager >= 1.13, a CNI for NetworkPolicy (optional)"
+  # KEDA is optional — only for claim-mode autoscaling (scaler.enabled). Postgres is
+  # bundled by the chart. A NetworkPolicy CNI is optional (networkPolicies.enabled).
+  agentctl.dev/requires: "cert-manager >= 1.13 (hard); KEDA >= 2.x (optional, scaler.enabled); a CNI for NetworkPolicy (optional, networkPolicies.enabled)"

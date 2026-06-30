@@ -12,12 +12,35 @@ and rotated by **cert-manager**, with the `caBundle` injected automatically.
 
 ## Prerequisites
 
-| Requirement | Why |
-|---|---|
-| **cert-manager** (≥ 1.13) | issues every serving/mTLS cert + injects the caBundles. `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml` |
-| A **CNI** that enforces NetworkPolicy (Calico/Cilium) | only if you set `networkPolicies.enabled=true` (kindnet ignores them) |
-| **Postgres** | the gateway + modelgateway durable store — bundled (eval) or external (prod) |
-| Aggregation layer enabled | the APIServer registers an `APIService` (standard on stock k8s) |
+| Requirement | Required? | Why |
+|---|---|---|
+| **cert-manager** (≥ 1.13) | **hard** | issues every serving/mTLS cert + injects the caBundles. `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml` |
+| **Postgres** | bundled | the gateway + modelgateway durable store — **bundled** by the chart (eval) or external (prod, `postgres.mode=external`) |
+| Aggregation layer enabled | standard | the APIServer registers an `APIService` (standard on stock k8s) |
+| **KEDA** (≥ 2.x) | *optional* | only for **claim-mode autoscaling** (`scaler.enabled` — elastic-from-zero AgentFleets). The chart installs and runs fully without it. `helm install keda kedacore/keda -n keda --create-namespace` |
+| A **CNI** that enforces NetworkPolicy (Calico/Cilium) | *optional* | only if you set `networkPolicies.enabled=true` (kindnet ignores them) |
+
+**cert-manager is the only hard external prerequisite.** Postgres is bundled; KEDA
+and a policy CNI are needed only for the opt-in features that use them (below).
+
+## What this installs
+
+A default install brings up the **core control plane** (no deps beyond cert-manager):
+`operator` · `node-agent` (DaemonSet) · aggregated `apiserver` · A2A `gateway` ·
+`modelgateway` · `admission` · bundled `postgres` — the "7 components" the verify step
+checks. Two planes are **opt-in** (default off): the **coordination** server
+(`coordination.enabled` — the `work.*` claim hub) and the **scaler**
+(`scaler.enabled` — elastic-from-zero autoscaling, **which requires KEDA**). Enable
+both for claim-mode fleets:
+
+```console
+helm upgrade agentctl ./charts/agentctl -n agentctl-system --reuse-values \
+  --set coordination.enabled=true --set scaler.enabled=true   # needs KEDA installed
+```
+
+> **CRDs on upgrade.** Helm installs the `crds/` (`Agent`/`AgentFleet`/`ModelPool`)
+> on **first install** but does **not** update them on `helm upgrade`. When a chart
+> upgrade changes a CRD, re-apply: `kubectl apply -f charts/agentctl/crds/`.
 
 ## Install
 

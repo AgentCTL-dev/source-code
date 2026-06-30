@@ -11,16 +11,18 @@ any conformant Kubernetes cluster — see the
 
 ## Prerequisites
 
-| Requirement | Why |
-|---|---|
-| **kind** + **kubectl** + **Helm 3** | local cluster + install tooling |
-| **cert-manager** (>= 1.13) | issues every serving/mTLS cert and injects the `caBundle`s |
-| Aggregation layer enabled | the APIServer registers an `APIService` (standard on kind) |
-| **Postgres** | the A2A gateway + ModelGateway durable store — bundled by default |
+| Requirement | Required? | Why |
+|---|---|---|
+| **kind** + **kubectl** + **Helm 3** | always | local cluster + install tooling |
+| **cert-manager** (>= 1.13) | **always** | issues every serving/mTLS cert and injects the `caBundle`s |
+| Aggregation layer enabled | always | the APIServer registers an `APIService` (standard on kind) |
+| **Postgres** | bundled | the A2A gateway + ModelGateway durable store — **bundled by the chart** by default (set `postgres.mode=external` for a managed DB) |
+| **KEDA** (>= 2.x) | *optional* | **only** for claim-mode **autoscaling** (`scaler.enabled` — elastic-from-zero AgentFleets). The control plane installs and runs fully without it. |
+| A NetworkPolicy CNI (Calico/Cilium) | *optional* | **only** if you set `networkPolicies.enabled=true`; kindnet ignores NetworkPolicies. See [NetworkPolicies](/docs/guides/security/netpol). |
 
-A NetworkPolicy-enforcing CNI (Calico/Cilium) is needed *only* if you later set
-`networkPolicies.enabled=true`; kindnet ignores NetworkPolicies. See
-[NetworkPolicies](/docs/guides/security/netpol).
+**cert-manager is the only hard external prerequisite.** Postgres is bundled. KEDA
+and a policy CNI are needed *only* for the opt-in features that use them (see
+[what gets installed](#what-gets-installed), below).
 
 ## 1. Create the cluster
 
@@ -78,6 +80,37 @@ kubectl get apiservice v1alpha1.management.agents.x-k8s.io    # AVAILABLE=True
 After install, `helm test agentctl -n agentctl-system` runs a connectivity probe
 that checks the gateway `/healthz` and that the aggregated APIService is
 registered and available.
+
+## What gets installed
+
+A default `helm install agentctl` brings up the **core control plane** — seven
+components, no extra prerequisites beyond cert-manager:
+
+`operator` · `node-agent` (DaemonSet) · aggregated `apiserver` · A2A `gateway` ·
+`modelgateway` · `admission` webhook · bundled `postgres`.
+
+Two planes are **opt-in** (default off), because they pull in extra dependencies or
+are only needed for fleet workloads:
+
+| Component | Enable | Adds |
+|---|---|---|
+| **coordination** server (`work.*` distribution) | `--set coordination.enabled=true` | the work-claim hub for claim-mode fleets |
+| **scaler** (KEDA external scaler) | `--set scaler.enabled=true` | elastic-from-zero autoscaling of claim-mode AgentFleets — **requires KEDA** |
+
+To use claim-mode autoscaling, install **KEDA** first, then enable the scaler:
+
+```console
+helm repo add kedacore https://kedacore.github.io/charts && helm repo update
+helm install keda kedacore/keda --namespace keda --create-namespace
+
+helm upgrade agentctl ./charts/agentctl -n agentctl-system \
+  --reuse-values --set coordination.enabled=true --set scaler.enabled=true
+```
+
+> **CRDs on upgrade.** The chart ships the `Agent` / `AgentFleet` / `ModelPool` CRDs
+> in `crds/`, which Helm installs automatically on **first install** but does **not**
+> update on `helm upgrade`. When upgrading to a chart version with CRD changes,
+> re-apply them: `kubectl apply -f charts/agentctl/crds/` (or `deploy/crds/`).
 
 ## What cert-manager wired
 

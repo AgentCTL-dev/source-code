@@ -17,8 +17,25 @@ CHECK THE ROLLOUT
     kubectl get apiservice v1alpha1.management.agents.x-k8s.io
   (the AVAILABLE column should read True once the apiserver is serving)
 {{- end }}
+{{- if .Values.scaler.enabled }}
+
+CLAIM-MODE AUTOSCALING (scaler enabled)
+  The KEDA external scaler is enabled, so KEDA must be installed in the cluster —
+  the operator renders a keda.sh/ScaledObject per claim-mode AgentFleet:
+    kubectl get crd scaledobjects.keda.sh    # must exist
+  If KEDA is missing:
+    helm install keda kedacore/keda -n keda --create-namespace
+{{- else }}
+
+WORK DISTRIBUTION & AUTOSCALING (opt-in — currently off)
+  For claim-mode AgentFleets (elastic-from-zero), enable the coordination server
+  and the KEDA scaler (install KEDA first):
+    helm upgrade {{ .Release.Name }} <chart> -n {{ $ns }} --reuse-values \
+      --set coordination.enabled=true --set scaler.enabled=true
+{{- end }}
 
 NEXT STEPS
   The kubectl-agent plugin ships separately from this chart — install it to drive
   agents from the CLI, then create your first Agent:
     kubectl get agents -A
+  Docs: https://github.com/AgentCTL-dev/source-code (getting-started → install / first-agent)
