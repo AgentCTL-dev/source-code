@@ -70,6 +70,7 @@ for the per-plane status and roadmap.
 
 ## Design & specs
 
+- **[docs/architecture.md](docs/architecture.md)** — wiring & communication diagrams (component topology + per-flow Mermaid sequence diagrams).
 - **[docs/design/agentctl-architecture-brainstorm.md](docs/design/agentctl-architecture-brainstorm.md)** — the binding pre-RFC record (decisions, P0, contract asks).
 - **[rfcs/](rfcs/)** — the agentctl RFC track (0001–0018).
 - **[contract/](contract/)** — the Agent Control Contract v1 (JSON Schemas + golden fixtures).
