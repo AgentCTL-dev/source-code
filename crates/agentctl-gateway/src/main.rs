@@ -725,15 +725,35 @@ fn base_url(headers: &HeaderMap) -> String {
 /// `DATABASE_URL` (e.g. `postgres://user:pw@host:5432/db?sslmode=disable`).
 ///
 /// `sslmode=disable` (the default path) → [`tokio_postgres::NoTls`]: a plain
-/// in-cluster hop, kept NetworkPolicy-scoped. Any other mode (`require`/`prefer`,
-/// e.g. bundled `postgres.tls.enabled` or an external managed DSN) → a rustls/ring
-/// connector ([`db_tls::make_connector`]) that encrypts the hop. Both stay
-/// pure-Rust (no C toolchain).
+/// in-cluster hop, kept NetworkPolicy-scoped. `sslmode=require`/`prefer` (e.g.
+/// bundled `postgres.tls.enabled` or an external managed DSN) → a rustls/ring
+/// connector ([`db_tls::make_connector`]) that encrypts the hop without verifying
+/// the cert. `sslmode=verify-full` (or `DB_TLS_VERIFY=full`) with a mounted CA
+/// bundle → a CA-pinning connector ([`db_tls::make_verifying_connector`]) that
+/// verifies the chain and server name. All paths stay pure-Rust (no C toolchain).
 fn build_pool() -> Pool {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let raw = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let (url, verify_full) = db_tls::resolve_tls(&raw);
     let cfg: tokio_postgres::Config = url.parse().expect("parse DATABASE_URL");
     let mgr = if cfg.get_ssl_mode() == tokio_postgres::config::SslMode::Disable {
         deadpool_postgres::Manager::new(cfg, tokio_postgres::NoTls)
+    } else if verify_full {
+        let ca = db_tls::ca_file_path();
+        match db_tls::make_verifying_connector(&ca) {
+            Ok(connector) => {
+                tracing::info!(ca = %ca.display(), "postgres TLS: verify-full (CA pinning)");
+                deadpool_postgres::Manager::new(cfg, connector)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ca = %ca.display(),
+                    error = %err,
+                    "postgres TLS: verify-full requested but CA load failed; \
+                     falling back to encrypt-without-verify"
+                );
+                deadpool_postgres::Manager::new(cfg, db_tls::make_connector())
+            }
+        }
     } else {
         deadpool_postgres::Manager::new(cfg, db_tls::make_connector())
     };

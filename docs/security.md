@@ -247,6 +247,14 @@ pinning close the loop at deploy.
   required-claims authz + identity forwarding, native to the CR (front it with an
   Ingress/LB for TLS). See "OIDC per agent/fleet". Exporting enforcement to an external
   API-gateway/mesh is a documented future option.
+- [x] **Postgres `verify-full` (client CA pinning), opt-in** — `postgres.bundled.tls.verifyFull`
+  (with `tls.enabled`) pins the chart CA: the chart mounts `ca.crt` at `/etc/agentctl-pg-ca` in
+  the gateway + modelgateway (and the coordination server when `coordination.store=postgres`),
+  sets `DB_CA_FILE`/`PGSSLROOTCERT`, and flips `DATABASE_URL` to `sslmode=verify-full` against the
+  cert-SAN `.svc` host. Default off keeps `sslmode=require` (encrypt, no CA verify). See
+  operations.md §1.
+- [x] **Coordination HA/durability, opt-in** — `coordination.store=postgres` backs the claim queue
+  with the durable Postgres store (shared across replicas), so `coordination.replicas` can be raised
+  for HA. Default `store=memory` stays single-replica/in-process.
 - [ ] NetworkPolicy enforcement — needs Calico/Cilium (kindnet ignores).
-- [ ] Postgres `verify-full` (client CA pinning) — today `sslmode=require` (encrypt, no CA verify).
-- [ ] coordination/scaler stronger-than-token (attested) auth; coordination HA/durability.
+- [ ] coordination/scaler stronger-than-token (attested) auth.

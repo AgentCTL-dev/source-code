@@ -1,7 +1,8 @@
 {{- $ns := include "agentctl.namespace" . }}
 {{- if .Values.coordination.enabled }}
 # ServiceAccount for the claim-mode coordination server. No RBAC: it holds the
-# claim queue in memory and never reads cluster state.
+# claim queue in memory (or in Postgres when coordination.store=postgres) and never
+# reads cluster state.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -18,10 +19,11 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
 ---
-# The claim-mode coordination server: a single-replica HTTP/MCP service that
-# hands out work claims to AgentFleet replicas (pull/claim work source). v1 keeps
-# the claim queue + stats in memory and serializes claims, so it runs as a single
-# replica (HA / durable backing is future work).
+# The claim-mode coordination server: an HTTP/MCP service that hands out work
+# claims to AgentFleet replicas (pull/claim work source). The default store=memory
+# keeps the claim queue + stats in process (run a single replica). Set
+# coordination.store=postgres to back the queue with the durable Postgres store —
+# claims then survive restarts and coordination.replicas can be raised for HA.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -69,6 +71,18 @@ spec:
             - { containerPort: 8080, name: http }
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "coordination") | nindent 12 }}
+            {{- if eq .Values.coordination.store "postgres" }}
+            # Durable claim store (coordination.store=postgres): the coordination
+            # backend reads DATABASE_URL (the bundled-or-external Postgres) and keeps
+            # the claim queue + work.stats in Postgres, so claims survive restarts and
+            # coordination.replicas can be raised for HA. Default store=memory injects
+            # nothing (in-process queue, today's behaviour).
+            {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            {{- with (include "agentctl.pgCaEnv" $) }}
+            # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.apiToken.enabled }}
             # In-cluster bearer-token gate (apiToken.enabled): require
             # `Authorization: Bearer <this>` on work.* (default off -> open).
@@ -81,6 +95,12 @@ spec:
           {{- with (index .Values "coordination").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if eq .Values.coordination.store "postgres" }}
+          {{- with (include "agentctl.pgCaVolumeMount" $) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -97,6 +117,12 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.coordination.resources | nindent 12 }}
+      {{- if eq .Values.coordination.store "postgres" }}
+      {{- with (include "agentctl.pgCaVolume" $) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

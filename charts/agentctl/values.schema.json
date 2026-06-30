@@ -25,6 +25,7 @@
         "allowedRegistries": { "type": "string" },
         "secretsNamespaces": { "type": "array" },
         "attestIdentity": { "type": "boolean" },
+        "store": { "type": "string", "enum": ["memory", "postgres"] },
         "federationPeers": { "type": "string" },
         "address": { "type": "string" },
         "coordinationUrl": { "type": "string" },
@@ -146,7 +147,15 @@
             "runAsUser": { "type": "integer" },
             "storage": { "type": "string" },
             "pvcSize": { "type": "string" },
-            "storageClassName": { "type": "string" }
+            "storageClassName": { "type": "string" },
+            "tls": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "verifyFull": { "type": "boolean" }
+              }
+            }
           }
         },
         "external": {

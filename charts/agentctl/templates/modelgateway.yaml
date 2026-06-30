@@ -168,6 +168,10 @@ spec:
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "modelgateway") | nindent 12 }}
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            {{- with (include "agentctl.pgCaEnv" $) }}
+            # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if .Values.modelgateway.attestIdentity }}
             # Source-IP identity attestation (modelgateway.attestIdentity): derive the
             # agent namespace from the caller's source IP (kube pod lookup) instead of
@@ -188,6 +192,10 @@ spec:
           {{- with (index .Values "modelgateway").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with (include "agentctl.pgCaVolumeMount" $) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -211,6 +219,10 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.modelgateway.resources | nindent 12 }}
+      {{- with (include "agentctl.pgCaVolume" $) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

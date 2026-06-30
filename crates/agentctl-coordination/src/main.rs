@@ -40,11 +40,14 @@ use axum::{Json, Router};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
+mod db_tls;
 mod mcp;
 mod metrics;
+mod pg_store;
 mod store;
 
 use metrics::Metrics;
+use pg_store::PgClaimStore;
 use store::{ClaimStore, InMemoryStore};
 
 /// FIFO bound on the dedupe (done) set — see `store::DoneSet`. Override with
@@ -77,7 +80,31 @@ async fn main() {
     let dedupe_cap = env_usize("COORDINATION_DEDUPE_CAP", DEFAULT_DEDUPE_CAP);
     let sweep_ms = env_u64("COORDINATION_SWEEP_INTERVAL_MS", DEFAULT_SWEEP_INTERVAL_MS);
 
-    let store: Arc<dyn ClaimStore> = Arc::new(InMemoryStore::new(dedupe_cap));
+    // BACKEND SELECTION (agentctl RFC 0011 §3.2 / §10): a durable, HA-capable
+    // Postgres store when COORDINATION_DATABASE_URL (or DATABASE_URL) is set —
+    // the serializing point becomes a shared DB row, so grant-one holds across
+    // >1 replica and survives a restart. Absent, the in-memory store is the
+    // (single-replica, non-durable) default. Both sit behind the SAME ClaimStore
+    // trait, so the MCP wire layer is untouched either way.
+    let store: Arc<dyn ClaimStore> = match coordination_database_url() {
+        Some(url) => {
+            tracing::info!(
+                "coordination backend: Postgres (durable, HA-capable across replicas) \
+                 via COORDINATION_DATABASE_URL/DATABASE_URL"
+            );
+            match PgClaimStore::connect(&url) {
+                Ok(s) => Arc::new(s),
+                Err(e) => panic!("coordination Postgres backend: {e}"),
+            }
+        }
+        None => {
+            tracing::info!(
+                "coordination backend: in-memory (single-replica, non-durable default) — \
+                 set COORDINATION_DATABASE_URL/DATABASE_URL for the durable Postgres backend"
+            );
+            Arc::new(InMemoryStore::new(dedupe_cap))
+        }
+    };
     let metrics = Arc::new(Metrics::new());
     let ready = Arc::new(AtomicBool::new(false));
 
@@ -267,6 +294,20 @@ fn port_from_env() -> u16 {
         }
     }
     8080
+}
+
+/// The coordination Postgres DSN, if configured. Prefers the coordination-specific
+/// `COORDINATION_DATABASE_URL`, then the shared `DATABASE_URL`. An unset OR empty
+/// value selects the in-memory backend (back-compat default).
+fn coordination_database_url() -> Option<String> {
+    for key in ["COORDINATION_DATABASE_URL", "DATABASE_URL"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 /// Parse a `usize` env var, falling back to `default`.

@@ -76,8 +76,12 @@ version = "0.1.0"
 dependencies = [
  "agentctl-telemetry",
  "axum",
+ "deadpool-postgres",
+ "rustls",
  "serde_json",
  "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
  "tracing",
 ]
 
@@ -128,6 +132,7 @@ dependencies = [
  "kube",
  "reqwest",
  "rustls",
+ "rustls-pemfile",
  "serde_json",
  "subtle",
  "tokio",

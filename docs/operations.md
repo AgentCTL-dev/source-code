@@ -116,6 +116,9 @@ toolchain). The DSN's `sslmode` selects the transport:
   on the in-cluster NetworkPolicy scope.
 - `sslmode=require` / `prefer` — the connection is **encrypted** but the server cert is
   **not** CA-verified (libpq `require` semantics, distinct from `verify-ca`/`verify-full`).
+- `sslmode=verify-full` — the client verifies the server cert **chains to a pinned CA**
+  **and** the hostname matches a cert SAN (the strongest mode). The rustls client reads the
+  CA from `DB_CA_FILE` / `PGSSLROOTCERT`.
 
 **Bundled TLS (opt-in).** Set `postgres.bundled.tls.enabled=true` to encrypt the bundled
 hop: the chart issues a cert-manager `Certificate` (`agentctl-postgres-tls`, signed by the
@@ -124,11 +127,20 @@ chart CA) for `agentctl-postgres.<ns>.svc[.cluster.local]`, mounts it at `/tls` 
 and flips `DATABASE_URL` to `sslmode=require`. Requires cert-manager (`certManager.enabled`,
 the default).
 
+**Bundled `verify-full` (CA pinning, opt-in).** Set `postgres.bundled.tls.verifyFull=true`
+(with `tls.enabled=true`) to pin the chart CA. The chart then projects the cert's `ca.crt`
+into the gateway + modelgateway (and the coordination server when
+`coordination.store=postgres`) at `/etc/agentctl-pg-ca/ca.crt`, sets `DB_CA_FILE` +
+`PGSSLROOTCERT` to that path, and flips `DATABASE_URL` to `sslmode=verify-full` against the
+`agentctl-postgres.<ns>.svc` host (covered by the cert SANs, so hostname verification
+passes). This closes the encrypt-without-verify gap for the bundled store. Default off keeps
+`sslmode=require`.
+
 **External TLS.** For a managed Postgres, put the desired mode in your DSN Secret. The
-client encrypts on `sslmode=require`/`prefer`; **full CA + hostname verification
-(`sslmode=verify-ca` / `verify-full`) is not yet implemented client-side** — it currently
-behaves as encrypt-without-verify. If your threat model needs `verify-full`, terminate TLS
-at a verifying sidecar/proxy in front of the DSN until client-side CA verification lands.
+client encrypts on `sslmode=require`/`prefer`, and CA-pins on `sslmode=verify-full` when the
+DSN carries it and you provide the CA via `DB_CA_FILE`/`PGSSLROOTCERT` (mount it via the
+component's `extraEnv` + a `volumes`/`volumeMounts` overlay, or use the provider's
+system-trust CA). For the in-cluster bundled store prefer `postgres.bundled.tls.verifyFull`.
 
 ---
 
@@ -231,10 +243,24 @@ http://agentctl-coordination.<release-namespace>.svc/
 (the MCP/HTTP coordination endpoint; substitute your release namespace, e.g.
 `agentctl-system`).
 
-**v1 caveats.** The server is **single-replica and in-memory** — the claim queue
-and `work.stats` live in process and claims are serialized, so `coordination.replicas`
-is pinned to `1` and autoscaling is unsupported (HA / durable backing is future
-work).
+**Store backends.** The default `coordination.store=memory` keeps the claim queue and
+`work.stats` **in process** — durable only for the life of the pod, so run a **single
+replica** (raising `coordination.replicas` would give each replica its own queue). For
+HA / durability set:
+
+```sh
+helm upgrade --install agentctl charts/agentctl \
+  --set coordination.enabled=true \
+  --set coordination.store=postgres \
+  --set coordination.replicas=2
+```
+
+With `store=postgres` the backend reads `DATABASE_URL` (the bundled-or-external Postgres,
+via the same `agentctl.databaseUrlEnv` helper the gateway uses) and persists the queue +
+stats in Postgres, so claims **survive restarts** and replicas share one durable queue —
+safe to scale `coordination.replicas` for HA. Pair with `postgres.bundled.tls.verifyFull`
+to CA-pin the hop, and `metrics.serviceMonitor.enabled=true` to scrape the coordination
+`/metrics` (the chart already renders an `agentctl-coordination` ServiceMonitor).
 
 ### KEDA autoscaler (claim-depth scaling)
 
@@ -406,12 +432,16 @@ production-blocking, but operators should know them:
   `emptyDir` (eval default; data is lost on pod restart) or a PVC. There is **no
   replication or automated failover**. In-cluster TLS is **opt-in** via
   `postgres.bundled.tls.enabled` (default off → `sslmode=disable`); when enabled the
-  hop is encrypted but **not** CA-verified (`sslmode=require`, see §1). For HA/DR
-  and a CA-verified DSN, point at an **external managed Postgres**
-  (`postgres.mode=external`, DSN with `sslmode=verify-full`) and defer
-  backup/restore to that provider (§1).
-- **Other tracked residuals:** CA-verified (`sslmode=verify-full`) TLS for the
-  bundled path (today it is encrypt-without-verify),
+  hop is encrypted (`sslmode=require`), and adding `postgres.bundled.tls.verifyFull`
+  CA-pins it (`sslmode=verify-full`, see §1). For HA/DR point at an **external managed
+  Postgres** (`postgres.mode=external`) and defer backup/restore to that provider (§1).
+- **Coordination HA/durability is opt-in** — the default `coordination.store=memory`
+  is single-replica/in-process; `coordination.store=postgres` makes the claim queue
+  durable + shared so `coordination.replicas` can be raised for HA (see "Coordination
+  server" above).
+- **Bundled `verify-full` is opt-in** — `postgres.bundled.tls.verifyFull` CA-pins the
+  bundled hop (default off is still the `require` encrypt-without-verify path, §1).
+- **Other tracked residuals:**
   operator `status.replicas`/`status.selector` write-back for `AgentFleet` HPA read-back,
   and NetworkPolicy enforcement (manifests ship via `networkPolicies.enabled`, but
   enforcement needs a policy CNI such as Calico/Cilium — kindnet ignores them).

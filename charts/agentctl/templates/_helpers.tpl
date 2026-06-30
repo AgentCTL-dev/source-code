@@ -52,6 +52,67 @@ Usage: {{ include "agentctl.databaseUrlEnv" $ | nindent 12 }}
 {{- end }}
 {{- end -}}
 
+{{/*
+Whether the bundled-Postgres TLS hop is CA-pinned (verify-full). True only when
+the bundled store is in use AND postgres.bundled.tls.{enabled,verifyFull} are both
+set. Renders the string "true" (so callers test `eq (include ...) "true"`); empty
+otherwise. Drives the agentctl-pg-ca CA mount + DB_CA_FILE/PGSSLROOTCERT env and
+the sslmode=verify-full DSN. Default off => empty => today's output unchanged.
+*/}}
+{{- define "agentctl.pgVerifyFull" -}}
+{{- if and (eq .Values.postgres.mode "bundled") .Values.postgres.bundled.tls.enabled .Values.postgres.bundled.tls.verifyFull -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+CA-file env for verify-full: the DB client reads the pinned CA from the mounted
+agentctl-pg-ca volume (DB_CA_FILE / PGSSLROOTCERT). Empty unless pgVerifyFull.
+Usage (guard so the default emits nothing):
+  {{- with (include "agentctl.pgCaEnv" $) }}
+  {{- . | nindent 12 }}
+  {{- end }}
+*/}}
+{{- define "agentctl.pgCaEnv" -}}
+{{- if eq (include "agentctl.pgVerifyFull" .) "true" }}
+- name: DB_CA_FILE
+  value: /etc/agentctl-pg-ca/ca.crt
+- name: PGSSLROOTCERT
+  value: /etc/agentctl-pg-ca/ca.crt
+{{- end }}
+{{- end -}}
+
+{{/*
+volumeMount for the verify-full CA (mounted read-only at /etc/agentctl-pg-ca).
+Empty unless pgVerifyFull. Usage (guard at container volumeMounts: level):
+  {{- with (include "agentctl.pgCaVolumeMount" $) }}
+  {{- . | nindent 12 }}
+  {{- end }}
+*/}}
+{{- define "agentctl.pgCaVolumeMount" -}}
+{{- if eq (include "agentctl.pgVerifyFull" .) "true" }}
+- name: pg-ca
+  mountPath: /etc/agentctl-pg-ca
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{/*
+volume projecting the bundled-Postgres cert's ca.crt for verify-full. The
+agentctl-postgres-tls secret carries ca.crt (the chart CA); project just that key
+into /etc/agentctl-pg-ca/ca.crt. Empty unless pgVerifyFull. Usage (at volumes:):
+  {{- with (include "agentctl.pgCaVolume" $) }}
+  {{- . | nindent 8 }}
+  {{- end }}
+*/}}
+{{- define "agentctl.pgCaVolume" -}}
+{{- if eq (include "agentctl.pgVerifyFull" .) "true" }}
+- name: pg-ca
+  secret:
+    secretName: agentctl-postgres-tls
+    items:
+      - { key: ca.crt, path: ca.crt }
+{{- end }}
+{{- end -}}
+
 {{/* The CA issuer the leaf Certificates reference (the chart's CA, or a user issuer). */}}
 {{- define "agentctl.caIssuer" -}}
 {{- if .Values.certManager.caIssuerRef -}}

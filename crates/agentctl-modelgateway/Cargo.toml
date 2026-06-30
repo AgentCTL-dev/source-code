@@ -31,6 +31,8 @@ tokio-postgres = "0.7"
 # off + `ring` → no aws-lc-rs, no C toolchain.
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Parse the mounted CA bundle (PEM) for the verify-full (CA-pinning) Postgres hop.
+rustls-pemfile = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 serde_json.workspace = true
 # Constant-time byte comparison for the optional bearer-token access gate

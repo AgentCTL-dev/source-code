@@ -18,6 +18,16 @@ axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 serde_json.workspace = true
 tracing = "0.1"
+# Durable, HA-capable claim store (the optional Postgres backend behind the
+# ClaimStore trait — chosen at startup by COORDINATION_DATABASE_URL/DATABASE_URL;
+# absent ⇒ the in-memory default). Same stack the gateway/modelgateway use:
+# deadpool pool + tokio-postgres, TLS via tokio-postgres-rustls (rustls/ring →
+# no aws-lc-rs, no C toolchain). sslmode=disable → NoTls; sslmode=require →
+# the ring connector in db_tls.rs (encrypt-without-verify, like the gateway).
+deadpool-postgres = "0.14"
+tokio-postgres = "0.7"
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Shared tracing init: fmt-only by default, OTLP export when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set (matches every other control-plane binary).
 agentctl-telemetry = { path = "../agentctl-telemetry" }

@@ -98,6 +98,16 @@ postgres:
     #     client encrypts the hop WITHOUT CA verification (see operations.md §1).
     tls:
       enabled: false
+      # CA-pinned, hostname-verified Postgres hop. Requires tls.enabled. When ALSO
+      # true the chart: mounts the chart CA (ca.crt from the agentctl-postgres-tls
+      # secret) at /etc/agentctl-pg-ca in the gateway + modelgateway (and the
+      # coordination server when coordination.store=postgres); sets DB_CA_FILE +
+      # PGSSLROOTCERT to /etc/agentctl-pg-ca/ca.crt; and flips DATABASE_URL to
+      # sslmode=verify-full against the .svc host (which the cert SANs cover). The
+      # rustls client then verifies the server cert chains to the chart CA and the
+      # hostname matches. DEFAULT false: the sslmode=require (encrypt-no-verify) path
+      # is preserved. See operations.md §1 / security.md.
+      verifyFull: false
   external:
     # mode=external: point at a managed Postgres via a pre-created Secret holding
     # a key 'DATABASE_URL' (postgres://user:pw@host:5432/db?sslmode=require).
@@ -306,14 +316,20 @@ admission:
     targetCPUUtilizationPercentage: 80
 
 # Claim-mode coordination server (RFC: pull/claim work source). Hands out work
-# claims to AgentFleet replicas over an in-cluster HTTP/MCP endpoint. v1 is
-# SINGLE-REPLICA and IN-MEMORY: the claim queue + work.stats are held in process
-# and claims are serialized, so it does not scale horizontally (autoscaling stays
-# off, replicas pinned to 1). HA / durable backing is future work. Disabled by
+# claims to AgentFleet replicas over an in-cluster HTTP/MCP endpoint. Disabled by
 # default — enable with coordination.enabled=true.
 coordination:
   enabled: false
-  replicas: 1                  # single serializing replica in v1 (do not raise)
+  # Claim store backend. memory (default) keeps the claim queue + work.stats in
+  # process — durable only for the life of the pod, so run a single replica. Set to
+  # postgres to back the queue with the durable store (reuses the bundled-or-external
+  # Postgres / the DATABASE_URL helper); claims then survive restarts and you can
+  # raise coordination.replicas for HA (each replica shares the Postgres-backed
+  # queue). Default memory renders no DATABASE_URL (today's output unchanged).
+  store: memory                # memory | postgres
+  # 1 is the safe default. With store=postgres the queue is durable + shared, so you
+  # may raise this for HA; with store=memory keep it at 1 (per-pod in-process queue).
+  replicas: 1
   logLevel: info               # -> RUST_LOG
   # In-memory coordination server: small footprint.
   resources:
@@ -333,12 +349,18 @@ coordination:
   pdb:
     enabled: false
     minAvailable: 1
-  # Stateful / single-serializing in v1 — horizontal autoscaling is unsupported.
+  # Horizontal autoscaling is only meaningful with store=postgres (the durable,
+  # shared queue). With store=memory each replica has its own in-process queue, so
+  # leave this off and keep replicas=1.
   autoscaling:
     enabled: false
     minReplicas: 1
     maxReplicas: 1
     targetCPUUtilizationPercentage: 80
+  # Metrics: the coordination Service exposes /metrics on the http port. When
+  # metrics.serviceMonitor.enabled=true the chart already renders an
+  # agentctl-coordination ServiceMonitor (templates/servicemonitor.yaml) so a
+  # Prometheus-Operator scrapes it — pair store=postgres HA with that for visibility.
 
 # KEDA external scaler (RFC 0011) — claim-depth autoscaling for AgentFleets.
 # A stateless gRPC service (:9100) KEDA dials to drive claim-mode fleet replica

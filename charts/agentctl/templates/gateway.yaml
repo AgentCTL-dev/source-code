@@ -108,6 +108,10 @@ spec:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "gateway") | nindent 12 }}
             # Durable A2A task store (RFC 0013).
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            {{- with (include "agentctl.pgCaEnv" $) }}
+            # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
+            {{- . | nindent 12 }}
+            {{- end }}
             # Ed25519 seed for Agent Card JWS signing (RFC 0014).
             - name: GATEWAY_SIGNING_SEED
               valueFrom:
@@ -144,6 +148,9 @@ spec:
             - name: client-tls
               mountPath: /etc/agentctl-client/tls
               readOnly: true
+            {{- with (include "agentctl.pgCaVolumeMount" $) }}
+            {{- . | nindent 12 }}
+            {{- end }}
           # Gate liveness/readiness until the process is up and the DB schema
           # migration has run, so a slow first start (waiting on Postgres) does
           # not trip the liveness probe and crash-loop the pod. ~60s budget.
@@ -165,6 +172,9 @@ spec:
         - name: client-tls
           secret:
             secretName: agentctl-client-tls
+        {{- with (include "agentctl.pgCaVolume" $) }}
+        {{- . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

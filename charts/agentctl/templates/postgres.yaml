@@ -1,6 +1,14 @@
 {{- if eq .Values.postgres.mode "bundled" }}
 {{- $ns := include "agentctl.namespace" . }}
 {{- $tls := .Values.postgres.bundled.tls.enabled }}
+{{- $verifyFull := and $tls .Values.postgres.bundled.tls.verifyFull }}
+{{/* verify-full pins the chart CA AND checks the hostname, so the DSN host must
+     match a cert SAN: use the .svc form (in the Certificate dnsNames). require/
+     disable keep the short service name (today's value). */}}
+{{- $pgHost := printf "agentctl-postgres.%s" $ns }}
+{{- if $verifyFull }}{{- $pgHost = printf "agentctl-postgres.%s.svc" $ns }}{{- end }}
+{{- $sslmode := "disable" }}
+{{- if $verifyFull }}{{- $sslmode = "verify-full" }}{{- else if $tls }}{{- $sslmode = "require" }}{{- end }}
 {{/* Reuse the existing password on upgrade (idempotent) — regenerating it would
      break auth against the already-initialized Postgres data dir. lookup is empty
      during `helm template`/install (no cluster), so a fresh install generates one. */}}
@@ -29,10 +37,13 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_PASSWORD: {{ $pw | quote }}
-  # Consumed by the gateway + modelgateway. sslmode=require when bundled TLS is on
-  # (the rustls client encrypts the hop without CA verify); sslmode=disable (NoTls)
-  # otherwise — the working default path.
-  DATABASE_URL: "postgres://agentctl:{{ $pw }}@agentctl-postgres.{{ $ns }}:5432/agentctl?sslmode={{ if $tls }}require{{ else }}disable{{ end }}"
+  # Consumed by the gateway + modelgateway (and coordination when
+  # coordination.store=postgres). sslmode=disable (NoTls) by default — the working
+  # path; sslmode=require when bundled TLS is on (rustls encrypts the hop without CA
+  # verify); sslmode=verify-full when tls.verifyFull is also set (the client pins
+  # the chart CA via the mounted /etc/agentctl-pg-ca/ca.crt and checks the hostname,
+  # hence the .svc host above).
+  DATABASE_URL: "postgres://agentctl:{{ $pw }}@{{ $pgHost }}:5432/agentctl?sslmode={{ $sslmode }}"
 {{- if $tls }}
 ---
 # Serving cert for the bundled Postgres (postgres.bundled.tls.enabled). Signed by
