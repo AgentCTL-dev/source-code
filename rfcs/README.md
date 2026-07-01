@@ -10,8 +10,12 @@
 
 This directory holds the agentctl RFC set. **agentctl is the Kubernetes control
 plane for *conformant agents*** — it provisions, reaches, scales, observes, and
-manages a fleet of agents, and exposes their public A2A surface. **RFCs 0001–0018
-are written** (Proposed) — **the full 0001–0018 track is now drafted.** The
+manages a fleet of agents, and exposes their public A2A surface. **RFCs 0001–0020
+are written** (Proposed): the **0001–0018 core track** below, plus the **0019–0020
+tools/identity track** — MCP server registration, identity & authentication (0019)
+and instruction sourcing & live delivery (0020) — which extend the earlier CRDs
+(RFC 0004 §5's `MCPServerSet`, RFC 0003's `instruction`) with the secret-free MCP
+broker and the live-instruction resolver (§ "The tools/identity track", below). The
 **0001–0003** RFCs are the **foundational track**:
 they fix the questions every later component RFC inherits — the implementation
 stack and repo shape (0001), the data-plane *reach* abstraction (0002), and the
@@ -95,6 +99,8 @@ and the RFC files a primitive ask (the cross-repo critical path, brainstorm §14
 | [0016](0016-cli-and-kubectl-plugin.md) | CLI & kubectl-plugin grammar | Proposed | The human client: three faces over one `crates/cli` (`kubectl-agent`/`kubectl-agents`/`agentctl`), manifest-rendered verb *visibility* (contract-vocabulary typed + generic passthrough for novel vendor tools), the cold/live/gateway path split (four cold back-ends with distinct auth — only the kube-apiserver reuses kubeconfig), the `attach` steering UX (lease + multi-viewer, single-warm-session-bound until P-session), output/negotiation/exit-code contract; a client, never a new access path. |
 | [0017](0017-release-and-lifecycle.md) | Release & lifecycle engineering | Proposed | The three-version-clock lifecycle: the contract-keyed agent-image rolling upgrade (re-probe → re-negotiate → contractVersionRange **and** requiredSurfaces gate → canary on exit-0/health → roll back as a cache hit); the agentctl component upgrade & skew matrix + the CRD-bump SVM inner loop; DR concentrated on the three irreplaceable stores; the GitOps ownership boundary (SSA, KEDA-owns-replicas, finalizer-honouring prune); air-gap as the default-clean path. |
 | [0018](0018-codegen-and-contract-conformance.md) | Codegen & contract conformance | Proposed | The detailed spec of RFC 0001 §4 anti-drift: the three sources of truth (neutral schemas / generated `agent-contract-client` / black-box behavioral conformance suite) + runtime negotiation; the four codegen lanes and hand-written `surfaces{}` sum-type deserializers; pinning by `(contract major.minor + schema digest)`, never an agent SHA; the contract-extraction + brand-neutralization plan; the conformance assertions (semantic, contract-derived required/optional partitions) + the E2E/chaos + kind/Kata test matrix. |
+| [0019](0019-mcp-server-registration-identity-and-authentication.md) | MCP server registration, identity & authentication | Proposed (tools/identity track) | Realizes RFC 0004 §5's `MCPServerSet` as a CRD and extends it with per-server identity/auth (`transport`/`endpoint`/`auth` union/`budget`); the **MCP broker** data path mirroring RFC 0012's ModelGateway (credential held off the pod, keyless dial, out of the node-agent); the full MCP 2025-06-18 OAuth flow (RFC 9728 PRM → 8414 → DCR/CIMD → 8707 Resource Indicators → audience binding, no token passthrough) performed by the broker; two tiers — **Tier 1 headless** (client-credentials SEP-1046 + `private_key_jwt` RFC 7523) and **Tier 2 on-behalf-of-user** (EMA/ID-JAG SEP-990, human-principal-only); attested-peer workload identity (SO_PEERCRED/vsock, SA-token/SPIFFE optional) on the RFC 0012 §5.4 authz chokepoint; the broker as the runtime PDP/PEP (OAuth/EMA stop at issuance); the stdio↔broker bridge for the stdio-only reference agent (contract ask P-mcp-egress). |
+| [0020](0020-instruction-source-and-live-delivery.md) | Instruction source & live delivery | Proposed (tools/identity track) | Generalizes `AgentSpec.instruction` into a closed `instructionSource` union (`inline`/`configMapKeyRef`/`secretKeyRef`/`file`/`url`/`mcpResource`); a **resolver** that materializes any source into the agent's instruction input (the agent never fetches — static sources render the startup instruction with no contract change; live sources refresh via `url` polling / `mcpResource` subscription); secretless ingress (the fetch/OAuth credential stays in the resolver/broker, never the pod); `url` typed+authenticated+polled+bounded; `mcpResource` subscription-driven live instruction composed with RFC 0019's broker; the sourced instruction treated as an `untrusted_input` trifecta leg with an admission allow-list + provenance; atomic, turn-boundary, change-gated reload — **hot (no-restart) once instruction is made reloadable (contract ask P-instr-file), managed roll as the interim**. |
 
 These eighteen are P0-disciplined and mutually consistent: they share the tier names
 (`stock-unix` / `kata-hybrid` / `sidecar-emptydir`), the "conformant agent / the
@@ -121,26 +127,60 @@ sequences the machinery 0005/0006/0008/0011/0013/0014 own into rolling/skew/DR/G
 air-gap choreography; and 0018 is the detailed spec of 0001 §4 anti-drift. All keep
 agent as the reference implementation only (P0).
 
+## The tools/identity track (0019–0020)
+
+Two RFCs extend the core track with the **tool-facing identity plane** the earlier
+CRDs deferred. **0019** realizes RFC 0004 §5's `MCPServerSet` as a real CRD and adds
+the per-server **identity & authentication** 0004 §5 left open — applying the exact
+0004-owns-the-schema / 0012-owns-the-runtime split to tools: a secret-free **MCP
+broker** (the RFC 0012 ModelGateway pattern, one plane over) holds the credential
+off the hostile-tenant pod, performs the MCP 2025-06-18 OAuth flow, and exposes each
+server keyless; **Tier 1** (headless, SEP-1046 client-credentials + `private_key_jwt`)
+covers autonomous agents and **Tier 2** (EMA/ID-JAG, SEP-990) covers on-behalf-of-a-
+human enterprise access; the agent→broker hop reuses the RFC 0012 §5.4 attested-peer
+authz chokepoint, and the broker is the runtime PDP/PEP because OAuth/EMA stop at
+issuance. **0020** generalizes RFC 0003's inline `instruction` into an
+`instructionSource` union (inline / ConfigMap / Secret / file / typed-authenticated-
+polled `url` / subscription-driven `mcpResource`) delivered into the agent's instruction
+input by a **resolver** that keeps live sources fresh and holds any fetch credential off
+the pod (static sources need no contract change; *hot* no-restart live reload needs the
+instruction made reloadable — contract ask P-instr-file — with a managed roll as the
+interim) — with the sourced text
+treated as an `untrusted_input` trifecta leg, admission-allow-listed, and
+provenance-recorded. The two compose: 0020's `mcpResource` instruction is
+authenticated by 0019's broker (one MCP-identity model, two consumers). Both preserve
+every core-track invariant — **P0**, secret-free pod, out-of-node-agent egress,
+attested identity, hostile-multitenancy isolation — and neither gates an MVP
+milestone (both are additive, inline/no-MCP agents run untouched). The design research
+behind them is persisted, fully sourced, in
+[`docs/design/mcp-auth-research.md`](../docs/design/mcp-auth-research.md).
+
 ## The full proposed track
 
-The complete agentctl RFC track — **agentctl RFC 0001–0018** — is enumerated in the
+The **core** agentctl RFC track — **agentctl RFC 0001–0018** — is enumerated in the
 brainstorm **[§15](../docs/design/agentctl-architecture-brainstorm.md)** (ordered
 roughly by dependency: foundational stack/substrate/CRD first, then the ops/dev
 CRDs, versioning, operator reconcile, admission, node-agent, management access,
 observability, scaling, intelligence, A2A gateway + mesh identity, security &
 multi-tenancy, CLI/kubectl-plugin, release engineering, and codegen & conformance).
+The **0019–0020 tools/identity track** extends it beyond that original brainstorm
+enumeration (prompted by the MCP-authentication + instruction-sourcing work; design
+research in [`docs/design/mcp-auth-research.md`](../docs/design/mcp-auth-research.md)).
 The phased build roadmap with the explicit MVP cut line is **§16**, and the top
 human-decision open questions are **§17**.
 
-**Track complete (drafted).** All eighteen RFCs (**0001–0018**) are now written
+**Track complete (drafted).** All twenty RFCs (**0001–0020**) are now written
 (Proposed): the foundational stack/substrate/CRD track (0001–0003), the ops/dev CRDs
 + versioning + reconcile + admission (0004–0007), the runtime/operations track
-(0008–0010), the plane track (0011–0014), and the cross-cutting security / interface
-/ lifecycle / conformance capstone (0015–0018). The forward references the plane RFCs
-made to agentctl RFC 0015 (the cross-cutting trust model, internal PKI, the egress
-allow-list, per-tenant isolation, and `P-attach-gate`) are now **resolved** in the
-authored 0015; 0016/0017/0018 likewise fill the CLI, lifecycle, and conformance seams
-the earlier RFCs deferred. **The next gates are execution, not more RFCs:** the phased
+(0008–0010), the plane track (0011–0014), the cross-cutting security / interface
+/ lifecycle / conformance capstone (0015–0018), and the tools/identity track
+(0019–0020: MCP registration/identity/auth + instruction sourcing). The forward
+references the plane RFCs made to agentctl RFC 0015 (the cross-cutting trust model,
+internal PKI, the egress allow-list, per-tenant isolation, and `P-attach-gate`) are
+now **resolved** in the authored 0015; 0016/0017/0018 likewise fill the CLI, lifecycle,
+and conformance seams the earlier RFCs deferred; and 0019/0020 realize the `MCPServerSet`
+(RFC 0004 §5) and `instructionSource` (RFC 0003) seams the CRD track reserved. **The
+next gates are execution, not more RFCs:** the phased
 build roadmap (brainstorm **§16**, with the explicit MVP cut line) and the **cross-repo
 critical path** — the ~12 agent contract primitives/fixes v1 depends on (brainstorm
 **§14**), since agent repo work must lead agentctl work for each plane (brainstorm
