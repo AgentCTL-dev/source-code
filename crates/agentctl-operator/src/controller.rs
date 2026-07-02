@@ -65,6 +65,10 @@ pub struct Ctx {
     /// env `AGENTCTL_MODELGATEWAY_URL`). Read once at startup
     /// ([`RenderConfig::from_env`]).
     pub render: RenderConfig,
+    /// Workload PKI wiring (serving Certificates + per-ns CA distribution;
+    /// envs `AGENTCTL_ISSUER_REF` / `AGENTCTL_CA_FILE`). Read once at startup
+    /// ([`crate::pki::PkiConfig::from_env`]).
+    pub pki: crate::pki::PkiConfig,
 }
 
 /// Operator-side wiring for the optional in-cluster bearer-token gate (chart
@@ -284,6 +288,14 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             // cannot cross namespaces — see ApiTokenConfig::should_inject).
             if ctx.api_token.should_inject(ns) {
                 inject_api_token(&mut rendered);
+            }
+            // Workload PKI first (serving Certificate + per-ns CA ConfigMap),
+            // so the pod's mounts resolve as it schedules.
+            if ctx.pki.enabled() {
+                let owner = agent
+                    .controller_owner_ref(&())
+                    .expect("Agent CRs always carry name+uid on the live object");
+                crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
             }
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(agent = %name, workload = kind, "applied workload");
@@ -516,6 +528,14 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             // namespaces). Fleet pods are agents too, so inject before applying.
             if ctx.api_token.should_inject(ns) {
                 inject_api_token(&mut rendered);
+            }
+            // Workload PKI first (serving Certificate + per-ns CA ConfigMap),
+            // so fleet pods' mounts resolve as they schedule.
+            if ctx.pki.enabled() {
+                let owner = fleet
+                    .controller_owner_ref(&())
+                    .expect("AgentFleet CRs always carry name+uid on the live object");
+                crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
             }
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(fleet = %name, workload = kind, "applied fleet workload");

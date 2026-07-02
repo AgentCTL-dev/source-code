@@ -113,6 +113,13 @@ async fn main() -> Result<(), kube::Error> {
 
     let render = agentctl_operator::RenderConfig::from_env();
     info!(modelgateway = %render.modelgateway_url, "render config");
+    let pki = agentctl_operator::pki::PkiConfig::from_env();
+    info!(
+        issuer = ?pki.issuer,
+        ca_loaded = pki.ca_pem.is_some(),
+        enabled = pki.enabled(),
+        "workload PKI config"
+    );
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
@@ -120,6 +127,7 @@ async fn main() -> Result<(), kube::Error> {
         scaler,
         api_token,
         render,
+        pki,
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");
