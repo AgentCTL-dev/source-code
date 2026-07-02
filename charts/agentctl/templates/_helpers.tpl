@@ -113,14 +113,26 @@ into /etc/agentctl-pg-ca/ca.crt. Empty unless pgVerifyFull. Usage (at volumes:):
 {{- end }}
 {{- end -}}
 
-{{/* The CA issuer the leaf Certificates reference (the chart's CA, or a user issuer). */}}
+{{/* The CA issuer the leaf Certificates reference (the chart's CA, or a user
+issuer). Always a ClusterIssuer since the v2 pivot: the same CA signs the
+per-workload serving certs the operator issues into AGENT namespaces. */}}
 {{- define "agentctl.caIssuer" -}}
 {{- if .Values.certManager.caIssuerRef -}}
 name: {{ .Values.certManager.caIssuerRef }}
 kind: ClusterIssuer
 {{- else -}}
 name: agentctl-ca
-kind: Issuer
+kind: ClusterIssuer
+{{- end -}}
+{{- end -}}
+
+{{/* The CA issuer as the operator's AGENTCTL_ISSUER_REF value ("Kind/name") —
+what the operator's per-workload serving Certificates reference. */}}
+{{- define "agentctl.issuerRefEnv" -}}
+{{- if .Values.certManager.caIssuerRef -}}
+ClusterIssuer/{{ .Values.certManager.caIssuerRef }}
+{{- else -}}
+ClusterIssuer/agentctl-ca
 {{- end -}}
 {{- end -}}
 

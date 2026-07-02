@@ -1,13 +1,18 @@
 {{- if .Values.certManager.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
 {{- if not .Values.certManager.caIssuerRef }}
-# Bootstrap: self-signed issuer -> the agentctl CA -> a CA issuer that mints the
-# leaf certs below. (Skipped if you supply certManager.caIssuerRef.)
+# Bootstrap: self-signed CLUSTER issuer -> the agentctl CA -> a CA CLUSTER
+# issuer that mints the leaf certs below AND the per-workload serving certs the
+# operator requests in AGENT namespaces (contract 2.0: every agent pod serves
+# mTLS HTTPS). A ClusterIssuer reads its CA secret from cert-manager's
+# "cluster resource namespace" (the cert-manager install namespace by default),
+# so the CA Certificate is placed THERE — that is the one cross-namespace write
+# this chart makes, and it is what lets ONE CA sign identities cluster-wide.
+# (All skipped if you supply certManager.caIssuerRef.)
 apiVersion: cert-manager.io/v1
-kind: Issuer
+kind: ClusterIssuer
 metadata:
   name: agentctl-selfsigned
-  namespace: {{ $ns }}
   labels:
     {{- include "agentctl.labels" . | nindent 4 }}
 spec:
@@ -17,7 +22,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: agentctl-ca
-  namespace: {{ $ns }}
+  namespace: {{ .Values.certManager.clusterResourceNamespace | default "cert-manager" }}
   labels:
     {{- include "agentctl.labels" . | nindent 4 }}
 spec:
@@ -31,13 +36,12 @@ spec:
     size: 256
   issuerRef:
     name: agentctl-selfsigned
-    kind: Issuer
+    kind: ClusterIssuer
 ---
 apiVersion: cert-manager.io/v1
-kind: Issuer
+kind: ClusterIssuer
 metadata:
   name: agentctl-ca
-  namespace: {{ $ns }}
   labels:
     {{- include "agentctl.labels" . | nindent 4 }}
 spec:

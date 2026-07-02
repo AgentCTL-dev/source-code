@@ -47,6 +47,16 @@ rules:
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Workload PKI (contract 2.0): a per-workload serving Certificate is applied
+  # into each Agent/Fleet's namespace (same soft-dependency discipline as KEDA),
+  # and the cluster-CA PUBLIC cert is distributed as the per-namespace
+  # agentctl-ca ConfigMap agent pods mount for client-CA + outbound trust.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
@@ -172,9 +182,34 @@ spec:
             # secretKeyRef at pod start, not the operator.
             - name: API_TOKEN_ENABLED
               value: {{ .Values.apiToken.enabled | default false | quote }}
+            # Workload PKI + keyless intelligence wiring (contract 2.0). The
+            # operator issues a per-workload serving Certificate (issuerRef
+            # below), distributes the CA public cert per namespace (read from
+            # its own mount), and renders AGENT_INTELLIGENCE at the ModelGateway
+            # over https (absolute trailing-dot FQDN so no DNS search list can
+            # capture it; keyless — identity is source-IP attestation there).
+            {{- if .Values.certManager.enabled }}
+            - name: AGENTCTL_ISSUER_REF
+              value: {{ include "agentctl.issuerRefEnv" . | quote }}
+            - name: AGENTCTL_CA_FILE
+              value: /etc/agentctl/ca/ca.crt
+            {{- end }}
+            {{- if .Values.modelgateway.enabled }}
+            - name: AGENTCTL_MODELGATEWAY_URL
+              value: {{ .Values.operator.modelgatewayUrl | default (printf "https://agentctl-modelgateway.%s.svc.cluster.local." $ns) | quote }}
+            {{- end }}
           {{- with .Values.operator.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.certManager.enabled }}
+          volumeMounts:
+            # The cluster CA PUBLIC cert (every chart leaf Secret carries
+            # ca.crt; the client-tls leaf always exists). Source of the
+            # per-namespace agentctl-ca ConfigMap the operator distributes.
+            - name: agentctl-ca
+              mountPath: /etc/agentctl/ca
+              readOnly: true
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -194,6 +229,16 @@ spec:
             periodSeconds: {{ .Values.operator.probes.readiness.periodSeconds }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
+      {{- if .Values.certManager.enabled }}
+      volumes:
+        # ca.crt only — the operator holds the CA PUBLIC half, never its key.
+        - name: agentctl-ca
+          secret:
+            secretName: agentctl-client-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
 ---
 # Metrics Service for the operator (RFC 0010). Selects every operator replica and
 # exposes the http port so the operator ServiceMonitor can scrape /metrics.

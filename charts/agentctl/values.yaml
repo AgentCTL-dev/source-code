@@ -72,8 +72,14 @@ namespace:
 certManager:
   enabled: true
   # If you already run a cluster CA Issuer, set this and the chart skips the
-  # self-signed bootstrap (uses your issuer as the CA for the leaf certs).
+  # self-signed bootstrap (uses your issuer as the CA for the leaf certs AND
+  # the operator-issued per-workload agent serving certs).
   caIssuerRef: ""              # e.g. "my-ca-clusterissuer" (ClusterIssuer)
+  # Where the bootstrap CA Certificate is placed so the agentctl-ca
+  # ClusterIssuer can read its secret: cert-manager's "cluster resource
+  # namespace" (its install namespace unless overridden there with
+  # --cluster-resource-namespace). Only used when caIssuerRef is unset.
+  clusterResourceNamespace: "cert-manager"
 
 # Durable store for the gateway + modelgateway (tasks, push configs, token usage).
 postgres:
@@ -126,6 +132,9 @@ postgres:
 operator:
   replicas: 1                  # leader-elected: safe to raise for HA (1 active + standbys)
   logLevel: info               # -> RUST_LOG
+  # Override the ModelGateway URL rendered into agent pods (AGENT_INTELLIGENCE,
+  # keyless https dial). Empty => https://agentctl-modelgateway.<ns>.svc.cluster.local.
+  modelgatewayUrl: ""
   # Leader-elected singleton: default to the small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }
