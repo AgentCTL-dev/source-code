@@ -212,7 +212,10 @@ async fn handle_verb(
     Path((ns, name, verb)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
-    if !matches!(verb.as_str(), "drain" | "lame-duck" | "cancel") {
+    if !matches!(
+        verb.as_str(),
+        "drain" | "lame-duck" | "cancel" | "pause" | "resume"
+    ) {
         return status(
             StatusCode::NOT_FOUND,
             "Failure",
@@ -243,19 +246,19 @@ async fn handle_verb(
         Ok(true) => {
             state.metrics.inc_authorized();
             tracing::info!(%user, %ns, agent = %name, %verb, "authorized management verb");
-            match forward_to_node_agent(&state.client, &state.na, &ns, &name, &verb).await {
+            match call_agent_admin(&state.client, &state.na, &ns, &name, &verb).await {
                 Ok(result) => {
                     state.metrics.inc_forwarded();
-                    tracing::info!(%ns, agent = %name, %verb, "forwarded to node-agent");
+                    tracing::info!(%ns, agent = %name, %verb, "admin verb delivered to agent");
                     status(
                         StatusCode::OK,
                         "Success",
-                        &format!("{verb} {ns}/{name} by {user}; node-agent: {result}"),
+                        &format!("{verb} {ns}/{name} by {user}; agent: {result}"),
                     )
                 }
                 Err(e) => {
                     state.metrics.inc_error();
-                    tracing::error!(error = %e, "node-agent forward failed");
+                    tracing::error!(error = %e, "agent admin call failed");
                     status(
                         StatusCode::BAD_GATEWAY,
                         "Failure",
@@ -319,7 +322,15 @@ async fn authorize(
 /// Resolve the Agent to its pod, find the node-agent on that pod's node, and
 /// POST the verb to it. Routing: Agent --(label)--> pod (uid, node) --> the
 /// node-agent DaemonSet pod on `node` --> `POST /v1/agents/<pod_uid>/<verb>`.
-async fn forward_to_node_agent(
+/// Deliver a management verb DIRECTLY to the agent pod as a contract-2.0 A2A
+/// admin JSON-RPC (`a2a.Drain`/`a2a.LameDuck`/`a2a.Pause`/`a2a.Resume`/
+/// `a2a.Cancel` on `POST /mcp`). The agent serves mTLS-gated HTTPS on :8443
+/// (rendered by the operator); our client certificate chains to the cluster CA
+/// the agent was given as `--serve-client-ca`, which mints the `Management`
+/// origin these verbs require. There is no node-agent hop anymore: the pod IS
+/// the endpoint, addressed by pod IP (the CA — not DNS — is the trust anchor;
+/// see `na_client::CaServerVerifier`).
+async fn call_agent_admin(
     client: &Client,
     http: &reqwest::Client,
     ns: &str,
@@ -329,54 +340,55 @@ async fn forward_to_node_agent(
     // The agent's pod, labelled by the operator (agentctl.dev/agent=<name>).
     let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
     let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
-    let pod = pods
+    let pod_ip = pods
         .list(&lp)
         .await
         .map_err(|e| format!("list agent pods: {e}"))?
         .items
         .into_iter()
         .find(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
-        .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?;
-    let pod_uid = pod.metadata.uid.ok_or("agent pod has no uid")?;
-    let node = pod
-        .spec
-        .and_then(|s| s.node_name)
-        .ok_or("agent pod has no nodeName")?;
+        .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?
+        .status
+        .and_then(|s| s.pod_ip)
+        .ok_or_else(|| format!("agent pod for {ns}/{name} has no podIP"))?;
 
-    // The node-agent on that node.
-    let na: Api<Pod> = Api::namespaced(client.clone(), "agentctl-system");
-    let na_lp = ListParams::default()
-        .labels("app.kubernetes.io/name=agentctl-node-agent")
-        .fields(&format!("spec.nodeName={node}"));
-    let na_ip = na
-        .list(&na_lp)
-        .await
-        .map_err(|e| format!("list node-agents: {e}"))?
-        .items
-        .into_iter()
-        // Skip a terminating/old pod during a rollout — only a Running one serves.
-        .filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
-        .find_map(|p| p.status.and_then(|s| s.pod_ip))
-        .ok_or_else(|| format!("no running node-agent on node {node}"))?;
+    // Verb → the agentd extension admin method (Management-gated; the `a2a.`
+    // prefix is deliberate — these are operator verbs, not A2A protocol).
+    let method = match verb {
+        "drain" => "a2a.Drain",
+        "lame-duck" => "a2a.LameDuck",
+        "cancel" => "a2a.Cancel",
+        "pause" => "a2a.Pause",
+        "resume" => "a2a.Resume",
+        other => return Err(format!("unmapped verb: {other}")),
+    };
 
-    // mTLS control hop (RFC 0015): https on :8443, client-cert required. Inject the
-    // W3C `traceparent` so the node-agent continues this trace (no-op when OTLP is
-    // off — nothing is added to the request).
-    let url = format!("https://{na_ip}:8443/v1/agents/{pod_uid}/{verb}");
+    // Inject the W3C `traceparent` so the agent's run joins this trace (no-op
+    // when OTLP is off). No Origin header is sent (the agent 403s cross-origin).
+    let url = format!("https://{pod_ip}:8443/mcp");
     let mut trace_headers = reqwest::header::HeaderMap::new();
     agentctl_telemetry::inject_context(&mut trace_headers);
     let resp = http
         .post(&url)
         .headers(trace_headers)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }))
         .send()
         .await
-        .map_err(|e| format!("node-agent POST {url}: {e}"))?;
+        .map_err(|e| format!("agent POST {url}: {e}"))?;
     let code = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if code.is_success() {
-        Ok(body)
-    } else {
-        Err(format!("node-agent {code}: {body}"))
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("agent {code}: unparseable JSON-RPC response: {e}"))?;
+    // JSON-RPC envelope: a `result` is success regardless of transport nuances;
+    // an `error` (e.g. method-not-found for a peer the agent does not consider
+    // Management) is surfaced verbatim.
+    if let Some(err) = body.get("error") {
+        return Err(format!("agent JSON-RPC error: {err}"));
+    }
+    match body.get("result") {
+        Some(result) => Ok(result.to_string()),
+        None => Err(format!("agent {code}: no result in JSON-RPC response")),
     }
 }
 
@@ -431,7 +443,9 @@ async fn api_resources() -> Json<Value> {
         "resources": [
             { "name": "agents/drain", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
             { "name": "agents/lame-duck", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
-            { "name": "agents/cancel", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] }
+            { "name": "agents/cancel", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
+            { "name": "agents/pause", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
+            { "name": "agents/resume", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] }
         ],
     }))
 }

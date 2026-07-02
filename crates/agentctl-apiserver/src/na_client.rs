@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! mTLS client for the apiserver → node-agent hop (RFC 0015).
+//! mTLS client for the apiserver → **agent pod** hop (contract 2.0).
 //!
-//! The node-agent's control API now requires a CA-signed **client** certificate,
-//! so only the control plane (this apiserver, the gateway) can drive the
-//! `/v1/agents/...` connect/A2A verbs. We present our client identity from
-//! `/etc/agentctl-client/tls/{tls.crt,tls.key}` and verify the node-agent's
-//! server cert against `/etc/agentctl-client/tls/ca.crt`.
+//! Every rendered agent serves its self-MCP/A2A surface mTLS-gated on :8443;
+//! the admin verbs (`a2a.Drain`/…) require the `Management` origin, minted from
+//! a client certificate chaining to the cluster CA the agent was given as
+//! `--serve-client-ca`. We present our client identity from
+//! `/etc/agentctl-client/tls/{tls.crt,tls.key}` and verify the agent's serving
+//! cert against `/etc/agentctl-client/tls/ca.crt` (the same cluster CA).
 //!
-//! We deliberately DO NOT check the server hostname: the node-agent is addressed
-//! by its dynamic pod IP (never present in the cert SANs). mTLS still
+//! We deliberately DO NOT check the server hostname: an agent pod is addressed
+//! by its dynamic pod IP (its serving-cert SANs are Service + pod-DNS names). mTLS still
 //! authenticates the server — only a peer holding the private key for a cert
 //! chaining to our CA can complete the handshake — so skipping the name check is
 //! acceptable here (the CA is the trust anchor, not DNS). See
