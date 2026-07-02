@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"
+# Optional TLS listener for the keyless agent dial (contract 2.0). `tls-rustls-no-provider`
+# keeps it ring-only (no aws-lc-rs, no C toolchain), matching the rustls/ring stack.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # kube client to read the ModelPool CRD + the provider-credential Secret.
 # rustls/ring → no aws-lc-rs, no C toolchain.
 kube = { version = "4", default-features = false, features = ["client", "rustls-tls", "ring"] }

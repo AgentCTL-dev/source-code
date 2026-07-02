@@ -43,7 +43,11 @@ spec:
                       user = ''
                       for m in req.get('messages', []):
                           if m.get('role') == 'user': user = m.get('content', '')
-                      resp = {"model": model, "content": "mock completion for: " + user,
+                      # OpenAI chat-completions shape (contract 2.0 agents parse `choices`).
+                      resp = {"id": "chatcmpl-mock", "object": "chat.completion", "model": model,
+                              "choices": [{"index": 0, "finish_reason": "stop",
+                                           "message": {"role": "assistant",
+                                                       "content": "mock completion for: " + user}}],
                               "usage": {"prompt_tokens": 90, "completion_tokens": 10, "total_tokens": 100}}
                       print('PROVIDER 200 auth=' + auth[:18] + '… model=' + model, flush=True)
                       out = json.dumps(resp).encode()

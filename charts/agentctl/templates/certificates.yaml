@@ -108,6 +108,29 @@ spec:
   usages: ["server auth"]
   issuerRef:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- if .Values.modelgateway.enabled }}
+---
+# ModelGateway serving cert (contract 2.0): agents dial their rendered
+# AGENT_INTELLIGENCE=https://agentctl-modelgateway... keyless — this cert
+# chains to the same cluster CA the agent trusts via --tls-ca.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-modelgateway
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-modelgateway-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-modelgateway.{{ $ns }}.svc
+    - agentctl-modelgateway.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- end }}
 ---
 # Control-plane client cert (apiserver + gateway present this to the node-agent).
 apiVersion: cert-manager.io/v1

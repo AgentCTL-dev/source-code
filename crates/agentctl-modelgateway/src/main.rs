@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_api::{ModelPool, ModelPoolSpec};
 use axum::extract::{ConnectInfo, Query, State};
@@ -170,6 +171,39 @@ async fn main() {
             ip_cache,
         });
 
+    // Optional TLS listener (contract 2.0): agents dial their rendered
+    // `AGENT_INTELLIGENCE=https://…` keyless — the serving cert (cert-manager,
+    // chains to the cluster CA the agent trusts via `--tls-ca`) authenticates
+    // US to the agent; the AGENT's identity stays source-IP attestation, so
+    // this is server-auth-only TLS (no client certs). Enabled when both
+    // `MODELGATEWAY_TLS_ADDR` and `MODELGATEWAY_TLS_DIR` (tls.crt/tls.key) are
+    // set; runs alongside the plaintext :8080 (metrics scrape + legacy dials).
+    let tls_addr_env = std::env::var("MODELGATEWAY_TLS_ADDR")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let tls_dir_env = std::env::var("MODELGATEWAY_TLS_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if let (Some(tls_addr), Some(tls_dir)) = (tls_addr_env, tls_dir_env) {
+        let tls_addr: SocketAddr = tls_addr
+            .parse()
+            .unwrap_or_else(|e| panic!("parse MODELGATEWAY_TLS_ADDR {tls_addr}: {e}"));
+        let server_config = tls_server_config(std::path::Path::new(&tls_dir))
+            .unwrap_or_else(|e| panic!("build modelgateway TLS config from {tls_dir}: {e}"));
+        let rustls_config =
+            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+        let tls_app = app
+            .clone()
+            .into_make_service_with_connect_info::<SocketAddr>();
+        tracing::info!(%tls_addr, dir = %tls_dir, "modelgateway TLS listener (keyless agent dials)");
+        tokio::spawn(async move {
+            axum_server::bind_rustls(tls_addr, rustls_config)
+                .serve(tls_app)
+                .await
+                .expect("serve modelgateway TLS");
+        });
+    }
+
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -189,6 +223,30 @@ async fn main() {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("serve");
+}
+
+/// Server-auth-only rustls config for the TLS listener: the serving identity
+/// from `<dir>/tls.crt` + `<dir>/tls.key` (a mounted cert-manager Secret), NO
+/// client-certificate verification — the caller's identity is source-IP
+/// attestation, not a certificate. rustls resolves ring as the provider (the
+/// only compiled-in crypto feature; no aws-lc-rs in this graph).
+fn tls_server_config(dir: &std::path::Path) -> Result<rustls::ServerConfig, String> {
+    let load = |name: &str| -> Result<std::io::BufReader<std::fs::File>, String> {
+        let p = dir.join(name);
+        Ok(std::io::BufReader::new(
+            std::fs::File::open(&p).map_err(|e| format!("open {p:?}: {e}"))?,
+        ))
+    };
+    let certs = rustls_pemfile::certs(&mut load("tls.crt")?)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read tls.crt: {e}"))?;
+    let key = rustls_pemfile::private_key(&mut load("tls.key")?)
+        .map_err(|e| format!("read tls.key: {e}"))?
+        .ok_or("no private key in tls.key")?;
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("server config: {e}"))
 }
 
 // --- graceful shutdown -----------------------------------------------------
@@ -498,17 +556,33 @@ async fn resolve_ip_to_source(
     let pods: Api<Pod> = Api::all(client.clone());
     let ip_s = ip.to_string();
     let lp = ListParams::default().fields(&format!("status.podIP={ip_s}"));
-    let list = pods.list(&lp).await.map_err(|e| e.to_string())?;
-    let Some(pod) = list.items.iter().find(|p| attest::pod_matches_ip(p, &ip_s)) else {
-        return Ok(attest::SourcePod::Unresolved);
-    };
-    if attest::is_node_agent_pod(pod, control_plane_ns) {
-        return Ok(attest::SourcePod::Forwarder);
+
+    // COLD-START RACE: a source IP that reached us over TCP was assigned by the
+    // CNI to a real pod — but the kubelet patches `status.podIP` onto the pod
+    // AFTER the sandbox is up, so a freshly-started agent that dials on its very
+    // first loop iteration can beat its own IP into our (watch-cache-backed)
+    // list. "Resolves to no pod" is then a transient propagation lag, not a
+    // spoof. Retry a few times over ~1.5s before concluding Unresolved; the
+    // cost is paid only on the miss path (rare in steady state) and closes the
+    // race so a cold agent's first inference is not a 403 → crash-loop.
+    const RESOLVE_RETRIES: usize = 3;
+    const RESOLVE_BACKOFF: Duration = Duration::from_millis(500);
+    for attempt in 0..=RESOLVE_RETRIES {
+        let list = pods.list(&lp).await.map_err(|e| e.to_string())?;
+        if let Some(pod) = list.items.iter().find(|p| attest::pod_matches_ip(p, &ip_s)) {
+            if attest::is_node_agent_pod(pod, control_plane_ns) {
+                return Ok(attest::SourcePod::Forwarder);
+            }
+            return Ok(match attest::identity_from_pod(pod) {
+                Some(id) => attest::SourcePod::Direct(id),
+                None => attest::SourcePod::Unresolved,
+            });
+        }
+        if attempt < RESOLVE_RETRIES {
+            tokio::time::sleep(RESOLVE_BACKOFF).await;
+        }
     }
-    Ok(match attest::identity_from_pod(pod) {
-        Some(id) => attest::SourcePod::Direct(id),
-        None => attest::SourcePod::Unresolved,
-    })
+    Ok(attest::SourcePod::Unresolved)
 }
 
 /// Resolve a node-agent-asserted pod UID to the real agent's attested identity.

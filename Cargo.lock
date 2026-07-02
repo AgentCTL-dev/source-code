@@ -139,6 +139,7 @@ dependencies = [
  "agent-api",
  "agentctl-telemetry",
  "axum",
+ "axum-server",
  "deadpool-postgres",
  "k8s-openapi",
  "kube",
