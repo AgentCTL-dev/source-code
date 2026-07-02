@@ -111,12 +111,15 @@ async fn main() -> Result<(), kube::Error> {
         "API token injection config"
     );
 
+    let render = agentctl_operator::RenderConfig::from_env();
+    info!(modelgateway = %render.modelgateway_url, "render config");
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
         recorder,
         scaler,
         api_token,
+        render,
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");

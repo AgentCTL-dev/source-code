@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 use crate::metrics::Metrics;
 use crate::{
     fleet_selector_string, inject_api_token, render_agent, render_fleet, render_scaled_object,
-    RenderError, Rendered, DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
+    RenderConfig, RenderError, Rendered, DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
@@ -61,6 +61,10 @@ pub struct Ctx {
     /// Optional in-cluster bearer-token injection into rendered agent pods
     /// (chart `apiToken.enabled`).
     pub api_token: ApiTokenConfig,
+    /// Operator-scoped render inputs (the ModelGateway URL agents dial keyless;
+    /// env `AGENTCTL_MODELGATEWAY_URL`). Read once at startup
+    /// ([`RenderConfig::from_env`]).
+    pub render: RenderConfig,
 }
 
 /// Operator-side wiring for the optional in-cluster bearer-token gate (chart
@@ -272,7 +276,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
 
     // Render + apply the workload, then derive the desired status. A RenderError
     // is a user error (invalid spec) → Validated=False, not a retried failure.
-    let (condition, phase, contract) = match render_agent(&agent) {
+    let (condition, phase, contract) = match render_agent(&agent, &ctx.render) {
         Ok(mut rendered) => {
             let kind = rendered_kind(&rendered);
             // Optional in-cluster bearer-token injection (chart apiToken.enabled).
@@ -503,7 +507,8 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // `.status.selector` (the label-selector string matching the fleet pods), so
     // `kubectl get agentfleet` shows replicas and an HPA can read both back. On a
     // render error we leave them unset (the merge patch keeps the last value).
-    let (condition, replicas, selector, scaler_condition) = match render_fleet(&fleet) {
+    let (condition, replicas, selector, scaler_condition) = match render_fleet(&fleet, &ctx.render)
+    {
         Ok(mut rendered) => {
             let kind = rendered_kind(&rendered);
             // Optional in-cluster bearer-token injection (chart apiToken.enabled);
@@ -766,13 +771,13 @@ mod tests {
 
     #[test]
     fn controller_picks_job_for_once() {
-        let rendered = render_agent(&agent(Mode::Once)).unwrap();
+        let rendered = render_agent(&agent(Mode::Once), &RenderConfig::default()).unwrap();
         assert_eq!(rendered_kind(&rendered), "Job");
     }
 
     #[test]
     fn controller_picks_deployment_for_reactive() {
-        let rendered = render_agent(&agent(Mode::Reactive)).unwrap();
+        let rendered = render_agent(&agent(Mode::Reactive), &RenderConfig::default()).unwrap();
         assert_eq!(rendered_kind(&rendered), "Deployment");
     }
 
@@ -780,7 +785,7 @@ mod tests {
     fn render_error_maps_to_validated_false() {
         let mut a = agent(Mode::Once);
         a.spec.image = None; // classless agent without an image is unrenderable
-        let err = render_agent(&a).unwrap_err();
+        let err = render_agent(&a, &RenderConfig::default()).unwrap_err();
         let c = validated_failed_condition(&err.to_string());
         assert_eq!(c.status, "False");
         assert_eq!(c.type_, "Validated");
@@ -899,7 +904,7 @@ mod tests {
         );
         shard.metadata.namespace = Some("agents".into());
         shard.metadata.uid = Some("uid-shard".into());
-        let rendered = render_fleet(&shard).unwrap();
+        let rendered = render_fleet(&shard, &RenderConfig::default()).unwrap();
         assert!(matches!(rendered, Rendered::StatefulSet(_)));
         assert_eq!(fleet_replica_count(&shard, &rendered), 4);
 
@@ -919,7 +924,7 @@ mod tests {
         );
         claim.metadata.namespace = Some("agents".into());
         claim.metadata.uid = Some("uid-claim".into());
-        let rendered = render_fleet(&claim).unwrap();
+        let rendered = render_fleet(&claim, &RenderConfig::default()).unwrap();
         assert!(matches!(rendered, Rendered::Deployment(_)));
         // KEDA-safe: the rendered Deployment still carries no .spec.replicas.
         if let Rendered::Deployment(dep) = &rendered {
@@ -929,7 +934,7 @@ mod tests {
 
         // claim mode with no spec.replicas → defaults to 0 (deferred to KEDA).
         claim.spec.replicas = None;
-        let rendered = render_fleet(&claim).unwrap();
+        let rendered = render_fleet(&claim, &RenderConfig::default()).unwrap();
         assert_eq!(fleet_replica_count(&claim, &rendered), 0);
     }
 
@@ -964,7 +969,7 @@ mod tests {
         );
 
         // every matchLabels entry on the rendered workload appears in the string.
-        let rendered = render_fleet(&fleet).unwrap();
+        let rendered = render_fleet(&fleet, &RenderConfig::default()).unwrap();
         let Rendered::Deployment(dep) = &rendered else {
             panic!("claim fleet should render a Deployment");
         };
@@ -1058,7 +1063,7 @@ mod tests {
     fn unsupported_substrate_is_a_render_error_condition() {
         let mut a = agent(Mode::Once);
         a.spec.substrate = Some(Substrate::KataHybrid);
-        let err = render_agent(&a).unwrap_err();
+        let err = render_agent(&a, &RenderConfig::default()).unwrap_err();
         let c = validated_failed_condition(&err.to_string());
         assert!(c.message.unwrap().to_lowercase().contains("substrate"));
     }

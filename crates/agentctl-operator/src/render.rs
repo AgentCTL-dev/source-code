@@ -4,13 +4,18 @@
 //!
 //! This is the deterministic, side-effect-free core the reconcile loop (RFC
 //! 0006) calls. Keeping it pure makes the mode→workload mapping (RFC 0003 §5),
-//! the scaling regime (RFC 0011), and the substrate wiring (RFC 0002) all
-//! unit-testable without a cluster.
+//! the scaling regime (RFC 0011), and the serve wiring all unit-testable
+//! without a cluster.
 //!
-//! v1 implements the **stock-unix** substrate (the PRIMARY/dev tier, RFC 0002):
-//! the agent serves its management socket on a per-pod hostPath subdir, reached
-//! by the node-agent. The Kata-hybrid tier reuses this same shape with a
-//! different volume source (RFC 0002 §4/§6.2) and is added later.
+//! **contract_version 2.0 (agentd v2 HTTPS-everywhere pivot): the network is
+//! the substrate; identity is the boundary.** Every rendered pod SERVES its
+//! management/A2A surface over mTLS-gated HTTPS (`--serve-mcp
+//! https://0.0.0.0:8443`) with a cert-manager-issued serving identity, trusts
+//! the cluster CA for callers (`--serve-client-ca`) and for its own keyless
+//! outbound dials (`--tls-ca`, `AGENT_INTELLIGENCE=https://<modelgateway>`),
+//! and exposes `/readyz` on a separate metrics listener. No hostPath, no
+//! unix sockets, no pod-held credential: the ONLY key material in the pod is
+//! its OWN serving identity (cert-manager Secret, rotated live by the agent).
 
 use std::collections::BTreeMap;
 
@@ -18,46 +23,87 @@ use agent_api::{Agent, AgentFleet, AgentSpec, Mode, ScaleMode, Substrate};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, HostPathVolumeSource,
-    ObjectFieldSelector, PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile,
-    SecretKeySelector, SecurityContext, Volume, VolumeMount,
+    Capabilities, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
+    EnvVarSource, HTTPGetAction, ObjectFieldSelector, PodSecurityContext, PodSpec, PodTemplateSpec,
+    Probe, SeccompProfile, SecretKeySelector, SecretVolumeSource, SecurityContext, Volume,
+    VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 /// API group/version these resources are owned by (agent-api `GROUP`).
 const API_VERSION: &str = "agents.x-k8s.io/v1alpha1";
 
-/// The node-agent-owned hostPath root for the stock-unix substrate (RFC 0002
-/// §6.1). Each pod mounts only its own `<pod-uid>/` subdir.
-const SOCKET_HOSTPATH_ROOT: &str = "/run/agentctl/sockets";
-/// In-pod mount point where the agent binds its management socket.
-const SOCKET_MOUNT: &str = "/run/agent";
-const SOCKET_VOLUME: &str = "agentctl-sockets";
+/// In-pod mount of the workload's own serving identity — the cert-manager
+/// `Certificate` Secret ([`serving_secret_name`], keys `tls.crt`/`tls.key`).
+/// The agent re-reads these paths in place on rotation (agentd ≥2.1 live
+/// acceptor), so a cert-manager renewal never restarts the pod.
+const TLS_MOUNT: &str = "/etc/agentctl/tls";
+const TLS_VOLUME: &str = "agentctl-serving-tls";
 
-/// Annotation that opts a single Agent/Pod into the **routed-infer** path (RFC
-/// 0012 node-local proxy topology). When present and `"true"`, the agent's
-/// `AGENT_INTELLIGENCE` is pointed at the node-agent's infer-proxy unix socket
-/// (a read-only hostPath) instead of dialing the ModelGateway Service directly;
-/// the node-agent forwards to the ModelGateway with an SO_PEERCRED-attested
-/// pod-uid (`X-Agent-Pod-Uid`). This is the NETWORKLESS-tier identity path:
-/// confined pods on the Kata tier have no routable pod IP for the ModelGateway
-/// to attest, so the unix-socket peer credential is the substrate-local
-/// attestation. The Kata/networkless tier defaults this on later (RFC 0002);
-/// for now it is explicit opt-in so the default direct-dial wiring is UNCHANGED.
-pub const ROUTED_INFER_ANNOTATION: &str = "agentctl.dev/routed-infer";
+/// In-pod mount of the cluster CA **public certificate** (ConfigMap
+/// [`CA_CONFIGMAP`], key `ca.crt`, ensured per agent namespace by the
+/// operator). Doubles as the agent's client-CA (who may call me = holders of
+/// agentctl-CA client certs → `Management`) and its outbound trust anchor
+/// (`--tls-ca` — the gateways' serving certs chain to the same CA).
+const CA_MOUNT: &str = "/etc/agentctl/ca";
+const CA_VOLUME: &str = "agentctl-ca";
+/// The per-namespace ConfigMap carrying the cluster CA cert (public material).
+pub const CA_CONFIGMAP: &str = "agentctl-ca";
+/// Key within [`CA_CONFIGMAP`] (and the mounted filename) holding the CA PEM.
+pub const CA_KEY: &str = "ca.crt";
 
-/// The node-agent-owned hostPath dir holding the infer-proxy unix socket (chart
-/// `nodeAgent.inferProxy`, mounted read-write on the node-agent DaemonSet).
-/// Agent pods on the routed-infer path mount it READ-ONLY.
-const INFER_SOCKET_HOSTPATH_DIR: &str = "/run/agentctl/infer";
-/// Socket filename inside [`INFER_SOCKET_HOSTPATH_DIR`] the node-agent binds and
-/// the agent dials (`AGENT_INTELLIGENCE=unix:<dir>/<file>`). Kept in sync with
-/// the chart's `NODE_AGENT_INFER_SOCKET` (charts/agentctl/templates/node-agent.yaml).
-const INFER_SOCKET_NAME: &str = "infer.sock";
-/// In-pod mount point for the routed-infer socket dir (same path as on the host
-/// for a stable `AGENT_INTELLIGENCE` URI).
-const INFER_SOCKET_MOUNT: &str = "/run/agentctl/infer";
-const INFER_SOCKET_VOLUME: &str = "agentctl-infer";
+/// The HTTPS port every rendered agent serves its self-MCP/A2A surface on.
+pub const SERVE_PORT: i32 = 8443;
+/// The metrics/readiness listener port (`AGENT_METRICS_ADDR`, `/readyz`).
+pub const METRICS_PORT: i32 = 9090;
+
+/// The serving-identity Secret name for a workload (cert-manager
+/// `Certificate.spec.secretName`; created by the operator, mounted at
+/// [`TLS_MOUNT`]).
+pub fn serving_secret_name(workload: &str) -> String {
+    format!("{workload}-serving-tls")
+}
+
+/// Operator-scoped render inputs that do not live on the CR: where the
+/// ModelGateway is (`AGENTCTL_MODELGATEWAY_URL`). Built once by the controller
+/// from its environment; a test passes a literal.
+#[derive(Debug, Clone)]
+pub struct RenderConfig {
+    /// The ModelGateway base URL rendered into `AGENT_INTELLIGENCE` (keyless
+    /// dial; identity = source-IP attestation at the gateway). MUST be an
+    /// `https://` URL whose cert chains to the cluster CA, and SHOULD be an
+    /// absolute (trailing-dot) FQDN so no DNS search list can capture it.
+    pub modelgateway_url: String,
+}
+
+/// Default in-cluster ModelGateway URL (chart Service, control-plane
+/// namespace; absolute FQDN — trailing dot — so ndots search never rewrites it).
+pub const DEFAULT_MODELGATEWAY_URL: &str =
+    "https://agentctl-modelgateway.agentctl-system.svc.cluster.local.";
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        RenderConfig {
+            modelgateway_url: DEFAULT_MODELGATEWAY_URL.to_string(),
+        }
+    }
+}
+
+impl RenderConfig {
+    /// Build from the operator environment (`AGENTCTL_MODELGATEWAY_URL`),
+    /// falling back to the in-cluster default.
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        RenderConfig {
+            modelgateway_url: std::env::var("AGENTCTL_MODELGATEWAY_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(d.modelgateway_url),
+        }
+    }
+}
 
 /// Writable scratch dir mounted over the read-only root filesystem. With
 /// `readOnlyRootFilesystem: true` (see `container_security_context`) the
@@ -123,7 +169,7 @@ impl std::fmt::Display for RenderError {
 impl std::error::Error for RenderError {}
 
 /// Render an `Agent` to its workload (mode→workload, RFC 0003 §5).
-pub fn render_agent(agent: &Agent) -> Result<Rendered, RenderError> {
+pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, RenderError> {
     let name = agent
         .metadata
         .name
@@ -139,12 +185,7 @@ pub fn render_agent(agent: &Agent) -> Result<Rendered, RenderError> {
         &labels,
         owner_ref("Agent", &name, uid_of(&agent.metadata.uid)),
     );
-    let pod = pod_template(
-        &agent.spec,
-        &image,
-        &labels,
-        routed_infer_enabled(&agent.metadata.annotations),
-    );
+    let pod = pod_template(&agent.spec, &image, &labels, &name, cfg);
 
     match agent.spec.mode {
         Mode::Once | Mode::Schedule => {
@@ -178,7 +219,7 @@ pub fn render_agent(agent: &Agent) -> Result<Rendered, RenderError> {
 /// Render an `AgentFleet` to its workload (scaling regime, RFC 0011): claim mode
 /// → a Deployment with **`replicas` omitted** (KEDA's HPA owns it); shard mode →
 /// a StatefulSet whose replica count is the fixed partition count `N`.
-pub fn render_fleet(fleet: &AgentFleet) -> Result<Rendered, RenderError> {
+pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, RenderError> {
     let name = fleet
         .metadata
         .name
@@ -195,12 +236,7 @@ pub fn render_fleet(fleet: &AgentFleet) -> Result<Rendered, RenderError> {
         &labels,
         owner_ref("AgentFleet", &name, uid_of(&fleet.metadata.uid)),
     );
-    let pod = pod_template(
-        spec,
-        &image,
-        &labels,
-        routed_infer_enabled(&fleet.metadata.annotations),
-    );
+    let pod = pod_template(spec, &image, &labels, &name, cfg);
 
     match fleet.spec.scaling.mode {
         ScaleMode::Claim => Ok(Rendered::Deployment(Box::new(Deployment {
@@ -468,7 +504,8 @@ fn pod_template(
     spec: &AgentSpec,
     image: &str,
     labels: &BTreeMap<String, String>,
-    routed_infer: bool,
+    workload: &str,
+    cfg: &RenderConfig,
 ) -> PodTemplateSpec {
     let restart_policy = match spec.mode {
         Mode::Once | Mode::Schedule => Some("Never".to_string()),
@@ -477,15 +514,35 @@ fn pod_template(
     };
 
     let mut env = downward_env();
-    let mut volume_mounts = vec![
+    // Keyless intelligence dial: the ModelGateway holds the provider credential
+    // and attests the caller by source IP — NO token env is ever rendered.
+    env.push(EnvVar {
+        name: "AGENT_INTELLIGENCE".to_string(),
+        value: Some(cfg.modelgateway_url.clone()),
+        ..Default::default()
+    });
+    // Metrics + readiness listener (`/readyz`), probed below and scraped directly
+    // (the pod is network-attached; there is no scrape proxy).
+    env.push(EnvVar {
+        name: "AGENT_METRICS_ADDR".to_string(),
+        value: Some(format!("0.0.0.0:{METRICS_PORT}")),
+        ..Default::default()
+    });
+
+    let volume_mounts = vec![
+        // The workload's OWN serving identity (cert-manager Secret; tls.crt/tls.key).
+        // Read-only; the agent re-reads it in place on rotation (agentd ≥2.1).
         VolumeMount {
-            name: SOCKET_VOLUME.to_string(),
-            mount_path: SOCKET_MOUNT.to_string(),
-            // Per RFC 0002 §6.1: the per-pod subdir is selected by the pod UID
-            // via subPathExpr, so the path is unique WITHOUT the operator
-            // knowing the UID at render time. NOT marked readOnly: the agent
-            // binds its management socket here.
-            sub_path_expr: Some("$(AGENT_POD_UID)".to_string()),
+            name: TLS_VOLUME.to_string(),
+            mount_path: TLS_MOUNT.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        },
+        // The cluster CA public cert (client-CA + outbound trust anchor).
+        VolumeMount {
+            name: CA_VOLUME.to_string(),
+            mount_path: CA_MOUNT.to_string(),
+            read_only: Some(true),
             ..Default::default()
         },
         // Writable scratch: `readOnlyRootFilesystem` makes `/` read-only, so
@@ -496,12 +553,20 @@ fn pod_template(
             ..Default::default()
         },
     ];
-    let mut volumes = vec![
+    let volumes = vec![
         Volume {
-            name: SOCKET_VOLUME.to_string(),
-            host_path: Some(HostPathVolumeSource {
-                path: SOCKET_HOSTPATH_ROOT.to_string(),
-                type_: Some("DirectoryOrCreate".to_string()),
+            name: TLS_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(serving_secret_name(workload)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: CA_VOLUME.to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: CA_CONFIGMAP.to_string(),
+                ..Default::default()
             }),
             ..Default::default()
         },
@@ -513,42 +578,36 @@ fn pod_template(
         },
     ];
 
-    // Routed-infer opt-in (annotation `agentctl.dev/routed-infer: "true"`): point
-    // the agent's intelligence endpoint at the node-agent infer-proxy unix socket
-    // on a READ-ONLY hostPath, instead of the direct ModelGateway dial. The
-    // node-agent attests the peer (SO_PEERCRED) and forwards upstream. Default
-    // (no annotation) leaves this OFF, so the direct ModelGateway wiring is
-    // unchanged. See [`ROUTED_INFER_ANNOTATION`].
-    if routed_infer {
-        env.push(EnvVar {
-            name: "AGENT_INTELLIGENCE".to_string(),
-            value: Some(format!("unix:{INFER_SOCKET_MOUNT}/{INFER_SOCKET_NAME}")),
-            ..Default::default()
-        });
-        volume_mounts.push(VolumeMount {
-            name: INFER_SOCKET_VOLUME.to_string(),
-            mount_path: INFER_SOCKET_MOUNT.to_string(),
-            // READ-ONLY: the agent only dials the socket; it never binds it (the
-            // node-agent owns the bind). A confined tenant cannot tamper with or
-            // re-bind the forwarder's socket.
-            read_only: Some(true),
-            ..Default::default()
-        });
-        volumes.push(Volume {
-            name: INFER_SOCKET_VOLUME.to_string(),
-            host_path: Some(HostPathVolumeSource {
-                path: INFER_SOCKET_HOSTPATH_DIR.to_string(),
-                type_: Some("DirectoryOrCreate".to_string()),
-            }),
-            ..Default::default()
-        });
-    }
+    let mut args = agent_args(spec);
+    args.extend(serve_args());
 
     let container = Container {
         name: "agent".to_string(),
         image: Some(image.to_string()),
-        args: Some(agent_args(spec)),
+        args: Some(args),
         env: Some(env),
+        ports: Some(vec![
+            ContainerPort {
+                name: Some("mcp".to_string()),
+                container_port: SERVE_PORT,
+                ..Default::default()
+            },
+            ContainerPort {
+                name: Some("metrics".to_string()),
+                container_port: METRICS_PORT,
+                ..Default::default()
+            },
+        ]),
+        // Readiness = the contract's `/readyz` on the metrics listener (drain /
+        // lame-duck / all-endpoints-down flip it, so ready == accepting work).
+        readiness_probe: Some(Probe {
+            http_get: Some(HTTPGetAction {
+                path: Some("/readyz".to_string()),
+                port: IntOrString::Int(METRICS_PORT),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         // Confine the tenant container (hostile multi-tenancy P0).
         security_context: Some(container_security_context()),
         volume_mounts: Some(volume_mounts),
@@ -565,6 +624,9 @@ fn pod_template(
             restart_policy,
             // Pod-level hardening (hostile multi-tenancy P0).
             security_context: Some(pod_security_context()),
+            // The pod holds NO borrowed credential — and no ambient one either:
+            // never auto-mount the namespace default ServiceAccount token.
+            automount_service_account_token: Some(false),
             // Share the pod PID namespace so the pod's infra (pause) container is
             // PID 1 and the agent is NOT. A conformant agent (e.g. agentd) forks a
             // worker subagent guarded by an orphan check (`getppid() == 1` ⇒ the
@@ -579,35 +641,34 @@ fn pod_template(
     }
 }
 
-/// Whether an object's annotations opt it into the routed-infer path
-/// ([`ROUTED_INFER_ANNOTATION`] == `"true"`). Absent/any-other value = off, so
-/// the default direct-dial ModelGateway wiring is preserved.
-fn routed_infer_enabled(annotations: &Option<BTreeMap<String, String>>) -> bool {
-    annotations
-        .as_ref()
-        .and_then(|a| a.get(ROUTED_INFER_ANNOTATION))
-        .map(|v| v == "true")
-        .unwrap_or(false)
+/// The HTTPS serve + trust args every rendered agent gets (contract 2.0): serve
+/// the self-MCP/A2A surface mTLS-gated on [`SERVE_PORT`], trust cluster-CA
+/// client certs (`Management` = the control plane), and trust the same CA for
+/// outbound dials (the gateways).
+fn serve_args() -> Vec<String> {
+    vec![
+        "--serve-mcp".to_string(),
+        format!("https://0.0.0.0:{SERVE_PORT}"),
+        "--serve-cert".to_string(),
+        format!("{TLS_MOUNT}/tls.crt"),
+        "--serve-key".to_string(),
+        format!("{TLS_MOUNT}/tls.key"),
+        "--serve-client-ca".to_string(),
+        format!("{CA_MOUNT}/{CA_KEY}"),
+        "--tls-ca".to_string(),
+        format!("{CA_MOUNT}/{CA_KEY}"),
+    ]
 }
 
 /// Container-level confinement for the tenant agent (hostile multi-tenancy P0):
-/// block privilege escalation, drop all Linux capabilities, and make the root
-/// filesystem read-only (writable paths are explicit volumes — see `/tmp` and
-/// the management socket mount).
-///
-/// NOTE: the agent runs as `runAsUser: 0` (root) on the stock-unix substrate. It
-/// binds its management/A2A socket into a hostPath `subPath` dir the kubelet
-/// creates `root:root`; a nonroot UID could not write it and the socket bind
-/// fails (`Permission denied`), so a reference agent image that ships `USER
-/// 65532` (e.g. agentd) would never serve its management surface. We therefore
-/// pin root here so the bind succeeds regardless of the image's default user.
-/// Forcing nonroot is a FOLLOW-UP gated on substrate socket-perms (RFC 0002
-/// §6.1: node-agent-chowned per-pod dirs); when that lands a user-supplied
-/// Agent-spec securityContext override should win. Privilege escalation is still
-/// blocked, all capabilities dropped, and the root filesystem read-only.
+/// **nonroot enforced**, no privilege escalation, all Linux capabilities
+/// dropped, read-only root filesystem (writable paths are explicit volumes —
+/// `/tmp`). With no hostPath socket to bind (the v2 pivot removed it), the
+/// reference image's native `USER 65532` runs unchanged and the whole render
+/// satisfies the `restricted` Pod Security Standard.
 fn container_security_context() -> SecurityContext {
     SecurityContext {
-        run_as_user: Some(0),
+        run_as_non_root: Some(true),
         allow_privilege_escalation: Some(false),
         read_only_root_filesystem: Some(true),
         capabilities: Some(Capabilities {
@@ -619,9 +680,7 @@ fn container_security_context() -> SecurityContext {
 }
 
 /// Pod-level confinement: pin the seccomp profile to the runtime default so the
-/// kernel syscall surface is filtered for every container in the pod. As with
-/// the container context, `runAsNonRoot` is intentionally left unset (see
-/// `container_security_context`).
+/// kernel syscall surface is filtered for every container in the pod.
 fn pod_security_context() -> PodSecurityContext {
     PodSecurityContext {
         seccomp_profile: Some(SeccompProfile {
@@ -634,7 +693,8 @@ fn pod_security_context() -> PodSecurityContext {
 
 /// The downward-API instance-identity env (contract `env-convention`, RFC
 /// 0014 §6.4). Emitted with the `AGENT_*` spelling the reference agent reads
-/// (contract `env-convention` / README map).
+/// (contract `env-convention` / README map). The serve instruction is NOT env
+/// anymore — it is the `--serve-mcp https://…` argv ([`serve_args`]).
 fn downward_env() -> Vec<EnvVar> {
     let field = |name: &str, path: &str| EnvVar {
         name: name.to_string(),
@@ -652,24 +712,21 @@ fn downward_env() -> Vec<EnvVar> {
         field("AGENT_POD_UID", "metadata.uid"),
         field("AGENT_POD_NAMESPACE", "metadata.namespace"),
         field("AGENT_NODE_NAME", "spec.nodeName"),
-        // The management bind-address instruction (RFC 0002 §6.1): the agent
-        // serves its self-MCP management profile on the per-pod hostPath socket.
-        EnvVar {
-            name: "AGENT_SERVE_MCP".to_string(),
-            value: Some(format!("unix:{SOCKET_MOUNT}/mgmt.sock")),
-            ..Default::default()
-        },
     ]
 }
 
-/// Container args derived from the spec (mode + instruction + subscriptions).
-/// A later step renders the full config via a ConfigMap (RFC 0017); args keep
-/// the v1 render self-contained and testable.
+/// Container args derived from the spec (mode + instruction + model +
+/// subscriptions). A later step renders the full config via a ConfigMap (RFC
+/// 0017); args keep the render self-contained and testable.
 fn agent_args(spec: &AgentSpec) -> Vec<String> {
     let mut args = vec!["--mode".to_string(), mode_str(spec.mode).to_string()];
     if let Some(instruction) = &spec.instruction {
         args.push("--instruction".to_string());
         args.push(instruction.clone());
+    }
+    if let Some(model) = &spec.model {
+        args.push("--model".to_string());
+        args.push(model.clone());
     }
     for sub in &spec.subscribe {
         args.push("--subscribe".to_string());
@@ -745,9 +802,21 @@ mod tests {
         &pod.spec.as_ref().unwrap().containers[0]
     }
 
+    fn cfg() -> RenderConfig {
+        RenderConfig::default()
+    }
+
+    fn has_arg_pair(c: &Container, k: &str, v: &str) -> bool {
+        c.args
+            .as_ref()
+            .unwrap()
+            .windows(2)
+            .any(|w| w == [k.to_string(), v.to_string()])
+    }
+
     #[test]
     fn once_renders_a_job() {
-        let r = render_agent(&agent(Mode::Once)).unwrap();
+        let r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
         let Rendered::Job(job) = r else {
             panic!("expected a Job")
         };
@@ -771,7 +840,7 @@ mod tests {
     fn reactive_renders_a_singleton_deployment() {
         let mut a = agent(Mode::Reactive);
         a.spec.subscribe = vec!["file:///data/inbox".into()];
-        let r = render_agent(&a).unwrap();
+        let r = render_agent(&a, &cfg()).unwrap();
         let Rendered::Deployment(dep) = r else {
             panic!("expected a Deployment")
         };
@@ -787,35 +856,77 @@ mod tests {
             Some("demo")
         );
         let c = container_of(&spec.template);
-        assert!(c
-            .args
-            .as_ref()
-            .unwrap()
-            .windows(2)
-            .any(|w| w == ["--subscribe".to_string(), "file:///data/inbox".to_string()]));
+        assert!(has_arg_pair(c, "--subscribe", "file:///data/inbox"));
     }
 
     #[test]
-    fn stock_unix_substrate_wiring() {
-        let r = render_agent(&agent(Mode::Once)).unwrap();
+    fn serve_wiring_v2() {
+        // Every rendered pod SERVES mTLS-gated HTTPS (contract 2.0): the serve
+        // argv, its own serving-identity Secret mount, the cluster-CA ConfigMap
+        // mount (client-CA + outbound trust), ports, and the /readyz probe.
+        let r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
         let Rendered::Job(job) = r else {
             unreachable!()
         };
         let pod = job.spec.unwrap().template;
         let podspec = pod.spec.as_ref().unwrap();
+        let c = container_of(&pod);
 
-        let vol = &podspec.volumes.as_ref().unwrap()[0];
-        assert_eq!(vol.name, "agentctl-sockets");
+        // Serve + trust argv.
+        assert!(has_arg_pair(c, "--serve-mcp", "https://0.0.0.0:8443"));
+        assert!(has_arg_pair(c, "--serve-cert", "/etc/agentctl/tls/tls.crt"));
+        assert!(has_arg_pair(c, "--serve-key", "/etc/agentctl/tls/tls.key"));
+        assert!(has_arg_pair(
+            c,
+            "--serve-client-ca",
+            "/etc/agentctl/ca/ca.crt"
+        ));
+        assert!(has_arg_pair(c, "--tls-ca", "/etc/agentctl/ca/ca.crt"));
+
+        // The workload's OWN serving identity, mounted read-only.
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let tls = mounts
+            .iter()
+            .find(|m| m.name == TLS_VOLUME)
+            .expect("serving-tls mounted");
+        assert_eq!(tls.mount_path, "/etc/agentctl/tls");
+        assert_eq!(tls.read_only, Some(true));
+        let volumes = podspec.volumes.as_ref().unwrap();
+        let tls_vol = volumes.iter().find(|v| v.name == TLS_VOLUME).unwrap();
         assert_eq!(
-            vol.host_path.as_ref().unwrap().path,
-            "/run/agentctl/sockets"
+            tls_vol.secret.as_ref().unwrap().secret_name.as_deref(),
+            Some("demo-serving-tls")
         );
 
-        let c = container_of(&pod);
-        let mount = &c.volume_mounts.as_ref().unwrap()[0];
-        assert_eq!(mount.sub_path_expr.as_deref(), Some("$(AGENT_POD_UID)"));
-        assert_eq!(mount.mount_path, "/run/agent");
+        // The cluster CA (public), mounted read-only from the per-ns ConfigMap.
+        let ca = mounts
+            .iter()
+            .find(|m| m.name == CA_VOLUME)
+            .expect("ca mounted");
+        assert_eq!(ca.mount_path, "/etc/agentctl/ca");
+        assert_eq!(ca.read_only, Some(true));
+        let ca_vol = volumes.iter().find(|v| v.name == CA_VOLUME).unwrap();
+        assert_eq!(ca_vol.config_map.as_ref().unwrap().name, CA_CONFIGMAP);
 
+        // NO sockets, NO hostPath anywhere (restricted-PSS-clean).
+        assert!(volumes.iter().all(|v| v.host_path.is_none()));
+        assert!(!c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "AGENT_SERVE_MCP"));
+
+        // Ports + the /readyz readiness probe on the metrics listener.
+        let ports = c.ports.as_ref().unwrap();
+        assert!(ports.iter().any(|p| p.container_port == SERVE_PORT));
+        assert!(ports.iter().any(|p| p.container_port == METRICS_PORT));
+        let probe = c.readiness_probe.as_ref().unwrap();
+        let get = probe.http_get.as_ref().unwrap();
+        assert_eq!(get.path.as_deref(), Some("/readyz"));
+        assert_eq!(get.port, IntOrString::Int(METRICS_PORT));
+
+        // Downward-API identity env intact.
         let env = c.env.as_ref().unwrap();
         let uid = env.iter().find(|e| e.name == "AGENT_POD_UID").unwrap();
         assert_eq!(
@@ -828,22 +939,47 @@ mod tests {
                 .field_path,
             "metadata.uid"
         );
-        let serve = env.iter().find(|e| e.name == "AGENT_SERVE_MCP").unwrap();
-        assert_eq!(serve.value.as_deref(), Some("unix:/run/agent/mgmt.sock"));
+    }
+
+    #[test]
+    fn intelligence_env_is_keyless_and_from_config() {
+        let custom = RenderConfig {
+            modelgateway_url: "https://mgw.cp.svc.cluster.local.".into(),
+        };
+        let r = render_agent(&agent(Mode::Reactive), &custom).unwrap();
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
+        let c = container_of(&dep.spec.as_ref().unwrap().template).clone();
+        let env = c.env.as_ref().unwrap();
+        let intel = env
+            .iter()
+            .find(|e| e.name == "AGENT_INTELLIGENCE")
+            .expect("AGENT_INTELLIGENCE rendered");
+        assert_eq!(
+            intel.value.as_deref(),
+            Some("https://mgw.cp.svc.cluster.local.")
+        );
+        // Keyless: NO intelligence token env of any spelling.
+        assert!(!env.iter().any(|e| e.name.contains("INTELLIGENCE_TOKEN")));
+        // Metrics listener env for the /readyz probe + direct scrape.
+        let metrics = env.iter().find(|e| e.name == "AGENT_METRICS_ADDR").unwrap();
+        assert_eq!(metrics.value.as_deref(), Some("0.0.0.0:9090"));
     }
 
     #[test]
     fn rendered_pod_is_confined() {
         // Hardening must apply to every rendered workload; exercise the Job path
         // (all kinds share `pod_template`).
-        let r = render_agent(&agent(Mode::Once)).unwrap();
+        let r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
         let Rendered::Job(job) = r else {
             unreachable!()
         };
         let pod = job.spec.unwrap().template;
         let podspec = pod.spec.as_ref().unwrap();
 
-        // Pod-level: seccomp pinned to the runtime default.
+        // Pod-level: seccomp pinned; no ambient SA credential; PID ns shared
+        // (the agentd orphan-guard, see pod_template).
         let psc = podspec
             .security_context
             .as_ref()
@@ -852,27 +988,24 @@ mod tests {
             psc.seccomp_profile.as_ref().unwrap().type_,
             "RuntimeDefault"
         );
-        // runAsNonRoot is a follow-up (RFC 0002 socket-perms) — must NOT be forced
-        // yet or the stock-unix mgmt-socket bind breaks.
-        assert_eq!(psc.run_as_non_root, None);
-        assert_eq!(psc.run_as_user, None);
+        assert_eq!(podspec.automount_service_account_token, Some(false));
+        assert_eq!(podspec.share_process_namespace, Some(true));
 
-        // Container-level: no priv-esc, drop ALL caps, read-only root fs.
+        // Container-level: NONROOT (restricted PSS — no hostPath socket to bind
+        // anymore), no priv-esc, drop ALL caps, read-only root fs.
         let c = container_of(&pod);
         let sc = c
             .security_context
             .as_ref()
             .expect("container securityContext present");
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.run_as_user, None);
         assert_eq!(sc.allow_privilege_escalation, Some(false));
         assert_eq!(sc.read_only_root_filesystem, Some(true));
         assert_eq!(
             sc.capabilities.as_ref().unwrap().drop.as_deref(),
             Some(["ALL".to_string()].as_slice())
         );
-        // Pinned root so the agent can bind its socket into the kubelet's
-        // root:root hostPath dir even when the image ships USER 65532 (agentd).
-        assert_eq!(sc.run_as_non_root, None);
-        assert_eq!(sc.run_as_user, Some(0));
 
         // Writable /tmp emptyDir backs the read-only root filesystem.
         let mounts = c.volume_mounts.as_ref().unwrap();
@@ -881,147 +1014,18 @@ mod tests {
             .find(|m| m.mount_path == "/tmp")
             .expect("/tmp mount present");
         assert_eq!(tmp_mount.name, "tmp");
-        // /tmp mount is writable (readOnly not set).
         assert_ne!(tmp_mount.read_only, Some(true));
-
         let volumes = podspec.volumes.as_ref().unwrap();
         let tmp_vol = volumes
             .iter()
             .find(|v| v.name == "tmp")
             .expect("tmp volume present");
         assert!(tmp_vol.empty_dir.is_some(), "tmp volume is an emptyDir");
-
-        // The management socket mount stays writable (the agent binds there).
-        let sock_mount = mounts
-            .iter()
-            .find(|m| m.mount_path == "/run/agent")
-            .expect("socket mount present");
-        assert_ne!(sock_mount.read_only, Some(true));
-    }
-
-    #[test]
-    fn default_render_has_no_routed_infer_wiring() {
-        // No annotation → the direct-dial ModelGateway path: NO AGENT_INTELLIGENCE
-        // env, NO infer socket mount/volume. Default output is unchanged.
-        let r = render_agent(&agent(Mode::Reactive)).unwrap();
-        let Rendered::Deployment(dep) = r else {
-            unreachable!()
-        };
-        let pod = dep.spec.unwrap().template;
-        let c = container_of(&pod);
-
-        assert!(
-            !c.env
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|e| e.name == "AGENT_INTELLIGENCE"),
-            "default render must not set AGENT_INTELLIGENCE (direct-dial unchanged)"
-        );
-        assert!(
-            !c.volume_mounts
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|m| m.name == INFER_SOCKET_VOLUME),
-            "default render must not mount the infer socket"
-        );
-        assert!(
-            !pod.spec
-                .as_ref()
-                .unwrap()
-                .volumes
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|v| v.name == INFER_SOCKET_VOLUME),
-            "default render must not declare the infer socket volume"
-        );
-    }
-
-    #[test]
-    fn routed_infer_annotation_wires_node_agent_socket() {
-        let mut a = agent(Mode::Reactive);
-        a.metadata.annotations = Some(BTreeMap::from([(
-            ROUTED_INFER_ANNOTATION.to_string(),
-            "true".to_string(),
-        )]));
-        let r = render_agent(&a).unwrap();
-        let Rendered::Deployment(dep) = r else {
-            unreachable!()
-        };
-        let pod = dep.spec.unwrap().template;
-        let podspec = pod.spec.as_ref().unwrap();
-        let c = container_of(&pod);
-
-        // AGENT_INTELLIGENCE points at the node-agent infer-proxy unix socket.
-        let intel = c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|e| e.name == "AGENT_INTELLIGENCE")
-            .expect("AGENT_INTELLIGENCE set on the routed-infer path");
-        assert_eq!(
-            intel.value.as_deref(),
-            Some("unix:/run/agentctl/infer/infer.sock")
-        );
-
-        // The infer socket dir is mounted READ-ONLY (the agent dials, never binds).
-        let mount = c
-            .volume_mounts
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|m| m.name == INFER_SOCKET_VOLUME)
-            .expect("infer socket mounted");
-        assert_eq!(mount.mount_path, "/run/agentctl/infer");
-        assert_eq!(mount.read_only, Some(true));
-
-        // Backed by a hostPath to the node-agent-owned dir.
-        let vol = podspec
-            .volumes
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|v| v.name == INFER_SOCKET_VOLUME)
-            .expect("infer socket volume declared");
-        assert_eq!(vol.host_path.as_ref().unwrap().path, "/run/agentctl/infer");
-
-        // The downward-API identity + mgmt-socket wiring is untouched.
-        assert!(c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|e| e.name == "AGENT_POD_UID"));
-    }
-
-    #[test]
-    fn routed_infer_off_for_non_true_annotation_value() {
-        // Only the exact "true" opts in; any other value is the default path.
-        let mut a = agent(Mode::Once);
-        a.metadata.annotations = Some(BTreeMap::from([(
-            ROUTED_INFER_ANNOTATION.to_string(),
-            "false".to_string(),
-        )]));
-        let r = render_agent(&a).unwrap();
-        let Rendered::Job(job) = r else {
-            unreachable!()
-        };
-        let pod = job.spec.unwrap().template;
-        let c = container_of(&pod);
-        assert!(!c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|e| e.name == "AGENT_INTELLIGENCE"));
     }
 
     #[test]
     fn inject_api_token_adds_secret_key_ref_env() {
-        let mut r = render_agent(&agent(Mode::Reactive)).unwrap();
+        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
         inject_api_token(&mut r);
         let Rendered::Deployment(dep) = &r else {
             unreachable!()
@@ -1054,7 +1058,7 @@ mod tests {
 
     #[test]
     fn inject_api_token_is_idempotent() {
-        let mut r = render_agent(&agent(Mode::Once)).unwrap();
+        let mut r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
         inject_api_token(&mut r);
         inject_api_token(&mut r);
         let Rendered::Job(job) = &r else {
@@ -1075,7 +1079,7 @@ mod tests {
     fn missing_image_is_an_error() {
         let mut a = agent(Mode::Once);
         a.spec.image = None;
-        assert_eq!(render_agent(&a), Err(RenderError::MissingImage));
+        assert_eq!(render_agent(&a, &cfg()), Err(RenderError::MissingImage));
     }
 
     #[test]
@@ -1083,14 +1087,14 @@ mod tests {
         let mut a = agent(Mode::Once);
         a.spec.substrate = Some(Substrate::KataHybrid);
         assert_eq!(
-            render_agent(&a),
+            render_agent(&a, &cfg()),
             Err(RenderError::UnsupportedSubstrate(Substrate::KataHybrid))
         );
     }
 
     #[test]
     fn claim_fleet_renders_deployment_with_replicas_omitted() {
-        let r = render_fleet(&fleet(ScaleMode::Claim, None)).unwrap();
+        let r = render_fleet(&fleet(ScaleMode::Claim, None), &cfg()).unwrap();
         let Rendered::Deployment(dep) = r else {
             panic!("expected a Deployment")
         };
@@ -1102,7 +1106,7 @@ mod tests {
 
     #[test]
     fn shard_fleet_renders_statefulset_with_n_replicas() {
-        let r = render_fleet(&fleet(ScaleMode::Shard, Some(3))).unwrap();
+        let r = render_fleet(&fleet(ScaleMode::Shard, Some(3)), &cfg()).unwrap();
         let Rendered::StatefulSet(sts) = r else {
             panic!("expected a StatefulSet")
         };
@@ -1114,7 +1118,7 @@ mod tests {
     #[test]
     fn shard_fleet_without_shards_is_an_error() {
         assert_eq!(
-            render_fleet(&fleet(ScaleMode::Shard, None)),
+            render_fleet(&fleet(ScaleMode::Shard, None), &cfg()),
             Err(RenderError::MissingShards)
         );
     }
