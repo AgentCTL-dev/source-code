@@ -675,11 +675,15 @@ async fn push_config(
         "set" if task_id.is_empty() || url_param.is_empty() => {
             Err("set requires params.taskId and params.pushNotificationConfig.url".into())
         }
-        "set" => store::push_set(pool, ns, name, &task_id, &url_param, &token_param)
-            .await
-            .map(|_| {
-                json!({ "taskId": task_id, "pushNotificationConfig": push_cfg(&url_param, &token_param) })
-            }),
+        // Reject an SSRF/exfil webhook at registration time (re-validated on delivery).
+        "set" => match webhook::validate(&url_param).await {
+            Err(e) => Err(e),
+            Ok(()) => store::push_set(pool, ns, name, &task_id, &url_param, &token_param)
+                .await
+                .map(|_| {
+                    json!({ "taskId": task_id, "pushNotificationConfig": push_cfg(&url_param, &token_param) })
+                }),
+        },
         "get" => store::push_get(pool, ns, name, &task_id)
             .await
             .map(|u| match u {
@@ -707,12 +711,139 @@ async fn push_config(
     }
 }
 
+/// SSRF/exfil guard for push webhooks (RFC 0013). The gateway POSTs a client-supplied
+/// URL from INSIDE the cluster, so an unvalidated webhook is a server-side request
+/// forgery + data-exfiltration primitive: an attacker registers a URL pointing at
+/// cloud metadata (169.254.169.254), an in-cluster Service, or an RFC1918 host and the
+/// gateway both probes it and ships the task payload there. Enforce https-only, and
+/// that EVERY resolved address is public — validated on `set` AND again at delivery
+/// (re-resolve + pin the connection to the validated IP, defeating DNS rebinding).
+mod webhook {
+    use std::net::{IpAddr, SocketAddr};
+
+    /// Parse an `https://host[:port]` webhook, returning `(host, port)`. Rejects any
+    /// non-https scheme.
+    pub fn parse_https(url: &str) -> Result<(String, u16), String> {
+        let rest = url
+            .strip_prefix("https://")
+            .ok_or_else(|| "webhook url must be https://".to_string())?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        // Drop any userinfo (`user:pass@host`).
+        let hostport = authority.rsplit('@').next().unwrap_or(authority);
+        let (host, port) = if let Some(after) = hostport.strip_prefix('[') {
+            // Bracketed IPv6 literal: [::1]:443
+            let (h6, tail) = after.split_once(']').ok_or("malformed IPv6 host")?;
+            let port = tail
+                .strip_prefix(':')
+                .map(|p| p.parse::<u16>().map_err(|_| "bad port".to_string()))
+                .transpose()?
+                .unwrap_or(443);
+            (h6.to_string(), port)
+        } else if let Some((h, p)) = hostport.rsplit_once(':') {
+            (h.to_string(), p.parse::<u16>().map_err(|_| "bad port")?)
+        } else {
+            (hostport.to_string(), 443u16)
+        };
+        if host.is_empty() {
+            return Err("webhook url has no host".into());
+        }
+        Ok((host, port))
+    }
+
+    /// A globally-routable address only: rejects loopback, private (RFC1918 + CGNAT
+    /// 100.64/10), link-local (incl. 169.254.169.254 metadata), unspecified,
+    /// broadcast, documentation, multicast, and the IPv6 ULA/link-local ranges.
+    pub fn is_public(ip: &IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                let o = v4.octets();
+                let cgnat = o[0] == 100 && (o[1] & 0xc0) == 64; // 100.64.0.0/10
+                !(v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.is_documentation()
+                    || v4.is_multicast()
+                    || cgnat)
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
+                    return false;
+                }
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    return is_public(&IpAddr::V4(v4));
+                }
+                let seg0 = v6.segments()[0];
+                let ula = (seg0 & 0xfe00) == 0xfc00; // fc00::/7
+                let link_local = (seg0 & 0xffc0) == 0xfe80; // fe80::/10
+                !(ula || link_local)
+            }
+        }
+    }
+
+    /// Resolve `host:port` and return a validated public `SocketAddr` to pin the
+    /// connection to. Rejects if ANY resolved address is non-public.
+    pub async fn resolve_public(host: &str, port: u16) -> Result<SocketAddr, String> {
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| format!("resolve webhook host {host}: {e}"))?
+            .collect();
+        if addrs.is_empty() {
+            return Err(format!("webhook host {host} did not resolve"));
+        }
+        for a in &addrs {
+            if !is_public(&a.ip()) {
+                return Err(format!(
+                    "webhook host {host} resolves to non-public address {} (SSRF blocked)",
+                    a.ip()
+                ));
+            }
+        }
+        Ok(addrs[0])
+    }
+
+    /// Full validation used on `set`: scheme + all-resolved-addresses-public.
+    pub async fn validate(url: &str) -> Result<(), String> {
+        let (host, port) = parse_https(url)?;
+        resolve_public(&host, port).await.map(|_| ())
+    }
+}
+
 /// Fire-and-forget delivery of a task to a registered push webhook (RFC 0013).
 /// Retries up to 3 attempts (200ms backoff) until a 2xx; a non-empty `token` is
-/// sent as `Authorization: Bearer <token>`.
+/// sent as `Authorization: Bearer <token>`. The webhook is RE-validated + the
+/// connection PINNED to a validated public IP at delivery time (anti-DNS-rebinding).
 fn deliver_push(url: String, token: String, task: Value) {
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let (host, port) = match webhook::parse_https(&url) {
+            Ok(hp) => hp,
+            Err(e) => {
+                tracing::warn!(%url, error = %e, "push webhook rejected (scheme)");
+                return;
+            }
+        };
+        let pinned = match webhook::resolve_public(&host, port).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                tracing::warn!(%url, error = %e, "push webhook rejected at delivery (SSRF guard)");
+                return;
+            }
+        };
+        // Pin DNS to the validated address so a rebind between resolve and connect
+        // cannot redirect us to an internal host.
+        let client = match reqwest::Client::builder()
+            .resolve(&host, pinned)
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(%url, error = %e, "build push client");
+                return;
+            }
+        };
         let mut last = String::from("no attempt");
         for attempt in 1..=3u32 {
             let mut rb = client.post(&url).json(&task);
@@ -1196,5 +1327,47 @@ mod tests {
         assert_eq!(e["id"], 7);
         assert_eq!(e["error"]["code"], -32601);
         assert_eq!(e["error"]["message"], "method not found: foo/bar");
+    }
+
+    #[test]
+    fn webhook_parse_requires_https_and_extracts_hostport() {
+        assert!(webhook::parse_https("http://evil.example/hook").is_err());
+        assert!(webhook::parse_https("ftp://x").is_err());
+        assert_eq!(
+            webhook::parse_https("https://hooks.acme.io/p?x=1").unwrap(),
+            ("hooks.acme.io".to_string(), 443)
+        );
+        assert_eq!(
+            webhook::parse_https("https://h.example:8443/p").unwrap(),
+            ("h.example".to_string(), 8443)
+        );
+        assert_eq!(
+            webhook::parse_https("https://[2606:4700:4700::1111]:443/p").unwrap(),
+            ("2606:4700:4700::1111".to_string(), 443)
+        );
+    }
+
+    #[test]
+    fn is_public_blocks_ssrf_targets() {
+        use std::net::IpAddr;
+        let pub_v4: IpAddr = "1.1.1.1".parse().unwrap();
+        assert!(webhook::is_public(&pub_v4));
+        // The classic SSRF targets are all rejected.
+        for bad in [
+            "127.0.0.1",           // loopback
+            "169.254.169.254",     // cloud metadata (link-local)
+            "10.1.2.3",            // RFC1918
+            "192.168.0.5",         // RFC1918
+            "172.16.9.9",          // RFC1918
+            "100.64.0.1",          // CGNAT
+            "0.0.0.0",             // unspecified
+            "::1",                 // IPv6 loopback
+            "fd00::1",             // IPv6 ULA
+            "fe80::1",             // IPv6 link-local
+            "::ffff:127.0.0.1",    // IPv4-mapped loopback
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(!webhook::is_public(&ip), "{bad} must be blocked");
+        }
     }
 }
