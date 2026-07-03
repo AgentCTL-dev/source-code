@@ -6,10 +6,8 @@ exists once the Prometheus Operator (and its CRDs) is installed.
 
 NOTE: most components only serve /metrics once the metrics-endpoint code lands in
 a later wave; until then these ServiceMonitors are configured but the scrape
-returns 404. The node-agent already serves /metrics on :8080 (the http port).
-The node-agent runs as a DaemonSet with no Service object today, so its
-ServiceMonitor selector matches nothing until a (headless) node-agent Service
-exposing the http port is added — see the chart notes.
+returns 404. (The node-agent DaemonSet was retired in contract 2.0, so it is no
+longer a scrape target.)
 */}}
 {{- if .Values.metrics.serviceMonitor.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
@@ -18,10 +16,10 @@ exposing the http port is added — see the chart notes.
   (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled    "port" "https" "scheme" "https")
   (dict "comp" "gateway"      "enabled" .Values.gateway.enabled      "port" "http"  "scheme" "http")
   (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled "port" "http"  "scheme" "http")
+  (dict "comp" "mcpgateway"   "enabled" .Values.mcpgateway.enabled   "port" "http"  "scheme" "http")
   (dict "comp" "admission"    "enabled" .Values.admission.enabled    "port" "https" "scheme" "https")
   (dict "comp" "coordination" "enabled" .Values.coordination.enabled "port" "http"  "scheme" "http")
   (dict "comp" "scaler"       "enabled" .Values.scaler.enabled       "port" "http"  "scheme" "http")
-  (dict "comp" "node-agent"   "enabled" true                         "port" "http"  "scheme" "http")
 }}
 {{- range $t := $targets }}
 {{- if $t.enabled }}

@@ -38,7 +38,7 @@ subjects:
     name: agentctl-apiserver
     namespace: {{ $ns }}
 ---
-# Resolve Agent → pod → node-agent (the management-verb routing).
+# Resolve Agent → pod (the management verbs dial the agent pod's mTLS /mcp directly).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -154,7 +154,8 @@ spec:
             - name: tls
               mountPath: /etc/agentctl-apiserver/tls
               readOnly: true
-            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            # Client cert the apiserver presents to an agent pod's mTLS /mcp
+            # (mints the Management origin the a2a.* admin verbs require).
             - name: client-tls
               mountPath: /etc/agentctl-client/tls
               readOnly: true

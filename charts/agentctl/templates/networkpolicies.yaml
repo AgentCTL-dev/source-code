@@ -84,31 +84,13 @@ spec:
     - ports:
         - { protocol: TCP, port: 8080 }
 {{- end }}
----
-# node-agent control API (mTLS, RFC 0015) on :8443 — reached only by the apiserver
-# and gateway (management-verb routing), both in the control-plane namespace.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: agentctl-node-agent-ingress
-  namespace: {{ $ns }}
-  labels:
-    {{- include "agentctl.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: agentctl-node-agent
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: agentctl-apiserver
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: agentctl-gateway
-      ports:
-        - { protocol: TCP, port: 8443 }
+# NOTE (contract 2.0): the node-agent ingress policy is gone with the DaemonSet.
+# Agents now SERVE their mTLS surface on :8443 in TENANT namespaces and are
+# reached directly by the apiserver + A2A gateway. Per-tenant-namespace ingress
+# to agent :8443 (from the control-plane components) and egress to the gateways
+# is the tenancy boundary — a follow-up that renders NetworkPolicies into agent
+# namespaces (the operator, per agent), out of scope for this control-plane-ns
+# policy set.
 {{- if .Values.modelgateway.enabled }}
 ---
 # ModelGateway: the inference proxy on :8080, reached by agent pods in the tenant
@@ -163,10 +145,11 @@ spec:
         - { protocol: TCP, port: 5432 }
 {{- end }}
 # -----------------------------------------------------------------------------
-# Data plane: per-tenant-namespace agent isolation. These make the "networkless
-# agent" claim real: an agent pod may egress ONLY to DNS and the on-node bridge
-# (node-agent), the A2A gateway, and the ModelGateway — never the internet or
-# other tenants — and accepts ingress only from the control plane.
+# Data plane: per-tenant-namespace agent isolation (contract 2.0). An agent pod
+# may egress ONLY to DNS and the control-plane GATEWAYS — the ModelGateway
+# (intelligence), the MCPGateway (tools), the A2A gateway (delegation-out), and
+# the coordination server (claims) — never the internet or other tenants — and
+# accepts ingress only from the control plane (which reaches its mTLS :8443).
 {{- range $agentNs := $agentNamespaces }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -203,21 +186,23 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
-    # The control plane: the A2A gateway + ModelGateway ONLY, over HTTP :8080,
-    # scoped to those specific pods (podSelector) — NOT any control-plane pod.
-    # Defense in depth under hostile multi-tenancy: a bare namespaceSelector would
-    # also let a tenant agent reach e.g. the admission webhook on :8443; the
-    # podSelector forbids that. The node-agent is reached over the SO_PEERCRED
-    # unix socket (routed-infer) / not a TCP dial, so it needs no egress allow.
+    # The control-plane GATEWAYS ONLY, scoped to those specific pods
+    # (podSelector) — NOT any control-plane pod. Defense in depth under hostile
+    # multi-tenancy: a bare namespaceSelector would also let a tenant agent reach
+    # e.g. the admission webhook; the podSelector forbids that. Ports 443 (the v2
+    # HTTPS listeners the agent dials keyless) + 8080 (coordination/legacy plain).
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ns }}
           podSelector:
             matchExpressions:
-              - { key: app.kubernetes.io/name, operator: In, values: ["agentctl-gateway", "agentctl-modelgateway"] }
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["agentctl-modelgateway", "agentctl-mcpgateway", "agentctl-gateway", "agentctl-coordination"]
       ports:
-        - { protocol: TCP, port: 8080 }  # A2A gateway + ModelGateway (HTTP)
+        - { protocol: TCP, port: 443 }   # ModelGateway + MCPGateway (v2 HTTPS)
+        - { protocol: TCP, port: 8080 }  # coordination / legacy plaintext
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane
 # (no cross-tenant pod-to-pod traffic).

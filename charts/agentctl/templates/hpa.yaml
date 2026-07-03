@@ -2,8 +2,8 @@
 HorizontalPodAutoscalers for the stateless, horizontally-scalable Deployments.
 Opt-in per component (<comp>.autoscaling.enabled, off by default). When enabled
 the HPA owns the replica count, so .Values.<comp>.replicas is ignored. The
-operator (leader-elected singleton), admission (webhook), and node-agent
-(DaemonSet) are intentionally excluded — they don't scale on CPU.
+operator (leader-elected singleton) and admission (webhook) are intentionally
+excluded — they don't scale on CPU.
 */}}
 {{- $ns := include "agentctl.namespace" . }}
 {{- $comps := list

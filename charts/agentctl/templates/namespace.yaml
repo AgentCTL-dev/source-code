@@ -5,8 +5,11 @@ metadata:
   name: {{ include "agentctl.namespace" . }}
   labels:
     {{- include "agentctl.labels" . | nindent 4 }}
-    # The node-agent DaemonSet needs hostPath + hostPID; relax PodSecurity for
-    # this namespace only.
+    # Contract 2.0: no control-plane component needs hostPath/hostPID/privileged
+    # anymore (the node-agent DaemonSet — the only such component — is retired),
+    # so the control-plane namespace defaults to the `baseline` Pod Security
+    # Standard. (`restricted` is a follow-up pending a seccomp audit of the
+    # bundled Postgres.)
     pod-security.kubernetes.io/enforce: {{ .Values.namespace.podSecurity }}
     pod-security.kubernetes.io/audit: {{ .Values.namespace.podSecurity }}
     pod-security.kubernetes.io/warn: {{ .Values.namespace.podSecurity }}

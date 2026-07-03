@@ -1,10 +1,17 @@
 # agentctl Helm chart
 
-The cloud-native install for the **agentctl** control plane — operator, on-node
-bridge (node-agent), aggregated APIServer, A2A gateway, intelligence ModelGateway,
-and admission webhook — plus the Agent Control Contract CRDs. All TLS (the
-APIServer serving cert, the admission webhook cert, and node-agent mTLS) is issued
-and rotated by **cert-manager**, with the `caBundle` injected automatically.
+The cloud-native install for the **agentctl** control plane — operator, aggregated
+APIServer, A2A gateway, intelligence ModelGateway, MCP gateway, and admission
+webhook — plus the Agent Control Contract CRDs. All TLS (the APIServer serving
+cert, the admission webhook cert, each agent's serving identity, and the gateways'
+serving certs) is issued and rotated by **cert-manager**, with the `caBundle`
+injected automatically.
+
+> **Contract 2.0.** Agents (agentd ≥ 2.0) serve their management/A2A surface over
+> mTLS HTTPS and dial the gateways keyless; the control plane reaches them
+> directly. The on-node bridge (node-agent DaemonSet) was **retired** — nothing
+> routes through a node any more, so no control-plane component needs
+> hostPath/hostPID/privileged.
 
 > The control plane is **BUSL-1.1**; the contract + SDK are **Apache-2.0** (see the
 > repo `LICENSE`). The data plane is *any* conformant agent — the reference agent
@@ -26,9 +33,9 @@ and a policy CNI are needed only for the opt-in features that use them (below).
 ## What this installs
 
 A default install brings up the **core control plane** (no deps beyond cert-manager):
-`operator` · `node-agent` (DaemonSet) · aggregated `apiserver` · A2A `gateway` ·
-`modelgateway` · `admission` · bundled `postgres` — the "7 components" the verify step
-checks. Two planes are **opt-in** (default off): the **coordination** server
+`operator` · aggregated `apiserver` · A2A `gateway` · `modelgateway` ·
+`mcpgateway` · `admission` · bundled `postgres`. Two planes are **opt-in**
+(default off): the **coordination** server
 (`coordination.enabled` — the `work.*` claim hub) and the **scaler**
 (`scaler.enabled` — elastic-from-zero autoscaling, **which requires KEDA**). Enable
 both for claim-mode fleets:
@@ -44,15 +51,15 @@ helm upgrade agentctl ./charts/agentctl -n agentctl-system --reuse-values \
 
 ## Install
 
-The namespace needs a relaxed PodSecurity level (the node-agent uses `hostPath` +
-`hostPID`), and Helm can't reliably own the namespace it installs into, so
-pre-create it:
+Helm can't reliably own the namespace it installs into, so pre-create it. No
+control-plane component needs `hostPath`/`hostPID`/privileged anymore (the
+node-agent is retired), so the `baseline` PodSecurity level suffices:
 
 ```console
 kubectl create namespace agentctl-system
 kubectl label  namespace agentctl-system \
-  pod-security.kubernetes.io/enforce=privileged \
-  pod-security.kubernetes.io/warn=privileged
+  pod-security.kubernetes.io/enforce=baseline \
+  pod-security.kubernetes.io/warn=baseline
 
 helm install agentctl ./charts/agentctl -n agentctl-system
 ```
@@ -60,7 +67,7 @@ helm install agentctl ./charts/agentctl -n agentctl-system
 Verify:
 
 ```console
-kubectl -n agentctl-system get pods                       # 7 components Running
+kubectl -n agentctl-system get pods                       # all components Running
 kubectl -n agentctl-system get certificate                # all READY=True
 kubectl get apiservice v1alpha1.management.agents.x-k8s.io # AVAILABLE=True
 ```
@@ -103,7 +110,7 @@ runs `helm upgrade --install` (pass `--registry`, `--tag`, `--version`, `--set`)
 | `certManager.caIssuerRef` | `""` | use an existing cluster CA `ClusterIssuer` instead of the bundled self-signed CA |
 | `postgres.mode` | `bundled` | `bundled` (in-cluster Postgres) or `external` |
 | `postgres.external.dsnSecretName` | `""` | Secret holding `DATABASE_URL` when `mode=external` |
-| `apiserver.enabled` / `gateway.enabled` / `modelgateway.enabled` / `admission.enabled` | `true` | toggle planes (operator + node-agent always install) |
+| `apiserver.enabled` / `gateway.enabled` / `modelgateway.enabled` / `mcpgateway.enabled` / `admission.enabled` | `true` | toggle planes (the operator always installs) |
 | `admission.allowedRegistries` | (CSV) | image-registry prefixes the webhook permits |
 | `networkPolicies.enabled` | `false` | ship egress/tenant NetworkPolicies (needs a policy CNI) |
 | `apiToken.enabled` | `false` | in-cluster bearer-token gate (`AGENTCTL_API_TOKEN`) on coordination/modelgateway/A2A-gateway; injected into scaler + control-plane-namespace agents (see [security.md](../../docs/security.md)) |

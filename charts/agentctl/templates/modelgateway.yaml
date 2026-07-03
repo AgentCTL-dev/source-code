@@ -175,12 +175,12 @@ spec:
             # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
             {{- . | nindent 12 }}
             {{- end }}
-            # Downward API: the ModelGateway's own (control-plane) namespace. Source-IP
-            # attestation (modelgateway.attestIdentity) uses it to anchor the trusted
-            # node-agent forwarder to a pod in THIS namespace running the
-            # agentctl-node-agent ServiceAccount — an anchor a tenant cannot forge.
-            # Unset/empty -> NO forwarder is trusted (fail closed). Harmless when attest
-            # is off, so it is unconditional (keeps the env stable across the toggle).
+            # Downward API: the ModelGateway's own (control-plane) namespace, the
+            # anchor for source-IP attestation (modelgateway.attestIdentity). In
+            # contract 2.0 agents dial the gateway DIRECTLY, attested as their own
+            # source-IP identity; the legacy node-agent-forwarder trust path is
+            # inert (no node-agent exists) but its anchor stays fail-closed.
+            # Harmless when attest is off, so it is unconditional.
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

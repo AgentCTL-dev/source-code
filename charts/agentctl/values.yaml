@@ -64,7 +64,9 @@ observability:
 namespace:
   name: agentctl-system
   create: false
-  podSecurity: privileged      # node-agent needs hostPath + hostPID
+  # baseline: no control-plane component needs hostPath/hostPID/privileged since
+  # the node-agent (the only such component) was retired in contract 2.0.
+  podSecurity: baseline
 
 # cert-manager wiring. When enabled (required), the chart creates a self-signed
 # bootstrap Issuer -> a CA -> a CA Issuer, and issues every serving/mTLS cert,
@@ -175,42 +177,12 @@ operator:
     enabled: false
     minAvailable: 1
 
-nodeAgent:
-  logLevel: info               # -> RUST_LOG
-  # DaemonSet (one per node): footprint currently inline in node-agent.yaml.
-  resources:
-    requests: { cpu: 25m, memory: 32Mi }
-    limits: { cpu: 200m, memory: 128Mi }
-  nodeSelector: {}
-  affinity: {}
-  # Default tolerates everything so the bridge lands on every node (control-plane
-  # taints included). Narrow this to restrict where the node-agent runs.
-  tolerations:
-    - operator: Exists
-  topologySpreadConstraints: []
-  priorityClassName: ""
-  podAnnotations: {}
-  podLabels: {}
-  extraEnv: []
-  envFrom: []
-  serviceAccount:
-    annotations: {}
-  # Networkless/routed-infer proxy (RFC 0012). DISABLED by default — a stock
-  # install renders no infer-proxy env/mount. When enabled the node-agent binds
-  # an infer-proxy unix socket on a node-agent-owned hostPath dir (socketDir,
-  # mounted read-WRITE here) and forwards attested inference to the in-cluster
-  # ModelGateway Service. Agents opt in per-pod via the operator annotation
-  # `agentctl.dev/routed-infer: "true"` (the Kata/networkless tier defaults it on
-  # later); the operator then points the agent's AGENT_INTELLIGENCE at this
-  # socket and mounts socketDir READ-ONLY into the agent pod. The node-agent
-  # attests the unix-socket peer (SO_PEERCRED -> pod-uid -> X-Agent-Pod-Uid), the
-  # SO_PEERCRED complement to modelgateway.attestIdentity for the tier where pods
-  # have no routable IP. See docs/security.md.
-  inferProxy:
-    enabled: false
-    # node-agent-owned hostPath dir the infer-proxy socket (infer.sock) is bound
-    # in. Agents mount this dir read-only; keep it distinct from substrate.socketRoot.
-    socketDir: /run/agentctl/infer
+# The node-agent DaemonSet was RETIRED in contract 2.0 (agentd v2 removed all
+# non-HTTP transports): management verbs, intelligence, A2A, and MCP tools now
+# reach agents directly over their mTLS HTTPS surface / through the gateways, so
+# there is no on-node bridge, socket rendezvous, or routed-infer proxy. The
+# `nodeAgent` values block is gone; source-IP attestation at the ModelGateway /
+# MCPGateway (modelgateway.attestIdentity) is the identity mechanism now.
 
 apiserver:
   enabled: true

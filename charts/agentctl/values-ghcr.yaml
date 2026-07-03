@@ -3,8 +3,9 @@
 #   helm install agentctl oci://ghcr.io/agentctl-dev/charts/agentctl \
 #     -n agentctl-system --create-namespace -f values-ghcr.yaml
 #
-# This pulls ghcr.io/agentctl-dev/<comp>:0.1.0 for each of the 6 components
-# (operator, node-agent, apiserver, gateway, modelgateway, admission).
+# This pulls ghcr.io/agentctl-dev/<comp>:0.1.0 for each control-plane component
+# (operator, apiserver, gateway, modelgateway, mcpgateway, admission,
+# coordination, scaler).
 image:
   registry: ghcr.io/agentctl-dev
   tag: 0.1.0
@@ -12,7 +13,6 @@ image:
   # (a digest entry wins over the tag). Fill in the published sha256 digests:
   #   digests:
   #     operator: sha256:...
-  #     node-agent: sha256:...
   #     apiserver: sha256:...
   #     gateway: sha256:...
   #     modelgateway: sha256:...

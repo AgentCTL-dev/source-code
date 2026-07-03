@@ -89,25 +89,6 @@ spec:
   issuerRef:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
 {{- end }}
----
-# node-agent control-API server cert (mTLS on :8443). Clients verify the CA only
-# (the node-agent is addressed by dynamic pod IP), so the SAN is informational.
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: agentctl-node-agent
-  namespace: {{ $ns }}
-  labels:
-    {{- include "agentctl.labels" . | nindent 4 }}
-spec:
-  secretName: agentctl-node-agent-tls
-  duration: 8760h
-  renewBefore: 720h
-  commonName: agentctl-node-agent
-  dnsNames: ["agentctl-node-agent"]
-  usages: ["server auth"]
-  issuerRef:
-    {{- include "agentctl.caIssuer" . | nindent 4 }}
 {{- if .Values.modelgateway.enabled }}
 ---
 # ModelGateway serving cert (contract 2.0): agents dial their rendered
@@ -155,7 +136,9 @@ spec:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
 {{- end }}
 ---
-# Control-plane client cert (apiserver + gateway present this to the node-agent).
+# Control-plane client cert: the apiserver + A2A gateway present this to an
+# AGENT's mTLS /mcp to mint the Management origin (contract 2.0 — direct to the
+# pod; the node-agent hop is retired). Its ca.crt is the cluster CA.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

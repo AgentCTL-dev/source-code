@@ -1,7 +1,7 @@
 {{- $ns := include "agentctl.namespace" . }}
 {{- if .Values.gateway.enabled }}
-# RBAC for the A2A gateway: resolve Agent → pod → node-agent (same routing as the
-# apiserver). Stateless; reads pods only.
+# RBAC for the A2A gateway: resolve Agent → pod (dials the agent pod's mTLS /mcp
+# directly, same routing as the apiserver). Stateless; reads pods only.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -56,9 +56,10 @@ subjects:
     name: agentctl-gateway
     namespace: {{ $ns }}
 ---
-# The A2A gateway (RFC 0013): a replicated, stateless HTTP service fronting the
-# agents' A2A-over-the-substrate surface (bridged via the node-agent). Projects
-# each agent's Agent Card and routes spec-form A2A JSON-RPC to the reference verbs.
+# The A2A gateway (RFC 0013): a replicated, stateless HTTP service fronting each
+# agent's mTLS A2A surface (served on the agent pod, contract 2.0; the gateway
+# presents the Management client cert). Projects each agent's Agent Card and
+# routes spec-form A2A JSON-RPC to the bare v2.1 methods.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -175,7 +176,8 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            # Client cert the gateway presents to an agent pod's mTLS /mcp
+            # (mints the Management origin the A2A methods require).
             - name: client-tls
               mountPath: /etc/agentctl-client/tls
               readOnly: true

@@ -186,7 +186,6 @@
       }
     },
     "operator": { "$ref": "#/definitions/component" },
-    "nodeAgent": { "$ref": "#/definitions/component" },
     "apiserver": { "$ref": "#/definitions/component" },
     "gateway": { "$ref": "#/definitions/component" },
     "modelgateway": { "$ref": "#/definitions/component" },

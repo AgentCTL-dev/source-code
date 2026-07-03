@@ -15,7 +15,6 @@ members = [
     "crates/agent-api",
     "crates/agentctl-operator",
     "crates/agentctl-crdgen",
-    "crates/agentctl-node-agent",
     "crates/agentctl-cli",
     "crates/mock-agent",
     "crates/agentctl-apiserver",
