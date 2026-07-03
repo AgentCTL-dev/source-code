@@ -227,16 +227,30 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
         .as_object()
         .unwrap_or(&empty_map);
 
-    // Cross-object: resolve whether the named ModelPool exists (if one is named).
-    let model_pool_exists = resolve_model_pool(&state.client, view, &namespace).await;
+    // An AgentFleet's `spec.coordinator.template` (RFC 0022) is ALSO an AgentSpec —
+    // a normal conformant agent subject to the SAME policy. Check it too, so a
+    // coordinator cannot smuggle a disallowed image or ungated trifecta past the
+    // gate the worker template is checked at. `None` for a non-fleet or a
+    // coordinatorless fleet.
+    let coordinator_view = coordinator_spec_view(&kind, spec);
 
-    let verdict = evaluate(
+    // Evaluate every AgentSpec view under review (worker template always; the
+    // coordinator template when present). The first denial is the verdict — a
+    // fleet is admitted only if BOTH its members pass.
+    let mut verdict = evaluate_view(
+        &state,
         view,
         annotations,
-        &state.allowed_registries,
-        model_pool_exists,
         &namespace,
-    );
+    )
+    .await;
+    if verdict.is_ok() {
+        if let Some(coord) = coordinator_view {
+            verdict = evaluate_view(&state, coord, annotations, &namespace)
+                .await
+                .map_err(|m| format!("coordinator.template: {m}"));
+        }
+    }
 
     match &verdict {
         Ok(()) => tracing::info!(%uid, %namespace, %kind, "admit"),
@@ -245,6 +259,26 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     state.metrics.record(verdict.is_ok());
 
     Json(admission_response(&uid, verdict))
+}
+
+/// Run the full policy (registry + trifecta + modelPool existence) against ONE
+/// `AgentSpec`-shaped `view`, resolving its named `ModelPool` cross-object. Shared
+/// by the worker template and the coordinator template so both are held to the
+/// same bar.
+async fn evaluate_view(
+    state: &AppState,
+    view: &Value,
+    annotations: &Map<String, Value>,
+    namespace: &str,
+) -> Result<(), String> {
+    let model_pool_exists = resolve_model_pool(&state.client, view, namespace).await;
+    evaluate(
+        view,
+        annotations,
+        &state.allowed_registries,
+        model_pool_exists,
+        namespace,
+    )
 }
 
 /// The reviewed object's kind, preferring `request.object.kind`, falling back to
@@ -270,6 +304,19 @@ fn agent_spec_view<'a>(kind: &str, spec: &'a Value, empty: &'a Value) -> &'a Val
         spec.get("template").unwrap_or(empty)
     } else {
         spec
+    }
+}
+
+/// The coordinator's `AgentSpec` view (`spec.coordinator.template`), if the
+/// reviewed object is an `AgentFleet` that declares a coordinator (RFC 0022).
+/// `None` for a plain `Agent`, or a fleet without a coordinator — nothing extra to
+/// check. When `Some`, `validate` runs the SAME policy against it as the worker
+/// template, so a coordinator cannot smuggle a disallowed image or ungated trifecta.
+fn coordinator_spec_view<'a>(kind: &str, spec: &'a Value) -> Option<&'a Value> {
+    if kind == "AgentFleet" {
+        spec.get("coordinator").and_then(|c| c.get("template"))
+    } else {
+        None
     }
 }
 
@@ -616,6 +663,41 @@ mod tests {
         });
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "true" }));
         assert!(evaluate(&spec, &anns, &[], None, "default").is_ok());
+    }
+
+    #[test]
+    fn coordinator_view_selected_only_for_fleet_with_coordinator() {
+        // A plain Agent has no coordinator view.
+        let agent_spec = json!({ "mode": "once", "image": "ghcr.io/acme/agent:v1" });
+        assert!(coordinator_spec_view("Agent", &agent_spec).is_none());
+        // A fleet without a coordinator: nothing extra to check.
+        let bare_fleet = json!({ "template": { "mode": "reactive" } });
+        assert!(coordinator_spec_view("AgentFleet", &bare_fleet).is_none());
+        // A fleet WITH a coordinator: its template is returned for policy checks.
+        let fleet = json!({
+            "template": { "mode": "reactive" },
+            "coordinator": { "template": { "mode": "reactive", "image": "ghcr.io/acme/main:v1" } }
+        });
+        let view = coordinator_spec_view("AgentFleet", &fleet).expect("coordinator view");
+        assert_eq!(view["image"], "ghcr.io/acme/main:v1");
+    }
+
+    #[test]
+    fn coordinator_template_is_held_to_the_same_policy() {
+        // The worker template is clean, but the coordinator smuggles an ungated
+        // lethal trifecta — evaluate (the shared policy) denies it, and validate
+        // runs it against the coordinator view. Assert the policy itself rejects
+        // the coordinator spec (the view validate feeds it).
+        let fleet = json!({
+            "template": { "mode": "reactive", "image": "ghcr.io/acme/agent:v1" },
+            "coordinator": { "template": {
+                "mode": "reactive",
+                "exec": true, "egress": true, "secrets": ["db-password"]
+            }}
+        });
+        let coord = coordinator_spec_view("AgentFleet", &fleet).unwrap();
+        let err = evaluate(coord, &Map::new(), &[], None, "default").unwrap_err();
+        assert!(err.contains("lethal trifecta"), "coordinator trifecta must be denied: {err}");
     }
 
     #[test]

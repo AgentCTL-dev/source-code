@@ -416,24 +416,121 @@ pub struct Condition {
     )
 )]
 #[serde(rename_all = "camelCase")]
-#[schemars(extend("x-kubernetes-validations" = [{
-    "rule": "self.scaling.mode != 'shard' || has(self.scaling.shards)",
-    "message": "shards is required when scaling.mode is 'shard'"
-}]))]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.scaling.mode != 'shard' || has(self.scaling.shards)",
+        "message": "shards is required when scaling.mode is 'shard'"
+    },
+    {
+        // A coordinator ("main agent") is a long-lived front door — a `once`
+        // coordinator would exit and never serve. Constrains ONLY the new field,
+        // so it is additive (RFC 0022 §4 / RFC 0005 §2.3).
+        "rule": "!has(self.coordinator) || self.coordinator.template.mode != 'once'",
+        "message": "coordinator.template.mode must not be 'once' (the coordinator must be long-lived)"
+    }
+]))]
 pub struct AgentFleetSpec {
-    /// The per-replica agent definition.
+    /// The per-replica **worker** agent definition.
     pub template: AgentSpec,
-    /// The scaling regime.
+    /// The **worker** scaling regime.
     pub scaling: Scaling,
     /// The shared work source (an MCP resource URI) for claim/shard distribution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_source: Option<String>,
-    /// Claim-mode replica count, the target of the `scale` subresource so
-    /// `kubectl scale agentfleet` and an HPA can drive it. **KEDA owns this in
+    /// Claim-mode **worker** replica count, the target of the `scale` subresource
+    /// so `kubectl scale agentfleet` and an HPA can drive it. **KEDA owns this in
     /// steady state** (RFC 0011); the rendered workload omits it. Optional so
     /// claim mode may scale to 0 / defer to KEDA when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
+
+    /// The fleet's **coordinator** ("main agent", RFC 0022 §3). When set, the
+    /// operator renders an additional single-role Deployment (label
+    /// `agentctl.dev/fleet-role: coordinator`) and wires it as the fleet's A2A
+    /// front door + work producer. Absent ⇒ a headless worker pool (today's
+    /// behaviour), load-balanced directly by the A2A gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator: Option<Coordinator>,
+
+    /// Per-fleet model budget, enforced by the ModelGateway IN ADDITION to the
+    /// `ModelPool` budget (RFC 0012 / RFC 0022 §9). Isolates one fleet's spend
+    /// from another's even when they share a pool. Absent ⇒ only the pool cap
+    /// applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<FleetBudget>,
+
+    /// Work-fabric policy for this fleet's items (RFC 0022 §7): dead-letter
+    /// threshold and the default lease TTL. Absent ⇒ unbounded redelivery +
+    /// server-default TTL (today's behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_policy: Option<WorkPolicy>,
+}
+
+/// The fleet's coordinator ("main agent", RFC 0022 §3). A normal conformant
+/// agent, distinguished only by its role label and by the operator wiring it as a
+/// work **producer** + A2A front door rather than a **consumer**.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Coordinator {
+    /// The coordinator agent definition — a normal `AgentSpec` (its own image,
+    /// instruction, mode, model, MCP tools). Typically `mode: reactive` (a
+    /// long-lived planner that accepts A2A) or `mode: workflow`. Never `once`
+    /// (CEL-enforced on the fleet).
+    pub template: AgentSpec,
+
+    /// Coordinator replica count. Default 1 (a singleton main agent). `>1` is
+    /// allowed for HA, but the replicas are peers (not shards): they must
+    /// coordinate through the work fabric like any other producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<u32>,
+
+    /// How the coordinator reaches the workers (RFC 0022 §5). `queue` (default):
+    /// the operator wires it as a producer on the fleet `workSource`; workers
+    /// claim (load-balanced, elastic). `a2a`: the operator injects an
+    /// `--a2a-peer worker=<gateway>/fleets/<ns>/<name>` so it delegates
+    /// point-to-point through the gateway PEP (RFC 0013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<Distribution>,
+}
+
+/// How a coordinator fans work out to its workers (RFC 0022 §5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Distribution {
+    /// Fan-out over the `work.*` claim queue (elastic, load-balanced,
+    /// exactly-one-owner, holder-attested internally). The default.
+    #[default]
+    Queue,
+    /// Point-to-point delegation through the gateway PEP (`a2a.delegate`).
+    A2a,
+}
+
+/// Per-fleet model budget (RFC 0012, the intelligence plane; RFC 0022 §9).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetBudget {
+    /// Total tokens this fleet may consume against its `ModelPool`, across all
+    /// members. Enforced by the ModelGateway reservation path (RFC 0012) keyed by
+    /// `(namespace, pool, fleet)`, IN ADDITION to the pool-wide cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+}
+
+/// Work-fabric policy for a fleet's items (RFC 0011 / RFC 0022 §7).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkPolicy {
+    /// Dead-letter an item after it has been redelivered this many times without
+    /// a terminal `ack`. Absent ⇒ unbounded redelivery (today). A poison item is
+    /// moved to the `deadletter` state (surfaced at `dlq://items`) instead of
+    /// cycling forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+
+    /// Default lease TTL (ms) the operator advertises to workers for this fleet's
+    /// claims. Absent ⇒ the agent/server default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_ttl_ms: Option<u64>,
 }
 
 /// The scaling regime (RFC 0011).
