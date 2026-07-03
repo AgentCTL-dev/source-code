@@ -1,49 +1,64 @@
 # agentctl — status
 
 A snapshot of what is built and verified, and what remains. Updated as the
-implementation lands; the binding plan is `docs/design/agentctl-architecture-brainstorm.md`.
+implementation lands; the binding plan is `docs/design/agentctl-architecture-brainstorm.md`,
+and the current substrate/transport design is **[RFC 0021](../rfcs/0021-contract-2.0-network-substrate-pivot.md)**.
+
+> ⚠️ **Contract 2.0 — the network is the substrate.** agentctl was re-architected to
+> **agentd v2**: agents **serve mTLS HTTPS** (`POST /mcp`) and **dial the gateways
+> keyless**, the **node-agent is retired**, and identity is **cryptographic** (a verified
+> client cert into agents, an attested source IP into gateways). The v1 rows below have
+> been rewritten to the v2 model; see RFC 0021 for the full design and the phase series
+> `c01bba7`→`8b94261` + the contract-2.0 re-vendor `2cd5bf5` for the change history.
 
 ## Verified end-to-end on a kind cluster (k8s 1.31)
 
 | Plane / piece | RFC | State | Evidence |
 |---|---|---|---|
-| **CRDs** (`Agent`, `AgentFleet`) | 0003 | ✅ | install on stock k8s; `kubectl api-resources` resolves; short names work |
-| **Operator** (in-cluster, RBAC) | 0006 | ✅ | reconciles `Agent`→Job, status `Ready=True`, finalizer + owner-ref GC; 0 Forbidden |
-| **Substrate** (stock-unix) | 0002 | ✅ | hostPath socket + `subPathExpr` per-pod subdir + downward-API env, on the live Job |
-| **Scaling** (`AgentFleet`) | 0011 | ✅ (render+reconcile) | claim→Deployment (operator does NOT own `.spec.replicas` — KEDA-safe, verified via managedFields); shard→StatefulSet |
-| **node-agent keystone** | 0008 | ✅ (Tier A) | DaemonSet discovers a live agent's socket + bridges to its management profile |
-| **Aggregated APIServer** | 0009 | ✅ | `Available=True` (required front-proxy mTLS); `kubectl create --raw …/agents/x/drain` → SAR-authorized → forwarded to node-agent → agent; `--as=nobody`→403 |
-| **Observability** (scrape-proxy) | 0010 | ✅ (metrics) | node-agent `/metrics` re-exposes a networkless agent's metrics, relabeled with `agent_pod_uid` |
-| **A2A gateway + streaming + mesh registry** | 0013/0014 | ✅ | `message/send` + **`message/stream`** (live SSE: working→artifact→completed) + `tasks/get`/`tasks/cancel`; per-agent **Agent Card** at `/.well-known/`; **`GET /agents`** discovery registry (Agent + AgentFleet) |
-| **A2A durable task store** | 0013 | ✅ | Postgres-backed: `message/send` persists tasks, **`tasks/list`** returns history, `tasks/get` resolves from the store; **survives a gateway pod restart** (state in the DB, gateway stays stateless) |
-| **A2A push notifications** | 0013 | ✅ | `tasks/pushNotificationConfig/set·get·list·delete` (gateway-owned, since agents are networkless); on completion the gateway **delivers the task to the webhook** with retries + `Authorization: Bearer` (verified: sink received the task with `auth=Bearer …`) |
-| **A2A mesh: card signing + fleet card + federation** | 0014 | ✅ | Agent **+ fleet** Cards are **JWS-signed** (Ed25519); `GET /.well-known/jwks.json` serves the key — **a live card verifies against it**; `GET /agents` **federates** peer registries (`origin` per row); `tasks/resubscribe` replays a stored task over SSE |
-| **Intelligence plane** (ModelPool + ModelGateway) | 0012 | ✅ | networkless, **secretless** agent → ModelGateway injects the `ModelPool`'s provider credential (mock-provider 401s without it), **meters** tokens in Postgres (`/v1/usage`), and **enforces the budget** (3rd call → HTTP 429, provider saw only 2); CRD-driven (`kubectl get modelpools`) |
-| **Admission** (CEL + validating webhook) | 0007 | ✅ | **CEL** invariants on the apiserver (schedule⇔mode, shards⇔shardMode, budget>0) reject violating CRs; the **webhook** denies the lethal **trifecta** (exec+egress+secrets) without `agentctl.dev/allow-trifecta`, off-allow-list image registries, and a missing cross-object `modelPool` — all 9 cases verified via server dry-run |
-| **Hardening: node-agent mTLS** | 0015 | ✅ | the node-agent control API (`:8443`) requires a CA-signed **client cert** — an uncertified call is rejected at the TLS handshake (curl exit 56); apiserver + gateway authenticate with a client cert (rustls/**ring**, no aws-lc); `drain` + A2A verified over mTLS; `/healthz`+`/metrics` stay `:8080` plaintext for probes/Prometheus; NetworkPolicies for egress/tenant isolation shipped |
-| **Hardening: socket attestation** | 0002 §7 / 0015 | ✅ | the node-agent reads each management-socket peer's kernel credentials (`SO_PEERCRED`) and maps `/proc/<pid>/cgroup` → pod uid; a control call is **refused (403)** unless the attested pod uid matches the requested `<uid>` (socket-planting / impersonation defense), with fail-open on unresolved. Verified: `attested pod <uid> peer_pid <pid>` on both discovery and the drain path (DaemonSet `hostPID`) |
-| **Contract client + CRD gen + conformance fixture** | 0018 | ✅ (hand-written) | typed manifest client validated vs real golden `--capabilities` fixtures; `mock-agent` as a conformant stand-in |
-| **Real agent e2e** (`agentd` v1.0.0, image `agentd:1.0.0`) | — | ✅ | drove the **real reference agent** through the whole stack: `--capabilities` validates vs `manifest.schema.json` (neutral, `agent_version` 1.0.0); **38/38** behavioral conformance (`agent-conformance`, incl. `drain-0-on-sigterm`); admission **gates** the real image (denied until allow-listed); node-agent **`SO_PEERCRED`-attests + reads live `agent://capabilities`** (contract 1.0); **drain via the aggregated apiserver** (mTLS→node-agent mTLS→agent) → graceful `proc.exit reason=drain`; gateway projects + **JWS-signs** its Agent Card (version 1.0.0) |
-| **Product install** (Helm + cert-manager) | 0017 | ✅ | `helm install ./charts/agentctl` on kind brings up all **7 components** Running; **cert-manager** issues all 5 certs (CA + apiserver + admission + node-agent + client, all `Ready`) and **injects the caBundle** into the **APIService** *and* the webhook; **APIService `Available=True`**; admission **denies** an off-allow-list image + admits an allowed one; node-agent (cert-manager mTLS) rediscovers the real `agentd` + **drain over the apiserver succeeds** — the `install.sh` cert scripts are fully superseded |
+| **CRDs** (`Agent`, `AgentFleet`, `ModelPool`, `MCPServerSet`) | 0003/0004/0019 | ✅ | install on stock k8s; `kubectl api-resources` resolves; short names work |
+| **Operator + per-workload PKI** | 0006 / 0021 §5 | ✅ | reconciles `Agent`→Deployment/Job serving **mTLS HTTPS**; cert-manager mints a per-workload `<name>-serving-tls` Certificate + distributes the per-namespace `agentctl-ca` ConfigMap; status `Ready=True`; finalizer + owner-ref GC; 0 Forbidden |
+| **Provisioning** (agentd v2, mTLS HTTPS serve) | 0021 §5 | ✅ | rendered pod serves `https://0.0.0.0:8443/mcp` (`--serve-cert/--serve-key/--serve-client-ca`), dials gateways keyless (`--tls-ca`), **restricted-PSS** (runAsNonRoot, drop ALL, seccomp RuntimeDefault, `automountServiceAccountToken:false`), **zero pod credentials**, no hostPath |
+| **Management** (aggregated APIServer → pod, mTLS) | 0009 / 0021 §6 | ✅ | `Available=True`; `kubectl create --raw …/agents/x/{drain,lame-duck,cancel,pause,resume}` → SAR-authorized → **direct mTLS to the agent pod `/mcp`** as an `a2a.*` admin JSON-RPC call (client cert = `Management`); `--as=nobody`→403; **no node-agent, no host socket** |
+| **Intelligence plane** (ModelPool + ModelGateway, keyless) | 0012 / 0021 §7 | ✅ | keyless `AGENT_INTELLIGENCE=https://…modelgateway…` → ModelGateway **attests the caller by source IP** (kube pod lookup, cold-start retry), injects the `ModelPool` credential (mock-provider 401s without it), **meters** tokens in Postgres, **enforces the budget** (3rd call → 429); the agent holds **no provider key** |
+| **A2A gateway** (direct-to-pod, contract-2.0 wire) | 0013 / 0021 §8 | ✅ | gateway resolves the target and forwards **direct to the pod** `https://<podIP>:8443/mcp`; **bare PascalCase** methods (`SendMessage`/`GetTask`/`CancelTask`/`ListTasks` + streaming pair), `{"task"}` envelope, proto3-JSON shapes, **SSE** streaming terminated by terminal state + close (no `final`); signed Agent Card built from `agent://capabilities` via `resources/read`; Postgres durable task store; push-config gateway-owned |
+| **MCP tool plane** (MCPServerSet + MCPGateway) | 0019 / 0021 §9 | ✅ | operator renders `--mcp name=https://…mcpgateway…/<server>`; the **MCPGateway** attests source-IP → scopes to the bound `MCPServerSet` → injects the `staticToken` credential (held off-pod) → meters budget → forwards; **dual listeners** (`:8080` health always + `:8443` TLS) so a probe never races the bind |
+| **Workflow mode** | 0021 §5 | ✅ | `--mode workflow` renders a **Job**; an inline or `configMapKeyRef` graph is mounted + passed via `--workflow` |
+| **node-agent retirement** | 0008 / 0021 §10 | ✅ | crate + DaemonSet + its cert + its RBAC **deleted**; every plane above re-verified with the node-agent **absent**; tenant namespace relaxed to **baseline** PodSecurity (no component needs hostPath/hostPID/privileged) |
+| **Admission** (CEL + validating webhook) | 0007 | ✅ | CEL invariants (schedule⇔mode, shards⇔shardMode, budget>0, workflow⇒has(workflow)) reject violating CRs; the webhook denies the lethal **trifecta** without `allow-trifecta`, off-allow-list registries, and a missing cross-object `modelPool` |
+| **Security: identity is the boundary** | 0015 / 0021 §11 | ✅ | into agents = **mTLS client cert** (verified vs the pinned client CA ⇒ `Management`; an uncertified call is rejected at the handshake); into gateways = **attested source IP** (headers never trusted; confined pod drops `CAP_NET_RAW`); **mTLS-only** (never a pod-resident bearer); NetworkPolicies for egress/tenant isolation shipped |
+| **Contract client + conformance oracle** | 0018 | ✅ | typed manifest client at **`SUPPORTED_MAJOR = 2`**; fixtures regenerated from the v2 binary (contract 2.0, bare A2A methods, exec removed); a 1.x agent no longer negotiates; `mock-agent` emits a contract-2.0 manifest |
+| **Product install** (Helm + cert-manager) | 0017 | ✅ | `helm install ./charts/agentctl` brings up the core control plane Running; the **`agentctl-ca` ClusterIssuer** + per-component serving certs issue + inject the caBundles; APIService `Available=True`; upgrades use `--reset-then-reuse-values` |
 
-**Engineering:** 11 crates, 103 tests, `clippy -D warnings` clean, `cargo fmt` clean. **Install:** Helm chart at `charts/agentctl` (see its `README.md`); cert-manager-driven TLS.
+**Engineering:** 15 crates (node-agent deleted; `agentctl-mcpgateway` added), `agentctl-e2e`
+excluded from the workspace to keep `cargo test --workspace` hermetic. Workspace builds clean;
+**324 workspace tests pass** and the contract-2.0 conformance oracle is green. **Install:** Helm chart at `charts/agentctl`
+(see its `README.md`); cert-manager-driven TLS via the `agentctl-ca` ClusterIssuer.
 
 ## Remaining (roadmap)
 
-- **Observability** (rest of 0010): events pipeline (`agent://events`→logs), run-outcome capture (`kubectl agents results`), CLI `top`, trace correlation.
-- **A2A — protocol surface complete.** Done: `message/send`, **`message/stream`** (live SSE), `tasks/get`·`list`·`cancel`·**`resubscribe`**, **`pushNotificationConfig/*`** + webhook delivery (retry + bearer auth), per-agent **and fleet JWS-signed Agent Cards** + JWKS, the **`GET /agents` federated registry**, and the **Postgres durable task store**. Remaining is hardening/scale only: cross-cluster federation *trust* (verify peer card signatures + dedup), live in-flight stream resume (agents complete synchronously today), and push delivery for streaming tasks.
-- **Intelligence plane** (rest of 0012): bridge identity assertion (node-agent→ModelGateway with attestation) so identity isn't header-asserted; ModelPool `status.usedTokens` write-back; real provider adapters (Anthropic/OpenAI) + streaming; per-agent (not just per-pool) budgets. (Done: ModelPool CRD, ModelGateway credential injection + metering + budget + `/v1/usage`.)
-- **Admission** (rest of 0007): mutating webhook (defaulting/injection), `ValidatingAdmissionPolicy` (in-tree CEL, webhook-free) for cross-object where it now suffices, per-tenant quota/policy. (Done: CRD CEL invariants + the validating webhook — trifecta gate, registry allow-list, cross-object `modelPool` existence.)
-- **Hardening** (rest of 0015): wire the **attested** pod identity into the intelligence path (route agent→node-agent→ModelGateway so `SO_PEERCRED`-attested identity replaces the header-asserted `X-Agent-*`); the **Kata-hybrid vsock** substrate tier (needs the Kata runtime); NetworkPolicy *enforcement* (manifests shipped; needs Calico/Cilium — kindnet ignores them); SPIFFE/SVID identity. (Done: node-agent control-API **mTLS**, **`SO_PEERCRED` socket attestation**, egress/tenant NetworkPolicy manifests, and **cert-manager-issued certs with auto-rotation** via the Helm chart.)
-- **Real agent**: ✅ driven e2e against `agentd` v1.0.0 (image `agentd:1.0.0`; see the verified table). Two follow-ups surfaced: (1) the agent requires an **intelligence endpoint** to run *any* mode, but the operator doesn't wire one yet — so a serving daemon needs intelligence injected (the "rest of 0012" item); the e2e used a raw Deployment with a dummy intelligence URI (reactive idles, never calls the LLM). (2) The agent must bind the hostPath management socket as **root/fsGroup** — the operator/substrate should set socket perms (RFC 0002/0015 hardening). The agent's MCP `serverInfo.name` now reads `agentd` (matching the reference impl name; identity still comes from the manifest's neutral `agent_version`).
-- **Distribution** (0017): ✅ **GitHub Actions CI/CD** — `ci.yml` (fmt + clippy `-D` + tests + CRD-drift gate + helm lint/template on every PR) and `release.yml` (on `vX.Y.Z`: multi-arch component images **+ the Helm chart as an OCI artifact**, both → `ghcr.io/agentctl-dev`, with provenance + SBOM). Chart wired for GHCR + digest pins (`values-ghcr.yaml`); **`agentctl install`** CLI wrapper (cert-manager/namespace pre-flight → `helm upgrade --install`); **OLM bundle** (alpha) in `bundle/`. Remaining: cut the first tagged release; OperatorHub submission. ✅ Multi-arch is now **cross-compiled** (cargo-zigbuild, no QEMU) + GHA layer cache; images + chart are **cosign-signed**; CI runs **cargo-deny**.
-- **Cloud-native productization** (see [cloud-native-roadmap.md](cloud-native-roadmap.md)): ✅ **Waves 1–4 — all 9 audit P0s closed, verified on kind.** W1 chart productization (resources/scheduling/PDB/HPA/ServiceMonitors/PVC, idempotent `lookup` secrets). W2 observability/reliability (operator leader-election + HA-safe readiness, `/metrics` on every component, graceful shutdown). W3 security (tenant agent pods + node-agent + Postgres confined: drop-caps/seccomp/readonly-rootfs/non-root; NetworkPolicy + scoped RBAC). W4 API/CRD (admission now gates AgentFleet's `spec.template`; defaulting mutating webhook; AgentFleet scale subresource). W5 observability/day-2 (OTLP tracing off-by-default + W3C propagation, operator Kubernetes Events, Grafana dashboard + PrometheusRule alerts, values.schema.json, helm test, Krew manifest). W6 residual tail (operator `status.replicas`/`selector` write-back for HPA read-back; opt-in bundled-Postgres TLS via `tokio-postgres-rustls`; operations runbook **[docs/operations.md](operations.md)**). 🔜 Explicitly deferred (documented): PodSecurity namespace split, conversion webhook (no v1beta1 yet), Postgres `verify-full`.
-- **CI/codegen** (0018): the contract-as-schema codegen pipeline (client is hand-written today); broaden conformance.
-- **P0**: extract the contract into a neutral repo. (The contract is vendor-neutral — the `AGENT_*`/`agent://` spellings are emitted: operator injects them, node-agent requests them — so any agent can implement it. The reference implementation is `agentd` v1.0.0, which speaks that neutral contract and keeps `agentd://` as a legacy alias.)
+- **agentd v2.1.1 release.** The `--tls-ca` + serving-cert live-rotation + SNI-trailing-dot
+  fixes are verified against working-tree builds; a tagged `ghcr.io/agentd-dev/agentd` image
+  carrying them must be cut so published installs match (RFC 0021 §14).
+- **e2e mock-agent HTTPS rework.** `mock-agent` emits a contract-2.0 *manifest* and dispatches
+  both A2A spellings, but still serves the v1 NDJSON-over-unix transport; the full mTLS-HTTPS
+  `POST /mcp` mock is the remaining e2e-harness item.
+- **Observability** (rest of 0010): events pipeline (`agent://events`→logs), run-outcome
+  capture, CLI `top`, trace correlation. Metrics are now a **direct scrape** of the agent's
+  `/metrics` (the node-agent bridge is retired).
+- **Intelligence plane** (rest of 0012): `ModelPool.status.usedTokens` write-back; real provider
+  adapters (Anthropic/OpenAI) + streaming; per-agent (not just per-pool) budgets. (Done: keyless
+  dial + source-IP attestation + credential injection + metering + budget.)
+- **MCP tool plane** (rest of 0019): the full MCP 2025-06-18 OAuth broker tiers (client-credentials
+  / on-behalf-of-user) — the forward design; today the MCPGateway does `staticToken` injection +
+  source-IP attestation + scoping + budget.
+- **Instruction sourcing** (0020): hot (no-restart) live reload once `instruction` is made
+  reloadable (contract ask **P-instr-file**); managed roll is the interim. Unaffected by the pivot.
+- **P0**: extract the contract into a neutral repo. The contract is vendor-neutral (`AGENT_*` /
+  `agent://` spellings); the reference implementation is **agentd 2.x**, which speaks contract 2.0.
 
 ## Cross-repo contract asks
 
-The implementation leans on contract primitives a conformant agent must expose;
-the consolidated list (CC, P1–P12, …) is in the brainstorm §14. `mock-agent`
-implements enough of the management + metrics surface to exercise the control
-plane today.
+The implementation leans on contract primitives a conformant agent must expose; the consolidated
+list (CC, P1–P12, …) is in the brainstorm §14. Contract 2.0 delivered several (P-mcp-egress via
+native HTTPS MCP; the A2A binding resolution). `mock-agent` implements enough of the management +
+metrics surface to exercise the control plane today.

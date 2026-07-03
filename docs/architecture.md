@@ -4,6 +4,13 @@ How the control-plane components and the data-plane agents (e.g. `agentd`) are
 connected and communicate. Each diagram is one slice of the system; together they
 show the whole wiring.
 
+> ⚠️ **Contract 2.0 — the network is the substrate.** These diagrams reflect the
+> **v2** model: agents **serve mTLS HTTPS** (`POST /mcp`) and **dial the gateways
+> keyless**; the **node-agent is retired** (no host socket, no on-node bridge);
+> identity is cryptographic — a verified mTLS **client cert** into agents, an
+> **attested source IP** into the gateways. See
+> **[RFC 0021](../rfcs/0021-contract-2.0-network-substrate-pivot.md)** for the full design.
+
 **Legend:** solid = request/data path · dashed = certificates / out-of-band ·
 `agentd` = any conformant agent (the data plane). The control plane is Rust; the
 data plane is *any* agent that speaks the Agent Control Contract (ACC).
@@ -28,10 +35,10 @@ flowchart LR
   subgraph cp[Control plane: agentctl-system]
     adm[admission webhook]
     api[aggregated APIServer]
-    op[operator]
-    na[node-agent DaemonSet]
+    op[operator + PKI]
     gw[A2A gateway]
     mg[ModelGateway]
+    mcpg[MCPGateway]
     coord[coordination server]
     scaler[KEDA external scaler]
     keda[KEDA]
@@ -40,30 +47,32 @@ flowchart LR
   end
 
   subgraph dp[Data plane: your agents]
-    agent[agentd pod]
+    agent[agentd pod - serves mTLS HTTPS :8443 /mcp]
   end
 
-  kubectl -->|apply Agent/Fleet/ModelPool| api
+  kubectl -->|apply Agent/Fleet/ModelPool/MCPServerSet| api
   kubectl -->|drain / status verbs| api
   api -->|mutate then validate| adm
   op -->|watch CRDs, render workload| agent
-  api -->|mTLS| na
-  na -->|unix socket MCP mgmt| agent
+  api -->|a2a.* admin over mTLS /mcp| agent
   peer -->|A2A HTTP + SSE| gw
-  gw -->|mTLS| na
+  gw -->|forward direct to pod: mTLS /mcp| agent
   gw <-->|durable tasks| pg
   mg <-->|usage / tasks| pg
-  agent -->|infer: no key| mg
+  agent -->|infer: keyless HTTPS| mg
+  agent -->|tools: keyless HTTPS| mcpg
   mg -->|provider call: key injected| prov
+  mcpg -->|tool call: credential injected| src2[MCP tool servers]
   prod -->|work.submit MCP| coord
   agent -->|work.claim/ack MCP egress| coord
   keda -->|IsActive/GetMetrics gRPC| scaler
   scaler -->|work.stats| coord
   keda -->|scale 0..N| agent
-  na -->|scrape-proxy /metrics| prom
+  prom -->|scrape /metrics directly| agent
   cm -.->|certs + caBundle| api
   cm -.->|cert| adm
-  cm -.->|mTLS certs| na
+  cm -.->|per-workload serving cert + per-ns CA| agent
+  cm -.->|client cert| api
 ```
 
 ---
@@ -76,16 +85,17 @@ directions and easy to conflate.
 
 ```mermaid
 flowchart TB
-  na[node-agent] -->|inbound: tools/call over unix socket| srv
+  cp[control plane: APIServer / A2A gateway] -->|inbound: mTLS HTTPS POST /mcp, client cert = Management| srv
 
   subgraph agent[agentd pod]
-    srv[SERVES mgmt MCP: status / drain / subagent.spawn]
-    cli[CLIENT: outbound calls]
+    srv[SERVES mgmt + A2A MCP on :8443: status / a2a.Drain / SendMessage / subagent.spawn]
+    cli[CLIENT: outbound keyless calls]
   end
 
   cli -->|work.claim / ack: MCP, egress| coord[coordination server]
-  cli -->|infer: HTTP| mg[ModelGateway]
-  cli -->|subscribe / tools: MCP| src[work source / other MCP servers]
+  cli -->|infer: keyless HTTPS| mg[ModelGateway]
+  cli -->|tools: keyless HTTPS| mcpg[MCPGateway]
+  cli -->|work.claim/subscribe: MCP| src[work source]
 ```
 
 ---
@@ -94,21 +104,27 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  ss[SelfSigned Issuer] --> ca[agentctl CA certificate]
-  ca --> caissuer[CA Issuer]
-  caissuer --> apicert[apiserver serving cert]
-  caissuer --> admcert[admission serving cert]
-  caissuer --> nacert[node-agent mTLS server cert]
-  caissuer --> clcert[control-plane mTLS client cert]
+  ss[SelfSigned Issuer] --> ca[agentctl-ca ClusterIssuer]
+  ca --> apicert[apiserver serving cert]
+  ca --> admcert[admission serving cert]
+  ca --> gwcert[gateway serving certs: A2A / ModelGateway / MCPGateway]
+  ca --> wlcert[per-workload agent serving cert: name-serving-tls]
+  ca --> nscm[per-namespace agentctl-ca ConfigMap: public CA]
+  ca --> clcert[control-plane mTLS client cert]
   apicert -.->|caBundle inject| apisvc[APIService]
   admcert -.->|caBundle inject| webhook[Validating + Mutating Webhooks]
-  nacert --> na[node-agent :8443]
-  clcert --> apiclient[apiserver + gateway clients]
+  wlcert --> agent[agentd :8443 serve + verify client CA]
+  nscm -.->|--tls-ca outbound trust| agent
+  clcert --> apiclient[apiserver + A2A gateway clients: Management at /mcp]
 ```
 
-A self-signed bootstrap issuer mints the agentctl CA; the CA issuer mints every
-serving/mTLS leaf; cert-manager's cainjector populates the `caBundle` on the
-APIService and the webhooks. Renewal is automatic (`renewBefore`).
+A self-signed bootstrap issuer mints the **`agentctl-ca` ClusterIssuer** (one cluster
+CA); it mints every serving/mTLS leaf — including a **per-workload serving cert**
+(`<name>-serving-tls`) for each agent — and the control plane's client cert. A
+**per-namespace `agentctl-ca` ConfigMap** distributes the public CA so agents trust
+the gateways' serving certs (`--tls-ca`). cert-manager's cainjector populates the
+`caBundle` on the APIService and webhooks; renewal is automatic (`renewBefore`), and
+agentd **hot-reloads its serving cert** on rotation without a restart.
 
 ---
 
@@ -125,9 +141,10 @@ sequenceDiagram
   API->>ADM: mutate (defaults) then validate (trifecta + registry)
   ADM-->>API: patched + admitted
   OP->>API: watch Agents
-  OP->>API: apply Deployment/Job/StatefulSet (confined + downward env + mgmt socket)
+  OP->>OP: ensure per-workload PKI (serving cert + per-ns CA ConfigMap)
+  OP->>API: apply Deployment/Job/StatefulSet (restricted-PSS + downward env + TLS mounts, zero pod creds)
   API-->>AG: scheduled + started
-  AG->>AG: serve mgmt MCP on unix socket; idle / reactive
+  AG->>AG: serve mgmt + A2A MCP on mTLS HTTPS :8443; idle / reactive
 ```
 
 ---
@@ -139,18 +156,21 @@ sequenceDiagram
   actor U as kubectl
   participant KA as kube-apiserver
   participant API as aggregated APIServer
-  participant NA as node-agent
   participant AG as agentd
   U->>KA: create --raw .../agents/x/drain
   KA->>API: proxy (front-proxy mTLS + identity)
   API->>API: SubjectAccessReview (RBAC)
-  API->>NA: POST /drain (mTLS client cert)
-  NA->>NA: SO_PEERCRED attest pod uid
-  NA->>AG: tools/call drain (unix socket MCP)
-  AG-->>NA: draining -> proc.exit reason=drain
-  NA-->>API: ok
+  API->>API: resolve Agent -> status.podIP
+  API->>AG: a2a.Drain JSON-RPC over mTLS HTTPS POST /mcp (client cert = Management)
+  AG->>AG: verify client cert vs pinned client CA -> Management
+  AG-->>API: draining -> proc.exit reason=drain
   API-->>U: Success
 ```
+
+The verbs `drain` / `lame-duck` / `cancel` / `pause` / `resume` map to
+`a2a.Drain` / `a2a.LameDuck` / `a2a.Cancel` / `a2a.Pause` / `a2a.Resume`. Each stays
+SAR-gated at the APIServer; the call goes **direct to the agent pod** — no node-agent,
+no host socket, no `pods/proxy`.
 
 ---
 
@@ -162,8 +182,9 @@ sequenceDiagram
   participant MG as ModelGateway
   participant K8 as kube Secret via ModelPool
   participant P as Provider
-  Note over AG: networkless + secretless
-  AG->>MG: infer (X-Agent identity, no key)
+  Note over AG: secretless — dials AGENT_INTELLIGENCE=https://…modelgateway… keyless
+  AG->>MG: infer over TLS (no key, no identity header)
+  MG->>MG: attest caller by SOURCE IP (kube pod lookup) -> namespace/identity
   MG->>K8: read ModelPool credentialSecretRef
   MG->>MG: meter tokens; check budget
   alt within budget
@@ -175,27 +196,29 @@ sequenceDiagram
   end
 ```
 
-### 6a. Routed-infer attestation — the networkless (Kata) tier
+### 6a. Source-IP attestation & the cold-start race
 
-On the networkless tier the agent has no routable pod IP, so the ModelGateway cannot attest it
-by source IP. Opt-in (`nodeAgent.inferProxy.enabled` + the operator annotation
-`agentctl.dev/routed-infer: "true"`) routes inference through the node-agent's unix-socket
-forwarder, which kernel-attests the peer (`SO_PEERCRED`) and re-stamps the identity so the
-client cannot self-assert. See docs/security.md → "Networkless-tier infer attestation".
+Contract 2.0 makes every agent network-native, so the ModelGateway (and the MCPGateway)
+attest the caller **by source IP** directly — the v1 node-agent infer-proxy forwarder is
+**retired**. The gateway maps the TCP source IP to the calling pod via a kube watch-cache,
+deriving the agent's namespace/identity; a header is never trusted, and a confined pod
+drops `CAP_NET_RAW` so it cannot spoof its source IP. The one hazard is a **cold-start
+race** — an agent may dial before its `status.podIP` has propagated into the gateway's
+watch-cache — handled by a bounded retry.
 
 ```mermaid
 sequenceDiagram
-  participant AG as agentd (networkless)
-  participant NA as node-agent (infer-proxy)
-  participant MG as ModelGateway
-  Note over AG: AGENT_INTELLIGENCE = unix:/run/agentctl/infer/infer.sock (read-only mount)
-  AG->>NA: infer over unix socket (no IP, may assert any header)
-  NA->>NA: SO_PEERCRED -> /proc cgroup -> pod uid
-  NA->>NA: strip client identity; re-stamp X-Agent-Pod-Uid
-  NA->>MG: infer + X-Agent-Pod-Uid (trusted forwarder, source IP)
-  MG->>MG: trust forwarder IP; resolve uid -> namespace/identity
-  MG-->>NA: completion (metered + budgeted)
-  NA-->>AG: completion
+  participant AG as agentd (routable pod IP)
+  participant MG as ModelGateway / MCPGateway
+  participant KW as kube watch-cache (pods by IP)
+  AG->>MG: infer / tool call over TLS (keyless; source IP = pod IP)
+  MG->>KW: resolve source IP -> pod
+  alt pod not yet in cache (cold start)
+    MG->>MG: retry 3x / 500ms
+  end
+  KW-->>MG: pod -> namespace / identity
+  MG->>MG: scope + inject credential + meter + budget
+  MG-->>AG: response
 ```
 
 ---
@@ -207,19 +230,21 @@ sequenceDiagram
   participant C as A2A client / peer agent
   participant GW as A2A gateway
   participant PG as Postgres
-  participant NA as node-agent
   participant AG as agentd
   C->>GW: GET /.well-known/agent-card.json
+  GW->>AG: read agent://capabilities (resources/read, mTLS /mcp)
   GW-->>C: JWS-signed Agent Card
-  C->>GW: message/send or message/stream
+  C->>GW: SendMessage or SendStreamingMessage
   GW->>PG: create Task (durable)
-  GW->>NA: forward (mTLS)
-  NA->>AG: a2a (unix socket)
-  AG-->>NA: result / SSE frames
-  NA-->>GW: relay
+  GW->>AG: forward direct to pod: bare method over mTLS HTTPS /mcp
+  AG-->>GW: {"task":…} result / SSE frames (terminal state closes stream)
   GW->>PG: update Task -> completed
   GW-->>C: result / SSE: working -> artifact -> completed
 ```
+
+The gateway forwards **direct to the agent pod** with the contract-2.0 wire (bare
+PascalCase methods, `{"task"}` envelope, SSE terminated by terminal state + close);
+there is no node-agent relay. Durable history + push config stay gateway-owned.
 
 ### 7a. OIDC-gated A2A request — per-agent caller identity
 
@@ -362,10 +387,11 @@ sequenceDiagram
 
 ## Cross-cutting notes
 
-- **Two trust planes meet at the agent.** *Inbound* management is mTLS
-  (apiserver → node-agent) then a kernel-attested (`SO_PEERCRED`) unix socket
-  (node-agent → agent). *Outbound* work/intelligence is the agent dialing out
-  (egress on the hardened/networkless tier).
+- **Two trust planes meet at the agent — identity, not reachability.** *Inbound*
+  management + A2A is **direct mTLS** to the agent's `/mcp`; the agent verifies the
+  caller's client cert against the pinned client CA (⇒ `Management`). *Outbound*
+  intelligence + tools is the agent **dialing the gateways keyless**, attested by
+  **source IP**. No node-agent, no host socket, and **no credential on the pod**.
 - **State.** Postgres is shared durable state for the gateway (A2A tasks) and the
   ModelGateway (token usage); the coordination server is in-memory (the claim
   ledger), deliberately separate (and behind a `ClaimStore` trait for a future

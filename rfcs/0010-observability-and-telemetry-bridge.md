@@ -1,5 +1,7 @@
 # agentctl RFC 0010: Observability & telemetry bridge
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** **Amended.** Agents are network-native and serve `/metrics` directly; Prometheus scrapes the pod. The node-agent scrape-proxy/`http_sd` bridge is retired. See RFC 0021 §10.
+
 **Status:** Proposed (agentctl observability track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

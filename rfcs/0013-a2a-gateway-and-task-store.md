@@ -1,5 +1,7 @@
 # agentctl RFC 0013: A2A gateway & task store
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** **Amended.** The gateway forwards **direct to the agent pod** `/mcp` (no relay); the wire is contract-2.0 (bare PascalCase methods, `{"task"}` envelope, proto3-JSON shapes, SSE without a `final` flag). The durable store + gateway-owned methods are unchanged. See RFC 0021 §8.
+
 **Status:** Proposed (agentctl A2A-plane track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

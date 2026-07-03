@@ -1,5 +1,7 @@
 # agentctl RFC 0009: Management access path & RBAC
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** **Amended.** The operator/APIServer now dial the **agent pod directly** over mTLS (`/mcp`, `a2a.*` admin verbs incl. new pause/resume) — the node-agent hop is gone. The aggregated-APIServer + per-verb SAR/RBAC seam is unchanged. See RFC 0021 §6.
+
 **Status:** Proposed (agentctl management-plane track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

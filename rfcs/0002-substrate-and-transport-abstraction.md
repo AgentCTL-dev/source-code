@@ -1,5 +1,7 @@
 # agentctl RFC 0002: Substrate & transport abstraction
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** The **transport** half is superseded: agentctl reaches agents over **mTLS HTTPS** (`https://<podIP>:8443/mcp`), not a discovered on-node socket, and there are no stock-unix/kata-hybrid/sidecar transport tiers. The **Kata tenancy-hardening** decision (D1) still stands — a pod may be a Kata VM, now reached over the network. Read RFC 0021 for the current reach model.
+
 **Status:** Proposed (agentctl foundational track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

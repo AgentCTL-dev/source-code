@@ -1,5 +1,7 @@
 # agentctl RFC 0019: MCP server registration, identity & authentication — the `MCPServerSet` CRD, the MCP broker & the two-tier auth model
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** **Amended / realized.** `MCPServerSet` ships as a CRD and the broker as the **MCPGateway** (attest source-IP → scope → inject credential → forward). The **stdio↔broker bridge is deleted** — agentd v2 speaks HTTPS MCP natively (P-mcp-egress delivered). The OAuth broker tiers remain the forward design. See RFC 0021 §9.
+
 **Status:** Proposed (agentctl tools/identity track)
 **Author:** Andrii Tsok
 **Date:** 2026-07-01

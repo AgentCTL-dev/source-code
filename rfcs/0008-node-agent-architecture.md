@@ -1,5 +1,7 @@
 # agentctl RFC 0008: node-agent architecture (two tiers)
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** **Retired in full.** The node-agent crate, DaemonSet, its Certificate, and its RBAC are deleted; every function it performed is re-homed to a network-native path (RFC 0021 §10). This RFC is retained only as the historical v1 design.
+
 **Status:** Proposed (agentctl foundational track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

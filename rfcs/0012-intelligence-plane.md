@@ -1,5 +1,7 @@
 # agentctl RFC 0012: Intelligence plane — the egress proxy, control-plane resilience, zero-secret dial & cost governance
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** **Amended.** The egress proxy is now the standalone **ModelGateway** the agent dials **keyless** over TLS; **source-IP attestation** replaces the SO_PEERCRED node-agent hop. Zero-secret-in-pod is unchanged. See RFC 0021 §7.
+
 **Status:** Proposed (agentctl intelligence track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

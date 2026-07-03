@@ -1,5 +1,13 @@
 # agentctl RFC 0001: Stack & repo decision record
 
+> 📌 **Decision update (contract 2.0, [RFC 0021](0021-contract-2.0-network-substrate-pivot.md)).**
+> **D2 (Rust, all components), the repo shape, and the anti-drift/P0 principle stand
+> unchanged.** **D1 (substrate) is narrowed:** the *transport* half — "unix-socket-over-hostPath
+> as the primary substrate, converging on 'open a discovered socket'" — is **superseded**. In v2
+> the network **is** the substrate: agents serve mTLS HTTPS and dial the gateways keyless, and
+> the node-agent is retired. The *Kata tenancy-hardening* half of D1 survives (a pod may be a
+> Kata VM, now reached over the network). See RFC 0021 and the D1 note in the brainstorm §0.6.
+
 **Status:** Proposed (agentctl foundational track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

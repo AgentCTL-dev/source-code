@@ -3,10 +3,20 @@
 > **Note (contract is vendor-neutral):** the control contract these RFCs consume is
 > vendor-neutral, so **any** agent can implement it. The canonical wire forms are
 > `agent_*` (metric prefix) / `agent://` (URI scheme) / `AGENT_*` (env family) — these
-> are neutral, not brand names. The **reference implementation is `agentd` v1.0.0**,
+> are neutral, not brand names. The **reference implementation is `agentd` 2.x**,
 > which speaks exactly that neutral contract (and keeps `agentd://` as a legacy alias).
 > The reference implementation's repo dir is `agentd-dev`. See `contract/README.md` and
 > `contract/SPEC.md` (L4).
+
+> ⚠️ **Contract 2.0 pivot — read [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) first.**
+> The reference agent's v2 refactor removed every non-HTTP transport (stdio/unix/vsock)
+> and the exec surface: agents now **serve mTLS HTTPS** (`POST /mcp`) and **dial the
+> gateways keyless**, the **node-agent is retired**, and identity is **cryptographic** (a
+> verified client cert, or an attested source IP) — *"the network is the substrate;
+> identity is the boundary."* **RFC 0021 is the authoritative current design;** it
+> supersedes-in-part **0002** (transport), **0008** (retired), **0009/0010/0012/0013/0015/0019**
+> (amended). Each carries a banner. The RFCs below record the v1 design as built; where
+> they and RFC 0021 disagree on the substrate/transport model, **0021 wins.**
 
 This directory holds the agentctl RFC set. **agentctl is the Kubernetes control
 plane for *conformant agents*** — it provisions, reaches, scales, observes, and
@@ -100,6 +110,7 @@ and the RFC files a primitive ask (the cross-repo critical path, brainstorm §14
 | [0017](0017-release-and-lifecycle.md) | Release & lifecycle engineering | Proposed | The three-version-clock lifecycle: the contract-keyed agent-image rolling upgrade (re-probe → re-negotiate → contractVersionRange **and** requiredSurfaces gate → canary on exit-0/health → roll back as a cache hit); the agentctl component upgrade & skew matrix + the CRD-bump SVM inner loop; DR concentrated on the three irreplaceable stores; the GitOps ownership boundary (SSA, KEDA-owns-replicas, finalizer-honouring prune); air-gap as the default-clean path. |
 | [0018](0018-codegen-and-contract-conformance.md) | Codegen & contract conformance | Proposed | The detailed spec of RFC 0001 §4 anti-drift: the three sources of truth (neutral schemas / generated `agent-contract-client` / black-box behavioral conformance suite) + runtime negotiation; the four codegen lanes and hand-written `surfaces{}` sum-type deserializers; pinning by `(contract major.minor + schema digest)`, never an agent SHA; the contract-extraction + brand-neutralization plan; the conformance assertions (semantic, contract-derived required/optional partitions) + the E2E/chaos + kind/Kata test matrix. |
 | [0019](0019-mcp-server-registration-identity-and-authentication.md) | MCP server registration, identity & authentication | Proposed (tools/identity track) | Realizes RFC 0004 §5's `MCPServerSet` as a CRD and extends it with per-server identity/auth (`transport`/`endpoint`/`auth` union/`budget`); the **MCP broker** data path mirroring RFC 0012's ModelGateway (credential held off the pod, keyless dial, out of the node-agent); the full MCP 2025-06-18 OAuth flow (RFC 9728 PRM → 8414 → DCR/CIMD → 8707 Resource Indicators → audience binding, no token passthrough) performed by the broker; two tiers — **Tier 1 headless** (client-credentials SEP-1046 + `private_key_jwt` RFC 7523) and **Tier 2 on-behalf-of-user** (EMA/ID-JAG SEP-990, human-principal-only); attested-peer workload identity (SO_PEERCRED/vsock, SA-token/SPIFFE optional) on the RFC 0012 §5.4 authz chokepoint; the broker as the runtime PDP/PEP (OAuth/EMA stop at issuance); the stdio↔broker bridge for the stdio-only reference agent (contract ask P-mcp-egress). |
+| [0021](0021-contract-2.0-network-substrate-pivot.md) | **Contract 2.0 — the network is the substrate** | **Proposed (pivot track)** | The re-architecture that realigns agentctl to agentd v2: agents serve mTLS HTTPS `POST /mcp` and dial the gateways keyless; the node-agent is **retired** (every function re-homed to a network-native path); identity is cryptographic (mTLS client cert into agents, attested source IP into gateways) — *"identity is the boundary,"* superseding transport-is-the-boundary. Supersedes-in-part 0002 (transport)/0008 (retired)/0009/0010/0012/0013/0015/0019; ratified by the contract-2.0 re-vendor (RFC 0018). Provisioning+PKI, management, intelligence, A2A, MCP tools, workflows, node-agent retirement, the consolidated identity model, and the migration/compatibility posture. |
 | [0020](0020-instruction-source-and-live-delivery.md) | Instruction source & live delivery | Proposed (tools/identity track) | Generalizes `AgentSpec.instruction` into a closed `instructionSource` union (`inline`/`configMapKeyRef`/`secretKeyRef`/`file`/`url`/`mcpResource`); a **resolver** that materializes any source into the agent's instruction input (the agent never fetches — static sources render the startup instruction with no contract change; live sources refresh via `url` polling / `mcpResource` subscription); secretless ingress (the fetch/OAuth credential stays in the resolver/broker, never the pod); `url` typed+authenticated+polled+bounded; `mcpResource` subscription-driven live instruction composed with RFC 0019's broker; the sourced instruction treated as an `untrusted_input` trifecta leg with an admission allow-list + provenance; atomic, turn-boundary, change-gated reload — **hot (no-restart) once instruction is made reloadable (contract ask P-instr-file), managed roll as the interim**. |
 
 These eighteen are P0-disciplined and mutually consistent: they share the tier names
@@ -169,8 +180,11 @@ research in [`docs/design/mcp-auth-research.md`](../docs/design/mcp-auth-researc
 The phased build roadmap with the explicit MVP cut line is **§16**, and the top
 human-decision open questions are **§17**.
 
-**Track complete (drafted).** All twenty RFCs (**0001–0020**) are now written
-(Proposed): the foundational stack/substrate/CRD track (0001–0003), the ops/dev CRDs
+**Track complete (drafted), then pivoted.** All twenty core RFCs (**0001–0020**) were
+written (Proposed), and **[RFC 0021](0021-contract-2.0-network-substrate-pivot.md)** then
+re-architected the substrate/transport model for **contract 2.0** (the reference agent's
+v2 realignment — see the banner above; it supersedes-in-part 0002/0008/0009/0010/0012/0013/0015/0019).
+The core track (Proposed): the foundational stack/substrate/CRD track (0001–0003), the ops/dev CRDs
 + versioning + reconcile + admission (0004–0007), the runtime/operations track
 (0008–0010), the plane track (0011–0014), the cross-cutting security / interface
 / lifecycle / conformance capstone (0015–0018), and the tools/identity track

@@ -4,6 +4,15 @@ End-to-end measurements of the agentctl control plane driving the **real referen
 agent `agentd` v1.0.0** as the data plane, produced by the Phase-4 harness
 (`e2e/` + `crates/agentctl-e2e`). Every number here was **measured**, not modeled.
 
+> ⚠️ **Measured against the v1 (node-agent) topology.** These runs predate the
+> contract-2.0 pivot ([RFC 0021](../rfcs/0021-contract-2.0-network-substrate-pivot.md)),
+> which **retired the node-agent DaemonSet**. The v2 effect on these numbers is strictly
+> favorable and is annotated inline: the **per-node** node-agent overhead is **gone**
+> (freeing ~1 pod slot per node and its ~3 MiB), and the resident control-plane pod
+> census drops by the DaemonSet. The **per-agent** floor (~1.3 millicores, sub-MiB) is
+> unchanged — agentd is unchanged in weight. These figures will be re-measured against a
+> v2 build with the HTTPS-serving mock; until then, read them as the v1 baseline.
+
 > **Host-bound caveat — read first.** These runs are on a **single-node kind
 > cluster** (one Docker "node" sharing the host's CPU/RAM). Absolute capacity (max
 > agents, ops/sec) is therefore bound by *this host*, **not** by agentctl's design.
@@ -30,7 +39,7 @@ Marginal cost of one additional `agentd` agent, measured at steady state:
 | Component | CPU (millicores) | Memory (MiB) |
 |---|---|---|
 | **agentd pod** (idle/reactive) | **~1.3** | **< 1** |
-| node-agent (per *node*, constant — DaemonSet) | ~0 | ~3 |
+| node-agent (per *node*, constant — DaemonSet) — **retired in v2** | ~0 | ~3 → **0** |
 | control-plane marginal (per agent) | ~0 | ~0 |
 
 `agentd` is about the lightest possible conformant agent, so this is effectively
@@ -52,9 +61,11 @@ Requested vs. scheduled on this single node (agentd at the default 100m CPU requ
 Ceiling on this host: **~82 agentd pods** — and the binding constraint is the
 **kubelet's pods-per-node cap**, *not* CPU, memory, or anything in agentctl.
 Confirmed: the node reports `capacity.pods: 110` (the Kubernetes default), and with
-~28 control-plane + system pods already resident (operator, node-agent, gateway,
-ModelGateway, coordination, scaler, Postgres, admission, apiserver, KEDA,
-cert-manager, metrics-server, …), only ~82 agent slots remain (82 + 28 ≈ 110). On
+~28 control-plane + system pods already resident (operator, gateway, ModelGateway,
+MCPGateway, coordination, scaler, Postgres, admission, apiserver, KEDA, cert-manager,
+metrics-server, …), only ~82 agent slots remain (82 + 28 ≈ 110). **In v2 the
+node-agent DaemonSet is retired**, so a per-node pod slot is returned to agents (the
+DaemonSet was one resident pod per node). On
 CPU this node had ~8× headroom (82 × 100m ≈ 8.2 of 16 cores) and on memory ~6×
 (82 × 128 MiB ≈ 10.5 of 64 GiB). The cap is purely configurational — raise
 `--max-pods` (kubelet), lower the agent's CPU/memory requests toward the measured
@@ -134,6 +145,12 @@ control-plane interop bugs**, which is precisely the point of Phase 4:
   `runAsUser: 0` (capabilities still fully dropped, no-privilege-escalation,
   read-only root filesystem; nonroot remains a documented follow-up gated on
   node-agent-chowned per-pod dirs, RFC 0002 §6.1).
+
+> **v2 update:** the third finding is **resolved by the pivot** — contract 2.0 removed
+> the hostPath management socket, so v2 agent pods run **`runAsNonRoot`** with no
+> hostPath and no chowned per-pod dirs. "routed-infer" and the "management socket" are
+> v1 concepts; in v2 the agent serves mTLS HTTPS and the ModelGateway attests by source
+> IP directly ([RFC 0021](../rfcs/0021-contract-2.0-network-substrate-pivot.md)).
 
 Scenarios cover provisioning, the management path (drain/lame-duck/cancel via the
 aggregated APIServer + a SAR-denied 403), intelligence (routed-infer → ModelGateway

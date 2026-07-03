@@ -1,5 +1,7 @@
 # agentctl RFC 0015: Security & multi-tenancy
 
+> ⚠️ **Superseded in part by [RFC 0021](0021-contract-2.0-network-substrate-pivot.md) (contract 2.0 — the network is the substrate).** **Amended.** *Identity is the boundary*, not transport (L7 superseded): mTLS client cert into agents + attested source IP into gateways. The node-agent caller→agent PEP is deleted; the egress-authority PEPs (ModelGateway, MCPGateway) remain. mTLS-only — never a pod-resident bearer. See RFC 0021 §11.
+
 **Status:** Proposed (agentctl security track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27
