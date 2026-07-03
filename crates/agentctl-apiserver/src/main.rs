@@ -91,6 +91,10 @@ async fn main() {
             "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{ns}/agents/{name}/{verb}",
             post(handle_verb),
         )
+        .route(
+            "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{ns}/agentfleets/{name}/{verb}",
+            post(handle_fleet_verb),
+        )
         .with_state(AppState {
             client,
             na: na_client::node_agent_client(),
@@ -242,7 +246,7 @@ async fn handle_verb(
         .filter_map(|v| v.to_str().ok().map(String::from))
         .collect();
 
-    match authorize(&state.client, &user, &groups, &ns, &name, &verb).await {
+    match authorize(&state.client, &user, &groups, &ns, &name, &verb, "agents").await {
         Ok(true) => {
             state.metrics.inc_authorized();
             tracing::info!(%user, %ns, agent = %name, %verb, "authorized management verb");
@@ -284,7 +288,100 @@ async fn handle_verb(
     }
 }
 
-/// SubjectAccessReview: may `user` (with `groups`) `create` the `agents/<verb>`
+/// A management connect verb on an **AgentFleet** — fanned out to ALL Running
+/// replicas (RFC 0021 §4.4). Unlike the per-`Agent` path, a fleet drain/pause/cancel
+/// must reach every member; the old behavior hit one arbitrary pod and reported
+/// Success while N−1 kept running. Returns a partial-success Status (207 when some
+/// replicas failed).
+#[tracing::instrument(skip_all, fields(ns = %ns, fleet = %name, verb = %verb))]
+async fn handle_fleet_verb(
+    State(state): State<AppState>,
+    Path((ns, name, verb)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if !matches!(
+        verb.as_str(),
+        "drain" | "lame-duck" | "cancel" | "pause" | "resume"
+    ) {
+        return status(
+            StatusCode::NOT_FOUND,
+            "Failure",
+            &format!("unknown verb: {verb}"),
+        );
+    }
+    state.metrics.inc_request();
+    let user = headers
+        .get("X-Remote-User")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if user.is_empty() {
+        return status(
+            StatusCode::UNAUTHORIZED,
+            "Failure",
+            "no X-Remote-User (not proxied?)",
+        );
+    }
+    let groups: Vec<String> = headers
+        .get_all("X-Remote-Group")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .collect();
+
+    match authorize(&state.client, &user, &groups, &ns, &name, &verb, "agentfleets").await {
+        Ok(true) => {
+            state.metrics.inc_authorized();
+            match call_fleet_admin(&state.client, &state.na, &ns, &name, &verb).await {
+                Ok((ok, total, detail)) => {
+                    let all_ok = ok == total;
+                    if all_ok {
+                        state.metrics.inc_forwarded();
+                    } else {
+                        state.metrics.inc_error();
+                    }
+                    let code = if all_ok {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::MULTI_STATUS
+                    };
+                    tracing::info!(%ns, fleet = %name, %verb, ok, total, "fleet verb fanned out");
+                    (
+                        code,
+                        Json(json!({
+                            "kind": "Status", "apiVersion": "v1",
+                            "status": if all_ok { "Success" } else { "Failure" },
+                            "message": format!("{verb} fleet {ns}/{name} by {user}: {ok}/{total} replicas ok"),
+                            "code": code.as_u16(),
+                            "details": { "ok": ok, "total": total, "replicas": detail },
+                        })),
+                    )
+                }
+                Err(e) => {
+                    state.metrics.inc_error();
+                    status(
+                        StatusCode::BAD_GATEWAY,
+                        "Failure",
+                        &format!("fleet fan-out failed: {e}"),
+                    )
+                }
+            }
+        }
+        Ok(false) => {
+            state.metrics.inc_denied();
+            status(
+                StatusCode::FORBIDDEN,
+                "Failure",
+                &format!("{user:?} cannot {verb} agentfleets/{name} in {ns}"),
+            )
+        }
+        Err(e) => {
+            state.metrics.inc_error();
+            status(StatusCode::INTERNAL_SERVER_ERROR, "Failure", &e)
+        }
+    }
+}
+
+/// SubjectAccessReview: may `user` (with `groups`) `create` the `<resource>/<verb>`
 /// subresource on `name` in `ns`?
 async fn authorize(
     client: &Client,
@@ -293,6 +390,7 @@ async fn authorize(
     ns: &str,
     name: &str,
     verb: &str,
+    resource: &str,
 ) -> Result<bool, String> {
     let sar = SubjectAccessReview {
         spec: SubjectAccessReviewSpec {
@@ -300,7 +398,7 @@ async fn authorize(
             groups: Some(groups.to_vec()),
             resource_attributes: Some(ResourceAttributes {
                 group: Some(GROUP.to_string()),
-                resource: Some("agents".to_string()),
+                resource: Some(resource.to_string()),
                 subresource: Some(verb.to_string()),
                 verb: Some("create".to_string()),
                 namespace: Some(ns.to_string()),
@@ -337,40 +435,61 @@ async fn call_agent_admin(
     name: &str,
     verb: &str,
 ) -> Result<String, String> {
-    // The agent's pod, labelled by the operator (agentctl.dev/agent=<name>).
-    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
-    let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
-    let pod_ip = pods
-        .list(&lp)
-        .await
-        .map_err(|e| format!("list agent pods: {e}"))?
-        .items
+    let ip = running_pod_ips(client, ns, name)
+        .await?
         .into_iter()
-        .find(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
-        .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?
-        .status
-        .and_then(|s| s.pod_ip)
-        .ok_or_else(|| format!("agent pod for {ns}/{name} has no podIP"))?;
+        .next()
+        .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?;
+    forward_verb_to_ip(http, &ip, verb).await
+}
 
-    // Verb → the agentd extension admin method (Management-gated; the `a2a.`
-    // prefix is deliberate — these are operator verbs, not A2A protocol).
-    let method = match verb {
+/// Verb → the agentd extension admin method (Management-gated; the `a2a.` prefix is
+/// deliberate — these are operator verbs, not A2A protocol).
+fn verb_to_method(verb: &str) -> Result<&'static str, String> {
+    Ok(match verb {
         "drain" => "a2a.Drain",
         "lame-duck" => "a2a.LameDuck",
         "cancel" => "a2a.Cancel",
         "pause" => "a2a.Pause",
         "resume" => "a2a.Resume",
         other => return Err(format!("unmapped verb: {other}")),
-    };
+    })
+}
 
-    // Inject the W3C `traceparent` so the agent's run joins this trace (no-op
-    // when OTLP is off). No Origin header is sent (the agent 403s cross-origin).
+/// Every Running pod IP for a workload labelled `agentctl.dev/agent=<name>` — one
+/// for a singleton `Agent`, N for an `AgentFleet` (fleet pods share the label).
+async fn running_pod_ips(client: &Client, ns: &str, name: &str) -> Result<Vec<String>, String> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
+    Ok(pods
+        .list(&lp)
+        .await
+        .map_err(|e| format!("list pods: {e}"))?
+        .items
+        .into_iter()
+        .filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
+        .filter_map(|p| p.status.and_then(|s| s.pod_ip))
+        .collect())
+}
+
+/// POST an admin verb to one agent pod's mTLS `/mcp` as a contract-2.0 A2A admin
+/// JSON-RPC. A bounded timeout keeps a single hung replica from stalling a fleet
+/// fan-out.
+async fn forward_verb_to_ip(
+    http: &reqwest::Client,
+    pod_ip: &str,
+    verb: &str,
+) -> Result<String, String> {
+    let method = verb_to_method(verb)?;
     let url = format!("https://{pod_ip}:8443/mcp");
+    // Inject the W3C `traceparent` so the agent's run joins this trace (no-op when
+    // OTLP is off). No Origin header is sent (the agent 403s cross-origin).
     let mut trace_headers = reqwest::header::HeaderMap::new();
     agentctl_telemetry::inject_context(&mut trace_headers);
     let resp = http
         .post(&url)
         .headers(trace_headers)
+        .timeout(std::time::Duration::from_secs(10))
         .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": {} }))
         .send()
         .await
@@ -380,9 +499,6 @@ async fn call_agent_admin(
         .json()
         .await
         .map_err(|e| format!("agent {code}: unparseable JSON-RPC response: {e}"))?;
-    // JSON-RPC envelope: a `result` is success regardless of transport nuances;
-    // an `error` (e.g. method-not-found for a peer the agent does not consider
-    // Management) is surfaced verbatim.
     if let Some(err) = body.get("error") {
         return Err(format!("agent JSON-RPC error: {err}"));
     }
@@ -390,6 +506,34 @@ async fn call_agent_admin(
         Some(result) => Ok(result.to_string()),
         None => Err(format!("agent {code}: no result in JSON-RPC response")),
     }
+}
+
+/// Fan a management verb out to **every** Running replica of an `AgentFleet` and
+/// aggregate. A single-replica hit (what the per-`Agent` path does) is dangerous for
+/// a fleet — drain/pause/cancel would silently affect one of N pods while reporting
+/// Success. Returns `(ok, total, detail)` so the handler can build a partial-success
+/// Status.
+async fn call_fleet_admin(
+    client: &Client,
+    http: &reqwest::Client,
+    ns: &str,
+    name: &str,
+    verb: &str,
+) -> Result<(usize, usize, Vec<String>), String> {
+    let ips = running_pod_ips(client, ns, name).await?;
+    let total = ips.len();
+    let mut ok = 0usize;
+    let mut detail = Vec::with_capacity(total);
+    for ip in &ips {
+        match forward_verb_to_ip(http, ip, verb).await {
+            Ok(_) => {
+                ok += 1;
+                detail.push(format!("{ip}: ok"));
+            }
+            Err(e) => detail.push(format!("{ip}: {e}")),
+        }
+    }
+    Ok((ok, total, detail))
 }
 
 fn status(code: StatusCode, kind: &str, message: &str) -> (StatusCode, Json<Value>) {
@@ -445,7 +589,12 @@ async fn api_resources() -> Json<Value> {
             { "name": "agents/lame-duck", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
             { "name": "agents/cancel", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
             { "name": "agents/pause", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
-            { "name": "agents/resume", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] }
+            { "name": "agents/resume", "singularName": "", "namespaced": true, "kind": "Agent", "verbs": ["create"] },
+            { "name": "agentfleets/drain", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
+            { "name": "agentfleets/lame-duck", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
+            { "name": "agentfleets/cancel", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
+            { "name": "agentfleets/pause", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
+            { "name": "agentfleets/resume", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] }
         ],
     }))
 }
