@@ -4,13 +4,15 @@
 **Author:** Andrii Tsok
 **Date:** 2026-07-03
 
-> **Implemented** — Phases 1–5 and the shard-identity half of Phase 6 have landed
-> (CRD + admission; the result/correlation + dead-letter work fabric; coordinator
-> render/reconcile; the fleet-addressable A2A endpoint with LB + task affinity;
-> per-fleet budget; `--shard auto/N` identity injection). The only carried-forward
-> item is the **guarded shard *resize*** (a `Resizing` condition + drain-before-
-> reassign on an `N` change), which needs an agent-side drain acknowledgement and is
-> tracked as a follow-up (§8, §10).
+> **Implemented** — all of Phases 1–6 have landed: CRD + admission; the
+> result/correlation + dead-letter work fabric; coordinator render/reconcile; the
+> fleet-addressable A2A endpoint with LB + task affinity; per-fleet budget;
+> `--shard auto/N` identity injection; and the **guarded shard resize** — an
+> operator-choreographed stop-the-world rebalance (quiesce the old-`N` pods to 0,
+> then flip `N` and scale up, holding the fleet `Resizing`) that closes the
+> mixed-modulus double-own/orphan window a naive rolling update would open (§8). The
+> one residual is a per-item ownership **epoch** to make even a crash-mid-flip
+> overlap impossible — a data-plane/contract change, tracked as a follow-up (§8/§10).
 **Part of:** the agentctl control plane — turns `AgentFleet` from a bag of fungible replicas into a **distributed agent system**: a "main agent" (coordinator) that fans work out to an elastic worker pool over a result-bearing work fabric, addressable from outside as a **single A2A endpoint**, with per-fleet budget isolation.
 
 > **Contract-first, not agent-first (P0).** This RFC adds control-plane *orchestration*
@@ -359,12 +361,27 @@ held lease.
   `AGENT_POD_NAME` (`<sts>-<ordinal>`). This lands RFC 0003 §9.1's P3 fix: only `N` is
   templated (identical across pods, as a StatefulSet requires); `K` is self-derived. Purely
   additive to `agent_args`.
-- **Guarded resize.** Changing `N` is choreographed by the operator, not a bare
-  `.spec.replicas` patch: a `Resizing` status condition, one-ordinal-at-a-time roll, and
-  (where KEDA is not the owner) drain-before-reassign, so the §4.3 hazards (two live shards
-  owning the same slice; orphaned items) are covered. This is the one piece that may **phase
-  after** the CRD + coordinator/fabric work, since it needs an agent-side drain
-  acknowledgement; flagged explicitly, not silently deferred.
+- **Guarded resize (implemented).** Changing `N` is choreographed by the operator, not a
+  bare template swap that Kubernetes rolls one pod at a time — which would run a **mix** of
+  the old and new modulus, so across the seam an item is double-owned (two shards each
+  compute `hash mod N == K`) or orphaned (neither does), the RFC 0011 §4.3 hazards. The
+  operator instead drives a **stop-the-world rebalance**, a pure state machine
+  (`plan_shard_resize`) keyed off the live StatefulSet's applied `--shard auto/N` vs the
+  desired `N`:
+    1. **Quiesce** — while old-`N` pods run, merge-patch the StatefulSet to `replicas: 0`
+       (keeping the old template, so no premature rollout); the fleet goes `Ready=False /
+       Resizing`. A deleted pod definitively runs no modulus, so scale-to-0 is the barrier —
+       no drain-confirms-quiesced handshake needed; standard pod termination (SIGTERM +
+       grace) lets the agent finish in flight.
+    2. **Flip** — once fully quiesced (0 pods), forced-SSA the new-`N` render (the template
+       flips and scales back up). The forced apply reclaims `replicas` from the patched 0.
+    3. **Converge** — once the new-`N` pods are Ready, back to steady. No pod ever runs while
+       another runs a different `N`, so the entire mixed-modulus window is closed.
+  **Residual (follow-up).** The barrier is best-effort: an agent that ignores SIGTERM, or an
+  operator crash between quiesce and flip, could still briefly overlap. Closing that fully
+  needs a per-item ownership **epoch** (the shard predicate rejecting work stamped with a
+  stale epoch) — a data-plane / contract change to the agent, not the operator, so it stays a
+  tracked follow-up (§10).
 
 ---
 
