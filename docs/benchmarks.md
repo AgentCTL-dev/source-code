@@ -4,14 +4,45 @@ End-to-end measurements of the agentctl control plane driving the **real referen
 agent `agentd` v1.0.0** as the data plane, produced by the Phase-4 harness
 (`e2e/` + `crates/agentctl-e2e`). Every number here was **measured**, not modeled.
 
-> ⚠️ **Measured against the v1 (node-agent) topology.** These runs predate the
-> contract-2.0 pivot ([RFC 0021](../rfcs/0021-contract-2.0-network-substrate-pivot.md)),
-> which **retired the node-agent DaemonSet**. The v2 effect on these numbers is strictly
-> favorable and is annotated inline: the **per-node** node-agent overhead is **gone**
-> (freeing ~1 pod slot per node and its ~3 MiB), and the resident control-plane pod
-> census drops by the DaemonSet. The **per-agent** floor (~1.3 millicores, sub-MiB) is
-> unchanged — agentd is unchanged in weight. These figures will be re-measured against a
-> v2 build with the HTTPS-serving mock; until then, read them as the v1 baseline.
+> ⚠️ **The full sweep below was measured against the v1 (node-agent) topology**; the
+> **contract-2.0** ([RFC 0021](../rfcs/0021-contract-2.0-network-substrate-pivot.md))
+> per-agent and control-plane numbers were **re-measured live** on a running v2 stack —
+> see **[Contract 2.0 — live measurements](#contract-20--live-measurements)** immediately
+> below. The headline holds: an idle agent is **~1 millicore / sub-MiB**, the node-agent
+> per-node cost is **gone** (DaemonSet retired), and the new mcpgateway adds ~1m/1Mi. The
+> v1 density/throughput/latency sweeps are retained as the methodology baseline until the
+> full harness (now v2-updated) is re-run with disk headroom.
+
+## Contract 2.0 — live measurements
+
+Spot measurements (`kubectl top`) from a **running v2 deployment** on kind (the full
+control plane + a reactive `agentd` v2 agent bound to an MCPServerSet tool, all
+`Ready`), confirming the v2 overhead:
+
+**Per-agent (the headline is unchanged):**
+
+| Pod | CPU (millicores) | Memory (MiB) |
+|---|---|---|
+| `agentd` v2 agent (reactive, idle; serves mTLS `/mcp`, dials keyless) | **~1** | **< 1** |
+| a mock MCP tool server (echo) | ~1 | ~13 |
+| **node-agent (per node)** | — | **0 (retired)** |
+
+**Control-plane footprint (all Rust, distroless nonroot):**
+
+| Component | CPU (m) | Mem (MiB) | | Component | CPU (m) | Mem (MiB) |
+|---|---|---|---|---|---|---|
+| operator | 1 | 3 | | modelgateway | 1 | 2 |
+| apiserver | 1 | 4 | | **mcpgateway** | **1** | **1** |
+| gateway | 1 | 2 | | admission | 1 | 4 |
+| coordination | 3 | 7 | | scaler | 1 | 2 |
+| postgres | 8 | 54 | | | | |
+
+The whole v2 control plane idles at **~18 millicores and ~79 MiB** across 9 pods —
+Postgres is the single largest line; the eight Rust components together are ~10m / ~25 MiB.
+The v2 pivot **removed** the per-node node-agent DaemonSet entirely, so an N-agent, M-node
+fleet no longer pays an `M × node-agent` tax, and the agent pod itself is unchanged in
+weight (agentd is the same binary shape). *These are point-in-time readings of one idle
+agent, not a density sweep — the full sweep (below) is the v1 baseline pending a v2 re-run.*
 
 > **Host-bound caveat — read first.** These runs are on a **single-node kind
 > cluster** (one Docker "node" sharing the host's CPU/RAM). Absolute capacity (max
