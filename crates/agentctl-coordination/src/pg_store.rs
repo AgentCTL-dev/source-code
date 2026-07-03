@@ -37,7 +37,10 @@ use std::time::Duration;
 
 use deadpool_postgres::{Manager, Pool};
 
-use crate::store::{holder_mismatch_error, ClaimResult, ClaimStore, Stats, SubmitOutcome};
+use crate::store::{
+    holder_mismatch_error, ClaimResult, ClaimStore, DeadItem, Stats, SubmitOutcome, WorkState,
+    WorkStatus,
+};
 
 /// Pool size — mirrors the gateway/modelgateway stores.
 const POOL_MAX_SIZE: usize = 8;
@@ -56,13 +59,18 @@ const SCHEMA_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// row is a live `claimed` (contended) or `acked` (deduped); the caller reads it.
 /// The fresh, globally-unique, opaque `lease_id` is minted server-side from a
 /// shared sequence (uniqueness) plus an `md5(random())` suffix (opacity).
+/// `$1`=claim_key, `$2`=item, `$3`=holder, `$4`=ttl_ms. A GRANT increments
+/// `attempts` (this delivery). The reclaim clause requires an expired `claimed`
+/// row to still be UNDER its `max_attempts` budget — a poison row past budget is
+/// left for the sweeper (or the read-back) to dead-letter, never re-granted.
 const CLAIM_SQL: &str = "\
-INSERT INTO work_items (claim_key, item, status, lease_id, holder, expires_at, created_at, updated_at)
+INSERT INTO work_items (claim_key, item, status, lease_id, holder, expires_at, attempts, created_at, updated_at)
 VALUES (
     $1, $2, 'claimed',
     'lease-' || lpad(to_hex(nextval('work_items_lease_seq')), 8, '0') || '-' || substr(md5(random()::text || clock_timestamp()::text), 1, 16),
     $3,
     now() + ($4::bigint * interval '1 millisecond'),
+    1,
     now(), now()
 )
 ON CONFLICT (claim_key) DO UPDATE SET
@@ -71,10 +79,19 @@ ON CONFLICT (claim_key) DO UPDATE SET
     lease_id = EXCLUDED.lease_id,
     holder = EXCLUDED.holder,
     expires_at = EXCLUDED.expires_at,
+    attempts = work_items.attempts + 1,
     updated_at = now()
 WHERE work_items.status = 'pending'
-   OR (work_items.status = 'claimed' AND work_items.expires_at < now())
+   OR (work_items.status = 'claimed' AND work_items.expires_at < now()
+       AND (work_items.max_attempts IS NULL OR work_items.attempts < work_items.max_attempts))
 RETURNING lease_id";
+
+/// The status → `pending`/`deadletter` transition for a redelivery (sweep / release):
+/// a row past its `max_attempts` budget is dead-lettered, else returned to pending.
+/// Shared by `db_sweep` and `db_release` so both agree with the in-memory store.
+const REDELIVER_STATUS: &str =
+    "CASE WHEN work_items.max_attempts IS NOT NULL AND work_items.attempts >= work_items.max_attempts \
+     THEN 'deadletter' ELSE 'pending' END";
 
 /// The persisted status of a `work_items` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +99,7 @@ enum RowStatus {
     Pending,
     Claimed,
     Acked,
+    Deadletter,
 }
 
 impl RowStatus {
@@ -91,6 +109,7 @@ impl RowStatus {
             "pending" => Some(Self::Pending),
             "claimed" => Some(Self::Claimed),
             "acked" => Some(Self::Acked),
+            "deadletter" => Some(Self::Deadletter),
             _ => None,
         }
     }
@@ -98,25 +117,34 @@ impl RowStatus {
 
 /// PURE: map the conflicting row's state (read after a `claim` UPSERT granted
 /// nothing) to the non-grant [`ClaimResult`]. An `acked` key is the dedupe
-/// tombstone (never re-granted, `held_by:"<acked>"` on the wire); a live `claimed`
-/// is contention (report the holder). A leftover `pending` (only reachable via a
-/// concurrent transaction between the UPSERT and the read-back) is reported as
-/// contended-with-unknown-holder — a benign "lost", never a false grant.
-fn not_granted_result(status: RowStatus, holder: Option<String>) -> ClaimResult {
+/// tombstone (never re-granted, `held_by:"<acked>"`); a `deadletter` row — or an
+/// expired `claimed` row already past its `max_attempts` budget (which the reclaim
+/// clause deliberately left ungranted) — is [`ClaimResult::Deadlettered`]; any other
+/// live/under-budget `claimed` is contention. A leftover `pending` (a concurrent-txn
+/// race) is contended-with-unknown-holder — a benign "lost", never a false grant.
+fn not_granted_result(
+    status: RowStatus,
+    holder: Option<String>,
+    expired: bool,
+    past_budget: bool,
+) -> ClaimResult {
     match status {
         RowStatus::Acked => ClaimResult::Deduped,
+        RowStatus::Deadletter => ClaimResult::Deadlettered,
+        RowStatus::Claimed if expired && past_budget => ClaimResult::Deadlettered,
         RowStatus::Claimed | RowStatus::Pending => ClaimResult::Contended { held_by: holder },
     }
 }
 
 /// PURE: map the conflicting row's status (read after a `submit` INSERT was a
 /// no-op `ON CONFLICT DO NOTHING`) to the [`SubmitOutcome`]. Mirrors the in-memory
-/// producer-side dedupe: an `acked` key is deduped; a `claimed` key is already
-/// held; a `pending` key is already enqueued. (An expired `claimed` row reports
-/// `AlreadyClaimed` here; the sweeper / next `claim` reclaims it.)
+/// producer-side dedupe: an `acked` key is deduped; a `deadletter` key is held out;
+/// a `claimed` key is already held; a `pending` key is already enqueued. (An expired
+/// `claimed` row reports `AlreadyClaimed` here; the sweeper / next `claim` reclaims it.)
 fn submit_conflict_outcome(status: RowStatus) -> SubmitOutcome {
     match status {
         RowStatus::Acked => SubmitOutcome::Deduped,
+        RowStatus::Deadletter => SubmitOutcome::Deadlettered,
         RowStatus::Claimed => SubmitOutcome::AlreadyClaimed,
         RowStatus::Pending => SubmitOutcome::AlreadyPending,
     }
@@ -188,13 +216,19 @@ impl std::fmt::Debug for PgClaimStore {
 }
 
 impl ClaimStore for PgClaimStore {
-    fn submit(&self, item: &str, claim_key: Option<&str>) -> SubmitOutcome {
+    fn submit(
+        &self,
+        item: &str,
+        claim_key: Option<&str>,
+        max_attempts: Option<u32>,
+    ) -> SubmitOutcome {
         // No claim_key ⇒ the item URI is its own identity key (the table is keyed
         // by claim_key; the item is the natural dedupe identity when none given).
         let key = claim_key.unwrap_or(item).to_string();
         let item = item.to_string();
+        let max = max_attempts.map(|m| m as i32);
         let pool = self.pool.clone();
-        match self.block(async move { db_submit(&pool, &key, &item).await }) {
+        match self.block(async move { db_submit(&pool, &key, &item, max).await }) {
             Ok(o) => o,
             Err(e) => {
                 tracing::error!(error = %e, "pg submit failed");
@@ -239,12 +273,16 @@ impl ClaimStore for PgClaimStore {
         lease_id: &str,
         claim_key: &str,
         expected_holder: Option<&str>,
+        result: Option<&str>,
     ) -> Result<(), String> {
         let lease_id = lease_id.to_string();
         let claim_key = claim_key.to_string();
         let expected = expected_holder.map(str::to_string);
+        let result = result.map(str::to_string);
         let pool = self.pool.clone();
-        self.block(async move { db_ack(&pool, &lease_id, &claim_key, expected.as_deref()).await })
+        self.block(async move {
+            db_ack(&pool, &lease_id, &claim_key, expected.as_deref(), result.as_deref()).await
+        })
     }
 
     fn release(
@@ -280,6 +318,7 @@ impl ClaimStore for PgClaimStore {
                     pending: 0,
                     claimed: 0,
                     oldest_age_ms: 0,
+                    deadletter: 0,
                 }
             }
         }
@@ -294,6 +333,53 @@ impl ClaimStore for PgClaimStore {
                 Vec::new()
             }
         }
+    }
+
+    fn result_of(&self, claim_key: &str) -> WorkStatus {
+        let key = claim_key.to_string();
+        let pool = self.pool.clone();
+        match self.block(async move { db_result_of(&pool, &key).await }) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "pg result_of failed");
+                // Fail safe: report Unknown rather than fabricate a state.
+                WorkStatus {
+                    state: WorkState::Unknown,
+                    result: None,
+                }
+            }
+        }
+    }
+
+    fn dead_items(&self) -> Vec<DeadItem> {
+        let pool = self.pool.clone();
+        match self.block(async move { db_dead_items(&pool).await }) {
+            Ok(items) => items,
+            Err(e) => {
+                tracing::error!(error = %e, "pg dead_items failed");
+                Vec::new()
+            }
+        }
+    }
+
+    fn requeue_dead(&self, claim_key: &str) -> bool {
+        let key = claim_key.to_string();
+        let pool = self.pool.clone();
+        self.block(async move { db_requeue_dead(&pool, &key).await })
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "pg requeue_dead failed");
+                false
+            })
+    }
+
+    fn drop_dead(&self, claim_key: &str) -> bool {
+        let key = claim_key.to_string();
+        let pool = self.pool.clone();
+        self.block(async move { db_drop_dead(&pool, &key).await })
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "pg drop_dead failed");
+                false
+            })
     }
 }
 
@@ -362,19 +448,24 @@ async fn ensure_schema(pool: &Pool) -> Result<(), String> {
     client
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS work_items (
-                claim_key  text        PRIMARY KEY,
-                item       text        NOT NULL,
-                status     text        NOT NULL DEFAULT 'pending',
-                lease_id   text,
-                holder     text,
-                expires_at timestamptz,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
+                claim_key    text        PRIMARY KEY,
+                item         text        NOT NULL,
+                status       text        NOT NULL DEFAULT 'pending',
+                lease_id     text,
+                holder       text,
+                expires_at   timestamptz,
+                created_at   timestamptz NOT NULL DEFAULT now(),
+                updated_at   timestamptz NOT NULL DEFAULT now()
             );
             CREATE SEQUENCE IF NOT EXISTS work_items_lease_seq;
             CREATE INDEX IF NOT EXISTS work_items_status_idx ON work_items (status);
             CREATE UNIQUE INDEX IF NOT EXISTS work_items_lease_id_idx
-                ON work_items (lease_id) WHERE lease_id IS NOT NULL;",
+                ON work_items (lease_id) WHERE lease_id IS NOT NULL;
+            -- RFC 0022 §7: redelivery accounting + the ack result. Additive, so an
+            -- existing table upgrades in place.
+            ALTER TABLE work_items ADD COLUMN IF NOT EXISTS attempts     int NOT NULL DEFAULT 0;
+            ALTER TABLE work_items ADD COLUMN IF NOT EXISTS max_attempts int;
+            ALTER TABLE work_items ADD COLUMN IF NOT EXISTS result       text;",
         )
         .await
         .map_err(|e| e.to_string())
@@ -400,15 +491,20 @@ async fn ensure_schema_with_retry(pool: Pool) -> Result<(), String> {
 /// `work.submit` → `INSERT … ON CONFLICT (claim_key) DO NOTHING` (dedupe). A
 /// returned row means newly enqueued; a conflict is classified from the existing
 /// row's status by [`submit_conflict_outcome`].
-async fn db_submit(pool: &Pool, key: &str, item: &str) -> Result<SubmitOutcome, String> {
+async fn db_submit(
+    pool: &Pool,
+    key: &str,
+    item: &str,
+    max_attempts: Option<i32>,
+) -> Result<SubmitOutcome, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let inserted = client
         .query_opt(
-            "INSERT INTO work_items (claim_key, item, status, created_at, updated_at)
-             VALUES ($1, $2, 'pending', now(), now())
+            "INSERT INTO work_items (claim_key, item, status, attempts, max_attempts, created_at, updated_at)
+             VALUES ($1, $2, 'pending', 0, $3, now(), now())
              ON CONFLICT (claim_key) DO NOTHING
              RETURNING claim_key",
-            &[&key, &item],
+            &[&key, &item, &max_attempts],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -453,7 +549,9 @@ async fn db_claim(
     }
     let row = client
         .query_opt(
-            "SELECT status, holder FROM work_items WHERE claim_key = $1",
+            "SELECT status, holder, (expires_at IS NOT NULL AND expires_at < now()) AS expired,
+                    (max_attempts IS NOT NULL AND attempts >= max_attempts) AS past_budget
+               FROM work_items WHERE claim_key = $1",
             &[&key],
         )
         .await
@@ -463,7 +561,9 @@ async fn db_claim(
             let status = RowStatus::parse(r.get::<_, &str>(0))
                 .ok_or_else(|| "work_items.status unrecognised".to_string())?;
             let holder: Option<String> = r.get(1);
-            Ok(not_granted_result(status, holder))
+            let expired: bool = r.get(2);
+            let past_budget: bool = r.get(3);
+            Ok(not_granted_result(status, holder, expired, past_budget))
         }
         // The row vanished between the UPSERT and the read-back (rows are never
         // deleted, so this is unreachable); fail closed as contended-unknown.
@@ -519,15 +619,16 @@ async fn db_ack(
     lease_id: &str,
     claim_key: &str,
     expected_holder: Option<&str>,
+    result: Option<&str>,
 ) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let updated = client
         .execute(
             "UPDATE work_items
                 SET status = 'acked', lease_id = NULL, holder = NULL,
-                    expires_at = NULL, updated_at = now()
+                    expires_at = NULL, result = $3, updated_at = now()
               WHERE lease_id = $1 AND ($2::text IS NULL OR holder = $2)",
-            &[&lease_id, &expected_holder],
+            &[&lease_id, &expected_holder, &result],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -535,7 +636,8 @@ async fn db_ack(
         return Ok(());
     }
     // Not settled: idempotent re-ack (the key is already an acked tombstone) wins
-    // first — harmless no-op for any caller.
+    // first — harmless no-op for any caller. A late `result` on the re-ack is
+    // recorded only when none was stored (mirrors the in-memory store).
     let key_already_acked = client
         .query_opt(
             "SELECT 1 FROM work_items WHERE claim_key = $1 AND status = 'acked'",
@@ -545,6 +647,16 @@ async fn db_ack(
         .map_err(|e| e.to_string())?
         .is_some();
     if key_already_acked {
+        if result.is_some() {
+            client
+                .execute(
+                    "UPDATE work_items SET result = $2, updated_at = now()
+                      WHERE claim_key = $1 AND status = 'acked' AND result IS NULL",
+                    &[&claim_key, &result],
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         return Ok(());
     }
     // Gated + a LIVE lease with this id still exists ⇒ a wrong-holder mismatch.
@@ -564,14 +676,14 @@ async fn db_release(
     expected_holder: Option<&str>,
 ) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
+    let sql = format!(
+        "UPDATE work_items
+            SET status = {REDELIVER_STATUS}, lease_id = NULL, holder = NULL,
+                expires_at = NULL, updated_at = now()
+          WHERE lease_id = $1 AND ($2::text IS NULL OR holder = $2)"
+    );
     let n = client
-        .execute(
-            "UPDATE work_items
-                SET status = 'pending', lease_id = NULL, holder = NULL,
-                    expires_at = NULL, updated_at = now()
-              WHERE lease_id = $1 AND ($2::text IS NULL OR holder = $2)",
-            &[&lease_id, &expected_holder],
-        )
+        .execute(sql.as_str(), &[&lease_id, &expected_holder])
         .await
         .map_err(|e| e.to_string())?;
     if n > 0 {
@@ -606,14 +718,17 @@ async fn lease_is_live(client: &deadpool_postgres::Client, lease_id: &str) -> Re
 /// keeps `stats`/`pending_items` truthful. Idempotent across concurrent replicas.
 async fn db_sweep(pool: &Pool) -> Result<usize, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
+    // Expired rows return to `pending`, EXCEPT those past their `max_attempts`
+    // budget, which are dead-lettered (RFC 0022 §7) — the same decision the
+    // in-memory `retire_or_requeue` makes.
+    let sql = format!(
+        "UPDATE work_items
+            SET status = {REDELIVER_STATUS}, lease_id = NULL, holder = NULL,
+                expires_at = NULL, updated_at = now()
+          WHERE status = 'claimed' AND expires_at <= now()"
+    );
     let n = client
-        .execute(
-            "UPDATE work_items
-                SET status = 'pending', lease_id = NULL, holder = NULL,
-                    expires_at = NULL, updated_at = now()
-              WHERE status = 'claimed' AND expires_at <= now()",
-            &[],
-        )
+        .execute(sql.as_str(), &[])
         .await
         .map_err(|e| e.to_string())?;
     Ok(usize::try_from(n).unwrap_or(0))
@@ -629,6 +744,7 @@ async fn db_stats(pool: &Pool) -> Result<Stats, String> {
             "SELECT
                 count(*) FILTER (WHERE status = 'pending') AS pending,
                 count(*) FILTER (WHERE status = 'claimed' AND expires_at > now()) AS claimed,
+                count(*) FILTER (WHERE status = 'deadletter') AS deadletter,
                 COALESCE(
                     (EXTRACT(EPOCH FROM (now() - min(updated_at) FILTER (WHERE status = 'pending'))) * 1000)::bigint,
                     0
@@ -640,12 +756,108 @@ async fn db_stats(pool: &Pool) -> Result<Stats, String> {
         .map_err(|e| e.to_string())?;
     let pending: i64 = row.get("pending");
     let claimed: i64 = row.get("claimed");
+    let deadletter: i64 = row.get("deadletter");
     let oldest: i64 = row.get("oldest_age_ms");
     Ok(Stats {
         pending: usize::try_from(pending).unwrap_or(0),
         claimed: usize::try_from(claimed).unwrap_or(0),
         oldest_age_ms: u64::try_from(oldest).unwrap_or(0),
+        deadletter: usize::try_from(deadletter).unwrap_or(0),
     })
+}
+
+/// `work.result` → look up a unit's state (+ its acked `result`) by `claim_key`.
+/// Mirrors the in-memory precedence: acked → deadletter → live-claimed →
+/// (pending | expired-claimed) → unknown.
+async fn db_result_of(pool: &Pool, key: &str) -> Result<WorkStatus, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let row = client
+        .query_opt(
+            "SELECT status, result, (expires_at IS NOT NULL AND expires_at > now()) AS live
+               FROM work_items WHERE claim_key = $1",
+            &[&key],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(r) = row else {
+        return Ok(WorkStatus {
+            state: WorkState::Unknown,
+            result: None,
+        });
+    };
+    let status = RowStatus::parse(r.get::<_, &str>(0))
+        .ok_or_else(|| "work_items.status unrecognised".to_string())?;
+    let result: Option<String> = r.get(1);
+    let live: bool = r.get(2);
+    let state = match status {
+        RowStatus::Acked => WorkState::Done,
+        RowStatus::Deadletter => WorkState::Deadletter,
+        // A live lease is Claimed; an expired-but-unswept lease is about to be
+        // re-offered, so it reads as Pending (matches the in-memory store).
+        RowStatus::Claimed if live => WorkState::Claimed,
+        RowStatus::Claimed | RowStatus::Pending => WorkState::Pending,
+    };
+    Ok(WorkStatus {
+        state,
+        // Only a terminal ack carries a result.
+        result: if state == WorkState::Done { result } else { None },
+    })
+}
+
+/// The dead-lettered items (for `dlq://items` / `work.deadletter list`), by key.
+async fn db_dead_items(pool: &Pool) -> Result<Vec<DeadItem>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let rows = client
+        .query(
+            "SELECT claim_key, item, attempts FROM work_items
+              WHERE status = 'deadletter' ORDER BY claim_key ASC",
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|r| DeadItem {
+            claim_key: r.get::<_, String>(0),
+            item: r.get::<_, String>(1),
+            attempts: u32::try_from(r.get::<_, i32>(2)).unwrap_or(0),
+        })
+        .collect())
+}
+
+/// Re-offer a dead-lettered item to `pending` with a FRESH attempt budget
+/// (`work.deadletter requeue`). Returns whether a DLQ row matched.
+async fn db_requeue_dead(pool: &Pool, key: &str) -> Result<bool, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let n = client
+        .execute(
+            "UPDATE work_items
+                SET status = 'pending', attempts = 0, lease_id = NULL, holder = NULL,
+                    expires_at = NULL, updated_at = now()
+              WHERE claim_key = $1 AND status = 'deadletter'",
+            &[&key],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
+/// Discard a dead-lettered item permanently, tombstoning it as `acked` so it is
+/// never re-granted on a re-submit (`work.deadletter drop`). Returns whether a DLQ
+/// row matched.
+async fn db_drop_dead(pool: &Pool, key: &str) -> Result<bool, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let n = client
+        .execute(
+            "UPDATE work_items
+                SET status = 'acked', result = NULL, lease_id = NULL, holder = NULL,
+                    expires_at = NULL, updated_at = now()
+              WHERE claim_key = $1 AND status = 'deadletter'",
+            &[&key],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
 }
 
 /// The current pending items (for the `work://pending` resource), oldest first.
@@ -673,6 +885,7 @@ mod tests {
         assert_eq!(RowStatus::parse("pending"), Some(RowStatus::Pending));
         assert_eq!(RowStatus::parse("claimed"), Some(RowStatus::Claimed));
         assert_eq!(RowStatus::parse("acked"), Some(RowStatus::Acked));
+        assert_eq!(RowStatus::parse("deadletter"), Some(RowStatus::Deadletter));
         assert_eq!(RowStatus::parse("bogus"), None);
         assert_eq!(RowStatus::parse(""), None);
     }
@@ -681,12 +894,12 @@ mod tests {
     fn not_granted_acked_key_dedupes() {
         // An acked tombstone is never re-granted ⇒ Deduped (wire: held_by "<acked>").
         assert_eq!(
-            not_granted_result(RowStatus::Acked, None),
+            not_granted_result(RowStatus::Acked, None, false, false),
             ClaimResult::Deduped
         );
         // Even if a holder column lingered, acked still dedupes.
         assert_eq!(
-            not_granted_result(RowStatus::Acked, Some("h".into())),
+            not_granted_result(RowStatus::Acked, Some("h".into()), false, false),
             ClaimResult::Deduped
         );
     }
@@ -694,15 +907,37 @@ mod tests {
     #[test]
     fn not_granted_live_claim_is_contended_with_holder() {
         assert_eq!(
-            not_granted_result(RowStatus::Claimed, Some("pod-7".into())),
+            not_granted_result(RowStatus::Claimed, Some("pod-7".into()), false, false),
             ClaimResult::Contended {
                 held_by: Some("pod-7".into())
             }
         );
         // A leftover pending (concurrent-txn race) ⇒ contended-unknown, never a grant.
         assert_eq!(
-            not_granted_result(RowStatus::Pending, None),
+            not_granted_result(RowStatus::Pending, None, false, false),
             ClaimResult::Contended { held_by: None }
+        );
+    }
+
+    #[test]
+    fn not_granted_deadletter_and_expired_past_budget_are_deadlettered() {
+        // A row already in the DLQ ⇒ Deadlettered.
+        assert_eq!(
+            not_granted_result(RowStatus::Deadletter, None, false, false),
+            ClaimResult::Deadlettered
+        );
+        // An expired claimed row past its attempt budget (the reclaim clause left it
+        // ungranted) ⇒ Deadlettered — the sweeper will formalize the DLQ move.
+        assert_eq!(
+            not_granted_result(RowStatus::Claimed, Some("pod-7".into()), true, true),
+            ClaimResult::Deadlettered
+        );
+        // Expired but still UNDER budget ⇒ ordinary contention (will be reclaimed).
+        assert_eq!(
+            not_granted_result(RowStatus::Claimed, Some("pod-7".into()), true, false),
+            ClaimResult::Contended {
+                held_by: Some("pod-7".into())
+            }
         );
     }
 
@@ -719,6 +954,10 @@ mod tests {
         assert_eq!(
             submit_conflict_outcome(RowStatus::Pending),
             SubmitOutcome::AlreadyPending
+        );
+        assert_eq!(
+            submit_conflict_outcome(RowStatus::Deadletter),
+            SubmitOutcome::Deadlettered
         );
     }
 

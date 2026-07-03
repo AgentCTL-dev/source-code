@@ -19,6 +19,7 @@ pub struct Metrics {
     claims_granted: AtomicU64,
     claims_contended: AtomicU64,
     claims_deduped: AtomicU64,
+    claims_deadlettered: AtomicU64,
     renewed: AtomicU64,
     acked: AtomicU64,
     released: AtomicU64,
@@ -39,6 +40,7 @@ impl Metrics {
             claims_granted: AtomicU64::new(0),
             claims_contended: AtomicU64::new(0),
             claims_deduped: AtomicU64::new(0),
+            claims_deadlettered: AtomicU64::new(0),
             renewed: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             released: AtomicU64::new(0),
@@ -66,6 +68,10 @@ impl Metrics {
     /// A `work.claim` was deduped (key already acked).
     pub fn inc_claim_deduped(&self) {
         self.claims_deduped.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A `work.claim` hit a dead-lettered key (redelivered past `max_attempts`).
+    pub fn inc_claim_deadlettered(&self) {
+        self.claims_deadlettered.fetch_add(1, Ordering::Relaxed);
     }
     /// A lease was renewed.
     pub fn inc_renewed(&self) {
@@ -111,7 +117,7 @@ impl Metrics {
 
     /// Render the Prometheus exposition body. `pending`/`claimed` are the live
     /// store gauges read at scrape time (correct even at zero pods of the fleet).
-    pub fn render(&self, pending: usize, claimed: usize) -> String {
+    pub fn render(&self, pending: usize, claimed: usize, deadletter: usize) -> String {
         let mut out = String::new();
         gauge(
             &mut out,
@@ -142,6 +148,12 @@ impl Metrics {
             "agentctl_coordination_claims_deduped_total",
             "work.claim calls deduped against an already-acked claim_key.",
             self.claims_deduped.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_coordination_claims_deadlettered_total",
+            "work.claim calls that hit a dead-lettered claim_key (redelivered past max_attempts).",
+            self.claims_deadlettered.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -209,6 +221,12 @@ impl Metrics {
             "Items currently held under a live lease.",
             claimed as f64,
         );
+        gauge(
+            &mut out,
+            "agentctl_coordination_deadletter",
+            "Items dead-lettered (redelivered past max_attempts), awaiting requeue/drop.",
+            deadletter as f64,
+        );
         out
     }
 }
@@ -253,6 +271,7 @@ mod tests {
         m.inc_claim_granted();
         m.inc_claim_contended();
         m.inc_claim_deduped();
+        m.inc_claim_deadlettered();
         m.inc_renewed();
         m.inc_acked();
         m.inc_released();
@@ -266,9 +285,11 @@ mod tests {
         m.inc_mtls_accepted();
         m.inc_mtls_accepted();
         m.inc_mtls_rejected();
-        let body = m.render(5, 2);
+        let body = m.render(5, 2, 4);
 
         assert!(body.contains("# TYPE agentctl_coordination_claims_granted_total counter"));
+        assert!(body.contains("agentctl_coordination_claims_deadlettered_total 1"));
+        assert!(body.contains("agentctl_coordination_deadletter 4"));
         assert!(body.contains("agentctl_coordination_submitted_total 1"));
         assert!(body.contains("agentctl_coordination_claims_granted_total 2"));
         assert!(body.contains("agentctl_coordination_claims_contended_total 1"));

@@ -28,7 +28,7 @@
 //! Time is tracked with [`Instant`] (monotonic) — never wall-clock — so a clock
 //! step can never resurrect or prematurely expire a lease.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,10 @@ pub enum ClaimResult {
     /// The `claim_key` is already in the done set — the item was processed and
     /// acked. Never re-granted (DEDUPE; the wire reports `held_by:"<acked>"`).
     Deduped,
+    /// The `claim_key` was dead-lettered (redelivered past its `max_attempts`
+    /// without a terminal ack — RFC 0022 §7). Never re-granted; the wire reports
+    /// `held_by:"<deadletter>"`. An admin re-offers it via `work.deadletter`.
+    Deadlettered,
 }
 
 /// Outcome of `work.submit` — enqueueing into the backlog (the P9 scale-from-zero
@@ -82,6 +86,8 @@ pub enum SubmitOutcome {
     AlreadyPending,
     /// Currently held under a live lease.
     AlreadyClaimed,
+    /// `claim_key` is in the dead-letter queue — not re-enqueued (RFC 0022 §7).
+    Deadlettered,
 }
 
 /// A snapshot of queue depth (agentd RFC 0011 §3.2 / agentctl RFC 0011 §5.3): the
@@ -95,6 +101,55 @@ pub struct Stats {
     /// Age of the OLDEST pending item, in ms (0 when nothing is pending) — the
     /// backlog-staleness signal.
     pub oldest_age_ms: u64,
+    /// Items dead-lettered (redelivered past `max_attempts`) — awaiting an admin
+    /// requeue/drop (RFC 0022 §7).
+    pub deadletter: usize,
+}
+
+/// The lifecycle state of a work unit, keyed by its `claim_key` — the answer to a
+/// `work.result` lookup (RFC 0022 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkState {
+    /// Enqueued, not yet claimed.
+    Pending,
+    /// Held under a live lease.
+    Claimed,
+    /// Terminally acked (a `result` may be attached).
+    Done,
+    /// Dead-lettered (redelivered past `max_attempts`).
+    Deadletter,
+    /// No record of this key (never submitted, or evicted past the dedupe horizon).
+    Unknown,
+}
+
+impl WorkState {
+    /// The wire token for this state (`work.result.state`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkState::Pending => "pending",
+            WorkState::Claimed => "claimed",
+            WorkState::Done => "done",
+            WorkState::Deadletter => "deadletter",
+            WorkState::Unknown => "unknown",
+        }
+    }
+}
+
+/// The outcome of a `work.result` lookup: the unit's [`WorkState`] and, when
+/// terminally acked, the `result` the worker recorded on ack (RFC 0022 §7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkStatus {
+    pub state: WorkState,
+    pub result: Option<String>,
+}
+
+/// A dead-lettered work unit (surfaced at `dlq://items` / `work.deadletter list`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadItem {
+    pub claim_key: String,
+    pub item: String,
+    /// How many times it was delivered before being dead-lettered.
+    pub attempts: u32,
 }
 
 /// The pluggable coordination backend. The MCP wire layer ([`crate::mcp`]) only
@@ -104,8 +159,12 @@ pub struct Stats {
 /// Every method is its own atomic transaction. Implementations MUST serialize
 /// `claim` so exactly one of N concurrent racers for the same item is granted.
 pub trait ClaimStore: Send + Sync {
-    /// Enqueue `item` into the backlog. Skipped if `claim_key` is already done.
-    fn submit(&self, item: &str, claim_key: Option<&str>) -> SubmitOutcome;
+    /// Enqueue `item` into the backlog. Skipped if `claim_key` is already done or
+    /// dead-lettered. `max_attempts` (from the fleet `workPolicy`, RFC 0022 §7)
+    /// bounds redelivery: after that many deliveries without a terminal ack the
+    /// item is dead-lettered instead of re-offered. `None` ⇒ unbounded (today).
+    fn submit(&self, item: &str, claim_key: Option<&str>, max_attempts: Option<u32>)
+        -> SubmitOutcome;
     /// Atomically claim `item` for `holder` under `claim_key`, for `ttl_ms`.
     fn claim(&self, item: &str, ttl_ms: u64, claim_key: &str, holder: &str) -> ClaimResult;
     /// Extend a live, owned lease. `Err` for an unknown or stale (expired) lease —
@@ -135,6 +194,7 @@ pub trait ClaimStore: Send + Sync {
         lease_id: &str,
         claim_key: &str,
         expected_holder: Option<&str>,
+        result: Option<&str>,
     ) -> Result<(), String>;
     /// Return a held item to `pending` (re-claimable). `Err` for an unknown lease.
     ///
@@ -155,6 +215,17 @@ pub trait ClaimStore: Send + Sync {
     fn stats(&self) -> Stats;
     /// The current pending items (for the `work://pending` resource read).
     fn pending_items(&self) -> Vec<String>;
+    /// Look up a work unit's state (and its `result`, if terminally acked) by
+    /// `claim_key` — the `work.result` correlation read (RFC 0022 §7).
+    fn result_of(&self, claim_key: &str) -> WorkStatus;
+    /// The current dead-lettered items (for `dlq://items` / `work.deadletter list`).
+    fn dead_items(&self) -> Vec<DeadItem>;
+    /// Re-offer a dead-lettered item to `pending` (fresh attempt budget). Returns
+    /// `true` if the key was in the DLQ, `false` otherwise. (`work.deadletter requeue`.)
+    fn requeue_dead(&self, claim_key: &str) -> bool;
+    /// Discard a dead-lettered item permanently, tombstoning its key so it is never
+    /// re-granted. Returns whether the key was in the DLQ. (`work.deadletter drop`.)
+    fn drop_dead(&self, claim_key: &str) -> bool;
 }
 
 /// A live lease over one work unit (keyed by its `claim_key`).
@@ -171,18 +242,35 @@ struct Lease {
     item: String,
     /// Monotonic expiry. `<= now` ⇒ expired (re-claimable / sweepable).
     expires_at: Instant,
+    /// Deliveries so far (incremented on each grant). Redelivery past
+    /// `max_attempts` dead-letters the unit (RFC 0022 §7).
+    attempts: u32,
+    /// Redelivery bound from `work.submit` (the fleet `workPolicy`). `None` ⇒
+    /// unbounded (never dead-lettered).
+    max_attempts: Option<u32>,
 }
 
-/// A pending (enqueued-but-unclaimed) work unit: its payload URI plus the instant
-/// it entered `pending` (drives `oldest_age_ms` and the oldest-first
-/// `pending_items` ordering, matching the durable store's `updated_at`).
+/// A pending (enqueued-but-unclaimed) work unit: its payload URI, the instant it
+/// entered `pending` (drives `oldest_age_ms` + oldest-first ordering), and its
+/// redelivery accounting (carried across the claim/expire cycle).
 #[derive(Debug, Clone)]
 struct Pending {
     item: String,
     since: Instant,
+    attempts: u32,
+    max_attempts: Option<u32>,
 }
 
-/// A bounded FIFO dedupe set of `claim_key`s (the "done" set).
+/// A dead-lettered work unit held out of circulation until an admin requeues/drops
+/// it (`max_attempts` preserved so a requeue re-enters the same regime).
+#[derive(Debug, Clone)]
+struct Dead {
+    item: String,
+    attempts: u32,
+    max_attempts: Option<u32>,
+}
+
+/// A bounded FIFO dedupe map of acked `claim_key`s → their (optional) `result`.
 ///
 /// **The bound (documented):** capped at `cap` entries; when full, the OLDEST key
 /// is evicted first (insertion order). A redelivery of an item whose key was
@@ -190,10 +278,11 @@ struct Pending {
 /// (default 100k) so the eviction horizon is far past any realistic
 /// in-flight/redelivery window, and (b) the downstream side effect is itself
 /// `claim_key`-idempotent (agentd RFC 0019 §3.5), so a re-grant past the horizon
-/// re-collapses to one effect. This keeps the set from growing unbounded.
+/// re-collapses to one effect. This keeps the map from growing unbounded. A result
+/// recorded on ack is retrievable via `work.result` until its key is evicted.
 #[derive(Debug)]
 struct DoneSet {
-    set: HashSet<String>,
+    map: HashMap<String, Option<String>>,
     order: VecDeque<String>,
     cap: usize,
 }
@@ -201,26 +290,37 @@ struct DoneSet {
 impl DoneSet {
     fn new(cap: usize) -> Self {
         Self {
-            set: HashSet::new(),
+            map: HashMap::new(),
             order: VecDeque::new(),
             cap: cap.max(1),
         }
     }
 
     fn contains(&self, key: &str) -> bool {
-        self.set.contains(key)
+        self.map.contains_key(key)
     }
 
-    fn insert(&mut self, key: String) {
-        if self.set.contains(&key) {
-            return; // already done; don't disturb eviction order
+    /// The recorded result for a done key (`Some(None)` = acked with no result;
+    /// `None` = key not done).
+    fn get(&self, key: &str) -> Option<&Option<String>> {
+        self.map.get(key)
+    }
+
+    fn insert(&mut self, key: String, result: Option<String>) {
+        if let Some(slot) = self.map.get_mut(&key) {
+            // Already done; keep eviction order. Record a result if one arrived and
+            // none was stored (idempotent re-ack without a result won't wipe it).
+            if slot.is_none() && result.is_some() {
+                *slot = result;
+            }
+            return;
         }
-        self.set.insert(key.clone());
+        self.map.insert(key.clone(), result);
         self.order.push_back(key);
-        while self.set.len() > self.cap {
+        while self.map.len() > self.cap {
             match self.order.pop_front() {
                 Some(old) => {
-                    self.set.remove(&old);
+                    self.map.remove(&old);
                 }
                 None => break,
             }
@@ -239,10 +339,43 @@ struct Inner {
     claimed: HashMap<String, Lease>,
     /// lease_id → claim_key (reverse lookup for renew/ack/release).
     lease_index: HashMap<String, String>,
-    /// The bounded dedupe set of acked `claim_key`s.
+    /// The bounded dedupe map of acked `claim_key`s → result.
     done: DoneSet,
+    /// claim_key → dead-lettered unit (redelivered past `max_attempts`).
+    deadletter: HashMap<String, Dead>,
     /// Monotonic lease-id counter (uniqueness without wall-clock / RNG).
     seq: u64,
+}
+
+impl Inner {
+    /// Return an expired lease's unit to `pending`, OR dead-letter it when it has
+    /// been delivered past its `max_attempts` (RFC 0022 §7). Shared by
+    /// `sweep_expired`, the lazy-reclaim branch of `claim`, and `release`. Returns
+    /// `true` if the unit was dead-lettered.
+    fn retire_or_requeue(&mut self, key: String, item: String, attempts: u32, max: Option<u32>, now: Instant) -> bool {
+        if max.is_some_and(|m| attempts >= m) {
+            self.deadletter.insert(
+                key,
+                Dead {
+                    item,
+                    attempts,
+                    max_attempts: max,
+                },
+            );
+            true
+        } else {
+            self.pending.insert(
+                key,
+                Pending {
+                    item,
+                    since: now,
+                    attempts,
+                    max_attempts: max,
+                },
+            );
+            false
+        }
+    }
 }
 
 /// The v1 in-memory store: all state behind a single [`Mutex`] — THE serializing
@@ -261,6 +394,7 @@ impl InMemoryStore {
                 claimed: HashMap::new(),
                 lease_index: HashMap::new(),
                 done: DoneSet::new(dedupe_cap),
+                deadletter: HashMap::new(),
                 seq: 0,
             }),
         }
@@ -268,19 +402,28 @@ impl InMemoryStore {
 }
 
 impl ClaimStore for InMemoryStore {
-    fn submit(&self, item: &str, claim_key: Option<&str>) -> SubmitOutcome {
+    fn submit(
+        &self,
+        item: &str,
+        claim_key: Option<&str>,
+        max_attempts: Option<u32>,
+    ) -> SubmitOutcome {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         let now = Instant::now();
         // The claim_key is the work identity; when absent the item URI is its own
         // key (matches the durable store's `claim_key.unwrap_or(item)`).
         let key = claim_key.unwrap_or(item);
         // Classify against the existing state in the same precedence the durable
-        // store uses (acked tombstone → claimed → pending). A claimed entry reports
-        // AlreadyClaimed whether or not its lease has expired: an expired-but-unswept
-        // lease is reclaimed lazily by the next `claim` (or the sweeper), so a
-        // producer re-submit is a transient no-op, never a second enqueue.
+        // store uses (acked tombstone → dead-letter → claimed → pending). A claimed
+        // entry reports AlreadyClaimed whether or not its lease has expired: an
+        // expired-but-unswept lease is reclaimed lazily by the next `claim` (or the
+        // sweeper), so a producer re-submit is a transient no-op, never a second
+        // enqueue.
         if g.done.contains(key) {
             return SubmitOutcome::Deduped;
+        }
+        if g.deadletter.contains_key(key) {
+            return SubmitOutcome::Deadlettered;
         }
         if g.claimed.contains_key(key) {
             return SubmitOutcome::AlreadyClaimed;
@@ -293,6 +436,8 @@ impl ClaimStore for InMemoryStore {
             Pending {
                 item: item.to_string(),
                 since: now,
+                attempts: 0,
+                max_attempts,
             },
         );
         SubmitOutcome::Enqueued
@@ -306,6 +451,10 @@ impl ClaimStore for InMemoryStore {
         if g.done.contains(claim_key) {
             return ClaimResult::Deduped;
         }
+        // Dead-lettered: never re-granted until an admin requeues it.
+        if g.deadletter.contains_key(claim_key) {
+            return ClaimResult::Deadlettered;
+        }
 
         // A live lease for this key ⇒ contention. (An expired lease falls through
         // and is superseded below — lazy reclaim, correct between sweeps.)
@@ -316,11 +465,24 @@ impl ClaimStore for InMemoryStore {
                 };
             }
         }
-        if let Some(old) = g.claimed.remove(claim_key) {
+        // Redelivery accounting carried across the claim/expire cycle. An expired
+        // lease being superseded here (lazy reclaim) is itself a failed delivery: if
+        // it is already past `max_attempts`, dead-letter it instead of re-granting.
+        let prior = if let Some(old) = g.claimed.remove(claim_key) {
             g.lease_index.remove(&old.lease_id);
-        }
+            if old.max_attempts.is_some_and(|m| old.attempts >= m) {
+                g.retire_or_requeue(claim_key.to_string(), old.item, old.attempts, old.max_attempts, now);
+                return ClaimResult::Deadlettered;
+            }
+            (old.attempts, old.max_attempts)
+        } else if let Some(p) = g.pending.get(claim_key) {
+            (p.attempts, p.max_attempts)
+        } else {
+            // A direct claim of a never-submitted key: no attempt budget (unbounded).
+            (0, None)
+        };
 
-        // GRANT.
+        // GRANT — this delivery increments the attempt count.
         g.seq += 1;
         let seq = g.seq;
         let lease_id = make_lease_id(seq, item, holder);
@@ -330,6 +492,8 @@ impl ClaimStore for InMemoryStore {
             claim_key: claim_key.to_string(),
             item: item.to_string(),
             expires_at: now + Duration::from_millis(ttl_ms),
+            attempts: prior.0 + 1,
+            max_attempts: prior.1,
         };
         g.claimed.insert(claim_key.to_string(), lease);
         g.lease_index.insert(lease_id.clone(), claim_key.to_string());
@@ -376,6 +540,7 @@ impl ClaimStore for InMemoryStore {
         lease_id: &str,
         claim_key: &str,
         expected_holder: Option<&str>,
+        result: Option<&str>,
     ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         if let Some(key) = g.lease_index.get(lease_id).cloned() {
@@ -388,21 +553,27 @@ impl ClaimStore for InMemoryStore {
                 }
             }
             g.lease_index.remove(lease_id);
+            let result = result.map(str::to_string);
             // Record the lease's OWN claim_key (authoritative — what claim used; it
-            // equals `key`). Falls back to the passed key if the entry vanished.
+            // equals `key`) plus the settle `result`. Falls back to the passed key
+            // if the entry vanished.
             if let Some(lease) = g.claimed.remove(&key) {
-                g.done.insert(lease.claim_key);
+                g.done.insert(lease.claim_key, result);
             } else {
-                g.done.insert(claim_key.to_string());
+                g.done.insert(claim_key.to_string(), result);
             }
             g.pending.remove(&key);
             return Ok(());
         }
         // The lease is gone. If this key is already done, the item was acked —
-        // idempotent no-op (agentd RFC 0019 §3.5). Otherwise it's an unknown
-        // lease: error, and crucially we do NOT fabricate done state from a bare
-        // ack (that would let a stray call dedupe-block a legitimate future claim).
+        // idempotent no-op (agentd RFC 0019 §3.5); a late `result` on the re-ack is
+        // recorded only if none was stored. Otherwise it's an unknown lease: error,
+        // and crucially we do NOT fabricate done state from a bare ack (that would
+        // let a stray call dedupe-block a legitimate future claim).
         if g.done.contains(claim_key) {
+            if let Some(r) = result {
+                g.done.insert(claim_key.to_string(), Some(r.to_string()));
+            }
             return Ok(());
         }
         Err(format!("unknown lease_id: {lease_id}"))
@@ -415,6 +586,7 @@ impl ClaimStore for InMemoryStore {
         expected_holder: Option<&str>,
     ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
+        let now = Instant::now();
         let key = g
             .lease_index
             .get(lease_id)
@@ -429,42 +601,40 @@ impl ClaimStore for InMemoryStore {
             }
         }
         g.lease_index.remove(lease_id);
-        // Return the unit to pending under its key, carrying its payload URI so
-        // `pending_items` still reports the item (not the key).
-        let item = g
+        // Return the unit to pending (carrying its payload URI + redelivery
+        // accounting), OR dead-letter it if this delivery pushed it past
+        // `max_attempts` (a voluntarily-released poison item still counts).
+        let (item, attempts, max) = g
             .claimed
             .remove(&key)
-            .map(|lease| lease.item)
-            .unwrap_or_else(|| key.clone());
-        g.pending.insert(
-            key,
-            Pending {
-                item,
-                since: Instant::now(),
-            },
-        );
+            .map(|l| (l.item, l.attempts, l.max_attempts))
+            .unwrap_or_else(|| (key.clone(), 0, None));
+        g.retire_or_requeue(key, item, attempts, max, now);
         Ok(())
     }
 
     fn sweep_expired(&self) -> usize {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         let now = Instant::now();
-        let expired: Vec<(String, String, String)> = g
+        let expired: Vec<(String, String, String, u32, Option<u32>)> = g
             .claimed
             .iter()
             .filter(|(_, lease)| lease.expires_at <= now)
-            .map(|(key, lease)| (key.clone(), lease.lease_id.clone(), lease.item.clone()))
+            .map(|(key, lease)| {
+                (
+                    key.clone(),
+                    lease.lease_id.clone(),
+                    lease.item.clone(),
+                    lease.attempts,
+                    lease.max_attempts,
+                )
+            })
             .collect();
-        for (key, lease_id, item) in &expired {
+        for (key, lease_id, item, attempts, max) in &expired {
             g.claimed.remove(key);
             g.lease_index.remove(lease_id);
-            g.pending.insert(
-                key.clone(),
-                Pending {
-                    item: item.clone(),
-                    since: now,
-                },
-            );
+            // Return to pending, OR dead-letter when past the redelivery bound.
+            g.retire_or_requeue(key.clone(), item.clone(), *attempts, *max, now);
         }
         expired.len()
     }
@@ -488,6 +658,7 @@ impl ClaimStore for InMemoryStore {
             pending,
             claimed,
             oldest_age_ms,
+            deadletter: g.deadletter.len(),
         }
     }
 
@@ -498,6 +669,95 @@ impl ClaimStore for InMemoryStore {
         let mut entries: Vec<&Pending> = g.pending.values().collect();
         entries.sort_by_key(|p| p.since);
         entries.into_iter().map(|p| p.item.clone()).collect()
+    }
+
+    fn result_of(&self, claim_key: &str) -> WorkStatus {
+        let g = self.inner.lock().expect("store mutex poisoned");
+        let now = Instant::now();
+        // Precedence mirrors the write paths: done (terminal) → dead-letter →
+        // live-claimed → pending → unknown.
+        if let Some(result) = g.done.get(claim_key) {
+            return WorkStatus {
+                state: WorkState::Done,
+                result: result.clone(),
+            };
+        }
+        if g.deadletter.contains_key(claim_key) {
+            return WorkStatus {
+                state: WorkState::Deadletter,
+                result: None,
+            };
+        }
+        if g
+            .claimed
+            .get(claim_key)
+            .is_some_and(|l| l.expires_at > now)
+        {
+            return WorkStatus {
+                state: WorkState::Claimed,
+                result: None,
+            };
+        }
+        if g.pending.contains_key(claim_key) || g.claimed.contains_key(claim_key) {
+            // A pending item, or an expired-but-unswept lease (about to be re-offered).
+            return WorkStatus {
+                state: WorkState::Pending,
+                result: None,
+            };
+        }
+        WorkStatus {
+            state: WorkState::Unknown,
+            result: None,
+        }
+    }
+
+    fn dead_items(&self) -> Vec<DeadItem> {
+        let g = self.inner.lock().expect("store mutex poisoned");
+        let mut items: Vec<DeadItem> = g
+            .deadletter
+            .iter()
+            .map(|(key, d)| DeadItem {
+                claim_key: key.clone(),
+                item: d.item.clone(),
+                attempts: d.attempts,
+            })
+            .collect();
+        items.sort_by(|a, b| a.claim_key.cmp(&b.claim_key));
+        items
+    }
+
+    fn requeue_dead(&self, claim_key: &str) -> bool {
+        let mut g = self.inner.lock().expect("store mutex poisoned");
+        let now = Instant::now();
+        match g.deadletter.remove(claim_key) {
+            Some(d) => {
+                // Re-offer with a FRESH attempt budget (the admin chose to retry).
+                g.pending.insert(
+                    claim_key.to_string(),
+                    Pending {
+                        item: d.item,
+                        since: now,
+                        attempts: 0,
+                        max_attempts: d.max_attempts,
+                    },
+                );
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn drop_dead(&self, claim_key: &str) -> bool {
+        let mut g = self.inner.lock().expect("store mutex poisoned");
+        match g.deadletter.remove(claim_key) {
+            Some(_) => {
+                // Tombstone the key so it is never re-granted (a dropped poison item
+                // must not resurrect on a re-submit); no result.
+                g.done.insert(claim_key.to_string(), None);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -578,14 +838,14 @@ mod tests {
     fn ack_records_claim_key_dedupes() {
         let store = InMemoryStore::new(4096);
         let lease = lease_of(store.claim("item-a", 60_000, "ck-a", "h1"));
-        store.ack(&lease, "ck-a", None).expect("ack");
+        store.ack(&lease, "ck-a", None, None).expect("ack");
         // Same key again ⇒ never re-granted.
         assert_eq!(
             store.claim("item-a", 60_000, "ck-a", "h2"),
             ClaimResult::Deduped
         );
         // ack is idempotent: re-acking the gone lease, key already done ⇒ Ok.
-        assert!(store.ack(&lease, "ck-a", None).is_ok());
+        assert!(store.ack(&lease, "ck-a", None, None).is_ok());
     }
 
     // (3) release returns the item to pending ⇒ immediately re-claimable.
@@ -646,7 +906,7 @@ mod tests {
 
         // Unknown lease ⇒ all three error.
         assert!(store.renew("bogus", 1_000, None).is_err());
-        assert!(store.ack("bogus", "no-such-key", None).is_err());
+        assert!(store.ack("bogus", "no-such-key", None, None).is_err());
         assert!(store.release("bogus", "x", None).is_err());
 
         // Stale (expired) lease ⇒ renew errors (never resurrects).
@@ -659,11 +919,11 @@ mod tests {
     #[test]
     fn stats_counts_pending_and_claimed() {
         let store = InMemoryStore::new(4096);
-        assert_eq!(store.submit("p1", Some("kp1")), SubmitOutcome::Enqueued);
-        assert_eq!(store.submit("p2", Some("kp2")), SubmitOutcome::Enqueued);
+        assert_eq!(store.submit("p1", Some("kp1"), None), SubmitOutcome::Enqueued);
+        assert_eq!(store.submit("p2", Some("kp2"), None), SubmitOutcome::Enqueued);
         // Re-submit is a no-op count-wise.
         assert_eq!(
-            store.submit("p1", Some("kp1")),
+            store.submit("p1", Some("kp1"), None),
             SubmitOutcome::AlreadyPending
         );
         let _ = store.claim("c1", 60_000, "kc1", "h1");
@@ -677,8 +937,8 @@ mod tests {
     fn submit_dedupes_acked_key() {
         let store = InMemoryStore::new(4096);
         let lease = lease_of(store.claim("d1", 60_000, "kd1", "h1"));
-        store.ack(&lease, "kd1", None).expect("ack");
-        assert_eq!(store.submit("d1", Some("kd1")), SubmitOutcome::Deduped);
+        store.ack(&lease, "kd1", None, None).expect("ack");
+        assert_eq!(store.submit("d1", Some("kd1"), None), SubmitOutcome::Deduped);
         assert_eq!(store.stats().pending, 0);
     }
 
@@ -719,10 +979,10 @@ mod tests {
         // by the true holder); the right holder settles + dedupes.
         let l_ack = lease_of(store.claim("w-ack", 60_000, "k-ack", "team-a/checkout"));
         assert!(is_holder_mismatch(
-            &store.ack(&l_ack, "k-ack", Some("team-b/evil")).unwrap_err()
+            &store.ack(&l_ack, "k-ack", Some("team-b/evil"), None).unwrap_err()
         ));
         store
-            .ack(&l_ack, "k-ack", Some("team-a/checkout"))
+            .ack(&l_ack, "k-ack", Some("team-a/checkout"), None)
             .expect("right holder acks");
         assert_eq!(
             store.claim("w-ack", 60_000, "k-ack", "team-a/checkout"),
@@ -732,7 +992,7 @@ mod tests {
         // `None` (attest off) is unconstrained — back-compat.
         let l_none = lease_of(store.claim("w-none", 60_000, "k-none", "whoever"));
         store
-            .ack(&l_none, "k-none", None)
+            .ack(&l_none, "k-none", None, None)
             .expect("unconstrained ack");
     }
 
@@ -810,13 +1070,13 @@ mod tests {
     fn pending_items_reports_item_payload_oldest_first() {
         let store = InMemoryStore::new(4096);
         assert_eq!(
-            store.submit("file:///a", Some("k-a")),
+            store.submit("file:///a", Some("k-a"), None),
             SubmitOutcome::Enqueued
         );
         // Distinct enqueue instants so the ordering is deterministic.
         thread::sleep(Duration::from_millis(5));
         assert_eq!(
-            store.submit("file:///b", Some("k-b")),
+            store.submit("file:///b", Some("k-b"), None),
             SubmitOutcome::Enqueued
         );
         assert_eq!(
@@ -835,10 +1095,99 @@ mod tests {
         let _ = store.claim("file:///c", 5, "k-c", "h1");
         thread::sleep(Duration::from_millis(40)); // lease now expired, not swept
         assert_eq!(
-            store.submit("file:///c", Some("k-c")),
+            store.submit("file:///c", Some("k-c"), None),
             SubmitOutcome::AlreadyClaimed
         );
         assert_eq!(store.stats().pending, 0, "no phantom re-enqueue");
+    }
+
+    // (15) RFC 0022 §7: ack records a result; work.result retrieves it. The state
+    //      machine reports pending → claimed → done across the lifecycle.
+    #[test]
+    fn ack_result_is_recorded_and_retrievable() {
+        let store = InMemoryStore::new(4096);
+        // Unknown before submit.
+        assert_eq!(store.result_of("wk").state, WorkState::Unknown);
+        assert_eq!(store.submit("file:///w", Some("wk"), None), SubmitOutcome::Enqueued);
+        assert_eq!(store.result_of("wk").state, WorkState::Pending);
+        let lease = lease_of(store.claim("file:///w", 60_000, "wk", "h1"));
+        assert_eq!(store.result_of("wk").state, WorkState::Claimed);
+        store
+            .ack(&lease, "wk", None, Some("{\"answer\":42}"))
+            .expect("ack with result");
+        let done = store.result_of("wk");
+        assert_eq!(done.state, WorkState::Done);
+        assert_eq!(done.result.as_deref(), Some("{\"answer\":42}"));
+    }
+
+    // (16) Dead-letter: with max_attempts=1, the first delivery's expiry retires the
+    //      item to the DLQ instead of re-offering it. It is never re-granted, shows
+    //      up in dead_items, and requeue/drop manage it.
+    #[test]
+    fn poison_item_dead_letters_after_max_attempts() {
+        let store = InMemoryStore::new(4096);
+        assert_eq!(
+            store.submit("file:///poison", Some("pk"), Some(1)),
+            SubmitOutcome::Enqueued
+        );
+        // Delivery #1.
+        let _ = store.claim("file:///poison", 5, "pk", "h1");
+        thread::sleep(Duration::from_millis(40));
+        // The sweep past expiry retires it to the DLQ (attempts 1 >= max 1).
+        assert_eq!(store.sweep_expired(), 1);
+        assert_eq!(store.stats().deadletter, 1);
+        assert_eq!(store.stats().pending, 0, "not re-offered");
+        // Never re-granted while dead-lettered.
+        assert_eq!(
+            store.claim("file:///poison", 60_000, "pk", "h2"),
+            ClaimResult::Deadlettered
+        );
+        assert_eq!(store.result_of("pk").state, WorkState::Deadletter);
+        // Surfaced for an admin.
+        let dead = store.dead_items();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].claim_key, "pk");
+        assert_eq!(dead[0].attempts, 1);
+        // Requeue re-offers with a fresh budget.
+        assert!(store.requeue_dead("pk"));
+        assert!(!store.requeue_dead("pk"), "already requeued");
+        assert!(store.pending_items().contains(&"file:///poison".to_string()));
+        assert!(matches!(
+            store.claim("file:///poison", 60_000, "pk", "h3"),
+            ClaimResult::Granted { .. }
+        ));
+    }
+
+    // (17) A dead-lettered item that is DROPPED is tombstoned — a re-submit is
+    //      deduped, never resurrecting the poison item.
+    #[test]
+    fn dropped_dead_item_is_tombstoned() {
+        let store = InMemoryStore::new(4096);
+        let _ = store.submit("file:///d", Some("dk"), Some(1));
+        let _ = store.claim("file:///d", 5, "dk", "h1");
+        thread::sleep(Duration::from_millis(40));
+        store.sweep_expired();
+        assert!(store.drop_dead("dk"));
+        assert!(!store.drop_dead("dk"));
+        // Tombstoned: a re-submit is deduped, a re-claim is deduped.
+        assert_eq!(store.submit("file:///d", Some("dk"), None), SubmitOutcome::Deduped);
+        assert_eq!(store.claim("file:///d", 60_000, "dk", "h2"), ClaimResult::Deduped);
+    }
+
+    // (18) Under budget (max_attempts=3), an expired item is redelivered, not
+    //      dead-lettered, until the budget is exhausted.
+    #[test]
+    fn redelivery_under_budget_returns_to_pending() {
+        let store = InMemoryStore::new(4096);
+        let _ = store.submit("file:///r", Some("rk"), Some(3));
+        // Two delivery/expiry cycles stay under the budget of 3.
+        for _ in 0..2 {
+            let _ = store.claim("file:///r", 5, "rk", "h");
+            thread::sleep(Duration::from_millis(20));
+            store.sweep_expired();
+        }
+        assert_eq!(store.stats().deadletter, 0, "still under budget");
+        assert!(store.pending_items().contains(&"file:///r".to_string()));
     }
 
     // (8) Extra: the dedupe set honours its FIFO bound (no unbounded growth).
@@ -846,9 +1195,9 @@ mod tests {
     fn dedupe_set_is_bounded_fifo() {
         let mut d = DoneSet::new(3);
         for k in ["a", "b", "c", "d", "e"] {
-            d.insert(k.to_string());
+            d.insert(k.to_string(), None);
         }
-        assert_eq!(d.set.len(), 3);
+        assert_eq!(d.map.len(), 3);
         // Oldest evicted first.
         assert!(!d.contains("a"));
         assert!(!d.contains("b"));

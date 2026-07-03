@@ -26,6 +26,10 @@ pub const PROTOCOL_VERSION: &str = "2025-11-25";
 /// KEDA external scaler reads. Known at ZERO pods because it lives on the server.
 pub const PENDING_URI: &str = "work://pending";
 
+/// The dead-letter queue resource — items redelivered past `max_attempts`, awaiting
+/// an admin requeue/drop (RFC 0022 §7).
+pub const DLQ_URI: &str = "dlq://items";
+
 /// The frozen `_meta` key carrying the item-derived dedupe key (agentd RFC 0015
 /// §5.6). Present on `work.claim` and `work.ack`.
 const META_CLAIM_KEY: &str = "agent/claim_key";
@@ -137,6 +141,8 @@ fn dispatch_tool(
         "work.release" => tool_release(args, store, metrics, caller),
         "work.submit" => tool_submit(args, store, metrics, caller),
         "work.stats" => tool_stats(store, caller),
+        "work.result" => tool_work_result(args, store, caller),
+        "work.deadletter" => tool_deadletter(args, store, caller),
         other => (json!({ "error": format!("unknown tool: {other}") }), true),
     }
 }
@@ -264,6 +270,12 @@ fn tool_claim(
             metrics.inc_claim_deduped();
             (json!({ "granted": false, "held_by": "<acked>" }), false)
         }
+        ClaimResult::Deadlettered => {
+            metrics.inc_claim_deadlettered();
+            // A normal "lost" outcome (not isError): the claimer treats it as Lost
+            // and stops — the item is poison, held out until an admin requeues it.
+            (json!({ "granted": false, "held_by": "<deadletter>" }), false)
+        }
     }
 }
 
@@ -304,7 +316,10 @@ fn tool_renew(
 }
 
 /// `work.ack` — terminal settle + record the `claim_key` as done (dedupe set).
-/// arguments `{lease_id}`, `_meta {agent/claim_key}`. Idempotent.
+/// arguments `{lease_id, result?}`, `_meta {agent/claim_key}`. Idempotent. The
+/// optional `result` (any JSON value, RFC 0022 §7) is recorded atomically with the
+/// settle and returned by a later `work.result` — how a coordinator collects what a
+/// worker produced.
 fn tool_ack(
     args: &Value,
     meta: &Value,
@@ -323,16 +338,22 @@ fn tool_ack(
             )
         }
     };
+    // The result is serialized to a compact JSON string for the store (which is
+    // value-agnostic). A bare string is stored as-is; any other JSON is stringified.
+    let result_str = args.get("result").map(|v| match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    });
     let expected = match resolve_expected_holder(caller, metrics, "work.ack") {
         Ok(e) => e,
         Err(reject) => return reject,
     };
-    let result = store.ack(lease_id, claim_key, expected.as_deref());
-    if result.is_ok() {
+    let outcome = store.ack(lease_id, claim_key, expected.as_deref(), result_str.as_deref());
+    if outcome.is_ok() {
         metrics.inc_acked();
     }
     finish_verify(
-        result,
+        outcome,
         expected.is_some(),
         metrics,
         json!({ "ok": true, "acked": true }),
@@ -376,7 +397,10 @@ fn tool_release(
 }
 
 /// `work.submit` — enqueue an item into the backlog (producer side). arguments
-/// `{item, claim_key?}`. Skips if `claim_key` is already done (dedupe).
+/// `{item, claim_key?, max_attempts?}`. Skips if `claim_key` is already done or
+/// dead-lettered. Returns the `work_id` (the effective `claim_key`) so a producer
+/// can later correlate the outcome via `work.result` (RFC 0022 §7). `max_attempts`
+/// bounds redelivery (from the fleet `workPolicy`); absent ⇒ unbounded.
 ///
 /// Producers may be EXTERNAL (not pod-attestable), so submit is NOT hard-blocked by
 /// attestation — it stays token-gated. We attest-if-resolvable only to LOG the
@@ -398,18 +422,35 @@ fn tool_submit(
         }
     };
     let claim_key = args.get("claim_key").and_then(Value::as_str);
-    match store.submit(item, claim_key) {
+    let max_attempts = args
+        .get("max_attempts")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok());
+    // The work_id a producer uses for a later work.result lookup is the effective
+    // claim_key (the item URI when none is given — matches the store keying).
+    let work_id = claim_key.unwrap_or(item).to_string();
+    match store.submit(item, claim_key, max_attempts) {
         SubmitOutcome::Enqueued => {
             metrics.inc_submitted();
-            (json!({ "submitted": true, "deduped": false }), false)
+            (
+                json!({ "submitted": true, "deduped": false, "work_id": work_id }),
+                false,
+            )
         }
-        SubmitOutcome::Deduped => (json!({ "submitted": false, "deduped": true }), false),
+        SubmitOutcome::Deduped => (
+            json!({ "submitted": false, "deduped": true, "work_id": work_id }),
+            false,
+        ),
         SubmitOutcome::AlreadyPending => (
-            json!({ "submitted": false, "deduped": false, "reason": "already_pending" }),
+            json!({ "submitted": false, "deduped": false, "reason": "already_pending", "work_id": work_id }),
             false,
         ),
         SubmitOutcome::AlreadyClaimed => (
-            json!({ "submitted": false, "deduped": false, "reason": "already_claimed" }),
+            json!({ "submitted": false, "deduped": false, "reason": "already_claimed", "work_id": work_id }),
+            false,
+        ),
+        SubmitOutcome::Deadlettered => (
+            json!({ "submitted": false, "deduped": false, "reason": "deadletter", "work_id": work_id }),
             false,
         ),
     }
@@ -422,9 +463,77 @@ fn tool_stats(store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) 
     log_attested_caller("work.stats", caller);
     let s = store.stats();
     (
-        json!({ "pending": s.pending, "claimed": s.claimed, "oldest_age_ms": s.oldest_age_ms }),
+        json!({
+            "pending": s.pending,
+            "claimed": s.claimed,
+            "oldest_age_ms": s.oldest_age_ms,
+            "deadletter": s.deadletter,
+        }),
         false,
     )
+}
+
+/// `work.result` — correlate a submitted work unit to its outcome (RFC 0022 §7).
+/// arguments `{work_id}` (the effective `claim_key` returned by `work.submit`).
+/// Result: `{state, result?}` where `state` ∈ pending|claimed|done|deadletter|unknown
+/// and `result` is the JSON the worker recorded on `work.ack` (only for `done`).
+/// Token-gated like submit/stats (a coordinator/producer may be external).
+fn tool_work_result(args: &Value, store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) {
+    log_attested_caller("work.result", caller);
+    let work_id = match args.get("work_id").and_then(Value::as_str) {
+        Some(w) => w,
+        None => return (json!({ "error": "work.result requires arguments.work_id" }), true),
+    };
+    let status = store.result_of(work_id);
+    // The stored result is a JSON string; re-parse it so the caller gets structured
+    // JSON back (falling back to the raw string if it was a bare string).
+    let result = status.result.map(|s| {
+        serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s))
+    });
+    (
+        json!({ "work_id": work_id, "state": status.state.as_str(), "result": result }),
+        false,
+    )
+}
+
+/// `work.deadletter` — inspect and manage the dead-letter queue (RFC 0022 §7).
+/// arguments `{action, work_id?}`: `list` → `{items:[{work_id,item,attempts}]}`;
+/// `requeue`/`drop` require `work_id` → `{ok, found}`. Token-gated (an operator/admin
+/// tool, not a per-lease holder op).
+fn tool_deadletter(args: &Value, store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) {
+    log_attested_caller("work.deadletter", caller);
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
+    match action {
+        "list" => {
+            let items: Vec<Value> = store
+                .dead_items()
+                .into_iter()
+                .map(|d| json!({ "work_id": d.claim_key, "item": d.item, "attempts": d.attempts }))
+                .collect();
+            (json!({ "items": items }), false)
+        }
+        "requeue" | "drop" => {
+            let work_id = match args.get("work_id").and_then(Value::as_str) {
+                Some(w) => w,
+                None => {
+                    return (
+                        json!({ "error": format!("work.deadletter {action} requires arguments.work_id") }),
+                        true,
+                    )
+                }
+            };
+            let found = if action == "requeue" {
+                store.requeue_dead(work_id)
+            } else {
+                store.drop_dead(work_id)
+            };
+            (json!({ "ok": true, "action": action, "work_id": work_id, "found": found }), false)
+        }
+        other => (
+            json!({ "error": format!("work.deadletter: unknown action {other:?} (want list|requeue|drop)") }),
+            true,
+        ),
+    }
 }
 
 /// Log the attested caller for a NON-blocking (token-gated) call (`work.submit` /
@@ -443,23 +552,30 @@ fn resources_read(id: Value, params: &Value, store: &dyn ClaimStore) -> Value {
         .get("uri")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if uri == PENDING_URI {
+    let (matched_uri, body) = if uri == PENDING_URI {
         let items = store.pending_items();
-        let body = json!({ "pending": items.len(), "items": items });
-        let text = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
-        ok(
-            id,
-            json!({
-                "contents": [{
-                    "uri": PENDING_URI,
-                    "mimeType": "application/json",
-                    "text": text,
-                }],
-            }),
-        )
+        (PENDING_URI, json!({ "pending": items.len(), "items": items }))
+    } else if uri == DLQ_URI {
+        let items: Vec<Value> = store
+            .dead_items()
+            .into_iter()
+            .map(|d| json!({ "work_id": d.claim_key, "item": d.item, "attempts": d.attempts }))
+            .collect();
+        (DLQ_URI, json!({ "deadletter": items.len(), "items": items }))
     } else {
-        err(id, -32602, &format!("unknown resource uri: {uri}"))
-    }
+        return err(id, -32602, &format!("unknown resource uri: {uri}"));
+    };
+    let text = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+    ok(
+        id,
+        json!({
+            "contents": [{
+                "uri": matched_uri,
+                "mimeType": "application/json",
+                "text": text,
+            }],
+        }),
+    )
 }
 
 /// The advertised tools (`tools/list`). The agent validates a coordination server
@@ -492,10 +608,13 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool_def(
             "work.ack",
-            "Settle a lease (terminal) and record its claim_key as done (dedupe).",
+            "Settle a lease (terminal), record its claim_key as done (dedupe), and optionally record a result.",
             json!({
                 "type": "object",
-                "properties": { "lease_id": { "type": "string" } },
+                "properties": {
+                    "lease_id": { "type": "string" },
+                    "result": { "description": "Optional outcome (any JSON) retrievable via work.result." }
+                },
                 "required": ["lease_id"]
             }),
         ),
@@ -513,20 +632,42 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool_def(
             "work.submit",
-            "Enqueue an item into the backlog (skipped if its claim_key is done).",
+            "Enqueue an item into the backlog (skipped if done/deadletter). Returns a work_id for work.result correlation.",
             json!({
                 "type": "object",
                 "properties": {
                     "item": { "type": "string" },
-                    "claim_key": { "type": "string" }
+                    "claim_key": { "type": "string" },
+                    "max_attempts": { "type": "integer", "minimum": 1, "description": "Dead-letter after this many redeliveries (RFC 0022 §7); absent ⇒ unbounded." }
                 },
                 "required": ["item"]
             }),
         ),
         tool_def(
             "work.stats",
-            "Backlog snapshot: { pending, claimed, oldest_age_ms } (the P9 from-zero signal).",
+            "Backlog snapshot: { pending, claimed, oldest_age_ms, deadletter } (the P9 from-zero signal).",
             json!({ "type": "object", "properties": {} }),
+        ),
+        tool_def(
+            "work.result",
+            "Correlate a submitted work unit to its outcome: { state, result? } by work_id.",
+            json!({
+                "type": "object",
+                "properties": { "work_id": { "type": "string" } },
+                "required": ["work_id"]
+            }),
+        ),
+        tool_def(
+            "work.deadletter",
+            "Inspect/manage the dead-letter queue: action list|requeue|drop (requeue/drop need work_id).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "requeue", "drop"] },
+                    "work_id": { "type": "string" }
+                },
+                "required": ["action"]
+            }),
         ),
     ]
 }
@@ -538,12 +679,20 @@ fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
 
 /// The advertised resources (`resources/list`).
 fn resource_defs() -> Vec<Value> {
-    vec![json!({
-        "uri": PENDING_URI,
-        "name": "pending",
-        "description": "Pending (unclaimed) item count + list — the off-pod scale-from-zero signal (P9).",
-        "mimeType": "application/json",
-    })]
+    vec![
+        json!({
+            "uri": PENDING_URI,
+            "name": "pending",
+            "description": "Pending (unclaimed) item count + list — the off-pod scale-from-zero signal (P9).",
+            "mimeType": "application/json",
+        }),
+        json!({
+            "uri": DLQ_URI,
+            "name": "deadletter",
+            "description": "Dead-lettered items (redelivered past max_attempts) awaiting requeue/drop (RFC 0022 §7).",
+            "mimeType": "application/json",
+        }),
+    ]
 }
 
 /// Holder identity for `held_by`: prefer the frozen `agent/instance`, then
@@ -732,7 +881,7 @@ mod tests {
     #[test]
     fn resources_list_and_read_pending() {
         let (store, metrics) = ctx();
-        store.submit("file:///a", Some("ka"));
+        store.submit("file:///a", Some("ka"), None);
         let rl = handle_rpc(
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" }),
             &store,

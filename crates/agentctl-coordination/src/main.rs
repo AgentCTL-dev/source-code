@@ -457,7 +457,7 @@ async fn serve_metrics(
     let s = state.store.stats();
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        state.metrics.render(s.pending, s.claimed),
+        state.metrics.render(s.pending, s.claimed, s.deadletter),
     )
 }
 
