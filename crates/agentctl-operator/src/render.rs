@@ -344,7 +344,14 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
         .name
         .clone()
         .ok_or(RenderError::MissingName)?;
-    let spec = &fleet.spec.template;
+    // A fleet member is a long-lived worker — claim members poll the work queue,
+    // shard members own a partition — so the effective mode MUST be reactive. The
+    // per-replica `template.mode` defaults to `once` (and once/loop/schedule/workflow
+    // all run to exit), which would CrashLoop under the Deployment/StatefulSet. Pin
+    // it here so a fleet with an unset or mismatched template mode still runs.
+    let mut template = fleet.spec.template.clone();
+    template.mode = Mode::Reactive;
+    let spec = &template;
     let image = spec.image.clone().ok_or(RenderError::MissingImage)?;
     require_stock_unix(spec.substrate)?;
 
@@ -851,6 +858,26 @@ fn agent_args(spec: &AgentSpec) -> Vec<String> {
         args.push("--subscribe".to_string());
         args.push(sub.clone());
     }
+    // Deliver the declared bounding box to the agent (RFC 0003 §4.1). Without this
+    // the operator silently dropped `spec.limits`, so subagent-tree/step/token caps
+    // set on the CR never reached agentd (which consumes these flags). `max_tokens`
+    // / `max_depth` / `max_steps` map to agentd flags; `tree_token_budget` has no
+    // agentd flag yet (hardcoded Caps default — an agentd P-cap follow-up), so it is
+    // deliberately not emitted rather than passed to an unknown flag.
+    if let Some(limits) = &spec.limits {
+        if let Some(v) = limits.max_tokens {
+            args.push("--max-tokens".to_string());
+            args.push(v.to_string());
+        }
+        if let Some(v) = limits.max_depth {
+            args.push("--max-depth".to_string());
+            args.push(v.to_string());
+        }
+        if let Some(v) = limits.max_steps {
+            args.push("--max-steps".to_string());
+            args.push(v.to_string());
+        }
+    }
     args
 }
 
@@ -1354,6 +1381,50 @@ mod tests {
             render_fleet(&fleet(ScaleMode::Shard, None), &cfg()),
             Err(RenderError::MissingShards)
         );
+    }
+
+    #[test]
+    fn fleet_template_mode_is_coerced_to_reactive() {
+        // A fleet whose template carries the DEFAULT `once` mode (or any non-reactive
+        // mode) must render a long-lived reactive member — else the Deployment pods
+        // exit and CrashLoop. Both regimes go through the coercion.
+        for mode in [ScaleMode::Claim, ScaleMode::Shard] {
+            let mut f = fleet(mode, Some(2));
+            f.spec.template.mode = Mode::Once; // the CrashLoop-inducing default
+            let r = render_fleet(&f, &cfg()).unwrap();
+            let pod = match &r {
+                Rendered::Deployment(d) => d.spec.as_ref().unwrap().template.clone(),
+                Rendered::StatefulSet(s) => s.spec.as_ref().unwrap().template.clone(),
+                _ => panic!("fleet renders a Deployment or StatefulSet"),
+            };
+            assert!(
+                has_arg_pair(container_of(&pod), "--mode", "reactive"),
+                "fleet {mode:?} member must run --mode reactive"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_args_render_declared_limits() {
+        // The bounding box (spec.limits) must reach agentd; the operator used to
+        // drop it silently.
+        let mut a = agent(Mode::Reactive);
+        a.spec.limits = Some(agent_api::Limits {
+            max_tokens: Some(500_000),
+            max_depth: Some(3),
+            max_steps: Some(40),
+            tree_token_budget: Some(2_000_000), // no agentd flag yet → not emitted
+        });
+        let r = render_agent(&a, &cfg()).unwrap();
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
+        let c = container_of(&dep.spec.as_ref().unwrap().template).clone();
+        assert!(has_arg_pair(&c, "--max-tokens", "500000"));
+        assert!(has_arg_pair(&c, "--max-depth", "3"));
+        assert!(has_arg_pair(&c, "--max-steps", "40"));
+        // tree_token_budget has no agentd flag; it must NOT be passed to an unknown one.
+        assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--tree-token-budget"));
     }
 
     #[test]

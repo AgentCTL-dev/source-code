@@ -387,10 +387,21 @@ async fn infer(
     };
 
     // f. meter the tokens, then return the provider body tagged with the pool.
-    let total = provider_body
-        .pointer("/usage/total_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+    // Normalize across provider shapes (OpenAI total_tokens; OpenAI
+    // prompt+completion; Anthropic input+output). Metering is a SPEND CAP input, so
+    // never fail open at 0: when a provider returns no parseable usage, charge a
+    // conservative size-based estimate so it cannot silently drain the budget.
+    let total = match extract_token_count(&provider_body) {
+        Some(t) => t,
+        None => {
+            let est = estimate_tokens_from_size(&provider_body);
+            tracing::warn!(
+                %ns, pool = %pool_name, est,
+                "provider returned no parseable usage; charging a conservative estimate (fail-closed)"
+            );
+            est
+        }
+    };
     state.metrics.add_tokens(total);
     if let Err(e) = store::record_usage(&state.pool, &ns, &pool_name, &agent, total).await {
         tracing::warn!(%ns, pool = %pool_name, error = %e, "record usage failed");
@@ -778,9 +789,67 @@ fn build_pool() -> Pool {
         .expect("build postgres pool")
 }
 
+/// Extract a token count from a provider response's `usage` block, tolerant of the
+/// common shapes: OpenAI `total_tokens`; OpenAI `prompt_tokens`+`completion_tokens`;
+/// Anthropic `input_tokens`+`output_tokens`. Returns `None` only when there is no
+/// recognizable usage at all (the caller then charges a conservative estimate — a
+/// spend cap must never fail open at 0).
+fn extract_token_count(body: &Value) -> Option<i64> {
+    let usage = body.get("usage")?;
+    if let Some(t) = usage.get("total_tokens").and_then(Value::as_i64) {
+        return Some(t);
+    }
+    // Sum a request/response token pair; a present-but-partial pair still counts.
+    let pair = |a: &str, b: &str| -> Option<i64> {
+        let x = usage.get(a).and_then(Value::as_i64);
+        let y = usage.get(b).and_then(Value::as_i64);
+        match (x, y) {
+            (None, None) => None,
+            (x, y) => Some(x.unwrap_or(0) + y.unwrap_or(0)),
+        }
+    };
+    pair("input_tokens", "output_tokens") // Anthropic
+        .or_else(|| pair("prompt_tokens", "completion_tokens")) // OpenAI (no total)
+}
+
+/// A conservative token estimate from the serialized response size (~4 chars/token),
+/// floored at 1, used when a provider hides usage — so the budget still advances and
+/// a usage-omitting provider cannot silently drain it.
+fn estimate_tokens_from_size(body: &Value) -> i64 {
+    let chars = serde_json::to_string(body).map(|s| s.len()).unwrap_or(0);
+    ((chars / 4) as i64).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_token_count_handles_provider_shapes() {
+        // OpenAI total_tokens.
+        assert_eq!(
+            extract_token_count(&serde_json::json!({ "usage": { "total_tokens": 150 } })),
+            Some(150)
+        );
+        // Anthropic input+output (the shape the old `total_tokens`-only path metered as 0).
+        assert_eq!(
+            extract_token_count(&serde_json::json!({ "usage": { "input_tokens": 40, "output_tokens": 60 } })),
+            Some(100)
+        );
+        // OpenAI prompt+completion without a total.
+        assert_eq!(
+            extract_token_count(&serde_json::json!({ "usage": { "prompt_tokens": 10, "completion_tokens": 5 } })),
+            Some(15)
+        );
+        // No usage at all → None (caller charges an estimate, never 0).
+        assert_eq!(extract_token_count(&serde_json::json!({ "choices": [] })), None);
+    }
+
+    #[test]
+    fn estimate_tokens_never_zero() {
+        assert!(estimate_tokens_from_size(&serde_json::json!({})) >= 1);
+        assert!(estimate_tokens_from_size(&serde_json::json!({ "a": "x".repeat(400) })) >= 100);
+    }
 
     #[test]
     fn over_budget_none_is_never_over() {

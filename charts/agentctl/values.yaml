@@ -292,14 +292,15 @@ modelgateway:
   secretsNamespaces: []
   # Attested agent identity: when true the ModelGateway derives the agent namespace
   # from the caller's source IP (a kube pod lookup keyed on pod status.podIP)
-  # instead of trusting the X-Agent-Namespace request header. Robust because
-  # confined tenant pods drop CAP_NET_RAW and so cannot spoof their source IP, so a
-  # tenant cannot impersonate another namespace's ModelPool/budget. Requires the
-  # cluster-wide pods get/list grant (always present in the ClusterRole). Default
-  # false keeps the back-compat header-asserted identity. The node-agent
-  # SO_PEERCRED infer-routing is the complement for the NETWORKLESS (Kata) tier
-  # where pods have no IP to attest.
-  attestIdentity: false
+  # instead of trusting the spoofable X-Agent-Namespace request header. Robust
+  # because confined tenant pods drop CAP_NET_RAW and so cannot spoof their source
+  # IP, so a tenant cannot impersonate another namespace's ModelPool/budget.
+  # Requires the cluster-wide pods get/list grant (always present in the ClusterRole).
+  # DEFAULT TRUE (fail-closed): the header path lets any in-cluster pod set
+  # `X-Agent-Namespace: <victim>` to bill/borrow another tenant's pool, so it must be
+  # a deliberate single-tenant/dev opt-out — matching the MCPGateway, which is always
+  # attested. Set false ONLY for a trusted single-tenant install.
+  attestIdentity: true
   # Inference proxy: small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }
@@ -374,8 +375,10 @@ coordination:
   # tenant pods drop CAP_NET_RAW and so cannot spoof their source IP. Requires the
   # cluster-wide pods get/list grant (the chart renders a ClusterRole + binding ONLY
   # when this is on) and sets COORDINATION_ATTEST_IDENTITY + POD_NAMESPACE on the
-  # Deployment. Default false renders no RBAC and no env (today's output unchanged).
-  attestIdentity: false
+  # Deployment. DEFAULT TRUE (fail-closed): without it any in-cluster pod holding the
+  # coarse bearer could ack/release another tenant's claim. Set false only for a
+  # trusted single-tenant install. (Only takes effect when coordination.enabled.)
+  attestIdentity: true
   # Scaler -> coordination mTLS (RFC 0011). When enabled (and certManager.enabled),
   # the chart issues a SERVING cert (agentctl-coordination-mtls-tls) for a second
   # coordination listener on :8443 and a CLIENT cert (agentctl-scaler-client-tls) the
