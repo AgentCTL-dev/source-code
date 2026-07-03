@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_api::{Agent, AgentFleet, Condition, ContractStatus, Mode};
+use agent_api::{Agent, AgentFleet, AgentSpec, Condition, ContractStatus, MCPServerSet, Mode};
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Patch, PatchParams};
@@ -34,8 +34,9 @@ use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
 use crate::{
-    fleet_selector_string, inject_api_token, render_agent, render_fleet, render_scaled_object,
-    RenderConfig, RenderError, Rendered, DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
+    fleet_selector_string, inject_api_token, inject_mcp_servers, render_agent, render_fleet,
+    render_scaled_object, McpBinding, RenderConfig, RenderError, Rendered,
+    DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
@@ -289,6 +290,12 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             if ctx.api_token.should_inject(ns) {
                 inject_api_token(&mut rendered);
             }
+            // Bind MCP tool servers: resolve the agent's MCPServerSet refs and
+            // render `--mcp <name>=<gateway>/s/<name>` so it dials the MCPGateway
+            // keyless (RFC 0019). Best-effort — a dangling ref is logged, not
+            // fatal (surfaces as a missing tool, not a failed reconcile).
+            let bindings = resolve_mcp_bindings(&ctx.client, ns, &agent.spec).await;
+            inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
             // Workload PKI first (serving Certificate + per-ns CA ConfigMap),
             // so the pod's mounts resolve as it schedules.
             if ctx.pki.enabled() {
@@ -359,6 +366,39 @@ fn cleanup(agent: &Agent) -> Action {
 }
 
 /// Server-side-apply the rendered workload into `ns` under our field manager.
+/// Resolve an agent/fleet-template's `mcpServerSetRefs` into the flat list of
+/// bound MCP servers (name + trifecta tags) the renderer wires to the MCPGateway
+/// (RFC 0019). Reads each referenced `MCPServerSet` in the workload's namespace.
+/// Best-effort: a missing/dangling ref is logged and skipped (a config error
+/// surfaces as a missing tool, never a failed reconcile). Duplicate server names
+/// across sets collapse to the first seen (admission owns collision rejection).
+async fn resolve_mcp_bindings(client: &Client, ns: &str, spec: &AgentSpec) -> Vec<McpBinding> {
+    if spec.mcp_server_set_refs.is_empty() {
+        return Vec::new();
+    }
+    let sets: Api<MCPServerSet> = Api::namespaced(client.clone(), ns);
+    let mut out: Vec<McpBinding> = Vec::new();
+    for r in &spec.mcp_server_set_refs {
+        match sets.get(&r.name).await {
+            Ok(set) => {
+                for s in set.spec.servers {
+                    if out.iter().any(|b| b.name == s.name) {
+                        continue;
+                    }
+                    out.push(McpBinding {
+                        name: s.name,
+                        tags: s.tags,
+                    });
+                }
+            }
+            Err(e) => {
+                warn!(%ns, set = %r.name, error = %e, "bound MCPServerSet not found; skipping");
+            }
+        }
+    }
+    out
+}
+
 async fn apply_workload(client: &Client, ns: &str, rendered: &Rendered) -> Result<(), Error> {
     let pp = PatchParams::apply(FIELD_MANAGER).force();
     match rendered {
@@ -529,6 +569,10 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             if ctx.api_token.should_inject(ns) {
                 inject_api_token(&mut rendered);
             }
+            // Bind MCP tool servers for the fleet template (same resolution as a
+            // singleton Agent; the fleet's template carries mcpServerSetRefs).
+            let bindings = resolve_mcp_bindings(&ctx.client, ns, &fleet.spec.template).await;
+            inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
             // Workload PKI first (serving Certificate + per-ns CA ConfigMap),
             // so fleet pods' mounts resolve as they schedule.
             if ctx.pki.enabled() {

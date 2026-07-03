@@ -65,9 +65,9 @@ pub fn serving_secret_name(workload: &str) -> String {
     format!("{workload}-serving-tls")
 }
 
-/// Operator-scoped render inputs that do not live on the CR: where the
-/// ModelGateway is (`AGENTCTL_MODELGATEWAY_URL`). Built once by the controller
-/// from its environment; a test passes a literal.
+/// Operator-scoped render inputs that do not live on the CR: where the model +
+/// MCP gateways are. Built once by the controller from its environment; a test
+/// passes a literal.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
     /// The ModelGateway base URL rendered into `AGENT_INTELLIGENCE` (keyless
@@ -75,32 +75,93 @@ pub struct RenderConfig {
     /// `https://` URL whose cert chains to the cluster CA, and SHOULD be an
     /// absolute (trailing-dot) FQDN so no DNS search list can capture it.
     pub modelgateway_url: String,
+    /// The MCPGateway base URL each bound MCP server is rendered against
+    /// (`--mcp <name>=<url>/s/<name>`, RFC 0019). Same constraints as the
+    /// ModelGateway URL; the agent dials it keyless (identity = source IP).
+    pub mcpgateway_url: String,
 }
 
 /// Default in-cluster ModelGateway URL (chart Service, control-plane
 /// namespace; absolute FQDN — trailing dot — so ndots search never rewrites it).
 pub const DEFAULT_MODELGATEWAY_URL: &str =
     "https://agentctl-modelgateway.agentctl-system.svc.cluster.local.";
+/// Default in-cluster MCPGateway URL (chart Service, control-plane namespace).
+pub const DEFAULT_MCPGATEWAY_URL: &str =
+    "https://agentctl-mcpgateway.agentctl-system.svc.cluster.local.";
 
 impl Default for RenderConfig {
     fn default() -> Self {
         RenderConfig {
             modelgateway_url: DEFAULT_MODELGATEWAY_URL.to_string(),
+            mcpgateway_url: DEFAULT_MCPGATEWAY_URL.to_string(),
         }
     }
 }
 
 impl RenderConfig {
-    /// Build from the operator environment (`AGENTCTL_MODELGATEWAY_URL`),
-    /// falling back to the in-cluster default.
+    /// Build from the operator environment (`AGENTCTL_MODELGATEWAY_URL`,
+    /// `AGENTCTL_MCPGATEWAY_URL`), falling back to the in-cluster defaults.
     pub fn from_env() -> Self {
         let d = Self::default();
-        RenderConfig {
-            modelgateway_url: std::env::var("AGENTCTL_MODELGATEWAY_URL")
+        let env = |k: &str, dflt: String| {
+            std::env::var(k)
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
-                .unwrap_or(d.modelgateway_url),
+                .unwrap_or(dflt)
+        };
+        RenderConfig {
+            modelgateway_url: env("AGENTCTL_MODELGATEWAY_URL", d.modelgateway_url),
+            mcpgateway_url: env("AGENTCTL_MCPGATEWAY_URL", d.mcpgateway_url),
+        }
+    }
+}
+
+/// A resolved MCP server binding for an agent — the server name (which is both
+/// the gateway facade path segment and the agent's `--mcp` server name) and its
+/// operator-declared trifecta tags. Produced by the controller (which reads the
+/// `MCPServerSet`s the agent binds) and rendered by [`inject_mcp_servers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpBinding {
+    pub name: String,
+    pub tags: Vec<String>,
+}
+
+/// Append the agent's bound MCP servers to the rendered container args, each
+/// pointing at the MCPGateway facade (`--mcp <name>=<gateway>/s/<name>`) with
+/// its trifecta tags (`--mcp-tags <name>=<comma-list>`). The agent dials the
+/// gateway keyless (trusting the cluster CA via the already-rendered `--tls-ca`);
+/// the gateway attests it, scopes it to these servers, and injects each server's
+/// credential off-pod (RFC 0019). Idempotent per server name.
+pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &[McpBinding]) {
+    if servers.is_empty() {
+        return;
+    }
+    let pod = match rendered {
+        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
+        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
+    };
+    let Some(pod) = pod else { return };
+    let Some(spec) = pod.spec.as_mut() else {
+        return;
+    };
+    let Some(container) = spec.containers.first_mut() else {
+        return;
+    };
+    let args = container.args.get_or_insert_with(Vec::new);
+    let base = gateway_url.trim_end_matches('/');
+    for s in servers {
+        let mcp_val = format!("{}={}/s/{}", s.name, base, s.name);
+        // Idempotent: never render the same server twice.
+        if args.iter().any(|a| a == &mcp_val) {
+            continue;
+        }
+        args.push("--mcp".to_string());
+        args.push(mcp_val);
+        if !s.tags.is_empty() {
+            args.push("--mcp-tags".to_string());
+            args.push(format!("{}={}", s.name, s.tags.join(",")));
         }
     }
 }
@@ -945,6 +1006,7 @@ mod tests {
     fn intelligence_env_is_keyless_and_from_config() {
         let custom = RenderConfig {
             modelgateway_url: "https://mgw.cp.svc.cluster.local.".into(),
+            ..RenderConfig::default()
         };
         let r = render_agent(&agent(Mode::Reactive), &custom).unwrap();
         let Rendered::Deployment(dep) = r else {
@@ -1054,6 +1116,61 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.name == "AGENT_POD_UID"));
+    }
+
+    #[test]
+    fn inject_mcp_servers_renders_gateway_urls_and_tags() {
+        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
+        let servers = vec![
+            McpBinding {
+                name: "github".into(),
+                tags: vec!["untrusted_input".into(), "egress".into()],
+            },
+            McpBinding {
+                name: "fs".into(),
+                tags: vec![],
+            },
+        ];
+        inject_mcp_servers(&mut r, "https://mcpgw.cp.svc.cluster.local.", &servers);
+        inject_mcp_servers(&mut r, "https://mcpgw.cp.svc.cluster.local.", &servers); // idempotent
+        let Rendered::Deployment(dep) = &r else {
+            unreachable!()
+        };
+        let c = container_of(&dep.spec.as_ref().unwrap().template);
+        // github: --mcp github=<gw>/s/github + --mcp-tags github=untrusted_input,egress
+        assert!(has_arg_pair(
+            c,
+            "--mcp",
+            "github=https://mcpgw.cp.svc.cluster.local./s/github"
+        ));
+        assert!(has_arg_pair(
+            c,
+            "--mcp-tags",
+            "github=untrusted_input,egress"
+        ));
+        // fs: dial rendered, but no tags flag (empty tags).
+        assert!(has_arg_pair(
+            c,
+            "--mcp",
+            "fs=https://mcpgw.cp.svc.cluster.local./s/fs"
+        ));
+        assert!(!c
+            .args
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|a| a.starts_with("fs=") && a.contains("=,")));
+        // Idempotent: exactly one --mcp entry for github.
+        let n = c
+            .args
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|a| a.as_str() == "github=https://mcpgw.cp.svc.cluster.local./s/github")
+            .count();
+        assert_eq!(n, 1);
+        // The agent trusts the gateway via the already-rendered --tls-ca.
+        assert!(has_arg_pair(c, "--tls-ca", "/etc/agentctl/ca/ca.crt"));
     }
 
     #[test]

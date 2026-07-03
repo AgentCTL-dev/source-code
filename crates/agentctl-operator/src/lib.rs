@@ -16,8 +16,8 @@ pub mod serve;
 
 pub use metrics::Metrics;
 pub use render::{
-    fleet_selector_string, inject_api_token, render_agent, render_fleet, render_scaled_object,
-    serving_secret_name, RenderConfig, RenderError, Rendered, API_TOKEN_ENV, API_TOKEN_SECRET,
-    CA_CONFIGMAP, CA_KEY, DEFAULT_COORDINATION_URL, DEFAULT_MODELGATEWAY_URL,
-    DEFAULT_SCALER_ADDRESS,
+    fleet_selector_string, inject_api_token, inject_mcp_servers, render_agent, render_fleet,
+    render_scaled_object, serving_secret_name, McpBinding, RenderConfig, RenderError, Rendered,
+    API_TOKEN_ENV, API_TOKEN_SECRET, CA_CONFIGMAP, CA_KEY, DEFAULT_COORDINATION_URL,
+    DEFAULT_MCPGATEWAY_URL, DEFAULT_MODELGATEWAY_URL, DEFAULT_SCALER_ADDRESS,
 };
