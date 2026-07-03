@@ -226,6 +226,13 @@ spec:
             - name: AGENTCTL_MCPGATEWAY_URL
               value: {{ .Values.operator.mcpgatewayUrl | default (printf "https://agentctl-mcpgateway.%s.svc.cluster.local." $ns) | quote }}
             {{- end }}
+            {{- if .Values.gateway.enabled }}
+            # The A2A gateway base URL a coordinator's `--a2a-peer worker=…` is
+            # rendered against for `distribution: a2a` (RFC 0022 §5/§6). Unused for
+            # the default `queue` distribution.
+            - name: AGENTCTL_GATEWAY_URL
+              value: {{ .Values.operator.gatewayUrl | default (printf "http://agentctl-gateway.%s.svc.cluster.local.:8080" $ns) | quote }}
+            {{- end }}
           {{- with .Values.operator.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use agent_api::{Agent, AgentFleet, AgentSpec, Mode, ScaleMode, Substrate};
+use agent_api::{Agent, AgentFleet, AgentSpec, Distribution, Mode, ScaleMode, Substrate};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec, JobTemplateSpec};
 use k8s_openapi::api::core::v1::{
@@ -79,6 +79,10 @@ pub struct RenderConfig {
     /// (`--mcp <name>=<url>/s/<name>`, RFC 0019). Same constraints as the
     /// ModelGateway URL; the agent dials it keyless (identity = source IP).
     pub mcpgateway_url: String,
+    /// The A2A gateway base URL a coordinator's `--a2a-peer worker=…/fleets/<ns>/<name>`
+    /// is rendered against for `distribution: a2a` (RFC 0022 §5/§6). Unused for the
+    /// default `queue` distribution.
+    pub gateway_url: String,
 }
 
 /// Default in-cluster ModelGateway URL (chart Service, control-plane
@@ -88,19 +92,24 @@ pub const DEFAULT_MODELGATEWAY_URL: &str =
 /// Default in-cluster MCPGateway URL (chart Service, control-plane namespace).
 pub const DEFAULT_MCPGATEWAY_URL: &str =
     "https://agentctl-mcpgateway.agentctl-system.svc.cluster.local.";
+/// Default in-cluster A2A gateway URL (chart Service, control-plane namespace).
+pub const DEFAULT_GATEWAY_URL: &str =
+    "http://agentctl-gateway.agentctl-system.svc.cluster.local.:8080";
 
 impl Default for RenderConfig {
     fn default() -> Self {
         RenderConfig {
             modelgateway_url: DEFAULT_MODELGATEWAY_URL.to_string(),
             mcpgateway_url: DEFAULT_MCPGATEWAY_URL.to_string(),
+            gateway_url: DEFAULT_GATEWAY_URL.to_string(),
         }
     }
 }
 
 impl RenderConfig {
     /// Build from the operator environment (`AGENTCTL_MODELGATEWAY_URL`,
-    /// `AGENTCTL_MCPGATEWAY_URL`), falling back to the in-cluster defaults.
+    /// `AGENTCTL_MCPGATEWAY_URL`, `AGENTCTL_GATEWAY_URL`), falling back to the
+    /// in-cluster defaults.
     pub fn from_env() -> Self {
         let d = Self::default();
         let env = |k: &str, dflt: String| {
@@ -113,6 +122,7 @@ impl RenderConfig {
         RenderConfig {
             modelgateway_url: env("AGENTCTL_MODELGATEWAY_URL", d.modelgateway_url),
             mcpgateway_url: env("AGENTCTL_MCPGATEWAY_URL", d.mcpgateway_url),
+            gateway_url: env("AGENTCTL_GATEWAY_URL", d.gateway_url),
         }
     }
 }
@@ -421,6 +431,122 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
                 }),
                 ..Default::default()
             })))
+        }
+    }
+}
+
+/// The label distinguishing a fleet's coordinator workload from its worker pool
+/// (RFC 0022 §5). Worker pods keep only the existing `agentctl.dev/agent=<fleet>`
+/// label; the coordinator carries its own name label PLUS these two.
+pub const FLEET_ROLE_LABEL: &str = "agentctl.dev/fleet-role";
+/// The label tying a coordinator back to its fleet (for cross-member discovery).
+pub const FLEET_LABEL: &str = "agentctl.dev/fleet";
+
+/// The coordinator workload's name for a fleet: `<fleet>-coordinator`. Distinct
+/// from the fleet name so the worker Deployment's `agentctl.dev/agent=<fleet>`
+/// selector never captures coordinator pods (and vice-versa), and so the gateway
+/// can address the coordinator by `agentctl.dev/agent=<fleet>-coordinator`.
+pub fn coordinator_name(fleet: &str) -> String {
+    format!("{fleet}-coordinator")
+}
+
+/// Render an `AgentFleet`'s **coordinator** ("main agent", RFC 0022 §3) when one is
+/// declared; `None` for a coordinatorless fleet. The coordinator is a long-lived
+/// reactive front door rendered as its own Deployment `<fleet>-coordinator`,
+/// labeled `fleet-role: coordinator`, replicas `coordinator.replicas` (default 1),
+/// wired to fan work out per `distribution` (queue ⇒ a work-source env hint; a2a ⇒
+/// an `--a2a-peer worker=…/fleets/<ns>/<name>` through the gateway PEP).
+pub fn render_coordinator(
+    fleet: &AgentFleet,
+    cfg: &RenderConfig,
+) -> Option<Result<Rendered, RenderError>> {
+    let coord = fleet.spec.coordinator.as_ref()?;
+    Some(render_coordinator_inner(fleet, coord, cfg))
+}
+
+fn render_coordinator_inner(
+    fleet: &AgentFleet,
+    coord: &agent_api::Coordinator,
+    cfg: &RenderConfig,
+) -> Result<Rendered, RenderError> {
+    let fleet_name = fleet.metadata.name.clone().ok_or(RenderError::MissingName)?;
+    let name = coordinator_name(&fleet_name);
+    // The coordinator is a long-lived A2A front door: coerce to reactive so a
+    // run-to-exit mode does not CrashLoop under the Deployment (admission already
+    // forbids `once`). A workflow-driving coordinator is a future extension.
+    let mut template = coord.template.clone();
+    template.mode = Mode::Reactive;
+    let spec = &template;
+    let image = spec.image.clone().ok_or(RenderError::MissingImage)?;
+    require_stock_unix(spec.substrate)?;
+
+    let mut labels = managed_labels(&name);
+    labels.insert(FLEET_ROLE_LABEL.to_string(), "coordinator".to_string());
+    labels.insert(FLEET_LABEL.to_string(), fleet_name.clone());
+    let meta = owned_meta(
+        &name,
+        fleet.metadata.namespace.clone(),
+        &labels,
+        owner_ref("AgentFleet", &fleet_name, uid_of(&fleet.metadata.uid)),
+    );
+    let mut pod = pod_template(spec, &image, &labels, &name, cfg);
+    apply_distribution(
+        &mut pod,
+        coord.distribution.unwrap_or_default(),
+        fleet,
+        cfg,
+        &fleet_name,
+    );
+
+    let replicas = coord.replicas.unwrap_or(1).max(1) as i32;
+    Ok(Rendered::Deployment(Box::new(Deployment {
+        metadata: meta,
+        spec: Some(DeploymentSpec {
+            replicas: Some(replicas),
+            selector: label_selector(&labels),
+            template: pod,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })))
+}
+
+/// Wire the coordinator's work fan-out into its pod (RFC 0022 §5). `queue` (the
+/// default): inject `AGENT_FLEET_WORKSOURCE` (the fleet `workSource`) as a config
+/// hint so a conformant coordinator knows where to `work.submit`/`work.result`.
+/// `a2a`: append `--a2a-peer worker=<gateway>/fleets/<ns>/<fleet>` so the
+/// coordinator's `a2a.delegate` reaches the worker pool through the gateway PEP.
+fn apply_distribution(
+    pod: &mut PodTemplateSpec,
+    distribution: Distribution,
+    fleet: &AgentFleet,
+    cfg: &RenderConfig,
+    fleet_name: &str,
+) {
+    let Some(container) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) else {
+        return;
+    };
+    match distribution {
+        Distribution::Queue => {
+            if let Some(ws) = fleet.spec.work_source.as_deref() {
+                container.env.get_or_insert_with(Vec::new).push(EnvVar {
+                    name: "AGENT_FLEET_WORKSOURCE".to_string(),
+                    value: Some(ws.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+        Distribution::A2a => {
+            let ns = fleet.metadata.namespace.as_deref().unwrap_or("default");
+            let peer = format!(
+                "{}/fleets/{}/{}",
+                cfg.gateway_url.trim_end_matches('/'),
+                ns,
+                fleet_name
+            );
+            let args = container.args.get_or_insert_with(Vec::new);
+            args.push("--a2a-peer".to_string());
+            args.push(format!("worker={peer}"));
         }
     }
 }
@@ -1550,5 +1676,101 @@ mod tests {
         // the fleet's own workSource wins over the operator coordination default.
         assert_eq!(md["coordinationUrl"], "http://my-coordination.custom.svc/");
         assert_eq!(md["scalerAddress"], "scaler:9100");
+    }
+
+    // ── RFC 0022: coordinator ("main agent") rendering ──────────────────────
+
+    fn coord_template() -> AgentSpec {
+        AgentSpec {
+            mode: Mode::Reactive,
+            image: Some("ghcr.io/example/coordinator@sha256:def".into()),
+            instruction: Some("decompose and delegate".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn coordinatorless_fleet_renders_no_coordinator() {
+        let f = fleet(ScaleMode::Claim, None);
+        assert!(render_coordinator(&f, &cfg()).is_none());
+    }
+
+    #[test]
+    fn coordinator_renders_a_named_labeled_deployment() {
+        let mut f = fleet(ScaleMode::Claim, None);
+        f.spec.coordinator = Some(agent_api::Coordinator {
+            template: coord_template(),
+            replicas: Some(2),
+            distribution: None, // default queue
+        });
+        let r = render_coordinator(&f, &cfg()).expect("coordinator present").unwrap();
+        let Rendered::Deployment(dep) = r else {
+            panic!("coordinator renders a Deployment, got {r:?}");
+        };
+        // Named `<fleet>-coordinator`, distinct from the worker Deployment name.
+        assert_eq!(dep.metadata.name.as_deref(), Some("workers-coordinator"));
+        let spec = dep.spec.as_ref().unwrap();
+        assert_eq!(spec.replicas, Some(2));
+        // Pod labels carry the fleet-role + fleet labels AND the coordinator's own
+        // agent label (so the worker `agent=workers` selector never grabs it).
+        let labels = spec.template.metadata.as_ref().unwrap().labels.as_ref().unwrap();
+        assert_eq!(labels[FLEET_ROLE_LABEL], "coordinator");
+        assert_eq!(labels[FLEET_LABEL], "workers");
+        assert_eq!(labels["agentctl.dev/agent"], "workers-coordinator");
+        // Long-lived: coerced to reactive so it does not CrashLoop under a Deployment.
+        assert!(has_arg_pair(container_of(&spec.template), "--mode", "reactive"));
+        // Owned by the fleet (GC'd with it).
+        let owner = &dep.metadata.owner_references.as_ref().unwrap()[0];
+        assert_eq!(owner.kind, "AgentFleet");
+        assert_eq!(owner.name, "workers");
+    }
+
+    #[test]
+    fn coordinator_replicas_default_to_one() {
+        let mut f = fleet(ScaleMode::Claim, None);
+        f.spec.coordinator = Some(agent_api::Coordinator {
+            template: coord_template(),
+            replicas: None,
+            distribution: None,
+        });
+        let r = render_coordinator(&f, &cfg()).unwrap().unwrap();
+        let Rendered::Deployment(dep) = r else { unreachable!() };
+        assert_eq!(dep.spec.unwrap().replicas, Some(1), "singleton main agent by default");
+    }
+
+    #[test]
+    fn coordinator_queue_distribution_injects_worksource_env() {
+        let mut f = fleet(ScaleMode::Claim, None);
+        f.spec.work_source = Some("https://coord.svc/mcp".into());
+        f.spec.coordinator = Some(agent_api::Coordinator {
+            template: coord_template(),
+            replicas: None,
+            distribution: Some(agent_api::Distribution::Queue),
+        });
+        let r = render_coordinator(&f, &cfg()).unwrap().unwrap();
+        let Rendered::Deployment(dep) = r else { unreachable!() };
+        let c = container_of(&dep.spec.as_ref().unwrap().template);
+        let env = c.env.as_ref().unwrap();
+        let ws = env.iter().find(|e| e.name == "AGENT_FLEET_WORKSOURCE").expect("worksource env");
+        assert_eq!(ws.value.as_deref(), Some("https://coord.svc/mcp"));
+        // Queue mode does NOT add an --a2a-peer.
+        assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--a2a-peer"));
+    }
+
+    #[test]
+    fn coordinator_a2a_distribution_injects_worker_peer() {
+        let mut f = fleet(ScaleMode::Claim, None);
+        f.spec.coordinator = Some(agent_api::Coordinator {
+            template: coord_template(),
+            replicas: None,
+            distribution: Some(agent_api::Distribution::A2a),
+        });
+        let mut c = cfg();
+        c.gateway_url = "http://gw.svc:8080".into();
+        let r = render_coordinator(&f, &c).unwrap().unwrap();
+        let Rendered::Deployment(dep) = r else { unreachable!() };
+        let container = container_of(&dep.spec.as_ref().unwrap().template);
+        // `--a2a-peer worker=<gateway>/fleets/<ns>/<fleet>`.
+        assert!(has_arg_pair(container, "--a2a-peer", "worker=http://gw.svc:8080/fleets/agents/workers"));
     }
 }

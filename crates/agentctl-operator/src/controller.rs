@@ -34,9 +34,10 @@ use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
 use crate::{
-    fleet_selector_string, inject_api_token, inject_mcp_servers, inject_workflow, render_agent,
-    render_fleet, render_scaled_object, workflow_configmap_name, McpBinding, RenderConfig,
-    RenderError, Rendered, DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
+    coordinator_name, fleet_selector_string, inject_api_token, inject_mcp_servers, inject_workflow,
+    render_agent, render_coordinator, render_fleet, render_scaled_object, workflow_configmap_name,
+    McpBinding, RenderConfig, RenderError, Rendered, DEFAULT_COORDINATION_URL,
+    DEFAULT_SCALER_ADDRESS,
 };
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
@@ -775,6 +776,11 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 format!("{kind} workload applied"),
             )
             .await;
+            // The coordinator ("main agent", RFC 0022 §3) — a second owned workload
+            // when spec.coordinator is set. `None` ⇒ headless worker pool (unchanged);
+            // `Some(ready)` folds into the fleet readiness below (the fleet is Ready
+            // only when BOTH the worker pool and the coordinator are ready).
+            let coordinator_ready = reconcile_coordinator(ctx.as_ref(), ns, &fleet, &name).await?;
             // KEDA autoscaling for claim-mode fleets (RFC 0011). Gated +
             // best-effort: never hard-fails the Deployment reconcile (e.g. when
             // the KEDA CRDs are absent) — it only surfaces a condition.
@@ -784,13 +790,20 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             // and a claim fleet scaled to zero is Ready-but-idle. Populates the
             // long-declared status.readyReplicas / desiredReplicas.
             let scale_target = fleet_replica_count(&fleet, &rendered);
-            let condition = match workload_readiness(&ctx.client, ns, &name, kind, scale_target).await {
-                Some((ready, desired)) => {
-                    ready_replicas = Some(ready);
-                    desired_replicas = Some(desired);
-                    readiness_condition(observed, kind, ready, desired)
-                }
-                None => ready_condition(observed, kind),
+            let worker_condition =
+                match workload_readiness(&ctx.client, ns, &name, kind, scale_target).await {
+                    Some((ready, desired)) => {
+                        ready_replicas = Some(ready);
+                        desired_replicas = Some(desired);
+                        readiness_condition(observed, kind, ready, desired)
+                    }
+                    None => ready_condition(observed, kind),
+                };
+            // Fold the coordinator's readiness in: a not-ready coordinator holds the
+            // whole fleet Progressing (the front door is down even if workers are up).
+            let condition = match coordinator_ready {
+                Some(false) => coordinator_progressing_condition(observed),
+                _ => worker_condition,
             };
             (
                 condition,
@@ -840,6 +853,85 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
         debug!(fleet = %name, "fleet status unchanged; skipped patch");
     }
     Ok(Action::requeue(requeue_after()))
+}
+
+/// Render + apply the fleet's **coordinator** workload (RFC 0022 §3) when one is
+/// declared. Runs the SAME pre-apply pipeline as an agent (api-token, MCP tool
+/// bindings from the coordinator template, workload PKI), owns it by the fleet, and
+/// reads back its readiness. Returns `None` for a coordinatorless fleet, else
+/// `Some(ready)` where `ready` is whether the coordinator Deployment has its
+/// replicas up. A render error surfaces an event and reports `Some(false)`.
+async fn reconcile_coordinator(
+    ctx: &Ctx,
+    ns: &str,
+    fleet: &AgentFleet,
+    fleet_name: &str,
+) -> Result<Option<bool>, Error> {
+    let Some(coord) = fleet.spec.coordinator.as_ref() else {
+        return Ok(None);
+    };
+    let mut rendered = match render_coordinator(fleet, &ctx.render) {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            warn!(fleet = %fleet_name, error = %e, "coordinator render rejected");
+            publish_event(
+                ctx,
+                fleet,
+                EventType::Warning,
+                "RenderFailed",
+                "Coordinator",
+                format!("coordinator render rejected: {e}"),
+            )
+            .await;
+            return Ok(Some(false));
+        }
+        None => return Ok(None),
+    };
+    let coord_name = coordinator_name(fleet_name);
+    // Same secret-free wiring an agent pod gets: the in-cluster token (only in the
+    // control-plane namespace), and the coordinator template's own MCP tool servers
+    // (this is how `distribution: queue` reaches the coordination server — the
+    // coordinator template references it like any tool).
+    if ctx.api_token.should_inject(ns) {
+        inject_api_token(&mut rendered);
+    }
+    let bindings = resolve_mcp_bindings(&ctx.client, ns, &coord.template).await;
+    inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
+    // The Certificate/CA are owned by the fleet (GC'd with it), and named for the
+    // coordinator workload so the pod's serving-TLS mount resolves.
+    let owner = fleet
+        .controller_owner_ref(&())
+        .expect("AgentFleet CRs always carry name+uid on the live object");
+    if ctx.pki.enabled() {
+        crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &coord_name, &owner).await?;
+    }
+    apply_workload(&ctx.client, ns, &rendered).await?;
+    info!(fleet = %fleet_name, coordinator = %coord_name, "applied coordinator workload");
+    // Readiness: the coordinator is a Deployment of `replicas` (default 1). Ready
+    // when its ready replicas meet the desired count.
+    let desired_hint = coord.replicas.unwrap_or(1).max(1);
+    let ready = match workload_readiness(&ctx.client, ns, &coord_name, "Deployment", desired_hint)
+        .await
+    {
+        Some((ready, desired)) => desired > 0 && ready >= desired,
+        // No readback (unreadable status) — treat as applied; the next resync
+        // re-reads. Never blocks the fleet on a transient read.
+        None => true,
+    };
+    Ok(Some(ready))
+}
+
+/// The fleet-readiness condition when the coordinator is not yet up: the fleet is
+/// Progressing (its front door is down) even if the worker pool is ready.
+fn coordinator_progressing_condition(observed_generation: Option<i64>) -> Condition {
+    Condition {
+        type_: "Ready".to_string(),
+        status: "False".to_string(),
+        reason: Some("CoordinatorNotReady".to_string()),
+        message: Some("fleet coordinator (main agent) is not yet ready".to_string()),
+        observed_generation,
+        last_transition_time: None,
+    }
 }
 
 /// Best-effort: render + server-side-apply the KEDA `ScaledObject` for a
