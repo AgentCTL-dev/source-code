@@ -16,7 +16,7 @@ kind: Plugin
 metadata:
   name: agent
 spec:
-  version: v0.1.0
+  version: v1.0.0
   homepage: https://github.com/AgentCTL-dev/source-code
   shortDescription: Manage and drive agentctl Agents from kubectl.
   description: |
@@ -39,7 +39,7 @@ spec:
           os: linux
           arch: amd64
       # RELEASE PLACEHOLDER — filled at tag time.
-      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_linux_amd64.tar.gz
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v1.0.0/kubectl-agent_v1.0.0_linux_amd64.tar.gz
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
       bin: kubectl-agent
       files:
@@ -49,7 +49,7 @@ spec:
         matchLabels:
           os: linux
           arch: arm64
-      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_linux_arm64.tar.gz
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v1.0.0/kubectl-agent_v1.0.0_linux_arm64.tar.gz
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
       bin: kubectl-agent
       files:
@@ -59,7 +59,7 @@ spec:
         matchLabels:
           os: darwin
           arch: amd64
-      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_darwin_amd64.tar.gz
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v1.0.0/kubectl-agent_v1.0.0_darwin_amd64.tar.gz
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
       bin: kubectl-agent
       files:
@@ -69,7 +69,7 @@ spec:
         matchLabels:
           os: darwin
           arch: arm64
-      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_darwin_arm64.tar.gz
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v1.0.0/kubectl-agent_v1.0.0_darwin_arm64.tar.gz
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
       bin: kubectl-agent
       files:
@@ -79,7 +79,7 @@ spec:
         matchLabels:
           os: windows
           arch: amd64
-      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v0.1.0/kubectl-agent_v0.1.0_windows_amd64.zip
+      uri: https://github.com/AgentCTL-dev/source-code/releases/download/v1.0.0/kubectl-agent_v1.0.0_windows_amd64.zip
       sha256: "0000000000000000000000000000000000000000000000000000000000000000"
       bin: kubectl-agent.exe
       files:

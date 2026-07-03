@@ -14,7 +14,7 @@
 # (no openssl, no aws-lc-rs, no C toolchain) — matching the rest of agentctl.
 [package]
 name = "agentctl-e2e"
-version = "0.1.0"
+version = "1.0.0"
 description = "agentctl end-to-end and scale/resource benchmark harness: drives every plane against a real conformant agent (agentd) on kind, asserts via /metrics and CR-status oracles, and quantifies per-agent overhead, control-plane scaling trends, coordination throughput, and scale latency. Excluded from the workspace; needs a cluster to run."
 edition = "2021"
 rust-version = "1.89"

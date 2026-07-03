@@ -1,6 +1,6 @@
 [package]
 name = "agentctl-cli"
-version = "0.1.0"
+version = "1.0.0"
 description = "agentctl CLI and kubectl-agent plugin: inspect agents over the Kubernetes API and drive their management verbs."
 edition.workspace = true
 rust-version.workspace = true

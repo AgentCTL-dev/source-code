@@ -18,7 +18,7 @@ bundle/
     agents.agents.x-k8s.io.yaml            # Agent CRD       (copied from charts/agentctl/crds)
     agentfleets.agents.x-k8s.io.yaml       # AgentFleet CRD
     modelpools.agents.x-k8s.io.yaml        # ModelPool CRD
-    agentctl.clusterserviceversion.yaml    # the CSV (agentctl.v0.1.0)
+    agentctl.clusterserviceversion.yaml    # the CSV (agentctl.v1.0.0)
   metadata/
     annotations.yaml                       # bundle annotations (package/channels/dirs)
   bundle.Dockerfile                        # scratch bundle image (LABELs == annotations)
@@ -26,8 +26,8 @@ bundle/
 ```
 
 - Package: `agentctl`  Channel: `alpha` (default `alpha`)
-- CSV: `agentctl.v0.1.0` (version `0.1.0`, maturity `alpha`, minKubeVersion `1.31.0`)
-- Operator image: `ghcr.io/agentctl-dev/operator:0.1.0` (other planes: `apiserver`,
+- CSV: `agentctl.v1.0.0` (version `1.0.0`, maturity `alpha`, minKubeVersion `1.31.0`)
+- Operator image: `ghcr.io/agentctl-dev/operator:1.0.0` (other planes: `apiserver`,
   `gateway`, `modelgateway`, `admission` under `ghcr.io/agentctl-dev/`)
 
 ## Build
@@ -37,8 +37,8 @@ is this `bundle/` directory.
 
 ```bash
 # from the repo root
-docker build -f bundle/bundle.Dockerfile -t ghcr.io/agentctl-dev/agentctl-bundle:0.1.0 bundle
-docker push ghcr.io/agentctl-dev/agentctl-bundle:0.1.0
+docker build -f bundle/bundle.Dockerfile -t ghcr.io/agentctl-dev/agentctl-bundle:1.0.0 bundle
+docker push ghcr.io/agentctl-dev/agentctl-bundle:1.0.0
 ```
 
 ## Validate
@@ -52,7 +52,7 @@ operator-sdk bundle validate ./bundle \
   --select-optional suite=operatorframework
 
 # Run on a cluster with OLM installed:
-operator-sdk run bundle ghcr.io/agentctl-dev/agentctl-bundle:0.1.0 \
+operator-sdk run bundle ghcr.io/agentctl-dev/agentctl-bundle:1.0.0 \
   --namespace agentctl-system
 ```
 
