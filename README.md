@@ -385,6 +385,7 @@ default). OTLP tracing is emitted when configured.
 
 | Doc | What's in it |
 |---|---|
+| [docs/use-cases.md](docs/use-cases.md) | Worked examples — startup, small business, AI engineer, platform/data/ops — with apply-ready `agentd` manifests. |
 | [docs/architecture.md](docs/architecture.md) | Component topology and per-flow sequence diagrams. |
 | [docs/security.md](docs/security.md) | Identity, isolation, the trifecta gate, and the PKI. |
 | [docs/operations.md](docs/operations.md) | Day-2 operations: management verbs, upgrades, tuning. |
