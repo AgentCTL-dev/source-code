@@ -15,11 +15,9 @@ on:
   push:
     branches: [main]
     paths:
+      # The site is self-contained (no docs single-sourcing); deep docs/RFCs link
+      # to the repo, so only web/ changes need a rebuild.
       - "web/**"
-      - "docs/**"
-      - "contract/**"
-      - "rfcs/**"
-      - "charts/**"
       - ".github/workflows/pages.yml"
   pull_request:
     paths:

@@ -4,23 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "sync-docs": "node scripts/sync-docs.mjs",
-    "prebuild": "node scripts/sync-docs.mjs",
-    "predev": "node scripts/sync-docs.mjs",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "postinstall": "fumadocs-mdx"
+    "start": "next start"
   },
   "dependencies": {
     "next": "^15.3.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "fumadocs-ui": "15.8.5",
-    "fumadocs-core": "15.8.5",
-    "fumadocs-mdx": "12.0.3",
-    "motion": "^12.0.0",
-    "mermaid": "^11.0.0",
     "next-themes": "^0.4.6",
     "lucide-react": "^0.475.0",
     "class-variance-authority": "^0.7.1",
@@ -28,11 +19,6 @@
     "tailwind-merge": "^3.0.0",
     "@radix-ui/react-slot": "^1.1.0",
     "@radix-ui/react-tabs": "^1.1.0",
-    "@radix-ui/react-accordion": "^1.2.0",
-    "@radix-ui/react-tooltip": "^1.1.0",
-    "@radix-ui/react-navigation-menu": "^1.2.0",
-    "@radix-ui/react-dialog": "^1.1.0",
-    "@radix-ui/react-scroll-area": "^1.2.0",
     "@radix-ui/react-separator": "^1.1.0"
   },
   "devDependencies": {
@@ -40,13 +26,8 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@types/mdx": "^2.0.13",
-    "@types/mdast": "^4.0.4",
     "@tailwindcss/postcss": "^4.0.0",
     "tailwindcss": "^4.0.0",
-    "tw-animate-css": "^1.0.0",
-    "remark-gfm": "^4.0.0",
-    "shiki": "^3.13.0",
-    "unist-util-visit": "^5.0.0"
+    "tw-animate-css": "^1.0.0"
   }
 }

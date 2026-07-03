@@ -1,8 +1,4 @@
 @import "tailwindcss";
-/* Map Fumadocs' --color-fd-* tokens onto the shadcn CSS variables below, so the
-   docs UI and the shadcn landing share one palette. */
-@import "fumadocs-ui/css/shadcn.css";
-@import "fumadocs-ui/css/preset.css";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
