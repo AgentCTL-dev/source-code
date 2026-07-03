@@ -271,11 +271,27 @@ async fn build_signed_card(
     base_url: &str,
     kind: Option<&str>,
 ) -> Result<Value, String> {
-    let pod_ip = resolve(&state.client, ns, name).await?;
-    // The agent serves its manifest as the `agent://capabilities` MCP resource
-    // (contract 2.0); read it over the agent's mTLS `/mcp` (our client cert
-    // mints Management). `resources/read` returns `contents[0].text` = the
-    // manifest JSON.
+    // Best-effort: read the RICH manifest from a live pod; fall back to a STATIC card
+    // projected from the CR identity when no replica is Running, so the card is
+    // servable at `replicas:0` (a claim fleet idles at zero — its card, discovery, and
+    // task-acceptance must NOT depend on a live pod; RFC 0014 §3.2). We never 502 a
+    // card merely because the fleet is scaled down.
+    let manifest = match resolve(&state.client, ns, name).await {
+        Ok(pod_ip) => fetch_capabilities(state, &pod_ip).await.ok(),
+        Err(e) => {
+            tracing::debug!(%ns, %name, error = %e, "no live replica; projecting a static card");
+            None
+        }
+    };
+    let mut card = project_card(manifest.as_ref(), ns, name, base_url, kind);
+    state.signer.sign_card(&mut card);
+    Ok(card)
+}
+
+/// Read the `agent://capabilities` manifest from a live pod over its mTLS `/mcp`
+/// (contract 2.0; our client cert mints Management). `resources/read` returns
+/// `contents[0].text` = the manifest JSON.
+async fn fetch_capabilities(state: &AppState, pod_ip: &str) -> Result<Value, String> {
     let url = format!("https://{pod_ip}:8443/mcp");
     let read = json!({
         "jsonrpc": "2.0", "id": 1, "method": "resources/read",
@@ -298,14 +314,7 @@ async fn build_signed_card(
         .pointer("/result/contents/0/text")
         .and_then(Value::as_str)
         .ok_or("capabilities resource has no contents[0].text")?;
-    let manifest: Value =
-        serde_json::from_str(text).map_err(|e| format!("parse capabilities manifest: {e}"))?;
-    let mut card = project_card(&manifest, ns, name, base_url);
-    if let Some(k) = kind {
-        card["x-agentctl-kind"] = json!(k);
-    }
-    state.signer.sign_card(&mut card);
-    Ok(card)
+    serde_json::from_str(text).map_err(|e| format!("parse capabilities manifest: {e}"))
 }
 
 /// Project the signed A2A Agent Card for an `Agent` CR.
@@ -777,32 +786,59 @@ fn federation_peers(raw: &str) -> Vec<String> {
 /// One mesh-registry row for a discovered CR (`Agent` / `AgentFleet`): identity,
 /// the projected Agent Card URL, and the optional run mode (`None` ⇒ JSON null).
 fn registry_row(kind: &str, ns: &str, name: &str, mode: Option<&str>, base_url: &str) -> Value {
+    // A fleet's card + RPC live under /fleets/...; an agent's under /agents/... —
+    // discovery must point consumers at the surface matching the kind, or the
+    // x-agentctl-kind fleet marker is stripped by the /agents route.
+    let seg = if kind == "AgentFleet" { "fleets" } else { "agents" };
     json!({
         "kind": kind,
         "namespace": ns,
         "name": name,
-        "cardUrl": format!("{base_url}/agents/{ns}/{name}/.well-known/agent-card.json"),
+        "cardUrl": format!("{base_url}/{seg}/{ns}/{name}/.well-known/agent-card.json"),
         "mode": mode,
     })
 }
 
-/// Project a minimal A2A Agent Card from a capabilities manifest. The version is
-/// read from the neutral `agent_version` key.
-fn project_card(manifest: &Value, ns: &str, name: &str, base_url: &str) -> Value {
+/// Project a minimal A2A Agent Card. With a live capabilities `manifest` the card
+/// carries the real version + advertised streaming; WITHOUT one (a fleet idling at
+/// `replicas:0`) it projects a valid STATIC card from the CR identity — the card
+/// must be servable at rest (RFC 0014 §3.2). `kind` selects the endpoint path
+/// (`/fleets/...` for a fleet, `/agents/...` otherwise) and is echoed as
+/// `x-agentctl-kind` so a consumer routes follow-up RPC to the right surface.
+fn project_card(
+    manifest: Option<&Value>,
+    ns: &str,
+    name: &str,
+    base_url: &str,
+    kind: Option<&str>,
+) -> Value {
     let version = manifest
-        .get("agent_version")
+        .and_then(|m| m.get("agent_version"))
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    json!({
+    // Advertise streaming from the live manifest when present; at rest the gateway
+    // still proxies message/stream, so default TRUE — never under-advertise a
+    // capability the endpoint actually offers (the old stub hardcoded false, which
+    // contradicted both the agent's manifest and the gateway).
+    let streaming = manifest
+        .and_then(|m| m.pointer("/surfaces/a2a/streaming"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let seg = if kind == Some("AgentFleet") { "fleets" } else { "agents" };
+    let mut card = json!({
         "protocolVersion": "1.0",
         "name": format!("{ns}/{name}"),
-        "url": format!("{base_url}/agents/{ns}/{name}"),
+        "url": format!("{base_url}/{seg}/{ns}/{name}"),
         "version": version,
-        "capabilities": { "streaming": false },
+        "capabilities": { "streaming": streaming },
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
         "skills": []
-    })
+    });
+    if let Some(k) = kind {
+        card["x-agentctl-kind"] = json!(k);
+    }
+    card
 }
 
 /// A JSON-RPC 2.0 error envelope, preserving the request id.
@@ -1054,24 +1090,40 @@ mod tests {
     }
 
     #[test]
-    fn project_card_reads_neutral_version_and_builds_url() {
-        let manifest = json!({ "agent_version": "1.2.3", "contract_version": "1.0" });
-        let card = project_card(&manifest, "team-a", "echo", "https://gw.example");
+    fn project_card_reads_neutral_version_and_streaming() {
+        let manifest = json!({
+            "agent_version": "2.1.0",
+            "surfaces": { "a2a": { "streaming": true } }
+        });
+        let card = project_card(Some(&manifest), "team-a", "echo", "https://gw.example", None);
 
         assert_eq!(card["protocolVersion"], "1.0");
         assert_eq!(card["name"], "team-a/echo");
         assert_eq!(card["url"], "https://gw.example/agents/team-a/echo");
-        assert_eq!(card["version"], "1.2.3");
-        assert_eq!(card["capabilities"]["streaming"], false);
+        assert_eq!(card["version"], "2.1.0");
+        // Streaming is read from the manifest (the old stub hardcoded false).
+        assert_eq!(card["capabilities"]["streaming"], true);
         assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
-        assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
         assert_eq!(card["skills"], json!([]));
+        assert!(card.get("x-agentctl-kind").is_none());
     }
 
     #[test]
     fn project_card_defaults_version_when_absent() {
-        let card = project_card(&json!({}), "ns", "a", "http://h");
+        let card = project_card(Some(&json!({})), "ns", "a", "http://h", None);
         assert_eq!(card["version"], "unknown");
+    }
+
+    #[test]
+    fn fleet_card_is_servable_at_rest_from_static_facts() {
+        // No live manifest (replicas:0) → a VALID static fleet card: /fleets url,
+        // streaming advertised (the gateway proxies it), and the kind marker set.
+        let card = project_card(None, "team-a", "crawlers", "https://gw.example", Some("AgentFleet"));
+        assert_eq!(card["name"], "team-a/crawlers");
+        assert_eq!(card["url"], "https://gw.example/fleets/team-a/crawlers");
+        assert_eq!(card["version"], "unknown");
+        assert_eq!(card["capabilities"]["streaming"], true);
+        assert_eq!(card["x-agentctl-kind"], "AgentFleet");
     }
 
     #[test]
@@ -1099,9 +1151,10 @@ mod tests {
         assert_eq!(row["kind"], "AgentFleet");
         assert_eq!(row["namespace"], "ns");
         assert_eq!(row["name"], "fleet-a");
+        // A fleet row points at the /fleets/... surface (not /agents/...).
         assert_eq!(
             row["cardUrl"],
-            "http://h:8080/agents/ns/fleet-a/.well-known/agent-card.json"
+            "http://h:8080/fleets/ns/fleet-a/.well-known/agent-card.json"
         );
         assert_eq!(row["mode"], Value::Null);
     }
