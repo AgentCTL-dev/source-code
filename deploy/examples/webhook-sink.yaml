@@ -1,4 +1,4 @@
-# A minimal webhook receiver for the A2A push-notification e2e (RFC 0013): it
+# A minimal webhook receiver for the A2A push-notification examples: it
 # logs every POST body to stdout so we can confirm the gateway delivered a task.
 # Dev/test only — NOT part of the control plane.
 apiVersion: apps/v1

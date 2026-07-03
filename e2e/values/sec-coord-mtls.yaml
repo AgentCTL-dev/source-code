@@ -1,4 +1,4 @@
-# Security gate: scaler<->coordination mTLS (RFC 0011).
+# Security gate: scaler<->coordination mTLS.
 # Flips charts/agentctl/values.yaml `coordination.mtls.enabled`. The chart issues
 # a serving cert for a second coordination listener on :8443 and a client cert
 # the scaler presents (both off the agentctl CA); the coordination server

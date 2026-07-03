@@ -40,13 +40,12 @@ spec:
           spec:
             description: |-
               One logical agent: an instruction + bindings rendered to a workload whose
-              shape follows `mode` (RFC 0003 §5: once→Job, schedule→CronJob,
-              loop/reactive→Deployment).
+              shape follows `mode` (once→Job, schedule→CronJob, loop/reactive→Deployment).
             properties:
               access:
                 description: |-
-                  Declarative per-agent access policy (authn/authz at the A2A gateway). In
-                  v1 `public` is documentation-only; `oidc` configures JWT verification and
+                  Declarative per-agent access policy (authn/authz at the A2A gateway).
+                  `public` is documentation-only; `oidc` configures JWT verification and
                   claim-based authorization for inbound A2A calls.
                 nullable: true
                 properties:
@@ -95,15 +94,15 @@ spec:
                     type: object
                   public:
                     description: |-
-                      Whether this agent is served publicly via the A2A gateway. **Doc-only in
-                      v1** (no enforcement yet); records intent.
+                      Whether this agent is served publicly via the A2A gateway. Documentation-
+                      only (no enforcement yet); records intent.
                     nullable: true
                     type: boolean
                 type: object
               classRef:
                 description: |-
-                  Reference to an `AgentClass` (RFC 0004) supplying the ops profile +
-                  image. Mutually exclusive with `image`.
+                  Reference to an `AgentClass` supplying the ops profile + image. Mutually
+                  exclusive with `image`.
                 nullable: true
                 properties:
                   name:
@@ -113,23 +112,23 @@ spec:
                 type: object
               egress:
                 description: |-
-                  **Declared capability** (RFC 0007): the agent requests outbound network
-                  egress. The admission webhook gates this — combined with `exec` and
-                  `secrets` it forms the lethal trifecta and triggers the override gate.
+                  **Declared capability**: the agent requests outbound network egress. The
+                  admission webhook gates this — combined with `exec` and `secrets` it forms
+                  the lethal trifecta and triggers the override gate.
                 nullable: true
                 type: boolean
               exec:
                 description: |-
-                  **Declared capability** (RFC 0007): the agent requests in-sandbox command
-                  execution. The admission webhook gates this — it is a privileged
-                  capability and one leg of the lethal trifecta, never granted implicitly.
+                  **Declared capability**: the agent requests in-sandbox command execution.
+                  The admission webhook gates this — it is a privileged capability and one
+                  leg of the lethal trifecta, never granted implicitly.
                 nullable: true
                 type: boolean
               image:
                 description: |-
                   The conformant-agent image to run. **Required iff `classRef` is unset;
-                  forbidden when `classRef` is set** (enforced by CEL/admission, RFC 0003
-                  §7 / RFC 0007). A classless `Agent` names its own image here.
+                  forbidden when `classRef` is set** (enforced by CEL/admission). A classless
+                  `Agent` names its own image here.
                 nullable: true
                 type: string
               instruction:
@@ -137,7 +136,7 @@ spec:
                 nullable: true
                 type: string
               intelligenceRef:
-                description: Reference to an `IntelligenceService`/ModelPool (RFC 0004/0012).
+                description: Reference to an `IntelligenceService`/`ModelPool`.
                 nullable: true
                 properties:
                   name:
@@ -185,7 +184,7 @@ spec:
                 - interval
                 type: object
               mcpServerSetRefs:
-                description: Reusable MCP server bundles (RFC 0004 `MCPServerSet`).
+                description: Reusable MCP server bundles (`MCPServerSet`).
                 items:
                   description: A name-only reference to a sibling resource in the same namespace.
                   properties:
@@ -212,9 +211,9 @@ spec:
                 type: string
               modelPool:
                 description: |-
-                  **Declared capability** (RFC 0007): the `ModelPool` (RFC 0012) this agent
-                  binds for model access. The admission webhook validates the binding (the
-                  pool exists / is permitted for this tenant).
+                  **Declared capability**: the `ModelPool` this agent binds for model access.
+                  The admission webhook validates the binding (the pool exists / is permitted
+                  for this tenant).
                 nullable: true
                 type: string
               schedule:
@@ -231,9 +230,9 @@ spec:
                 type: object
               secrets:
                 description: |-
-                  **Declared capability** (RFC 0007): the names of namespace-local `Secret`s
-                  the agent may read. The admission webhook validates each requested name
-                  against policy; access to untrusted private data is a trifecta leg.
+                  **Declared capability**: the names of namespace-local `Secret`s the agent
+                  may read. The admission webhook validates each requested name against
+                  policy; access to untrusted private data is a trifecta leg.
                 items:
                   type: string
                 nullable: true
@@ -244,7 +243,7 @@ spec:
                   type: string
                 type: array
               substrate:
-                description: Substrate tier (RFC 0002). Names are the canonical tier ids.
+                description: Substrate tier. Names are the canonical tier ids.
                 enum:
                 - stock-unix
                 - kata-hybrid
@@ -253,9 +252,9 @@ spec:
                 type: string
               surfaces:
                 description: |-
-                  Which control-plane surfaces to expose (RFC 0003 §3). The operator drives
-                  only what the agent actually advertises in its manifest (graceful
-                  degradation), intersected with this desired set.
+                  Which control-plane surfaces to expose. The operator drives only what the
+                  agent actually advertises in its manifest (graceful degradation),
+                  intersected with this desired set.
                 nullable: true
                 properties:
                   a2a:
@@ -270,10 +269,10 @@ spec:
                 type: object
               workflow:
                 description: |-
-                  The workflow graph to drive (agentd v2 `--mode workflow`). Required when
-                  `mode: workflow`; also valid alongside `mode: reactive` (a suspend/resume
-                  daemon graph). Source is inline JSON or a ConfigMap key; the operator
-                  materializes it to a mounted file passed as `--workflow <path>`.
+                  The workflow graph to drive. Required when `mode: workflow`; also valid
+                  alongside `mode: reactive` (a suspend/resume daemon graph). Source is
+                  inline JSON or a ConfigMap key; the operator materializes it to a mounted
+                  file passed as `--workflow <path>`.
                 nullable: true
                 properties:
                   configMapKeyRef:
@@ -311,18 +310,18 @@ spec:
           status:
             description: |-
               `Agent.status` — a curated projection of the live capabilities manifest +
-              health (RFC 0003 §6), never a raw manifest dump.
+              health, never a raw manifest dump.
             nullable: true
             properties:
               conditions:
                 description: |-
-                  The conditions taxonomy (RFC 0003 §6.2): `Validated`, `Rendered`,
-                  `Ready`, `Draining`, `Degraded`, plus advisory `TrifectaUnionObserved`.
+                  The conditions taxonomy: `Validated`, `Rendered`, `Ready`, `Draining`,
+                  `Degraded`, plus advisory `TrifectaUnionObserved`.
                 items:
-                  description: A status condition (RFC 0003 §6.2). Mirrors `metav1.Condition` shape.
+                  description: A status condition. Mirrors `metav1.Condition` shape.
                   properties:
                     lastTransitionTime:
-                      description: RFC 3339 timestamp.
+                      description: An ISO 8601 / UTC timestamp.
                       nullable: true
                       type: string
                     message:
@@ -382,7 +381,7 @@ spec:
                     type: object
                 type: object
               observedGeneration:
-                description: The `.metadata.generation` this status reflects (hot-loop guard, RFC 0006).
+                description: The `.metadata.generation` this status reflects (hot-loop guard).
                 format: int64
                 nullable: true
                 type: integer

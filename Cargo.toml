@@ -1,13 +1,8 @@
 # agentctl workspace — the Kubernetes control plane for fleets of conformant agents.
 #
-# Per agentctl RFC 0001 (stack & repo decision record): Rust for all components,
-# the `kube-rs` ecosystem, one Cargo workspace. The data plane is ANY agent that
-# conforms to the Agent Control Contract (see `contract/`); `agent` is the
-# reference implementation, never a dependency (principle P0).
-#
-# Crates are added to `members` as they land. The first foundation crate is
-# `agent-contract-client` — the typed, hand-written-where-codegen-can't client for
-# the contract (agentctl RFC 0018).
+# Rust for every component, on the `kube-rs` ecosystem, in one Cargo workspace. The
+# data plane is ANY agent that conforms to the Agent Control Contract (see
+# `contract/`); `agentd` is the reference implementation, never a dependency.
 [workspace]
 resolver = "2"
 members = [
@@ -27,7 +22,7 @@ members = [
     "crates/agentctl-scaler",
 ]
 
-# The end-to-end + scale-benchmark harness (agentctl Phase 4) is DELIBERATELY
+# The end-to-end + scale-benchmark harness is DELIBERATELY
 # excluded from the workspace: it is a cluster-driving tool (kube-rs + kubectl +
 # helm shell-outs) whose binaries assert against a live cluster. Keeping it out of
 # `[workspace].members` means `cargo test --workspace` never compiles or runs it,

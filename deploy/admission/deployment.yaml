@@ -1,4 +1,4 @@
-# The validating admission webhook (RFC 0007): enforces the cross-object + policy
+# The validating admission webhook: enforces the cross-object + policy
 # rules CEL can't — the lethal-trifecta override gate, an image-registry
 # allow-list, and "referenced ModelPool exists". Serves HTTPS on :8443 with a
 # cert from the agentctl-admission-tls Secret (see install.sh).

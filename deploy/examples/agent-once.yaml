@@ -1,8 +1,5 @@
-# A minimal once-mode Agent. The operator renders this to a Job on the stock-unix
-# substrate (RFC 0002/0003). The image here is a placeholder — there is no real
-# conformant-agent image in this demo, so the Job's pod will not run an actual
-# agent; the point is that the operator reconciles the CR into the right workload
-# and patches Agent.status.
+# A minimal once-mode Agent: the operator renders it to a Job, issues its serving
+# certificate, and projects the agent's live capabilities into Agent.status.
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: Agent
 metadata:
@@ -10,5 +7,5 @@ metadata:
   namespace: default
 spec:
   mode: once
-  image: busybox:1.36
+  image: agentd:1.0.0
   instruction: "Read /data/report.md and write a 3-bullet summary to /data/summary.md"

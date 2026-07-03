@@ -10,10 +10,11 @@ Parameters
 Licensor:             Andrii Tsok
 
 Licensed Work:        The agentctl control plane — the agentctl-operator,
-                      agentctl-apiserver, agentctl-gateway,
-                      agentctl-modelgateway, agentctl-admission, and
-                      agentctl-node-agent crates of this repository, and their
-                      container images and deployment manifests.
+                      agentctl-apiserver, agentctl-gateway, agentctl-modelgateway,
+                      agentctl-mcpgateway, agentctl-admission, agentctl-coordination,
+                      agentctl-scaler, and agentctl-telemetry crates of this
+                      repository, and their container images and deployment
+                      manifests.
                       The Licensed Work is (c) 2026 Andrii Tsok.
 
 Additional Use Grant: You may use the Licensed Work for development, testing,

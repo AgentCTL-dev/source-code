@@ -1,4 +1,4 @@
-# Runtime image for the KEDA external scaler (RFC 0011). Distroless nonroot;
+# Runtime image for the KEDA external scaler. Distroless nonroot;
 # serves the KEDA externalscaler gRPC API on :9100 and a small HTTP surface
 # (/healthz, /readyz, /metrics) on :8080.
 #

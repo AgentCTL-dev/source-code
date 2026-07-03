@@ -1,7 +1,7 @@
 [package]
 name = "agent-contract-client"
 version = "0.1.0"
-description = "Typed client for the Agent Control Contract (capabilities manifest, surfaces discovery, version negotiation). agentctl RFC 0018."
+description = "Typed client for the Agent Control Contract: the capabilities manifest, surface discovery, and version negotiation."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

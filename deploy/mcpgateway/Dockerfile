@@ -1,4 +1,4 @@
-# Runtime image for the MCPGateway (RFC 0019 / 0021 §9). Distroless nonroot; serves
+# Runtime image for the MCPGateway. Distroless nonroot; serves
 # the tool-plane broker (attest source-IP -> scope to MCPServerSet -> inject
 # credential -> forward) on :8080 (health) + :8443 (mTLS).
 #

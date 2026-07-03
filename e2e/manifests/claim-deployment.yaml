@@ -1,8 +1,7 @@
 # e2e: the REAL agentd<->coordination claim loop (contract 2.0).
 #
-# Contract 2.0 retired the v1 stdio->HTTP bridge: agentd speaks HTTPS MCP natively,
-# so a claim-mode agent dials the coordination server's /mcp DIRECTLY (no bridge
-# sidecar, no hostPath socket, no unix intelligence). The coordination server serves
+# agentd speaks HTTPS MCP natively, so a claim-mode agent dials the coordination
+# server's /mcp DIRECTLY. The coordination server serves
 # work.* on its /mcp endpoint and attests the caller by source IP
 # (coordination.attestIdentity), so the claim is bound to the real pod:
 #

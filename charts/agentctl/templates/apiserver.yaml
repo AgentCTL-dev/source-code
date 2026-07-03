@@ -1,6 +1,6 @@
 {{- if .Values.apiserver.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
-# RBAC for the aggregated apiserver (RFC 0009): delegated authz (SAR/TokenReview)
+# RBAC for the aggregated apiserver: delegated authz (SAR/TokenReview)
 # + read the front-proxy CA from kube-system.
 apiVersion: v1
 kind: ServiceAccount

@@ -87,7 +87,7 @@ fn full_features_capture_has_surfaces_on() {
     assert_eq!(a2a.version, "1.0");
     assert!(a2a.streaming);
     assert_eq!(a2a.methods.len(), 6);
-    // Contract 2.0: the A2A methods are the bare PascalCase spec-§9 binding.
+    // Contract 2.0: the A2A methods are the bare PascalCase binding.
     assert!(a2a.methods.iter().any(|x| x == "SendMessage"));
 
     assert_eq!(m.identity.namespace.as_deref(), Some("agents"));

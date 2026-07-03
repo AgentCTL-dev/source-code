@@ -1,4 +1,4 @@
-# agentctl end-to-end + scale/resource benchmark harness (Phase 4).
+# agentctl end-to-end + scale/resource benchmark harness.
 #
 # Hybrid harness: bash/Make does cluster bringup + image build/load + helm
 # install; the heavy lifting (functional scenarios + benchmark sweeps) lives in

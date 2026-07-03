@@ -1,12 +1,12 @@
 {{- if .Values.networkPolicies.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
 {{- $agentNamespaces := .Values.networkPolicies.agentNamespaces | default (list "default") }}
-# Defence-in-depth network isolation (RFC 0015). Two scopes:
+# Defence-in-depth network isolation. Two scopes:
 #   1. Control plane (release namespace {{ $ns }}): a namespace-wide
 #      default-deny-ingress + narrow allows for the sanctioned flows.
 #   2. Data plane (each of .Values.networkPolicies.agentNamespaces): agent pods
-#      get a default-deny + sanctioned egress (DNS + control plane) and ingress
-#      (control plane only) — making the "networkless agent" claim real.
+#      get a default-deny + sanctioned egress (DNS + control-plane gateways) and
+#      ingress (control plane only) — the tenancy boundary.
 # NOTE: enforced ONLY by a NetworkPolicy-capable CNI (Calico/Cilium). kind's
 # default kindnet does NOT enforce these — they render correctly but are inert
 # there, and take effect on a real policy cluster.
@@ -84,8 +84,7 @@ spec:
     - ports:
         - { protocol: TCP, port: 8080 }
 {{- end }}
-# NOTE (contract 2.0): the node-agent ingress policy is gone with the DaemonSet.
-# Agents now SERVE their mTLS surface on :8443 in TENANT namespaces and are
+# NOTE: agents SERVE their mTLS surface on :8443 in TENANT namespaces and are
 # reached directly by the apiserver + A2A gateway. The per-tenant-namespace agent
 # policies below (default-deny + gateway/DNS egress + control-plane-only ingress)
 # are the tenancy boundary. They are rendered here for the STATICALLY listed
@@ -147,7 +146,7 @@ spec:
         - { protocol: TCP, port: 5432 }
 {{- end }}
 # -----------------------------------------------------------------------------
-# Data plane: per-tenant-namespace agent isolation (contract 2.0). An agent pod
+# Data plane: per-tenant-namespace agent isolation. An agent pod
 # may egress ONLY to DNS and the control-plane GATEWAYS — the ModelGateway
 # (intelligence), the MCPGateway (tools), the A2A gateway (delegation-out), and
 # the coordination server (claims) — never the internet or other tenants — and
@@ -193,8 +192,8 @@ spec:
     # The control-plane GATEWAYS ONLY, scoped to those specific pods
     # (podSelector) — NOT any control-plane pod. Defense in depth under hostile
     # multi-tenancy: a bare namespaceSelector would also let a tenant agent reach
-    # e.g. the admission webhook; the podSelector forbids that. Ports 443 (the v2
-    # HTTPS listeners the agent dials keyless) + 8080 (coordination/legacy plain).
+    # e.g. the admission webhook; the podSelector forbids that. Ports 443 (the
+    # HTTPS listeners the agent dials keyless) + 8080 (coordination, plaintext).
     - to:
         - namespaceSelector:
             matchLabels:
@@ -205,8 +204,8 @@ spec:
                 operator: In
                 values: ["agentctl-modelgateway", "agentctl-mcpgateway", "agentctl-gateway", "agentctl-coordination"]
       ports:
-        - { protocol: TCP, port: 443 }   # ModelGateway + MCPGateway (v2 HTTPS)
-        - { protocol: TCP, port: 8080 }  # coordination / legacy plaintext
+        - { protocol: TCP, port: 443 }   # ModelGateway + MCPGateway (HTTPS)
+        - { protocol: TCP, port: 8080 }  # coordination (plaintext)
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane
 # (no cross-tenant pod-to-pod traffic).

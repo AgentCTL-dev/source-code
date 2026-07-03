@@ -1,6 +1,6 @@
 {{- if .Values.mcpgateway.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
-# The MCPGateway (RFC 0019): the tool-plane broker. Networkless agents hold NO
+# The MCPGateway: the tool-plane broker. Agents hold NO
 # tool-server credential; the gateway attests the calling agent by source IP,
 # scopes it to the servers of the MCPServerSets its Agent CR binds, injects each
 # server's credential (from a Secret, held off-pod), and forwards MCP. RBAC: read

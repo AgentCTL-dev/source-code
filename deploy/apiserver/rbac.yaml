@@ -1,4 +1,4 @@
-# RBAC for the aggregated apiserver (RFC 0009): delegated authz (SAR/TokenReview)
+# RBAC for the aggregated apiserver: delegated authz (SAR/TokenReview)
 # + read the front-proxy CA from kube-system.
 apiVersion: v1
 kind: ServiceAccount
@@ -24,7 +24,7 @@ subjects:
     name: agentctl-apiserver
     namespace: agentctl-system
 ---
-# Resolve Agent → pod → node-agent (the management-verb routing).
+# Resolve Agent → pod so management verbs can dial the pod directly.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

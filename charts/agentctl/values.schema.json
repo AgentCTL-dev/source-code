@@ -222,13 +222,6 @@
         }
       }
     },
-    "substrate": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "socketRoot": { "type": "string" }
-      }
-    },
     "resources": { "type": "object" }
   }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "agentctl-admission"
 version = "0.1.0"
-description = "agentctl admission plane (RFC 0007): the validating webhook for what CEL can't express — cross-object lookups, policy (image registry allow-list), and the lethal-trifecta override gate. Hand-rolled in Rust (axum + rustls); agentctl is Rust-only."
+description = "agentctl admission plane: the validating and mutating webhooks for what CEL cannot express — cross-object lookups, the image-registry allow-list, and the lethal-trifecta opt-in gate. Rust (axum + rustls)."
 edition.workspace = true
 rust-version.workspace = true
 license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)

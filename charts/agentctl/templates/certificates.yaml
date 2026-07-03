@@ -114,7 +114,7 @@ spec:
 {{- end }}
 {{- if .Values.mcpgateway.enabled }}
 ---
-# MCPGateway serving cert (RFC 0019): agents dial their rendered
+# MCPGateway serving cert: agents dial their rendered
 # --mcp <name>=https://agentctl-mcpgateway.../s/<name> keyless — this cert
 # chains to the same cluster CA the agent trusts via --tls-ca.
 apiVersion: cert-manager.io/v1
@@ -136,9 +136,9 @@ spec:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
 {{- end }}
 ---
-# Control-plane client cert: the apiserver + A2A gateway present this to an
-# AGENT's mTLS /mcp to mint the Management origin (contract 2.0 — direct to the
-# pod; the node-agent hop is retired). Its ca.crt is the cluster CA.
+# Control-plane client cert: the apiserver + A2A gateway present this directly to
+# an AGENT pod's mTLS /mcp to mint the Management origin. Its ca.crt is the
+# cluster CA.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -156,7 +156,7 @@ spec:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
 {{- if and .Values.gateway.enabled .Values.trustedProxy.enabled }}
 ---
-# TRUSTED-PROXY (RFC 0013): serving cert for the gateway's mTLS :8443 listener, so
+# TRUSTED-PROXY: serving cert for the gateway's mTLS :8443 listener, so
 # the fronting proxy (APISIX) can verify the gateway. Secret carries ca.crt, which
 # the gateway also loads (TRUSTED_PROXY_CA) to verify the proxy's client cert.
 apiVersion: cert-manager.io/v1
@@ -177,7 +177,7 @@ spec:
   issuerRef:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
 ---
-# TRUSTED-PROXY (RFC 0013): client cert the operator hands to the fronting proxy
+# TRUSTED-PROXY: client cert the operator hands to the fronting proxy
 # (APISIX) so it can connect to the gateway's :8443 listener over mTLS. Signed by
 # the agentctl CA; CN must be in trustedProxy.allowedNames (default "apisix").
 apiVersion: cert-manager.io/v1

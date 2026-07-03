@@ -1,4 +1,4 @@
-# Runtime image for the ModelGateway (RFC 0012). Distroless nonroot; serves the
+# Runtime image for the ModelGateway. Distroless nonroot; serves the
 # inference proxy on :8080.
 #
 # Multi-arch via cross-compilation (cargo-zigbuild on $BUILDPLATFORM -> $TARGETPLATFORM).

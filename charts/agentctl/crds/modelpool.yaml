@@ -38,10 +38,10 @@ spec:
         properties:
           spec:
             description: |-
-              A pool of model access (RFC 0012, the intelligence plane). Agents are
-              **networkless and hold NO provider secrets**; the control plane supplies
-              model access through a credential-injecting, metering, budget-enforcing
-              proxy (the `ModelGateway`) configured by this CRD. The pool names the
+              A pool of model access (the intelligence plane). Agents hold **NO provider
+              secrets**; they dial the control plane keyless, and the control plane supplies
+              model access through a credential-injecting, metering, budget-enforcing proxy
+              (the `ModelGateway`) configured by this CRD. The pool names the
               provider, its endpoint, the `Secret` holding the provider API key, the
               allowed models, and an optional total token budget.
             properties:

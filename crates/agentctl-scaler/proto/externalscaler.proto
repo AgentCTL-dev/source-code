@@ -2,9 +2,9 @@
 // `externalscaler`), vendored verbatim from KEDA's `pkg/scalers/externalscaler`
 // (field numbers + names are part of KEDA's wire ABI; do not renumber/rename).
 //
-// agentctl serves the SERVER side of this (agentctl RFC 0011 §5.2): the four RPCs
-// KEDA's external trigger calls to make a claim-mode AgentFleet scale FROM ZERO on
-// the coordination server's off-pod backlog (contract ask P9).
+// agentctl serves the SERVER side of this: the four RPCs KEDA's external trigger
+// calls to make a claim-mode AgentFleet scale FROM ZERO on the coordination
+// server's off-pod backlog.
 syntax = "proto3";
 
 package externalscaler;

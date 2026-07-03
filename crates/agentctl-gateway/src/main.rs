@@ -56,8 +56,8 @@ struct AppState {
     /// It mints the `Management` origin at an agent's `/mcp`, so the gateway is
     /// the only peer that may drive A2A on the agent (external callers are
     /// authenticated + authorized on the inbound side, then forwarded as
-    /// Management). Built once. Despite the `na` name, this dials the agent's
-    /// `/mcp` directly, not a separate node-agent.
+    /// Management). Built once. The `na` field name is historical; it dials the
+    /// agent's `/mcp` directly.
     na: reqwest::Client,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,

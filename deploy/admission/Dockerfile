@@ -1,4 +1,4 @@
-# Runtime image for the validating admission webhook (RFC 0007). Distroless
+# Runtime image for the validating admission webhook. Distroless
 # nonroot; serves HTTPS on :8443.
 #
 # Multi-arch via cross-compilation (cargo-zigbuild on $BUILDPLATFORM -> $TARGETPLATFORM).

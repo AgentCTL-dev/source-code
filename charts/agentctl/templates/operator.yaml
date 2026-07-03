@@ -41,7 +41,7 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # KEDA ScaledObjects for claim-mode AgentFleets (RFC 0011). The operator applies
+  # KEDA ScaledObjects for claim-mode AgentFleets. The operator applies
   # these best-effort; a cluster without the KEDA CRDs simply never has them
   # created (the operator gates emission on SCALER_ENABLED and tolerates absence).
   - apiGroups: ["keda.sh"]
@@ -58,7 +58,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
 {{- if .Values.networkPolicies.enabled }}
-  # Tenant isolation (RFC 0015): when networkPolicies.enabled, the operator
+  # Tenant isolation: when networkPolicies.enabled, the operator
   # reconciles the per-namespace agent NetworkPolicies (default-deny + sanctioned
   # gateway/DNS egress + control-plane-only ingress) into each Agent/Fleet's OWN
   # namespace, so a dynamically-created tenant namespace is isolated without a
@@ -67,7 +67,7 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 {{- end }}
-  # Bound MCP tool servers (RFC 0019): the operator reads the MCPServerSets an
+  # Bound MCP tool servers: the operator reads the MCPServerSets an
   # Agent binds to render its --mcp gateway URLs + trifecta tags.
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["mcpserversets"]
@@ -161,7 +161,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # KEDA scaler wiring for claim-mode AgentFleets (RFC 0011). The
+            # KEDA scaler wiring for claim-mode AgentFleets. The
             # operator renders a ScaledObject per claim fleet when SCALER_ENABLED;
             # SCALER_ADDRESS is the external scaler's gRPC endpoint and
             # COORDINATION_URL the backlog source it reads. Resolution order:
@@ -197,7 +197,7 @@ spec:
             # secretKeyRef at pod start, not the operator.
             - name: API_TOKEN_ENABLED
               value: {{ .Values.apiToken.enabled | default false | quote }}
-            # Tenant network isolation (RFC 0015): when on, the operator reconciles
+            # Tenant network isolation: when on, the operator reconciles
             # the per-namespace agent NetworkPolicies into each Agent/Fleet's own
             # namespace (scoped to the control-plane namespace read from
             # POD_NAMESPACE above). Off -> no reconciliation (unchanged); the
@@ -222,14 +222,14 @@ spec:
             {{- end }}
             {{- if .Values.mcpgateway.enabled }}
             # The MCPGateway URL rendered into each bound MCP server's --mcp flag
-            # (RFC 0019; absolute trailing-dot FQDN, keyless dial).
+            # (absolute trailing-dot FQDN, keyless dial).
             - name: AGENTCTL_MCPGATEWAY_URL
               value: {{ .Values.operator.mcpgatewayUrl | default (printf "https://agentctl-mcpgateway.%s.svc.cluster.local." $ns) | quote }}
             {{- end }}
             {{- if .Values.gateway.enabled }}
             # The A2A gateway base URL a coordinator's `--a2a-peer worker=…` is
-            # rendered against for `distribution: a2a` (RFC 0022 §5/§6). Unused for
-            # the default `queue` distribution.
+            # rendered against for `distribution: a2a`. Unused for the default
+            # `queue` distribution.
             - name: AGENTCTL_GATEWAY_URL
               value: {{ .Values.operator.gatewayUrl | default (printf "http://agentctl-gateway.%s.svc.cluster.local.:8080" $ns) | quote }}
             {{- end }}
@@ -275,7 +275,7 @@ spec:
                 path: ca.crt
       {{- end }}
 ---
-# Metrics Service for the operator (RFC 0010). Selects every operator replica and
+# Metrics Service for the operator. Selects every operator replica and
 # exposes the http port so the operator ServiceMonitor can scrape /metrics.
 # publishNotReadyAddresses: scrape standbys too (which report /readyz 503) so the
 # leader gauge is observable across all replicas — exactly one should read 1.

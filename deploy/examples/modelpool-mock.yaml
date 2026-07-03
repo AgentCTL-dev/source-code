@@ -1,6 +1,6 @@
 # A ModelPool wired to the mock provider, plus the provider-credential Secret it
 # references. The ModelGateway reads this Secret and injects the key on each
-# request — the agent never holds it (zero-secret-in-pod, RFC 0012). budget caps
+# request — the agent never holds it (the agent stays secret-free). budget caps
 # the pool at 150 tokens (the mock returns 100/call → the 3rd call is rejected).
 apiVersion: v1
 kind: Secret

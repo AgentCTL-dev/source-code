@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentctl.dev/contract/v2/manifest.schema.json",
   "title": "Agent Control Contract — Capabilities Manifest",
-  "description": "The neutral, machine-readable capabilities manifest: the discovery spine of the Agent Control Contract (ACC). A conformant agent emits this object from the one-shot `--capabilities` entrypoint and (later) from the live `agent://capabilities` resource. agentctl consumes ONLY this contract, never an agent-specific shape (principle P0). The `surfaces{}` block is the SINGLE discovery point for every control-plane surface (RFC 0014 §6.2): a key ABSENT means the surface is unbuilt and the consumer degrades gracefully; never branch on a value that is not advertised here. VERSIONING (RFC 0014 §6.3): `contract_version` is major.minor; additive growth (new fields/tools/metrics/surfaces keys) bumps MINOR and a consumer MUST tolerate it (this object and its open sub-objects use additionalProperties:true); a consumer refuses ONLY an unknown MAJOR. NEUTRAL TOKENS (P0): the contract uses neutral tokens only — agent_version, agent://, agent_, AGENT_*. SECRETS: this manifest NEVER carries credentials (RFC 0012 §3.7) — intelligence is structural (transport scheme + endpoint count) only.",
+  "description": "The neutral, machine-readable capabilities manifest: the discovery spine of the Agent Control Contract (ACC). A conformant agent emits this object from the one-shot `--capabilities` entrypoint and (later) from the live `agent://capabilities` resource. agentctl consumes ONLY this contract, never an agent-specific shape. The `surfaces{}` block is the SINGLE discovery point for every control-plane surface: a key ABSENT means the surface is unbuilt and the consumer degrades gracefully; never branch on a value that is not advertised here. VERSIONING: `contract_version` is major.minor; additive growth (new fields/tools/metrics/surfaces keys) bumps MINOR and a consumer MUST tolerate it (this object and its open sub-objects use additionalProperties:true); a consumer refuses ONLY an unknown MAJOR. NEUTRAL TOKENS: the contract uses neutral tokens only — agent_version, agent://, agent_, AGENT_*. SECRETS: this manifest NEVER carries credentials — intelligence is structural (transport scheme + endpoint count) only.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -18,40 +18,40 @@
     "contract_version": {
       "type": "string",
       "pattern": "^\\d+\\.\\d+$",
-      "description": "The Agent Control Contract version this binary speaks, major.minor (reference CONTRACT_VERSION = \"2.0\"). Negotiation is on MAJOR only: a consumer refuses an instance whose MAJOR it does not understand and tolerates any unknown additive content within a MAJOR it knows. Contract 2.0 is the network-is-substrate pivot: agents serve their control surface over mTLS HTTPS and the non-HTTP transports (stdio/unix/vsock) and the local exec surface were removed.",
+      "description": "The Agent Control Contract version this binary speaks, major.minor (current value \"2.0\"). Negotiation is on MAJOR only: a consumer refuses an instance whose MAJOR it does not understand and tolerates any unknown additive content within a MAJOR it knows. In contract 2.0 the network is the substrate: a conformant agent serves its entire control surface over mTLS HTTPS; there are no non-HTTP transports and no local exec surface.",
       "examples": ["2.0"]
     },
     "agent_version": {
       "type": "string",
-      "description": "Build/version string of the agent binary. Free-form, impl-defined (reference emits CARGO_PKG_VERSION). REQUIRED at the root."
+      "description": "Build/version string of the agent binary. Free-form, implementation-defined. REQUIRED at the root."
     },
     "build_features": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "OPAQUE list of compile-time features present in this binary (reference tokens include tls, serve-mcp, serve-https, a2a, cron, metrics, otel). The contract does NOT freeze the membership of this set and consumers MUST NOT branch on individual values — feature presence is advertised structurally via surfaces{}. Treat build_features as diagnostic metadata only; new tokens are additive and must be tolerated.",
+      "description": "OPAQUE list of compile-time features present in this binary (example tokens include tls, serve-mcp, serve-https, a2a, cron, metrics, otel). The contract does NOT freeze the membership of this set and consumers MUST NOT branch on individual values — feature presence is advertised structurally via surfaces{}. Treat build_features as diagnostic metadata only; new tokens are additive and must be tolerated.",
       "examples": [["tls", "serve-mcp", "metrics"]]
     },
     "identity": { "$ref": "#/$defs/identity" },
     "mode": {
       "type": "string",
-      "description": "The configured run shape. NOT a frozen enum (open, additive-tolerant): the reference set is once | loop | reactive | schedule, but a consumer MUST tolerate an unknown mode string.",
+      "description": "The configured run shape. NOT a frozen enum (open, additive-tolerant): the defined set is once | loop | reactive | schedule, but a consumer MUST tolerate an unknown mode string.",
       "examples": ["once", "loop", "reactive", "schedule"]
     },
     "model": {
       "type": ["string", "null"],
-      "description": "Operator-declared model identifier, or null when unset. Metadata only, NEVER a secret (RFC 0012 §3.7)."
+      "description": "Operator-declared model identifier, or null when unset. Metadata only, NEVER a secret."
     },
     "intelligence": { "$ref": "#/$defs/intelligence" },
     "intelligence_summary": { "$ref": "#/$defs/intelligence_summary" },
     "mcp_servers": {
       "type": "array",
       "items": { "$ref": "#/$defs/mcp_server" },
-      "description": "Operator-declared MCP client servers, structural name + trifecta tags only — never the endpoint URL or headers (RFC 0012 §3.1). Contract 2.0: MCP servers are remote HTTPS endpoints (the stdio-spawn transport was removed), so there is no argv to leak."
+      "description": "Operator-declared MCP client servers, structural name + trifecta tags only — never the endpoint URL or headers. Contract 2.0: MCP servers are remote HTTPS endpoints, so there is no argv to leak."
     },
     "a2a_peers": {
       "type": "array",
       "items": { "$ref": "#/$defs/a2a_peer" },
-      "description": "Operator-declared A2A delegation peers, structural name + transport scheme only — never the endpoint URL (RFC 0020 §3)."
+      "description": "Operator-declared A2A delegation peers, structural name + transport scheme only — never the endpoint URL."
     },
     "exec_enabled": {
       "type": "boolean",
@@ -59,7 +59,7 @@
     },
     "allow_trifecta": {
       "type": "boolean",
-      "description": "Whether the lethal-trifecta combination is permitted (RFC 0012). Additive over the RFC 0014 §5 spine sketch; present in the reference source and RFC 0015 §5.2."
+      "description": "Whether the lethal-trifecta combination is permitted."
     },
     "limits": { "$ref": "#/$defs/limits" },
     "surfaces": { "$ref": "#/$defs/surfaces" }
@@ -68,12 +68,12 @@
     "identity": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Downward-API identity block (RFC 0014 §6.4, RFC 0015 §6). DESCRIPTIVE only — never load-bearing for placement/scheduling. run_id is always present (a ULID is synthesized if unset); the Kubernetes-sourced fields are string-or-null. Reference reads these from the downward-API env vars noted per field (AGENT_*); an empty env value is coerced to unset (null).",
+      "description": "Downward-API identity block. DESCRIPTIVE only — never load-bearing for placement/scheduling. run_id is always present (a ULID is synthesized if unset); the Kubernetes-sourced fields are string-or-null. A conformant agent populates these from the downward-API env vars noted per field (AGENT_*); an empty env value is coerced to unset (null).",
       "required": ["run_id"],
       "properties": {
         "run_id": {
           "type": "string",
-          "description": "Always present. Stable run identity (ULID if not supplied). Reference env: AGENT_RUN_ID."
+          "description": "Always present. Stable run identity (ULID if not supplied). Populated from env AGENT_RUN_ID."
         },
         "instance": {
           "type": ["string", "null"],
@@ -96,12 +96,12 @@
     "intelligence": {
       "type": "object",
       "additionalProperties": true,
-      "description": "STRUCTURAL intelligence summary — transport scheme + configured endpoint count + reachability. NEVER an endpoint URL or token (no embedded credentials, RFC 0012 §3.7). The full per-endpoint health view lives at agent://intelligence; the manifest carries only the bounded count.",
+      "description": "STRUCTURAL intelligence summary — transport scheme + configured endpoint count + reachability. NEVER an endpoint URL or token (no embedded credentials). The full per-endpoint health view lives at agent://intelligence; the manifest carries only the bounded count.",
       "required": ["transport", "endpoints", "healthy"],
       "properties": {
         "transport": {
           "type": ["string", "null"],
-          "description": "The PRIMARY endpoint's transport scheme, or null when no endpoint is configured / scheme is unrecognized. Contract 2.0 reference scheme set: https (the unix/vsock schemes were retired with the network-is-substrate pivot — intelligence is reached over the keyless ModelGateway HTTPS URL).",
+          "description": "The PRIMARY endpoint's transport scheme, or null when no endpoint is configured / scheme is unrecognized. Contract 2.0 scheme set: https — intelligence is reached over an HTTPS URL.",
           "examples": ["https", null]
         },
         "endpoints": {
@@ -121,16 +121,16 @@
     "intelligence_summary": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Coarse capability hints for placement (no secrets, RFC 0012). Open object; fields are advisory and may be omitted. Reference emits only `toolmode`; `max_context_hint` is omitted unless configured.",
+      "description": "Coarse capability hints for placement (no secrets). Open object; fields are advisory and may be omitted. Only `toolmode` is emitted by default; `max_context_hint` is omitted unless configured.",
       "properties": {
         "toolmode": {
           "type": "string",
-          "description": "Tool-calling mode hint. Reference value: \"native\".",
+          "description": "Tool-calling mode hint. Example value: \"native\".",
           "examples": ["native"]
         },
         "max_context_hint": {
           "type": ["integer", "null"],
-          "description": "Operator-declared max-context hint, or null. Omitted-when-absent in the reference."
+          "description": "Operator-declared max-context hint, or null. Omitted-when-absent."
         }
       }
     },
@@ -157,7 +157,7 @@
         "name": { "type": "string" },
         "transport": {
           "type": "string",
-          "description": "Peer transport scheme. Contract 2.0 reference set: https | unknown (unknown when the endpoint scheme is unrecognized). A2A peers are dialed over mTLS HTTPS.",
+          "description": "Peer transport scheme. Contract 2.0 set: https | unknown (unknown when the endpoint scheme is unrecognized). A2A peers are dialed over mTLS HTTPS.",
           "examples": ["https", "unknown"]
         }
       }
@@ -165,7 +165,7 @@
     "limits": {
       "type": "object",
       "additionalProperties": true,
-      "description": "The bounding box (RFC 0007/0009/0003): per-run limits + supervisor fork-bomb tree caps. All values are integers. Open object; consumers tolerate additional limit keys.",
+      "description": "The bounding box: per-run limits + supervisor fork-bomb tree caps. All values are integers. Open object; consumers tolerate additional limit keys.",
       "properties": {
         "max_depth": { "type": "integer", "description": "Max subagent tree depth." },
         "max_children": { "type": "integer", "description": "Max direct children per node (tree cap)." },
@@ -180,22 +180,22 @@
     "surfaces": {
       "type": "object",
       "additionalProperties": true,
-      "description": "The graceful-degradation contract and SINGLE discovery point (RFC 0014 §6.2 / §8). Each control-plane surface is reported HONESTLY as served-or-not for THIS build/config; agentctl drives ONLY what is declared here. A key ABSENT means the surface is unbuilt — degrade gracefully; do NOT treat absence as an error. additionalProperties:true is mandatory (additive-tolerance): NEVER apply deny-unknown / additionalProperties:false here — new surface keys are additive and bump MINOR. Several keys are SUM TYPES (bool|string, bool|object) and require hand-written deserializers in any codegen target (agentctl RFC 0018 §3.3): codegen cannot derive these.",
+      "description": "The graceful-degradation contract and SINGLE discovery point. Each control-plane surface is reported HONESTLY as served-or-not for THIS build/config; agentctl drives ONLY what is declared here. A key ABSENT means the surface is unbuilt — degrade gracefully; do NOT treat absence as an error. additionalProperties:true is mandatory (additive-tolerance): NEVER apply deny-unknown / additionalProperties:false here — new surface keys are additive and bump MINOR. Several keys are SUM TYPES (bool|string, bool|object) and require hand-written deserializers in any codegen target: codegen cannot derive these.",
       "properties": {
         "management": {
-          "description": "SUM TYPE (bool|string): the served self-MCP management address when configured (contract 2.0: an mTLS HTTPS URL, e.g. \"https://0.0.0.0:8443\"), else false (RFC 0015 §3). The reference maps Option<String> to a JSON string or the boolean false; codegen needs a hand-written deserializer.",
+          "description": "SUM TYPE (bool|string): the served self-MCP management address when configured (contract 2.0: an mTLS HTTPS URL, e.g. \"https://0.0.0.0:8443\"), else false. A conformant agent emits either the address string or the boolean false; codegen needs a hand-written deserializer.",
           "oneOf": [
             { "type": "boolean", "const": false },
-            { "type": "string", "description": "Management address — contract 2.0 serves the self-MCP over mTLS HTTPS, e.g. \"https://0.0.0.0:8443\" (the unix/vsock listener forms were retired)." }
+            { "type": "string", "description": "Management address — contract 2.0 serves the self-MCP over mTLS HTTPS, e.g. \"https://0.0.0.0:8443\"." }
           ]
         },
         "operator_tools": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Operator admin methods advertised on the management surface, invokable only by a Management-origin peer (RFC 0015 §4 / §5.2). Contract 2.0 spells these as the a2a.* admin JSON-RPC methods, in FROZEN order: a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel (source OPERATOR_TOOLS). These are agentd operator extensions, distinct from the A2A-protocol methods in surfaces.a2a (which keep the bare PascalCase spelling). `attach` is NOT a tool — it maps to subagent.send and is excluded. There is NO `force` tool (force = a second SIGTERM). Empty array when the build cannot serve the management surface. Items are typed as open strings (not a closed enum) for additive-tolerance: a consumer MUST tolerate an unknown additive tool name and refuse only at a new MAJOR."
+          "description": "Operator admin methods advertised on the management surface, invokable only by a Management-origin peer. Contract 2.0 spells these as the a2a.* admin JSON-RPC methods, in FROZEN order: a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel. These are operator extensions, distinct from the A2A-protocol methods in surfaces.a2a (which keep the bare PascalCase spelling). `attach` is NOT a tool — it maps to subagent.send and is excluded. There is NO `force` tool (force = a second SIGTERM). Empty array when the build cannot serve the management surface. Items are typed as open strings (not a closed enum) for additive-tolerance: a consumer MUST tolerate an unknown additive tool name and refuse only at a new MAJOR."
         },
         "a2a": {
-          "description": "SUM TYPE (bool|object): the A2A external-agent surface (RFC 0020). false when this build does not serve A2A; otherwise an object advertising the served method set. Contract 2.0: this key advertises the COMPILED A2A capability independent of whether a listener is bound (v1 tied it to the management listener; the pivot decoupled them), so a no-serve build still advertises it. BINDING RESOLVED (was P2): the normative method names are the A2A spec §9 BARE PascalCase spelling served over HTTPS JSON-RPC (POST /mcp); the legacy a2a.-prefixed spelling is accepted for back-compat but the bare form is canonical. Requires a hand-written deserializer (bool|object).",
+          "description": "SUM TYPE (bool|object): the A2A external-agent surface. false when this build does not serve A2A; otherwise an object advertising the served method set. Contract 2.0: this key advertises the COMPILED A2A capability independent of whether a listener is bound, so a no-serve build still advertises it. The normative method names are the A2A protocol's canonical BARE PascalCase spelling served over HTTPS JSON-RPC (POST /mcp); the legacy a2a.-prefixed spelling is accepted for back-compat but the bare form is canonical. Requires a hand-written deserializer (bool|object).",
           "oneOf": [
             { "type": "boolean", "const": false },
             {
@@ -205,7 +205,7 @@
               "properties": {
                 "version": {
                   "type": "string",
-                  "description": "A2A protocol version this surface advertises (reference \"1.0\").",
+                  "description": "A2A protocol version this surface advertises (e.g. \"1.0\").",
                   "examples": ["1.0"]
                 },
                 "streaming": {
@@ -215,19 +215,19 @@
                 "methods": {
                   "type": "array",
                   "items": { "type": "string" },
-                  "description": "The served method names. Contract 2.0 canonical set is the A2A spec §9 BARE PascalCase spelling over HTTPS JSON-RPC: SendMessage, GetTask, CancelTask, ListTasks, SendStreamingMessage, SubscribeToTask. The legacy a2a.-prefixed spelling (a2a.SendMessage, …) is accepted for back-compat. Open string items for additive-tolerance.",
+                  "description": "The served method names. Contract 2.0 canonical set is the A2A protocol's BARE PascalCase spelling over HTTPS JSON-RPC: SendMessage, GetTask, CancelTask, ListTasks, SendStreamingMessage, SubscribeToTask. The legacy a2a.-prefixed spelling (a2a.SendMessage, …) is accepted for back-compat. Open string items for additive-tolerance.",
                   "examples": [["SendMessage", "GetTask", "CancelTask", "ListTasks", "SendStreamingMessage", "SubscribeToTask"]]
                 },
                 "address": {
                   "type": "string",
-                  "description": "OPTIONAL dedicated A2A listener address. Contract 2.0: A2A is served on the same mTLS HTTPS /mcp listener as management, so the reference omits this key; it is present only if a build serves A2A on its own separate address."
+                  "description": "OPTIONAL dedicated A2A listener address. Contract 2.0: A2A is served on the same mTLS HTTPS /mcp listener as management, so this key is omitted by default; it is present only if a build serves A2A on its own separate address."
                 }
               }
             }
           ]
         },
         "metrics": {
-          "description": "SUM TYPE (bool|string): the Prometheus /metrics scrape address when configured (e.g. \":9090\"), else false (RFC 0010 / 0016). Carries the ADDRESS only — the byte-identical Prom-text resource (agent://metrics) and the capacity schema (agent://capacity) are out of manifest scope and undefined upstream (P4, downstream dependency). Requires a hand-written deserializer (bool|string).",
+          "description": "SUM TYPE (bool|string): the Prometheus /metrics scrape address when configured (e.g. \":9090\"), else false. Carries the ADDRESS only — the byte-identical Prom-text resource (agent://metrics) and the capacity schema (agent://capacity) are out of manifest scope. Requires a hand-written deserializer (bool|string).",
           "oneOf": [
             { "type": "boolean", "const": false },
             { "type": "string", "description": "Scrape address, e.g. \":9090\"." }
@@ -236,55 +236,55 @@
         "metrics_schema": {
           "type": "string",
           "pattern": "^\\d+\\.\\d+$",
-          "description": "FROZEN metrics-schema version, major.minor (reference METRICS_SCHEMA = \"1.0\"). Opaque version string: it gates which metric registry the consumer reads; the autoscaling metric-NAME reconciliation (P10) is resolved in the metrics registry extraction, not here.",
+          "description": "FROZEN metrics-schema version, major.minor (current value \"1.0\"). Opaque version string: it gates which metric registry the consumer reads.",
           "examples": ["1.0"]
         },
         "events": {
           "type": "boolean",
-          "description": "Whether the agent://events stream is served (RFC 0016 §7)."
+          "description": "Whether the agent://events stream is served."
         },
         "report_schema": {
           "type": "string",
           "pattern": "^\\d+\\.\\d+$",
-          "description": "FROZEN run-outcome report schema version, major.minor (reference REPORT_SCHEMA = \"1.0\").",
+          "description": "FROZEN run-outcome report schema version, major.minor (current value \"1.0\").",
           "examples": ["1.0"]
         },
         "exit_codes": {
           "type": "string",
-          "description": "The exit-code contract version (RFC 0016 §5, around RFC 0011 §5). DIVERGENCE: the RFC 0014/0015 jsonc sketch showed the literal \"RFC-0011-§5\"; the SOURCE (exit.rs EXIT_CODES) emits a bare version \"1.0\". The contract PREFERS the source (a major.minor version string); the §-tag is a documentation alias.",
+          "description": "The exit-code contract version, a major.minor version string (current value \"1.0\").",
           "examples": ["1.0"]
         },
         "intelligence": {
           "type": "boolean",
-          "description": "Whether the agent://intelligence endpoint-health resource is served (RFC 0018 §4.4)."
+          "description": "Whether the agent://intelligence endpoint-health resource is served."
         },
         "hot_reload": {
           "type": "boolean",
-          "description": "Whether the SIGHUP-triggered reload of the reloadable config subset is served (RFC 0017 §5)."
+          "description": "Whether the SIGHUP-triggered reload of the reloadable config subset is served."
         },
         "config_validate": {
           "type": "boolean",
-          "description": "Whether --validate-config is available (RFC 0017 §4.1)."
+          "description": "Whether --validate-config is available."
         },
         "config_schema": {
           "type": "boolean",
-          "description": "Whether --config-schema is available (RFC 0017 §4.2). PROVISIONAL (P6): the reference builder reports true, but the design record §14 flagged --config-schema as not-yet-built; treat a true value as contract-declared rather than independently proven. (Note: the config-file extraction found config_schema() IS implemented in the reference source — see config.schema.json — so this is effectively resolved, kept provisional here for cross-surface consistency.)"
+          "description": "Whether --config-schema is available. PROVISIONAL: a true value is contract-declared."
         },
         "cluster": {
           "type": "boolean",
-          "description": "Whether horizontal-scaling sharding + the capacity resource are present (RFC 0019). Additive over the RFC 0014 §6.2 key list (present in source)."
+          "description": "Whether horizontal-scaling sharding + the capacity resource are present."
         },
         "shard": {
           "type": ["string", "null"],
-          "description": "SUM TYPE (string|null): this instance's \"K/N\" shard identity, or null when unsharded (N==1) or no cluster (RFC 0019).",
+          "description": "SUM TYPE (string|null): this instance's \"K/N\" shard identity, or null when unsharded (N==1) or no cluster.",
           "examples": ["0/3", null]
         },
         "standby": {
           "type": "boolean",
-          "description": "Whether this instance is a standby (--standby); agentctl routes a directed assignment only to instances reporting standby:true (RFC 0019 §7). Additive over the RFC 0014 §6.2 key list (present in source)."
+          "description": "Whether this instance is a standby (--standby); agentctl routes a directed assignment only to instances reporting standby:true."
         },
         "claim": {
-          "description": "SUM TYPE (bool|object): when present, the claim styles this instance speaks (RFC 0019 §9 / RFC 0015 §5.6). IMPORTANT: this key is OMITTED-when-absent, never false — a build without the claim path leaves the key out entirely (agentctl places a claim route only on instances advertising it). The schema allows bool|object so that absence validates and a hypothetical false (if ever emitted) still validates, but the contract intent is OMITTED, not false.",
+          "description": "SUM TYPE (bool|object): when present, the claim styles this instance speaks. IMPORTANT: this key is OMITTED-when-absent, never false — a build without the claim path leaves the key out entirely (agentctl places a claim route only on instances advertising it). The schema allows bool|object so that absence validates and a hypothetical false (if ever emitted) still validates, but the contract intent is OMITTED, not false.",
           "oneOf": [
             { "type": "boolean" },
             {
@@ -295,7 +295,7 @@
                 "styles": {
                   "type": "array",
                   "items": { "type": "string" },
-                  "description": "Claim styles spoken. Reference set: tool, resource.",
+                  "description": "Claim styles spoken. Defined set: tool, resource.",
                   "examples": [["tool", "resource"]]
                 }
               }

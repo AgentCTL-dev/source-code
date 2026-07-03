@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BUSL-1.1
 #
-# agentctl end-to-end + scale/resource benchmark harness (agentctl Phase 4).
+# agentctl end-to-end + scale/resource benchmark harness.
 #
 # This crate is DELIBERATELY excluded from the root workspace (`[workspace].exclude`
 # in ../../Cargo.toml). It is a cluster-driving tool — its two binaries `e2e` and
@@ -15,7 +15,7 @@
 [package]
 name = "agentctl-e2e"
 version = "0.1.0"
-description = "agentctl end-to-end + scale/resource benchmark harness (Phase 4): drives every plane against a real conformant agent (agentd) on kind, asserts via /metrics + CR-status oracles, and quantifies per-agent overhead, control-plane scaling trends, coordination throughput, and scale latency. Excluded from the workspace; needs a cluster to run."
+description = "agentctl end-to-end and scale/resource benchmark harness: drives every plane against a real conformant agent (agentd) on kind, asserts via /metrics and CR-status oracles, and quantifies per-agent overhead, control-plane scaling trends, coordination throughput, and scale latency. Excluded from the workspace; needs a cluster to run."
 edition = "2021"
 rust-version = "1.89"
 license = "BUSL-1.1"  # control-plane tooling — source-available (see ../../LICENSE-BUSL)

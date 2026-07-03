@@ -1,6 +1,6 @@
-# The A2A gateway (RFC 0013): a replicated, stateless HTTP service fronting the
-# agents' A2A-over-the-substrate surface (bridged via the node-agent). Projects
-# each agent's Agent Card and routes spec-form A2A JSON-RPC to the reference verbs.
+# The A2A gateway: a replicated, stateless HTTP service fronting the agents'
+# A2A surface. Projects each agent's Agent Card and routes spec-form A2A
+# JSON-RPC to the reference verbs on the agent pods.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,19 +33,19 @@ spec:
           env:
             - name: RUST_LOG
               value: "info"
-            # Durable A2A task store (RFC 0013).
+            # Durable A2A task store.
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: agentctl-postgres
                   key: DATABASE_URL
-            # Ed25519 seed for Agent Card JWS signing (RFC 0014).
+            # Ed25519 seed for Agent Card JWS signing.
             - name: GATEWAY_SIGNING_SEED
               valueFrom:
                 secretKeyRef:
                   name: agentctl-gateway-signing
                   key: GATEWAY_SIGNING_SEED
-            # Mesh registry federation (RFC 0014): peer gateway base URLs (CSV).
+            # Mesh registry federation: peer gateway base URLs (CSV).
             # Self-reference here demonstrates the merge (peers are queried with
             # ?local=1 to prevent recursion).
             - name: FEDERATION_PEERS
@@ -56,7 +56,8 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            # Client cert for dialing agent pods' mTLS control surface directly
+            # (presents the control-plane / Management origin).
             - name: client-tls
               mountPath: /etc/agentctl-client/tls
               readOnly: true

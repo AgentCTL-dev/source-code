@@ -39,7 +39,8 @@ spec:
             - name: tls
               mountPath: /etc/agentctl-apiserver/tls
               readOnly: true
-            # Client cert for calling the node-agent control API over mTLS (RFC 0015).
+            # Client cert (the control-plane "Management" origin) for dialing the
+            # agent pod's mTLS control surface (POST /mcp on :8443) directly.
             - name: client-tls
               mountPath: /etc/agentctl-client/tls
               readOnly: true

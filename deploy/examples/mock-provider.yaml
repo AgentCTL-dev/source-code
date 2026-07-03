@@ -1,4 +1,4 @@
-# A mock model provider for the intelligence-plane e2e (RFC 0012): it REQUIRES an
+# A mock model provider for the intelligence-plane examples: it REQUIRES an
 # Authorization header (proving the ModelGateway injected the pool credential —
 # the agent never sent one) and returns a canned completion with token usage.
 # Dev/test only.

@@ -37,7 +37,7 @@ for ov in "$@"; do
   VALUE_FLAGS+=(-f "$f")
 done
 
-# ---- namespace (baseline PSA — contract 2.0 retired the privileged node-agent,
+# ---- namespace (baseline PSA — no control-plane component needs privileged,
 # so no control-plane component needs hostPath/hostPID/privileged) ----------
 log "ensuring namespace $NAMESPACE (baseline PodSecurity)"
 kubectl get ns "$NAMESPACE" >/dev/null 2>&1 || kubectl create ns "$NAMESPACE"

@@ -1,4 +1,4 @@
-# The ModelGateway (RFC 0012): the intelligence plane's credential-injecting,
+# The ModelGateway: the intelligence plane's credential-injecting,
 # token-metering, budget-enforcing inference proxy. Agents reach it WITHOUT any
 # provider secret; it injects the ModelPool's credential, meters per-pool tokens
 # in Postgres, and enforces the pool budget.

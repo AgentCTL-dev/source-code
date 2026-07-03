@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentctl.dev/contract/v2/metrics.registry.json",
   "title": "Agent Control Contract — Metrics Registry (metrics_schema 1.0)",
-  "description": "DATA catalogue (not a JSON-Schema validator) of the frozen, versioned Prometheus metrics a conformant agent exposes on the opt-in /metrics surface, gated by manifest surfaces.metrics_schema. Metrics are Prometheus 0.0.4 text exposition, not a JSON document, so a per-metric registry of neutral agent_* names is the right artifact for agentctl to codegen dashboards/alerts/scalers from. Versioned additive-within-major (new series / new bounded label values tolerated); removal/rename bumps major. A consumer MUST ignore unknown additive series + unknown bounded-label values and refuse only an unknown major. NOTE: the reference exposition (obs/metrics.rs render()) emits ONLY counters and gauges — NO histograms — so all histograms here are provisional/unbuilt with bucket boundaries undefined.",
+  "description": "DATA catalogue (not a JSON-Schema validator) of the frozen, versioned Prometheus metrics a conformant agent exposes on the opt-in /metrics surface, gated by manifest surfaces.metrics_schema. Metrics are Prometheus 0.0.4 text exposition, not a JSON document, so a per-metric registry of neutral agent_* names is the right artifact for agentctl to codegen dashboards/alerts/scalers from. Versioned additive-within-major (new series / new bounded label values tolerated); removal/rename bumps major. A consumer MUST ignore unknown additive series + unknown bounded-label values and refuse only an unknown major. NOTE: a conformant agent emits ONLY counters and gauges on /metrics — NO histograms — so all histograms here are provisional/unbuilt with bucket boundaries undefined.",
 
   "metrics_schema": "1.0",
   "x-contract-version": "2.0",
@@ -11,7 +11,7 @@
     "neutral": "agent_"
   },
 
-  "exposition": "Prometheus 0.0.4 text exposition; no metrics/prometheus crate (hand-rendered in obs/metrics.rs render()); /metrics carries NO version label — the version is discovered out-of-band via manifest surfaces.metrics_schema.",
+  "exposition": "Prometheus 0.0.4 text exposition; /metrics carries NO version label — the version is discovered out-of-band via manifest surfaces.metrics_schema.",
 
   "cardinality_rule": "Bounded labels only. NEVER carry run_id / agent_id / agent_path / call_id / session_id / URI as a label. Closed enum domains each carry an `other` overflow slot. The `server` label is config-time string bounded structurally by a 16-slot intern table (MCP_SERVER_SLOTS); once full, further names fold into server=\"other\".",
 
@@ -50,7 +50,7 @@
     "agent_tokens_output_total"
   ],
 
-  "histograms_note": "RFC 0016 §4.3 (agent_run_duration_ms / agent_intel_call_duration_ms / agent_tool_call_duration_ms) and RFC 0010 §3.8 (otel-only agent_tool_duration_ms / agent_loop_step_duration_ms / gen_ai.client.operation.duration) name the duration histograms differently and the reference /metrics exposition emits NONE of them. All histogram entries below are status=provisional with buckets UNDEFINED; consumers MUST treat them as absent unless a future surfaces flag advertises them.",
+  "histograms_note": "The duration histograms (agent_run_duration_ms / agent_intel_call_duration_ms / agent_tool_call_duration_ms) are named inconsistently across historical sources (some as otel-only agent_tool_duration_ms / agent_loop_step_duration_ms / gen_ai.client.operation.duration) and no conformant /metrics exposition emits any of them. All histogram entries below are status=provisional with buckets UNDEFINED; consumers MUST treat them as absent unless a future surfaces flag advertises them.",
 
   "value_type_note": "All gauges/counters render as integers EXCEPT agent_saturation, which renders as a float in [0,1] (stored as basis points, divided by 10000). A consumer codegen that assumes a uniform u64 value type breaks on agent_saturation.",
 
@@ -61,13 +61,13 @@
     "labels": "Label[] REQUIRED (may be empty []) — each { key, domain }",
     "unit": "enum — 1 | ms | bytes | bool | ratio | 1/s",
     "help": "string REQUIRED — HELP text",
-    "source": "string — RFC / source-file provenance",
+    "source": "string — provenance note",
     "status": "enum REQUIRED — stable | provisional | legacy",
     "autoscaling_signal": "bool REQUIRED",
     "cost_signal": "bool REQUIRED",
     "note": "string OPTIONAL — divergence / caveat",
     "scaling_role": "string OPTIONAL — role within the autoscaling subset",
-    "aliases_scaling": "string[] OPTIONAL — cross-RFC name aliases for the same signal"
+    "aliases_scaling": "string[] OPTIONAL — cross-source name aliases for the same signal"
   },
 
   "metrics": [
@@ -75,74 +75,74 @@
       "name": "agent_up", "neutral_name": "agent_up",
       "type": "gauge", "labels": [], "unit": "bool",
       "help": "1 while the process is alive.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_ready", "neutral_name": "agent_ready",
       "type": "gauge", "labels": [], "unit": "bool",
       "help": "1 when ready to accept work (not draining / lame-ducked).",
-      "source": "obs/metrics.rs render() (computed !draining && !lame_duck); RFC 0016 §4.3, RFC 0010 §3.7", "status": "stable",
+      "source": "Standard /metrics series (computed from not-draining and not-lame-duck state).", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "RFC 0015 §5.5 listed standalone agent_draining + agent_lame_duck gauges; source emits neither — drain/lame-duck observable via agent_ready==0 + agent_drains_total."
+      "note": "No standalone agent_draining / agent_lame_duck gauges exist; drain and lame-duck state are observable via agent_ready==0 combined with agent_drains_total."
     },
     {
       "name": "agent_paused", "neutral_name": "agent_paused",
       "type": "gauge", "labels": [], "unit": "bool",
-      "help": "1 while the agentic tree is paused at turn boundaries (RFC 0015 §4.3). Pause is NOT readiness.",
-      "source": "obs/metrics.rs render(); RFC 0015 §5.5", "status": "stable",
+      "help": "1 while the agentic tree is paused at turn boundaries. Pause is NOT readiness.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "Source-only addition vs RFC 0016 §4.3; owned by RFC 0015."
+      "note": "Pause is tracked independently of readiness (agent_ready)."
     },
     {
       "name": "agent_runs_total", "neutral_name": "agent_runs_total",
       "type": "counter", "labels": [{ "key": "status", "domain": "status" }], "unit": "1",
-      "help": "Runs by terminal status (RFC 0007 §3.4).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "help": "Runs by terminal status.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_loop_steps_total", "neutral_name": "agent_loop_steps_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Agentic loop steps executed.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_tokens_total", "neutral_name": "agent_tokens_total",
       "type": "counter", "labels": [{ "key": "type", "domain": "token_type" }], "unit": "1",
       "help": "Model tokens by direction.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": true,
-      "note": "RFC 0016 specifies labels {model,type}; reference emits ONLY {type} (AgentMsg::Usage lacks model). model label deferred — divergence, source wins."
+      "note": "Carries only the {type} label; a {model} label is not part of the contract (deferred)."
     },
     {
       "name": "agent_intel_calls_total", "neutral_name": "agent_intel_calls_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Intelligence calls made.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": true,
-      "note": "RFC 0016 specifies a {model} label; reference emits it bare. model label deferred."
+      "note": "Emitted without a {model} label; a {model} label is deferred and not part of the contract."
     },
     {
       "name": "agent_refusals_total", "neutral_name": "agent_refusals_total",
       "type": "counter", "labels": [{ "key": "reason", "domain": "refusal_reason" }], "unit": "1",
       "help": "Refusals/guard trips by reason.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_limit_exceeded_total", "neutral_name": "agent_limit_exceeded_total",
       "type": "counter", "labels": [{ "key": "limit", "domain": "limit" }], "unit": "1",
       "help": "Hard-bound trips by limit.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_active_subagents", "neutral_name": "agent_active_subagents",
       "type": "gauge", "labels": [], "unit": "1",
       "help": "Subagents currently alive in the tree.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3, RFC 0019 §5.1", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": true, "cost_signal": false,
       "scaling_role": "concurrency depth signal"
     },
@@ -150,57 +150,57 @@
       "name": "agent_tree_depth", "neutral_name": "agent_tree_depth",
       "type": "gauge", "labels": [], "unit": "1",
       "help": "Current max subagent-tree depth.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3, RFC 0010", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_tree_breadth", "neutral_name": "agent_tree_breadth",
       "type": "gauge", "labels": [], "unit": "1",
       "help": "Current max siblings at any tree node.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_subagents_spawned_total", "neutral_name": "agent_subagents_spawned_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Subagents spawned.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_subagents_exited_total", "neutral_name": "agent_subagents_exited_total",
       "type": "counter", "labels": [{ "key": "status", "domain": "status" }], "unit": "1",
-      "help": "Subagents exited by terminal status (RFC 0007 §3.4).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "help": "Subagents exited by terminal status.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_subagent_restarts_total", "neutral_name": "agent_subagent_restarts_total",
       "type": "counter", "labels": [{ "key": "reason", "domain": "restart_reason" }], "unit": "1",
-      "help": "Subagent restarts by reason (RFC 0003 §3.7).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "help": "Subagent restarts by reason.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_subagent_stuck_kills_total", "neutral_name": "agent_subagent_stuck_kills_total",
       "type": "counter", "labels": [{ "key": "signal", "domain": "stuck_signal" }], "unit": "1",
-      "help": "Wedged-subagent kills by signal (RFC 0003).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "help": "Wedged-subagent kills by signal.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_intel_up", "neutral_name": "agent_intel_up",
       "type": "gauge", "labels": [], "unit": "bool",
       "help": "1 when the intelligence endpoint is reachable.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "intel/health.rs prose names this agent_intel_endpoint_up; the rendered name is agent_intel_up. Contract canonicalizes the rendered name."
+      "note": "An older name was agent_intel_endpoint_up; the contract canonicalizes agent_intel_up."
     },
     {
       "name": "agent_intel_all_down", "neutral_name": "agent_intel_all_down",
       "type": "gauge", "labels": [], "unit": "bool",
-      "help": "1 while all intelligence endpoints are down (RFC 0018 §6).",
-      "source": "obs/metrics.rs render(); RFC 0018 §6, RFC 0016 §4.3", "status": "stable",
+      "help": "1 while all intelligence endpoints are down.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Fleet-routing signal: 1 while EVERY model endpoint is down (the same latch that flips /readyz). Distinct from agent_intel_up (the active endpoint's reachability)."
     },
@@ -208,69 +208,69 @@
       "name": "agent_intel_errors_total", "neutral_name": "agent_intel_errors_total",
       "type": "counter", "labels": [{ "key": "reason", "domain": "intel_error_reason" }], "unit": "1",
       "help": "Intelligence-endpoint errors by reason.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_mcp_connect_failures_total", "neutral_name": "agent_mcp_connect_failures_total",
       "type": "counter", "labels": [{ "key": "server", "domain": "open_bounded" }], "unit": "1",
       "help": "MCP connect failures by server.",
-      "source": "obs/metrics.rs render_connect_failures(), 16-slot McpServerTable; RFC 0016 §4.2/§4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "server label is a config-time string bounded by a 16-slot intern table (MCP_SERVER_SLOTS); overflow folds into server=\"other\"."
     },
     {
       "name": "agent_drains_total", "neutral_name": "agent_drains_total",
       "type": "counter", "labels": [{ "key": "phase", "domain": "drain_phase" }], "unit": "1",
-      "help": "Drain phase transitions (RFC 0011 §4).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "help": "Drain phase transitions.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_restarts_total", "neutral_name": "agent_restarts_total",
       "type": "counter", "labels": [], "unit": "1",
-      "help": "Supervisor process restarts observed (RFC 0003 §3.11).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "help": "Supervisor process restarts observed.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_reactor_stalls_total", "neutral_name": "agent_reactor_stalls_total",
       "type": "counter", "labels": [], "unit": "1",
-      "help": "Wedged-reactor liveness trips (RFC 0003).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3", "status": "stable",
+      "help": "Wedged-reactor liveness trips.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_config_reload_total", "neutral_name": "agent_config_reload_total",
       "type": "counter", "labels": [{ "key": "result", "domain": "reload_result" }], "unit": "1",
-      "help": "Hot reloads by result (RFC 0017 §5.6).",
-      "source": "obs/metrics.rs render(); RFC 0017 §5.6", "status": "stable",
+      "help": "Hot reloads by result.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "Source-only addition vs RFC 0016 §4.3; owned by RFC 0017."
+      "note": "Config hot-reload outcome counter; result is one of applied / rejected / other."
     },
     {
       "name": "agent_config_generation", "neutral_name": "agent_config_generation",
       "type": "gauge", "labels": [], "unit": "1",
       "help": "Successfully-applied config reloads (the live generation).",
-      "source": "obs/metrics.rs render(); RFC 0017 §5.6", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "Source-only addition vs RFC 0016 §4.3; owned by RFC 0017."
+      "note": "Advances only on a successfully-applied reload (the live generation counter)."
     },
     {
       "name": "agent_pending_events", "neutral_name": "agent_pending_events",
       "type": "gauge", "labels": [], "unit": "1",
       "help": "Reactive events received but not yet routed.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3, RFC 0019 §5.1", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": true, "cost_signal": false,
       "scaling_role": "PRIMARY KEDA/HPA backlog signal",
       "aliases_scaling": ["agent_reactive_backlog"],
-      "note": "P10 reconciliation: this source-emitted RFC 0016 name is CANONICAL. RFC 0019 §5.1 agent_reactive_backlog is an ALIAS for the same signal (RFC 0019 admits it is mechanically a sum)."
+      "note": "agent_pending_events is the CANONICAL name; agent_reactive_backlog is an ALIAS for the same signal (mechanically a sum)."
     },
     {
       "name": "agent_inflight_reactions", "neutral_name": "agent_inflight_reactions",
       "type": "gauge", "labels": [], "unit": "1",
       "help": "Reactions currently executing.",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3, RFC 0019 §5.1", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": true, "cost_signal": false,
       "scaling_role": "concurrency / saturation numerator"
     },
@@ -278,22 +278,22 @@
       "name": "agent_subscriptions_active", "neutral_name": "agent_subscriptions_active",
       "type": "gauge", "labels": [], "unit": "1",
       "help": "Reconciled declared subscriptions.",
-      "source": "obs/metrics.rs render(); RFC 0019 §5.1", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_reaction_lag_ms", "neutral_name": "agent_reaction_lag_ms",
       "type": "gauge", "labels": [], "unit": "ms",
       "help": "Age of the oldest un-routed pending event (ms).",
-      "source": "obs/metrics.rs render(); RFC 0016 §4.3, RFC 0019 §5.1", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": true, "cost_signal": false,
       "scaling_role": "latency-SLO backlog signal"
     },
     {
       "name": "agent_saturation", "neutral_name": "agent_saturation",
       "type": "gauge", "labels": [], "unit": "ratio",
-      "help": "In-flight / capacity utilization in [0,1] (RFC 0019 §5.1).",
-      "source": "obs/metrics.rs render() (gauge_f64, stored basis points /10000); RFC 0019 §5.1", "status": "stable",
+      "help": "In-flight / capacity utilization in [0,1].",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": true, "cost_signal": false,
       "scaling_role": "HPA target (~0.7)",
       "note": "FLOAT-valued in [0,1] — the only non-integer series; defeats uniform u64 codegen."
@@ -301,38 +301,38 @@
     {
       "name": "agent_shard_skipped_total", "neutral_name": "agent_shard_skipped_total",
       "type": "counter", "labels": [], "unit": "1",
-      "help": "Items dropped as out-of-shard (RFC 0019 §4.1).",
-      "source": "obs/metrics.rs render(); RFC 0019 §4.1/§5.1", "status": "stable",
+      "help": "Items dropped as out-of-shard.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": true, "cost_signal": false,
       "scaling_role": "shard mis-route signal"
     },
     {
       "name": "agent_claims_lost_total", "neutral_name": "agent_claims_lost_total",
       "type": "counter", "labels": [], "unit": "1",
-      "help": "Work claims lost to another replica (RFC 0019 §5.1).",
-      "source": "obs/metrics.rs render(); RFC 0019 §5.1", "status": "stable",
+      "help": "Work claims lost to another replica.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": true, "cost_signal": false,
       "scaling_role": "over-provision / scale-down signal (high under low backlog ⇒ scale down)"
     },
     {
       "name": "agent_claims_granted_total", "neutral_name": "agent_claims_granted_total",
       "type": "counter", "labels": [], "unit": "1",
-      "help": "Work claims granted to this replica (RFC 0019 §3.2).",
-      "source": "obs/metrics.rs render(); RFC 0019 §3.2", "status": "stable",
+      "help": "Work claims granted to this replica.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_claims_released_total", "neutral_name": "agent_claims_released_total",
       "type": "counter", "labels": [], "unit": "1",
-      "help": "Held claims released back to the fleet (RFC 0019 §3.3/§6).",
-      "source": "obs/metrics.rs render(); RFC 0019 §3.3/§6", "status": "stable",
+      "help": "Held claims released back to the fleet.",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
     },
     {
       "name": "agent_memory_max_bytes", "neutral_name": "agent_memory_max_bytes",
       "type": "gauge", "labels": [], "unit": "bytes",
       "help": "cgroup v2 memory.max hard limit (bytes).",
-      "source": "obs/metrics.rs memory_gauges(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Emitted only when the kernel exposes the cgroup v2 field; absent otherwise (graceful degradation)."
     },
@@ -340,7 +340,7 @@
       "name": "agent_memory_current_bytes", "neutral_name": "agent_memory_current_bytes",
       "type": "gauge", "labels": [], "unit": "bytes",
       "help": "cgroup v2 memory.current usage (bytes).",
-      "source": "obs/metrics.rs memory_gauges(); RFC 0016 §4.3", "status": "stable",
+      "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Emitted only when the kernel exposes the cgroup v2 field; absent otherwise."
     },
@@ -349,7 +349,7 @@
       "name": "agent_runs_started_total", "neutral_name": "agent_runs_started_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Supervised runs started.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Legacy bare series retained additively; prefer agent_runs_total{status} for terminal accounting."
     },
@@ -357,7 +357,7 @@
       "name": "agent_runs_completed_total", "neutral_name": "agent_runs_completed_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Supervised runs that completed.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Legacy bare series; subsumed by agent_runs_total{status=\"completed\"}."
     },
@@ -365,7 +365,7 @@
       "name": "agent_runs_failed_total", "neutral_name": "agent_runs_failed_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Supervised runs that failed on infra.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Legacy bare series; subsumed by agent_runs_total{status}."
     },
@@ -373,7 +373,7 @@
       "name": "agent_runs_killed_total", "neutral_name": "agent_runs_killed_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Supervised runs torn down by the supervisor.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Legacy bare series."
     },
@@ -381,7 +381,7 @@
       "name": "agent_reactions_total", "neutral_name": "agent_reactions_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Reactive triggers fired.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Legacy bare series retained additively."
     },
@@ -389,7 +389,7 @@
       "name": "agent_tokens_input_total", "neutral_name": "agent_tokens_input_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Input tokens reported by direct children.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": true,
       "note": "Legacy bare series; prefer agent_tokens_total{type=\"in\"}."
     },
@@ -397,7 +397,7 @@
       "name": "agent_tokens_output_total", "neutral_name": "agent_tokens_output_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Output tokens reported by direct children.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": true,
       "note": "Legacy bare series; prefer agent_tokens_total{type=\"out\"}."
     },
@@ -405,7 +405,7 @@
       "name": "agent_restarts_tripped_total", "neutral_name": "agent_restarts_tripped_total",
       "type": "counter", "labels": [], "unit": "1",
       "help": "Restart-governor breaker trips.",
-      "source": "obs/metrics.rs render(); RFC 0010 §3.8", "status": "legacy",
+      "source": "Legacy /metrics series.", "status": "legacy",
       "autoscaling_signal": false, "cost_signal": false,
       "note": "Legacy bare series retained additively."
     },
@@ -413,58 +413,58 @@
     {
       "name": "agent_run_duration_ms", "neutral_name": "agent_run_duration_ms",
       "type": "histogram", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL/UNBUILT — wall-clock run duration histogram (RFC 0016 §4.3).",
-      "source": "RFC 0016 §4.3 (NOT emitted by reference render())", "status": "provisional",
+      "help": "PROVISIONAL/UNBUILT — wall-clock run duration histogram.",
+      "source": "Declared but not currently emitted.", "status": "provisional",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "Reference emits NO histograms; bucket boundaries UNDEFINED. RFC 0010 §3.8 names a similar duration as otel-only. Consumers treat as absent unless surfaces advertises."
+      "note": "No histograms are emitted; bucket boundaries UNDEFINED. A similar duration exists only in otel. Consumers treat as absent unless surfaces advertises it."
     },
     {
       "name": "agent_intel_call_duration_ms", "neutral_name": "agent_intel_call_duration_ms",
       "type": "histogram", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL/UNBUILT — intelligence call duration histogram (RFC 0016 §4.3).",
-      "source": "RFC 0016 §4.3 (NOT emitted)", "status": "provisional",
+      "help": "PROVISIONAL/UNBUILT — intelligence call duration histogram.",
+      "source": "Declared but not currently emitted.", "status": "provisional",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "Reference emits NO histograms; buckets UNDEFINED."
+      "note": "No histograms are emitted; buckets UNDEFINED."
     },
     {
       "name": "agent_tool_call_duration_ms", "neutral_name": "agent_tool_call_duration_ms",
       "type": "histogram", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL/UNBUILT — tool call duration histogram (RFC 0016 §4.3).",
-      "source": "RFC 0016 §4.3 (NOT emitted; RFC 0010 §3.8 otel-only as agent_tool_duration_ms)", "status": "provisional",
+      "help": "PROVISIONAL/UNBUILT — tool call duration histogram.",
+      "source": "Declared but not currently emitted; exists only in otel as agent_tool_duration_ms.", "status": "provisional",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "Reference emits NO histograms; buckets UNDEFINED. Name conflicts with RFC 0010 §3.8 agent_tool_duration_ms (otel-only)."
+      "note": "No histograms are emitted; buckets UNDEFINED. Name conflicts with the otel-only agent_tool_duration_ms."
     },
     {
       "name": "agent_mcp_up", "neutral_name": "agent_mcp_up",
       "type": "gauge", "labels": [{ "key": "server", "domain": "open_bounded" }], "unit": "bool",
-      "help": "PROVISIONAL — 1 when a declared MCP server is connected (RFC 0016 §4.3).",
-      "source": "RFC 0016 §4.3 (NOT emitted by reference — no declared-server registration hook)", "status": "provisional",
+      "help": "PROVISIONAL — 1 when a declared MCP server is connected.",
+      "source": "Declared but not currently emitted (no declared-server registration hook).", "status": "provisional",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "DIVERGENCE: in RFC 0016 but reference does not emit it. server label would fold to the same 16-slot bound as agent_mcp_connect_failures_total."
+      "note": "DIVERGENCE: declared in the contract but not currently emitted. The server label would fold to the same 16-slot bound as agent_mcp_connect_failures_total."
     },
     {
       "name": "agent_tool_calls_total", "neutral_name": "agent_tool_calls_total",
       "type": "counter", "labels": [], "unit": "1",
-      "help": "PROVISIONAL — tool invocations (RFC 0016 §4.3).",
-      "source": "RFC 0016 §4.3 (NOT emitted by reference registry; logs/otel only)", "status": "provisional",
+      "help": "PROVISIONAL — tool invocations.",
+      "source": "Declared but not currently emitted on /metrics (logs/otel only).", "status": "provisional",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "DIVERGENCE: declared in RFC 0016 but not in the reference render() registry."
+      "note": "DIVERGENCE: declared in the contract but not currently emitted on /metrics."
     },
     {
       "name": "agent_tokens_per_sec", "neutral_name": "agent_tokens_per_sec",
       "type": "gauge", "labels": [], "unit": "1/s",
-      "help": "PROVISIONAL/DERIVED — token throughput (RFC 0019 §5.1).",
-      "source": "RFC 0019 §5.1 (NOT emitted)", "status": "provisional",
+      "help": "PROVISIONAL/DERIVED — token throughput.",
+      "source": "Declared but not currently emitted.", "status": "provisional",
       "autoscaling_signal": false, "cost_signal": true,
-      "note": "P10: RFC 0019 autoscaling name NOT emitted by reference; derived/provisional."
+      "note": "Autoscaling name not currently emitted; derived/provisional."
     },
     {
       "name": "agent_intelligence_latency_ms", "neutral_name": "agent_intelligence_latency_ms",
       "type": "gauge", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL — intelligence latency signal (RFC 0019 §5.1).",
-      "source": "RFC 0019 §5.1 (NOT emitted)", "status": "provisional",
+      "help": "PROVISIONAL — intelligence latency signal.",
+      "source": "Declared but not currently emitted.", "status": "provisional",
       "autoscaling_signal": false, "cost_signal": false,
-      "note": "P10: RFC 0019 autoscaling name NOT emitted by reference; provisional. See agent_intel_call_duration_ms (histogram, also provisional)."
+      "note": "Autoscaling name not currently emitted; provisional. See agent_intel_call_duration_ms (histogram, also provisional)."
     }
   ]
 }

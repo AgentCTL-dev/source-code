@@ -1,7 +1,7 @@
 [package]
 name = "agentctl-operator"
 version = "0.1.0"
-description = "agentctl operator: reconcile Agent/AgentFleet → workloads. agentctl RFC 0006. (this crate holds the pure rendering core plus the kube runtime controller that drives reconcile.)"
+description = "agentctl operator: reconciles Agent/AgentFleet into workloads. Holds the pure rendering core plus the kube runtime controller that drives reconciliation."
 edition.workspace = true
 rust-version.workspace = true
 license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
@@ -27,7 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 serde.workspace = true
 serde_json.workspace = true
-# Health/metrics surface (RFC 0010): the same axum stack the node-agent serves
+# Health/metrics surface: the same axum stack the other control-plane services serve
 # /healthz + /metrics with — no second HTTP/metrics framework.
 axum = "0.8"
 

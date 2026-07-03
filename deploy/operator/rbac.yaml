@@ -1,4 +1,4 @@
-# Least-privilege RBAC for the agentctl operator (RFC 0006/0015): watch the CRDs,
+# Least-privilege RBAC for the agentctl operator: watch the CRDs,
 # patch their status + finalizers, and own the rendered workloads.
 apiVersion: v1
 kind: ServiceAccount

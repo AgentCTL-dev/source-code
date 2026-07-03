@@ -1,4 +1,4 @@
-# Runtime image for the agentctl aggregated apiserver (RFC 0009). Distroless
+# Runtime image for the agentctl aggregated apiserver. Distroless
 # nonroot; serves HTTPS on 6443 with the mounted serving cert.
 #
 # Multi-arch via cross-compilation (cargo-zigbuild on $BUILDPLATFORM -> $TARGETPLATFORM).

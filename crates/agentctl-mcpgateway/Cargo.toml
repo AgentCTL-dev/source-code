@@ -1,7 +1,7 @@
 [package]
 name = "agentctl-mcpgateway"
 version = "0.1.0"
-description = "agentctl MCPGateway (RFC 0019): the credential-injecting, attesting, policy-enforcing broker for the tool plane — the ModelGateway pattern applied to MCP. Networkless agents hold NO tool-server secrets; this gateway attests the calling agent by source IP, scopes it to its bound MCPServerSet servers, injects the server's credential (held off-pod), and forwards MCP. Hand-rolled in Rust (axum). agentctl is Rust-only."
+description = "agentctl MCPGateway: the credential-injecting, attesting, policy-enforcing broker for the tool plane. Agents hold no tool-server secrets; the gateway attests the caller by source IP, scopes it to its bound MCPServerSet, injects the server credential off-pod, and forwards MCP. Rust (axum)."
 edition.workspace = true
 rust-version.workspace = true
 license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)

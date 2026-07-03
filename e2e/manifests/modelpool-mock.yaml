@@ -1,6 +1,6 @@
 # e2e ModelPool wired to the e2e mock provider, plus the provider-credential
 # Secret it references. The ModelGateway reads this Secret and injects the key on
-# each request — the agent never holds it (zero-secret-in-pod, RFC 0012). This is
+# each request — the agent never holds it (the agent stays secret-free). This is
 # the HEADROOM pool for the metering + once-mode-complete scenarios (intel-infer,
 # prov-once): a high budget so an inference always succeeds and the intelligence
 # agentd run reaches a clean exit 0. The ModelGateway's per-pool usage is durable

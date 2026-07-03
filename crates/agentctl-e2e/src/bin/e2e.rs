@@ -161,7 +161,7 @@ fn catalogue() -> Vec<Scenario> {
 #[derive(Parser, Debug)]
 #[command(
     name = "e2e",
-    about = "agentctl functional e2e scenarios (Phase 4). Needs a cluster (KUBECONFIG)."
+    about = "agentctl functional e2e scenarios. Needs a cluster (KUBECONFIG)."
 )]
 struct Cli {
     /// Scenario names to run (default: all).

@@ -2,7 +2,7 @@
 //! # agentctl-mcpgateway
 //!
 //! The tool-plane broker: the ModelGateway pattern applied to MCP.
-//! A networkless agent holds **no** tool-server credential; it dials this
+//! An agent holds **no** tool-server credential; it dials this
 //! gateway keyless (`--mcp <name>=https://…/s/<name>`), and the gateway:
 //!
 //! 1. **attests** the calling agent by its (unforgeable) source IP → `(ns,

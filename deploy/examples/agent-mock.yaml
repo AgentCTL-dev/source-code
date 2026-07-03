@@ -1,7 +1,7 @@
 # A reactive Agent backed by the mock-agent image (a conformant-agent stand-in
-# that serves the management profile). The operator renders a Deployment whose
-# pod binds the management socket on the stock-unix hostPath; the node-agent
-# DaemonSet then discovers it and reads its capabilities over the socket.
+# that serves the management profile). The operator renders a Deployment whose pod
+# serves its mTLS /mcp surface; the control plane dials it directly to read its
+# capabilities and drive management verbs.
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: Agent
 metadata:

@@ -19,11 +19,10 @@
 {{- else }}
 {{-   $pw = randAlphaNum 24 }}
 {{- end }}
-# Postgres backing the gateway's durable A2A task store (RFC 0013 / brainstorm
-# D4). Dev-grade: a single pod whose data dir is either ephemeral (emptyDir, the
-# eval default) or a PersistentVolumeClaim (postgres.bundled.storage=pvc).
-# Production would use a managed/replicated Postgres (or an operator) with a PVC
-# + TLS + NetworkPolicy.
+# Postgres backing the gateway's durable A2A task store. Dev-grade: a single pod
+# whose data dir is either ephemeral (emptyDir, the eval default) or a
+# PersistentVolumeClaim (postgres.bundled.storage=pvc). Production would use a
+# managed/replicated Postgres (or an operator) with a PVC + TLS + NetworkPolicy.
 apiVersion: v1
 kind: Secret
 metadata:

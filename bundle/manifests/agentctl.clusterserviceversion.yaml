@@ -12,9 +12,9 @@ metadata:
     repository: https://github.com/AgentCTL-dev/source-code
     description: >-
       The Kubernetes control plane for fleets of conformant agents — operator,
-      aggregated APIServer, A2A gateway, intelligence ModelGateway, admission
-      webhook, and on-node bridge. ALPHA / PREVIEW: the OLM CSV installs the
-      Deployments only; the node-agent DaemonSet, the aggregated APIService, the
+      aggregated APIServer, A2A gateway, intelligence ModelGateway, tool MCPGateway,
+      admission webhook, work coordination, and a KEDA scaler. ALPHA / PREVIEW: the
+      OLM CSV installs the Deployments only; the aggregated APIService, the
       validating webhook registration, and the cert-manager Certificates must be
       applied separately (or via the Helm chart). cert-manager is a runtime
       prerequisite.
@@ -98,18 +98,21 @@ spec:
     `AgentFleet`, `ModelPool`) and reconciles them across six planes:
 
     - **operator** — reconciles `Agent`/`AgentFleet` CRs into Jobs, CronJobs,
-      Deployments, and StatefulSets (RFC 0003).
+      Deployments, and StatefulSets.
     - **apiserver** — an aggregated API (`management.agents.x-k8s.io`) for live
-      management verbs, proxied to the per-pod agents (RFC 0009).
+      management verbs, proxied to the per-pod agents.
     - **gateway** — a stateless A2A (agent-to-agent) HTTP gateway with signed
-      Agent Cards and mesh federation (RFC 0013/0014).
+      Agent Cards and mesh federation.
     - **modelgateway** — the intelligence plane: a credential-injecting,
       token-metering, budget-enforcing inference proxy so agents hold **no**
-      provider secrets (RFC 0012).
+      provider secrets.
     - **admission** — a validating webhook enforcing the lethal-trifecta override
-      gate, an image-registry allow-list, and cross-object checks (RFC 0007).
-    - **node-agent** — a per-node DaemonSet bridging each pod's management socket
-      on the substrate (RFC 0008/0015).
+      gate, an image-registry allow-list, and cross-object checks.
+    - **mcpgateway** — the tool plane: attests the caller, scopes it to its bound
+      MCPServerSet, and injects each server's credential off-pod.
+    - **coordination** — the work-distribution backbone: the exactly-one-owner
+      claim hub whose backlog drives scale-from-zero.
+    - **scaler** — a KEDA external scaler over the coordination backlog.
 
     ## ALPHA / PREVIEW — read this before installing
 
@@ -118,15 +121,13 @@ spec:
     therefore **NOT installed by this CSV** and must be applied separately — the
     Helm chart at `charts/agentctl` installs all of them:
 
-    - **node-agent DaemonSet** — not a Deployment; install via Helm or
-      `deploy/node-agent`.
     - **Aggregated APIService** (`v1alpha1.management.agents.x-k8s.io`) — not
       expressible as a CSV `owned` apiservicedefinition without OLM-managed
       serving certs; apply it separately.
     - **ValidatingWebhookConfiguration** for the admission webhook — apply
       separately (or via Helm) so cert-manager can inject its `caBundle`.
     - **cert-manager Certificates/Issuers** — the apiserver, admission webhook,
-      gateway client, and node-agent all mount TLS Secrets issued by
+      gateway client, and the other components all mount TLS Secrets issued by
       cert-manager. **cert-manager (>= 1.13) is a hard runtime prerequisite**;
       until those Secrets exist, the apiserver/admission/gateway pods stay
       Pending.
@@ -162,13 +163,13 @@ spec:
           One logical agent: an instruction + bindings rendered to a workload
           whose shape follows `mode` (once→Job, schedule→CronJob,
           loop/reactive→Deployment). Declared capabilities (exec/egress/secrets)
-          are gated by the admission webhook (RFC 0003/0007).
+          are gated by the admission webhook.
       - name: agentfleets.agents.x-k8s.io
         version: v1alpha1
         kind: AgentFleet
         displayName: AgentFleet
         description: >-
-          A replicated, autoscaled set of agents (RFC 0003/0011). Renders to a
+          A replicated, autoscaled set of agents. Renders to a
           StatefulSet (shard mode) or Deployment (claim mode); KEDA owns the
           replica count for elastic claim pools.
       - name: modelpools.agents.x-k8s.io
@@ -176,7 +177,7 @@ spec:
         kind: ModelPool
         displayName: ModelPool
         description: >-
-          A pool of model access (RFC 0012). Names the provider, endpoint, the
+          A pool of model access. Names the provider, endpoint, the
           Secret holding the API key, allowed models, and an optional token
           budget. Agents hold no provider secrets; the ModelGateway injects the
           credential and meters/limits usage.

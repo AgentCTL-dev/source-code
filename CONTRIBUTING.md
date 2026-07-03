@@ -51,13 +51,39 @@ cargo run -p agentctl-crdgen                             # regenerate deploy/crd
 
 CI gates on all of the above (fmt, clippy `-D`, tests, CRD drift) — run them
 locally first. End-to-end work is verified on a `kind` cluster; see
-`deploy/README.md` and `docs/STATUS.md`.
+[`deploy/README.md`](deploy/README.md).
 
 ## Where things live
 
-- `README.md` — architecture + the 11 crates.
-- `docs/STATUS.md` — per-plane status + roadmap.
-- `rfcs/` — the design track (0001–0018).
-- `contract/` — the Agent Control Contract (`README.md`, `SPEC.md`, schemas, fixtures).
+### Crates (`crates/`)
+
+The workspace is Rust-only. Every control-plane component is a crate; the
+contract client and CRD types are shared libraries.
+
+| Crate | Role |
+| --- | --- |
+| `agent-api` | CRD types (`Agent`, `AgentFleet`, `ModelPool`, `MCPServerSet`) as kube-rs `CustomResource`s. |
+| `agent-contract-client` | Typed client for the Agent Control Contract (capabilities manifest, surfaces discovery, version negotiation). |
+| `agentctl-operator` | Reconciles `Agent`/`AgentFleet` into workloads (the pure rendering core plus the kube runtime controller). |
+| `agentctl-apiserver` | Aggregated APIServer serving the management verbs (drain, lame-duck, cancel, pause, resume). |
+| `agentctl-admission` | Validating + mutating webhooks (image allow-list, lethal-trifecta gate, secure defaults). |
+| `agentctl-gateway` | A2A gateway — the public agent-to-agent surface + Agent Card projection. |
+| `agentctl-modelgateway` | Intelligence broker — injects the ModelPool credential, meters tokens, enforces budgets. |
+| `agentctl-mcpgateway` | Tools broker — scopes calls to the bound MCPServerSet and injects the server credential off-pod. |
+| `agentctl-coordination` | Reference work-distribution MCP server (`work.*`) — the exactly-one-owner claim backbone and backlog signal. |
+| `agentctl-scaler` | KEDA external gRPC scaler that reads the coordination backlog so claim fleets scale from zero. |
+| `agentctl-cli` | The `agentctl` CLI / `kubectl-agent` plugin (`get`/`describe`, management verbs). |
+| `agentctl-crdgen` | Emits the CRDs as apply-able YAML under `deploy/crds/`. |
+| `agentctl-telemetry` | Shared tracing init (fmt layer + optional OTLP export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set). |
+| `mock-agent` | A minimal conformant-agent stand-in used by dev/e2e/conformance fixtures. |
+| `agentctl-e2e` | End-to-end + benchmark harness (excluded from the workspace; needs a cluster). |
+
+### Other top-level directories
+
+- `contract/` — the Agent Control Contract: `README.md`, `SPEC.md`, JSON schemas, and fixtures.
+- `charts/agentctl/` — the production Helm chart.
+- `deploy/` — raw per-component manifests, generated CRDs, and the local kind walkthrough.
+- `bundle/` — the alpha OLM / OperatorHub bundle.
+- `docs/` — [`architecture.md`](docs/architecture.md), [`operations.md`](docs/operations.md), [`security.md`](docs/security.md), [`benchmarks.md`](docs/benchmarks.md).
 
 By submitting a contribution you agree to the [CLA](CLA.md).

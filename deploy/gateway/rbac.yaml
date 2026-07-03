@@ -1,4 +1,4 @@
-# RBAC for the A2A gateway: resolve Agent → pod → node-agent (same routing as the
+# RBAC for the A2A gateway: resolve Agent → pod (same routing as the
 # apiserver). Stateless; reads pods only.
 apiVersion: v1
 kind: ServiceAccount

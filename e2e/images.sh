@@ -11,11 +11,11 @@
 #   agentd:2.x                   the real reference agent (built from
 #                                $AGENTD_SRC/Dockerfile — serves mTLS HTTPS /mcp,
 #                                dials gateways keyless). No 2.x tag is published on
-#                                GHCR yet (RFC 0021 §14), so this builds from source.
+#                                GHCR yet, so this builds from source.
 #   mock-agent:dev               conformant-agent stand-in (mTLS HTTPS self-MCP).
 #   agentctl/<comp>:dev          the 8 control-plane components, each from
 #                                deploy/<comp>/Dockerfile (v2: mcpgateway, not the
-#                                retired node-agent).
+#                                the reference agent).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +29,7 @@ AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:2.x}"
 AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:2.x}"
 
 # The 8 control-plane components (component == deploy/<comp>/Dockerfile dir),
-# matching the release.yml build matrix. Contract 2.0: the node-agent is retired;
+# matching the release.yml build matrix. Contract 2.0: agents serve HTTPS MCP natively;
 # the mcpgateway is the tool-plane broker.
 COMPONENTS=(operator mcpgateway apiserver gateway modelgateway admission coordination scaler)
 
@@ -81,7 +81,7 @@ for comp in "${COMPONENTS[@]}"; do
 done
 
 # The v1 stdio->HTTP work.* bridge is RETIRED in contract 2.0 — agentd speaks
-# HTTPS MCP natively (RFC 0021 §9), so claim-mode agents dial the coordination
-# server's /mcp directly (no bridge sidecar, no hostPath socket).
+# HTTPS MCP natively, so claim-mode agents dial the coordination
+# server's /mcp directly.
 
 log "images ready"

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentctl.dev/contract/v2/management-profile.json",
   "title": "Agent Control Contract — Management Profile",
-  "description": "The operator management profile of the Agent Control Contract: the operator admin methods served on the mTLS-gated management surface, the agent:// operator resources, and the PeerOrigin authority model. Contract 2.0 (network-is-substrate): the management surface is served over mTLS HTTPS (POST /mcp); the non-HTTP transports (stdio/unix/vsock) were removed, and the trust boundary is the verified mTLS CLIENT-CERT IDENTITY (a peer whose cert chains to the pinned client CA is Management) rather than reachability. Contract 2.0 spells the operator admin methods as a2a.Drain/a2a.LameDuck/a2a.Pause/a2a.Resume/a2a.Cancel — the a2a. prefix marks them agentd operator extensions, distinct from the bare A2A-protocol methods in surfaces.a2a. Authority: agent RFC 0015 §3.4 (PeerOrigin gating), §4 (operator methods; attach == subagent.send), §5.1 (operator agent:// resources), §5.5 (operator-surface metrics), §7 (trust boundary = mTLS identity). Reference source of truth: crates/agent/src/capabilities.rs (OPERATOR_TOOLS const, surfaces() builder, management = bool|String), signals.rs (drain machinery), agent_uri.rs (resource URIs), and the mcp crate http_server authenticate() (a presented, CA-verified peer cert => Management). This is a DATA catalogue describing the profile; methods are advertised in manifest surfaces.operator_tools. Versioning: open objects are additive-tolerant; a new tool/resource is a MINOR bump; a consumer MUST tolerate unknown additive tools/resources and refuse only an unknown MAJOR. A surfaces{} key ABSENT => surface unbuilt => graceful degradation.",
+  "description": "The operator management profile of the Agent Control Contract: the operator admin methods served on the mTLS-gated management surface, the agent:// operator resources, and the PeerOrigin authority model. Contract 2.0 (network-is-substrate): the management surface is served over mTLS HTTPS (POST /mcp); the trust boundary is the verified mTLS CLIENT-CERT IDENTITY (a peer whose cert chains to the pinned client CA is Management) rather than reachability. Contract 2.0 spells the operator admin methods as a2a.Drain/a2a.LameDuck/a2a.Pause/a2a.Resume/a2a.Cancel — the a2a. prefix marks them agentd operator extensions, distinct from the bare A2A-protocol methods in surfaces.a2a. Authority model: PeerOrigin gates access; operator methods are Management-only (attach maps to subagent.send); operator agent:// resources and operator-surface metrics require Management; the trust boundary is mTLS identity, so a conformant agent MUST treat a presented, CA-verified peer cert as Management. This is a DATA catalogue describing the profile; methods are advertised in manifest surfaces.operator_tools. Versioning: open objects are additive-tolerant; a new tool/resource is a MINOR bump; a consumer MUST tolerate unknown additive tools/resources and refuse only an unknown MAJOR. A surfaces{} key ABSENT => surface unbuilt => graceful degradation.",
   "type": "object",
   "additionalProperties": true,
   "required": ["operator_tools", "operator_resources", "peer_origin", "gating"],
@@ -10,46 +10,41 @@
   "x-contract-version": "2.0",
 
   "operator_tools": {
-    "description": "The operator admin methods advertised on the mTLS management surface and mirrored in manifest surfaces.operator_tools (capabilities.rs OPERATOR_TOOLS). FROZEN order. Contract 2.0 spells them as a2a.* JSON-RPC methods (a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel); the per-method detail below is keyed by that spelling and describes the SAME operations RFC 0015 §4 defines. Open registry (additive methods tolerated). Advertised as [] without the serve-mcp feature (no management surface). `attach` is NOT a method: it maps to subagent.send (RFC 0005). There is NO `force` method (force == a 2nd SIGTERM).",
+    "description": "The operator admin methods advertised on the mTLS management surface and mirrored in manifest surfaces.operator_tools. FROZEN order. Contract 2.0 spells them as a2a.* JSON-RPC methods (a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel); the per-method detail below is keyed by that spelling. Open registry (additive methods tolerated). Advertised as [] when no management surface is served. `attach` is NOT a method: it maps to subagent.send. There is NO `force` method (force == a 2nd SIGTERM).",
     "order_frozen": ["a2a.Drain", "a2a.LameDuck", "a2a.Pause", "a2a.Resume", "a2a.Cancel"],
     "tools": {
       "a2a.Drain": {
         "input": { "deadline_ms": { "type": "integer", "required": false, "note": "optional; silently CLAMPED to <= drain_timeout_ms, not rejected" } },
         "result": { "draining": "boolean", "in_flight": "integer", "eta_ms": "integer", "drain_timeout_ms": "integer", "started_at": "string (date-time)" },
-        "machinery": "Identical to receiving SIGTERM -> RFC 0011 §4.2 drain state machine; idempotent + monotonic; a clean drain exits 0 (not 143). Backed by signals.rs request_drain().",
-        "owner": "RFC-0011/0015"
+        "machinery": "Identical to receiving SIGTERM: runs the drain state machine; idempotent and monotonic; a clean drain exits 0 (not 143)."
       },
       "a2a.LameDuck": {
         "input": { "ready": { "type": "boolean", "default": false, "note": "false => flip to NotReady; true => return to Ready iff conditions hold" } },
         "result": { "ready": "boolean", "since": "string (date-time)", "in_flight": "integer" },
-        "machinery": "Readiness override toward NotReady only; reversible; performs no drain and triggers no exit.",
-        "owner": "RFC-0015"
+        "machinery": "Readiness override toward NotReady only; reversible; performs no drain and triggers no exit."
       },
       "a2a.Pause": {
         "input": {},
         "result": { "paused": "boolean", "affected": "integer" },
         "machinery": "Fan-control/pause to roots; suspends at a turn boundary. Reflected in agent_paused gauge.",
-        "owner": "RFC-0015",
         "x-status": "shipped",
-        "x-p-pause-note": "agentctl design record §14 P-pause/§0.6 marked pause/resume DEFERRED, but the reference SOURCE ships them (OPERATOR_TOOLS includes pause/resume; a test asserts presence, 'RFC 0015 §4.3 — shipped'). Prefer source: both are listed. P-pause is satisfied in source; the design record is stale on this point."
+        "x-p-pause-note": "pause and resume are shipped operator verbs; both are listed in operator_tools."
       },
       "a2a.Resume": {
         "input": {},
         "result": { "paused": "boolean", "affected": "integer" },
         "machinery": "Inverse of pause; resumes turn execution.",
-        "owner": "RFC-0015",
         "x-status": "shipped",
-        "x-p-pause-note": "See a2a.Pause; deferred in the design record, shipped in source."
+        "x-p-pause-note": "See a2a.Pause; pause and resume are shipped operator verbs."
       },
       "a2a.Cancel": {
         "input": { "handle": { "type": "string", "required": true, "note": "\"0\" or omitted => the root subtree (whole run); sentinel-in-string" }, "reason": { "type": "string", "required": false } },
         "result": { "handle": "string", "cancelling": "boolean", "subtree_size": "integer" },
-        "machinery": "Instance-scoped wrapper over subagent.cancel; runs the kill ladder.",
-        "owner": "RFC-0015/0005"
+        "machinery": "Instance-scoped wrapper over subagent.cancel; runs the kill ladder."
       }
     },
     "x-mappings": {
-      "attach": { "maps_to": "subagent.send", "owner": "RFC-0005", "note": "attach/steer is NOT an operator tool; it is the subagent.send work tool used for multi-turn steering. Gated by P-attach-gate for no-puppeting tenants." },
+      "attach": { "maps_to": "subagent.send", "note": "attach/steer is NOT an operator tool; it is the subagent.send work tool used for multi-turn steering. Gated for no-puppeting tenants." },
       "force": { "note": "NOT a method. Forcing a drain past budget == sending a 2nd SIGTERM." }
     }
   },
@@ -57,28 +52,28 @@
   "operator_resources": {
     "description": "Operator agent:// resources. Open registry (additive resources tolerated). Subscribable resources emit notifications/resources/updated{uri} (notify-then-read; no payload in the notification). Only agent://capabilities is visible to a non-Management (Stdio, in-process work-loop) caller; every other operator resource requires a Management-origin (mTLS client-cert) peer. `stdio_visible` below marks that carve-out.",
     "resources": {
-      "agent://capabilities":      { "subscribable": true,  "stdio_visible": true,  "owner": "RFC-0015", "note": "the capabilities manifest / Agent Card; the ONLY operator resource visible to a non-Management (Stdio) caller" },
-      "agent://inventory":         { "subscribable": true,  "stdio_visible": false, "owner": "RFC-0015" },
-      "agent://status":            { "subscribable": true,  "stdio_visible": false, "owner": "RFC-0015", "note": "identity-bearing; exit_disposition: null | integer(code)" },
-      "agent://events":            { "subscribable": false, "stdio_visible": false, "owner": "RFC-0016", "note": "bounded ring stream; read query ?after=<seq>&level=<lvl>&event=<dotted-prefix,..>; see events.schema.json" },
-      "agent://run/{run_id}":      { "owner": "RFC-0005", "note": "embeds the run-outcome report under `report`" },
-      "agent://subagent/{handle}": { "owner": "RFC-0005" },
-      "agent://session/{handle}":  { "owner": "RFC-0005" },
-      "agent://intelligence":      { "owner": "RFC-0018", "provisional": true, "note": "intelligence health resource" },
-      "agent://capacity":          { "owner": "RFC-0019", "provisional": "P4 — frozen schema undefined upstream" },
-      "agent://metrics":           { "owner": "RFC-0016", "provisional": "P4 — Prom 0.0.4 text body + mimeType not yet pinned" }
+      "agent://capabilities":      { "subscribable": true,  "stdio_visible": true,  "note": "the capabilities manifest / Agent Card; the ONLY operator resource visible to a non-Management (Stdio) caller" },
+      "agent://inventory":         { "subscribable": true,  "stdio_visible": false },
+      "agent://status":            { "subscribable": true,  "stdio_visible": false, "note": "identity-bearing; exit_disposition: null | integer(code)" },
+      "agent://events":            { "subscribable": false, "stdio_visible": false, "note": "bounded ring stream; read query ?after=<seq>&level=<lvl>&event=<dotted-prefix,..>; see events.schema.json" },
+      "agent://run/{run_id}":      { "note": "embeds the run-outcome report under `report`" },
+      "agent://subagent/{handle}": {},
+      "agent://session/{handle}":  {},
+      "agent://intelligence":      { "provisional": true, "note": "intelligence health resource" },
+      "agent://capacity":          { "provisional": "frozen schema undefined upstream" },
+      "agent://metrics":           { "provisional": "Prometheus 0.0.4 text body + mimeType not yet pinned" }
     }
   },
 
   "peer_origin": {
-    "description": "PeerOrigin gating — the trust domain of a caller (RFC 0015 §3.4/§7). Contract 2.0: origin is CRYPTOGRAPHIC IDENTITY, not reachability. A caller that presents a client cert the mTLS acceptor verified against the pinned client CA is Management; the agent's own in-process driving harness is Stdio. There is no lesser wire origin — a request on the HTTPS listener with no verified cert (and no accepted bearer) is unauthenticated and refused, not downgraded. Closed enum. The A2A gateway forwards to the agent presenting the control-plane client cert, so gateway-relayed A2A work arrives as Management.",
+    "description": "PeerOrigin gating — the trust domain of a caller. Contract 2.0: origin is CRYPTOGRAPHIC IDENTITY, not reachability. A caller that presents a client cert the mTLS acceptor verified against the pinned client CA is Management; the agent's own in-process driving harness is Stdio. There is no lesser wire origin — a request on the HTTPS listener with no verified cert (and no accepted bearer) is unauthenticated and refused, not downgraded. Closed enum. The A2A gateway forwards to the agent presenting the control-plane client cert, so gateway-relayed A2A work arrives as Management.",
     "enum": ["Stdio", "Management"],
     "origin_source": {
       "in-process work loop": "Stdio",
       "mTLS HTTPS peer with a client cert chaining to the pinned client CA": "Management",
       "mTLS HTTPS peer, no verified client cert / no accepted bearer": "unauthenticated => refused (not an origin)"
     },
-    "x-note": "agentd additionally accepts a constant-time bearer token as a Management alternative, but agentctl policy is mTLS-ONLY (never --serve-bearer) so no credential ever lands on the pod."
+    "x-note": "A conformant agent MAY additionally accept a constant-time bearer token as a Management-origin alternative, but agentctl policy is mTLS-ONLY (never --serve-bearer) so no credential ever lands on the pod."
   },
 
   "gating": {
@@ -88,26 +83,26 @@
   },
 
   "surfaces_control_keys": {
-    "description": "The surfaces{} sub-block keys this control surface owns (RFC 0014 §6.2). SUM TYPES require hand-written deserializers (agentctl RFC 0018 §3.3). additionalProperties:true — a key ABSENT => surface unbuilt => graceful degradation.",
-    "management":     { "type": "false | string", "forms": ["false", "https://HOST:PORT"], "source": "capabilities.rs maps Option<String> -> Value::Bool(false) | Value::String; contract 2.0 the string is an mTLS HTTPS URL" },
-    "operator_tools": { "type": "array<string>", "note": "empty [] without the serve-mcp feature; FROZEN order a2a.Drain,a2a.LameDuck,a2a.Pause,a2a.Resume,a2a.Cancel" },
+    "description": "The surfaces{} sub-block keys this control surface owns. SUM TYPES require hand-written deserializers. additionalProperties:true — a key ABSENT => surface unbuilt => graceful degradation.",
+    "management":     { "type": "false | string", "forms": ["false", "https://HOST:PORT"], "source": "false when no management surface is served, otherwise an mTLS HTTPS URL string (contract 2.0)" },
+    "operator_tools": { "type": "array<string>", "note": "empty [] when no management surface is served; FROZEN order a2a.Drain,a2a.LameDuck,a2a.Pause,a2a.Resume,a2a.Cancel" },
     "exit_codes":     { "type": "string", "value": "1.0", "note": "exit_codes_version; see exit-codes.table.json" },
-    "events":         { "type": "boolean", "note": "requires the events feature AND the served management surface" }
+    "events":         { "type": "boolean", "note": "requires the events capability AND a served management surface" }
   },
 
   "operator_state_metrics": {
-    "description": "Operator-state metrics (names FROZEN by RFC 0016; this surface only references them — see metrics.registry.json). Neutral agent_* names.",
-    "agent_paused":          { "type": "gauge", "values": "0|1", "owner": "RFC-0015 §5.5" },
-    "agent_ready":           { "type": "gauge", "values": "0|1", "computed": "!draining && !lame_duck", "owner": "RFC-0016" },
-    "agent_drains_total":    { "type": "counter", "labels": { "phase": ["started", "completed", "forced", "other"] }, "owner": "RFC-0016" },
-    "agent_active_subagents":{ "type": "gauge", "owner": "RFC-0010/0016" },
-    "agent_tree_depth":      { "type": "gauge", "owner": "RFC-0010" }
+    "description": "Operator-state metrics (names FROZEN; this surface only references them — see metrics.registry.json). Neutral agent_* names.",
+    "agent_paused":          { "type": "gauge", "values": "0|1" },
+    "agent_ready":           { "type": "gauge", "values": "0|1", "computed": "!draining && !lame_duck" },
+    "agent_drains_total":    { "type": "counter", "labels": { "phase": ["started", "completed", "forced", "other"] } },
+    "agent_active_subagents":{ "type": "gauge" },
+    "agent_tree_depth":      { "type": "gauge" }
   },
 
   "meta_convention": {
-    "description": "The _meta keys this control surface relies on (RFC 0011 §6.2; RFC 0015 §5.6). Neutral agent/* names. traceparent is W3C and unbranded.",
+    "description": "The _meta keys this control surface relies on. Neutral agent/* names. traceparent is W3C and unbranded.",
     "agent/run_id":    { "note": "idempotency key on every tools/call" },
-    "agent/claim_key": { "note": "claim-route stable item-derived key (RFC 0015 §5.6)" },
+    "agent/claim_key": { "note": "claim-route stable item-derived key" },
     "agent/instance":  {},
     "agent/shard":     {},
     "traceparent":     { "note": "W3C trace context; unbranded" }
@@ -115,15 +110,15 @@
 
   "x-sum-types": {
     "surfaces.management": "false | string (contract 2.0: an mTLS https URL, e.g. https://0.0.0.0:8443) — hand-written deserializer required",
-    "surfaces.exit_codes": "string version (\"1.0\"); RFC 0014 §5 sketch showed the \"RFC-0011-§5\" form, source pins \"1.0\"",
+    "surfaces.exit_codes": "string version (\"1.0\")",
     "agent://status.exit_disposition": "null | integer(code) — set once terminal",
     "lame-duck.ready / cancel.handle / drain.deadline_ms": "boolean override / sentinel-string \"0\" / clamped integer respectively"
   },
 
   "x-provisional": {
-    "p_pause": "RESOLVED-in-source: pause/resume ship despite the design record marking them deferred.",
-    "p4_resources": "agent://capacity and agent://metrics bodies are undefined upstream (P4); listed but provisional.",
-    "operator_metric_divergence": "RFC 0015 §5.5 lists gauges agent_draining + agent_lame_duck + agent_paused; the SOURCE emits agent_paused + agent_ready (computed) + agent_drains_total{phase} with NO standalone draining/lame_duck gauge. draining/lame_duck are observable via agent_ready==0 + agent_drains_total. Prefer source.",
+    "p_pause": "pause and resume are shipped operator verbs.",
+    "provisional_resources": "agent://capacity and agent://metrics bodies are undefined upstream; listed but provisional.",
+    "operator_metric_divergence": "The operator-state gauges are agent_paused + agent_ready (computed) + agent_drains_total{phase}; there is NO standalone draining/lame_duck gauge. draining/lame_duck are observable via agent_ready==0 + agent_drains_total.",
     "auth_model": "RESOLVED in contract 2.0: the management surface is mTLS HTTPS and the authority is the verified CLIENT-CERT IDENTITY (cert chaining to the pinned client CA => Management). This supersedes the v1 'reachability IS authority' model. agentd also accepts a bearer alternative, but agentctl is mTLS-only so no secret lands on the pod."
   }
 }

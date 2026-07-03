@@ -122,7 +122,7 @@ subjects:
     namespace: {{ $ns }}
 {{- end }}
 ---
-# The ModelGateway (RFC 0012): the intelligence plane's credential-injecting,
+# The ModelGateway: the intelligence plane's credential-injecting,
 # token-metering, budget-enforcing inference proxy. Agents reach it WITHOUT any
 # provider secret; it injects the ModelPool's credential, meters per-pool tokens
 # in Postgres, and enforces the pool budget.
@@ -182,11 +182,9 @@ spec:
             {{- . | nindent 12 }}
             {{- end }}
             # Downward API: the ModelGateway's own (control-plane) namespace, the
-            # anchor for source-IP attestation (modelgateway.attestIdentity). In
-            # contract 2.0 agents dial the gateway DIRECTLY, attested as their own
-            # source-IP identity; the legacy node-agent-forwarder trust path is
-            # inert (no node-agent exists) but its anchor stays fail-closed.
-            # Harmless when attest is off, so it is unconditional.
+            # anchor for source-IP attestation (modelgateway.attestIdentity).
+            # Agents dial the gateway directly, attested as their own source-IP
+            # identity. Harmless when attest is off, so it is unconditional.
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

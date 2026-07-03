@@ -1,7 +1,6 @@
-# Defence-in-depth network isolation for the data plane (RFC 0015). These make
-# the "networkless agent" claim real: an agent pod may egress ONLY to the on-node
-# bridge (node-agent), the A2A gateway, and the ModelGateway — never the internet
-# or other tenants. NOTE: enforced only by a NetworkPolicy-capable CNI
+# Defence-in-depth network isolation for the data plane. An agent pod may egress
+# ONLY to DNS and the control plane / gateways in agentctl-system — never the
+# internet or other tenants. NOTE: enforced only by a NetworkPolicy-capable CNI
 # (Calico/Cilium); kind's default kindnet does NOT enforce these (they are inert
 # but correct, and enforce on a real cluster).
 apiVersion: networking.k8s.io/v1
@@ -38,13 +37,13 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
-    # The control plane: node-agent (bridge), A2A gateway, ModelGateway.
+    # The control plane and gateways in agentctl-system.
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: agentctl-system
       ports:
-        - { protocol: TCP, port: 8443 }  # node-agent control API (mTLS)
+        - { protocol: TCP, port: 8443 }  # mTLS control surface (POST /mcp)
         - { protocol: TCP, port: 8080 }  # gateway / modelgateway
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane

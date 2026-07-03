@@ -1,7 +1,7 @@
 [package]
 name = "agentctl-gateway"
 version = "0.1.0"
-description = "agentctl A2A gateway (RFC 0013): the public A2A HTTP/JSON-RPC surface + Agent Card projection, bridging to an agent's A2A-over-the-substrate via the node-agent. Hand-rolled in Rust (axum). agentctl is Rust-only."
+description = "agentctl A2A gateway: the public A2A HTTP/JSON-RPC surface with signed Agent Card projection, reaching agents by dialing their pods directly over mTLS. Rust (axum)."
 edition.workspace = true
 rust-version.workspace = true
 license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)
@@ -13,11 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"
-# kube client to resolve {ns,name}→pod→node-agent (same routing as the apiserver).
+# kube client to resolve {ns,name}→pod (same routing as the apiserver).
 # rustls/ring → no aws-lc-rs, no C toolchain.
 kube = { version = "4", default-features = false, features = ["client", "rustls-tls", "ring"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }
-# HTTP client for the gateway→node-agent hop, now over mTLS (RFC 0015). `stream`
+# HTTP client for the mTLS hop to agent pods. `stream`
 # enables `Response::bytes_stream` for the SSE passthrough on `message/stream`.
 # `rustls-tls-manual-roots-no-provider` enables `use_preconfigured_tls` WITHOUT
 # pulling a default crypto provider → no aws-lc-rs, no C toolchain. We hand it a
@@ -27,12 +27,12 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "rustls-tls-manual-roots-no-provider",
 ] }
-# rustls (ring provider) for the node-agent mTLS ClientConfig + custom verifier.
+# rustls (ring provider) for the agent-dial mTLS ClientConfig + custom verifier.
 # ring, never aws-lc-rs → no C toolchain (matches the apiserver).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 # TRUSTED-PROXY mode (front-proxy trust over mTLS): a SECOND listener serving
-# rustls TLS that REQUIRES a CA-signed client cert, mirroring the node-agent's
+# rustls TLS that REQUIRES a CA-signed client cert, mirroring the agent's
 # dual listener. `tls-rustls-no-provider` keeps it ring-only (no aws-lc-rs, no C
 # toolchain); the binary installs the ring provider in main().
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
@@ -47,7 +47,7 @@ tower = { version = "0.5", default-features = false }
 x509-cert = "0.2"
 # CRD types (Agent / AgentFleet) for the mesh discovery registry (GET /agents).
 agent-api = { path = "../agent-api" }
-# Durable A2A task store (RFC 0013). sslmode=disable → NoTls (default); when the
+# Durable A2A task store. sslmode=disable → NoTls (default); when the
 # DSN asks for TLS (sslmode=require, e.g. bundled postgres.tls.enabled) the store
 # wraps the hop with tokio-postgres-rustls. Both pure Rust, no C toolchain.
 deadpool-postgres = "0.14"
@@ -61,7 +61,7 @@ tracing = "0.1"
 # Shared tracing init: fmt-only by default, OTLP export when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set.
 agentctl-telemetry = { path = "../agentctl-telemetry" }
-# Agent Card signing (JWS / EdDSA) + JWKS (RFC 0013). Both pure Rust — no C
+# Agent Card signing (JWS / EdDSA) + JWKS. Both pure Rust — no C
 # toolchain (keep the gateway image dependency-free of a C compiler).
 ed25519-dalek = "2"
 base64 = "0.22"
@@ -75,5 +75,5 @@ subtle = "2"
 jsonwebtoken = "9"
 # Mozilla root trust anchors for the JWKS discovery/fetch HTTPS client (public
 # OIDC issuers are reached over the open internet — distinct from the internal
-# node-agent CA used by the mTLS control hop). Pure Rust, no C toolchain.
+# cluster CA used by the mTLS control hop). Pure Rust, no C toolchain.
 webpki-roots = "1"

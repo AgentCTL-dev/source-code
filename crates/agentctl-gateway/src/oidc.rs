@@ -630,7 +630,7 @@ mod tests {
             groups: vec!["eng".to_string(), "oncall".to_string()],
         };
         let req = id
-            .inject(test_client().post("http://node-agent.local/v1"))
+            .inject(test_client().post("http://agent.local/v1"))
             .build()
             .unwrap();
         let h = req.headers();
@@ -647,7 +647,7 @@ mod tests {
             groups: vec![],
         };
         let req = id
-            .inject(test_client().post("http://node-agent.local/v1"))
+            .inject(test_client().post("http://agent.local/v1"))
             .build()
             .unwrap();
         let h = req.headers();

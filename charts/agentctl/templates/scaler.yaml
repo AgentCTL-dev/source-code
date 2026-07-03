@@ -20,7 +20,7 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
 ---
-# The KEDA external scaler (RFC 0011): a stateless gRPC service implementing the
+# The KEDA external scaler: a stateless gRPC service implementing the
 # KEDA `externalscaler.ExternalScaler` API on :9100. KEDA dials it (per the
 # ScaledObject external trigger the operator renders for each claim-mode
 # AgentFleet) and the scaler answers IsActive/GetMetrics off the coordination

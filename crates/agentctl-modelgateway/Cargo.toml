@@ -1,7 +1,7 @@
 [package]
 name = "agentctl-modelgateway"
 version = "0.1.0"
-description = "agentctl ModelGateway (RFC 0012): the credential-injecting, metering, budget-enforcing inference proxy for the intelligence plane. Networkless agents hold NO provider secrets; this gateway injects the ModelPool's credential, meters token usage, and enforces the pool budget. Hand-rolled in Rust (axum). agentctl is Rust-only."
+description = "agentctl ModelGateway: the credential-injecting, metering, budget-enforcing inference proxy for the intelligence plane. Agents hold no provider secrets; the gateway injects the ModelPool credential, meters tokens, and enforces the budget. Rust (axum)."
 edition.workspace = true
 rust-version.workspace = true
 license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)

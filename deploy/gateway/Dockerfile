@@ -1,4 +1,4 @@
-# Runtime image for the A2A gateway (RFC 0013). Distroless nonroot; serves the
+# Runtime image for the A2A gateway. Distroless nonroot; serves the
 # A2A HTTP surface on :8080.
 #
 # Multi-arch via cross-compilation (cargo-zigbuild on $BUILDPLATFORM -> $TARGETPLATFORM).

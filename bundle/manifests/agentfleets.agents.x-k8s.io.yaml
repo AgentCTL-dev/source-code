@@ -35,12 +35,338 @@ spec:
         properties:
           spec:
             description: |-
-              A replicated, autoscaled set of agents (RFC 0003 §4 / RFC 0011). Renders to a
-              StatefulSet (shard mode) or Deployment (claim mode); **KEDA owns
-              `.spec.replicas`**, so the rendered workload omits it.
+              A replicated, autoscaled set of agents. Renders to a StatefulSet (shard mode)
+              or Deployment (claim mode); **KEDA owns `.spec.replicas`**, so the rendered
+              workload omits it.
             properties:
+              budget:
+                description: |-
+                  Per-fleet model budget, enforced by the ModelGateway IN ADDITION to the
+                  `ModelPool` budget. Isolates one fleet's spend from another's even when
+                  they share a pool. Absent ⇒ only the pool cap applies.
+                nullable: true
+                properties:
+                  maxTokens:
+                    description: |-
+                      Total tokens this fleet may consume against its `ModelPool`, across all
+                      members. Enforced by the ModelGateway reservation path keyed by
+                      `(namespace, pool, fleet)`, IN ADDITION to the pool-wide cap.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              coordinator:
+                description: |-
+                  The fleet's **coordinator** ("main agent"). When set, the operator renders
+                  an additional single-role Deployment (label
+                  `agentctl.dev/fleet-role: coordinator`) and wires it as the fleet's A2A
+                  front door + work producer. Absent ⇒ a headless worker pool, load-balanced
+                  directly by the A2A gateway.
+                nullable: true
+                properties:
+                  distribution:
+                    description: How a coordinator fans work out to its workers.
+                    enum:
+                    - queue
+                    - a2a
+                    nullable: true
+                    type: string
+                  replicas:
+                    description: |-
+                      Coordinator replica count. Default 1 (a singleton main agent). `>1` is
+                      allowed for HA, but the replicas are peers (not shards): they must
+                      coordinate through the work fabric like any other producer.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  template:
+                    description: |-
+                      The coordinator agent definition — a normal `AgentSpec` (its own image,
+                      instruction, mode, model, MCP tools). Typically `mode: reactive` (a
+                      long-lived planner that accepts A2A) or `mode: workflow`. Never `once`
+                      (CEL-enforced on the fleet).
+                    properties:
+                      access:
+                        description: |-
+                          Declarative per-agent access policy (authn/authz at the A2A gateway).
+                          `public` is documentation-only; `oidc` configures JWT verification and
+                          claim-based authorization for inbound A2A calls.
+                        nullable: true
+                        properties:
+                          oidc:
+                            description: OIDC/JWT authentication + authorization for inbound A2A calls.
+                            nullable: true
+                            properties:
+                              audiences:
+                                description: Accepted `aud` (audience) claims.
+                                items:
+                                  type: string
+                                type: array
+                              forwardIdentity:
+                                description: Inject the caller's `sub`/`email`/`groups` identity to the agent.
+                                nullable: true
+                                type: boolean
+                              issuer:
+                                description: |-
+                                  OIDC issuer URL. JWKS is auto-discovered from
+                                  `issuer/.well-known/openid-configuration` unless `jwks_uri` is set.
+                                type: string
+                              jwksUri:
+                                description: Explicit JWKS URI override (skips OIDC discovery when set).
+                                nullable: true
+                                type: string
+                              requiredClaims:
+                                description: 'Authorization: ALL listed claim requirements must hold for the caller.'
+                                items:
+                                  description: A single claim-based authorization requirement.
+                                  properties:
+                                    anyOf:
+                                      description: The caller's claim (array contains OR scalar equals) must be one of these.
+                                      items:
+                                        type: string
+                                      type: array
+                                    claim:
+                                      description: The claim name, e.g. `"groups"` or `"email"`.
+                                      type: string
+                                  required:
+                                  - claim
+                                  type: object
+                                nullable: true
+                                type: array
+                            required:
+                            - issuer
+                            type: object
+                          public:
+                            description: |-
+                              Whether this agent is served publicly via the A2A gateway. Documentation-
+                              only (no enforcement yet); records intent.
+                            nullable: true
+                            type: boolean
+                        type: object
+                      classRef:
+                        description: |-
+                          Reference to an `AgentClass` supplying the ops profile + image. Mutually
+                          exclusive with `image`.
+                        nullable: true
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      egress:
+                        description: |-
+                          **Declared capability**: the agent requests outbound network egress. The
+                          admission webhook gates this — combined with `exec` and `secrets` it forms
+                          the lethal trifecta and triggers the override gate.
+                        nullable: true
+                        type: boolean
+                      exec:
+                        description: |-
+                          **Declared capability**: the agent requests in-sandbox command execution.
+                          The admission webhook gates this — it is a privileged capability and one
+                          leg of the lethal trifecta, never granted implicitly.
+                        nullable: true
+                        type: boolean
+                      image:
+                        description: |-
+                          The conformant-agent image to run. **Required iff `classRef` is unset;
+                          forbidden when `classRef` is set** (enforced by CEL/admission). A classless
+                          `Agent` names its own image here.
+                        nullable: true
+                        type: string
+                      instruction:
+                        description: Inline instruction. Required for non-reactive modes (CEL/admission).
+                        nullable: true
+                        type: string
+                      intelligenceRef:
+                        description: Reference to an `IntelligenceService`/`ModelPool`.
+                        nullable: true
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      limits:
+                        description: Resolved limits/budgets (override the agent defaults).
+                        nullable: true
+                        properties:
+                          maxDepth:
+                            format: uint64
+                            minimum: 0.0
+                            nullable: true
+                            type: integer
+                          maxSteps:
+                            format: uint64
+                            minimum: 0.0
+                            nullable: true
+                            type: integer
+                          maxTokens:
+                            format: uint64
+                            minimum: 0.0
+                            nullable: true
+                            type: integer
+                          treeTokenBudget:
+                            format: uint64
+                            minimum: 0.0
+                            nullable: true
+                            type: integer
+                        type: object
+                      loop:
+                        description: Loop-mode cadence. Used only for `loop`.
+                        nullable: true
+                        properties:
+                          deadline:
+                            description: Optional wall-clock bound, e.g. `"24h"`.
+                            nullable: true
+                            type: string
+                          interval:
+                            description: Re-entry interval, e.g. `"5m"`.
+                            type: string
+                        required:
+                        - interval
+                        type: object
+                      mcpServerSetRefs:
+                        description: Reusable MCP server bundles (`MCPServerSet`).
+                        items:
+                          description: A name-only reference to a sibling resource in the same namespace.
+                          properties:
+                            name:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      mode:
+                        description: The run shape. Determines the rendered workload kind.
+                        enum:
+                        - once
+                        - loop
+                        - reactive
+                        - schedule
+                        - workflow
+                        type: string
+                      model:
+                        description: |-
+                          The agent's declared model id (metadata; the real binding is via
+                          intelligence). Surfaced as a printer column.
+                        nullable: true
+                        type: string
+                      modelPool:
+                        description: |-
+                          **Declared capability**: the `ModelPool` this agent binds for model access.
+                          The admission webhook validates the binding (the pool exists / is permitted
+                          for this tenant).
+                        nullable: true
+                        type: string
+                      schedule:
+                        description: Schedule-mode cron. Used only for `schedule`.
+                        nullable: true
+                        properties:
+                          cron:
+                            type: string
+                          timezone:
+                            nullable: true
+                            type: string
+                        required:
+                        - cron
+                        type: object
+                      secrets:
+                        description: |-
+                          **Declared capability**: the names of namespace-local `Secret`s the agent
+                          may read. The admission webhook validates each requested name against
+                          policy; access to untrusted private data is a trifecta leg.
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      subscribe:
+                        description: Reactive-mode subscriptions (MCP resource URIs). Required for `reactive`.
+                        items:
+                          type: string
+                        type: array
+                      substrate:
+                        description: Substrate tier. Names are the canonical tier ids.
+                        enum:
+                        - stock-unix
+                        - kata-hybrid
+                        - sidecar-emptydir
+                        nullable: true
+                        type: string
+                      surfaces:
+                        description: |-
+                          Which control-plane surfaces to expose. The operator drives only what the
+                          agent actually advertises in its manifest (graceful degradation),
+                          intersected with this desired set.
+                        nullable: true
+                        properties:
+                          a2a:
+                            default: false
+                            type: boolean
+                          management:
+                            default: false
+                            type: boolean
+                          metrics:
+                            default: false
+                            type: boolean
+                        type: object
+                      workflow:
+                        description: |-
+                          The workflow graph to drive. Required when `mode: workflow`; also valid
+                          alongside `mode: reactive` (a suspend/resume daemon graph). Source is
+                          inline JSON or a ConfigMap key; the operator materializes it to a mounted
+                          file passed as `--workflow <path>`.
+                        nullable: true
+                        properties:
+                          configMapKeyRef:
+                            description: A ConfigMap key holding the workflow JSON (mounted directly).
+                            nullable: true
+                            properties:
+                              key:
+                                description: The key within the `ConfigMap`'s data holding the workflow JSON.
+                                type: string
+                              name:
+                                description: The `ConfigMap` name (same namespace as the `Agent`).
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          inline:
+                            description: |-
+                              The workflow graph as an inline JSON string. The operator renders it into
+                              a generated ConfigMap and mounts it.
+                            nullable: true
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: workflow needs exactly one of inline or configMapKeyRef
+                          rule: has(self.inline) != has(self.configMapKeyRef)
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: schedule is required when mode is 'schedule'
+                      rule: self.mode != 'schedule' || has(self.schedule)
+                    - message: workflow is required when mode is 'workflow'
+                      rule: self.mode != 'workflow' || has(self.workflow)
+                required:
+                - template
+                type: object
+              replicas:
+                description: |-
+                  Claim-mode **worker** replica count, the target of the `scale` subresource
+                  so `kubectl scale agentfleet` and an HPA can drive it. **KEDA owns this in
+                  steady state**; the rendered workload omits it. Optional so claim mode may
+                  scale to 0 / defer to KEDA when unset.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
               scaling:
-                description: The scaling regime.
+                description: The **worker** scaling regime.
                 properties:
                   max:
                     description: 'Claim mode: maximum replicas.'
@@ -90,12 +416,69 @@ spec:
                 - mode
                 type: object
               template:
-                description: The per-replica agent definition.
+                description: The per-replica **worker** agent definition.
                 properties:
+                  access:
+                    description: |-
+                      Declarative per-agent access policy (authn/authz at the A2A gateway).
+                      `public` is documentation-only; `oidc` configures JWT verification and
+                      claim-based authorization for inbound A2A calls.
+                    nullable: true
+                    properties:
+                      oidc:
+                        description: OIDC/JWT authentication + authorization for inbound A2A calls.
+                        nullable: true
+                        properties:
+                          audiences:
+                            description: Accepted `aud` (audience) claims.
+                            items:
+                              type: string
+                            type: array
+                          forwardIdentity:
+                            description: Inject the caller's `sub`/`email`/`groups` identity to the agent.
+                            nullable: true
+                            type: boolean
+                          issuer:
+                            description: |-
+                              OIDC issuer URL. JWKS is auto-discovered from
+                              `issuer/.well-known/openid-configuration` unless `jwks_uri` is set.
+                            type: string
+                          jwksUri:
+                            description: Explicit JWKS URI override (skips OIDC discovery when set).
+                            nullable: true
+                            type: string
+                          requiredClaims:
+                            description: 'Authorization: ALL listed claim requirements must hold for the caller.'
+                            items:
+                              description: A single claim-based authorization requirement.
+                              properties:
+                                anyOf:
+                                  description: The caller's claim (array contains OR scalar equals) must be one of these.
+                                  items:
+                                    type: string
+                                  type: array
+                                claim:
+                                  description: The claim name, e.g. `"groups"` or `"email"`.
+                                  type: string
+                              required:
+                              - claim
+                              type: object
+                            nullable: true
+                            type: array
+                        required:
+                        - issuer
+                        type: object
+                      public:
+                        description: |-
+                          Whether this agent is served publicly via the A2A gateway. Documentation-
+                          only (no enforcement yet); records intent.
+                        nullable: true
+                        type: boolean
+                    type: object
                   classRef:
                     description: |-
-                      Reference to an `AgentClass` (RFC 0004) supplying the ops profile +
-                      image. Mutually exclusive with `image`.
+                      Reference to an `AgentClass` supplying the ops profile + image. Mutually
+                      exclusive with `image`.
                     nullable: true
                     properties:
                       name:
@@ -105,23 +488,23 @@ spec:
                     type: object
                   egress:
                     description: |-
-                      **Declared capability** (RFC 0007): the agent requests outbound network
-                      egress. The admission webhook gates this — combined with `exec` and
-                      `secrets` it forms the lethal trifecta and triggers the override gate.
+                      **Declared capability**: the agent requests outbound network egress. The
+                      admission webhook gates this — combined with `exec` and `secrets` it forms
+                      the lethal trifecta and triggers the override gate.
                     nullable: true
                     type: boolean
                   exec:
                     description: |-
-                      **Declared capability** (RFC 0007): the agent requests in-sandbox command
-                      execution. The admission webhook gates this — it is a privileged
-                      capability and one leg of the lethal trifecta, never granted implicitly.
+                      **Declared capability**: the agent requests in-sandbox command execution.
+                      The admission webhook gates this — it is a privileged capability and one
+                      leg of the lethal trifecta, never granted implicitly.
                     nullable: true
                     type: boolean
                   image:
                     description: |-
                       The conformant-agent image to run. **Required iff `classRef` is unset;
-                      forbidden when `classRef` is set** (enforced by CEL/admission, RFC 0003
-                      §7 / RFC 0007). A classless `Agent` names its own image here.
+                      forbidden when `classRef` is set** (enforced by CEL/admission). A classless
+                      `Agent` names its own image here.
                     nullable: true
                     type: string
                   instruction:
@@ -129,7 +512,7 @@ spec:
                     nullable: true
                     type: string
                   intelligenceRef:
-                    description: Reference to an `IntelligenceService`/ModelPool (RFC 0004/0012).
+                    description: Reference to an `IntelligenceService`/`ModelPool`.
                     nullable: true
                     properties:
                       name:
@@ -177,7 +560,7 @@ spec:
                     - interval
                     type: object
                   mcpServerSetRefs:
-                    description: Reusable MCP server bundles (RFC 0004 `MCPServerSet`).
+                    description: Reusable MCP server bundles (`MCPServerSet`).
                     items:
                       description: A name-only reference to a sibling resource in the same namespace.
                       properties:
@@ -194,6 +577,7 @@ spec:
                     - loop
                     - reactive
                     - schedule
+                    - workflow
                     type: string
                   model:
                     description: |-
@@ -203,9 +587,9 @@ spec:
                     type: string
                   modelPool:
                     description: |-
-                      **Declared capability** (RFC 0007): the `ModelPool` (RFC 0012) this agent
-                      binds for model access. The admission webhook validates the binding (the
-                      pool exists / is permitted for this tenant).
+                      **Declared capability**: the `ModelPool` this agent binds for model access.
+                      The admission webhook validates the binding (the pool exists / is permitted
+                      for this tenant).
                     nullable: true
                     type: string
                   schedule:
@@ -222,9 +606,9 @@ spec:
                     type: object
                   secrets:
                     description: |-
-                      **Declared capability** (RFC 0007): the names of namespace-local `Secret`s
-                      the agent may read. The admission webhook validates each requested name
-                      against policy; access to untrusted private data is a trifecta leg.
+                      **Declared capability**: the names of namespace-local `Secret`s the agent
+                      may read. The admission webhook validates each requested name against
+                      policy; access to untrusted private data is a trifecta leg.
                     items:
                       type: string
                     nullable: true
@@ -235,7 +619,7 @@ spec:
                       type: string
                     type: array
                   substrate:
-                    description: Substrate tier (RFC 0002). Names are the canonical tier ids.
+                    description: Substrate tier. Names are the canonical tier ids.
                     enum:
                     - stock-unix
                     - kata-hybrid
@@ -244,9 +628,9 @@ spec:
                     type: string
                   surfaces:
                     description: |-
-                      Which control-plane surfaces to expose (RFC 0003 §3). The operator drives
-                      only what the agent actually advertises in its manifest (graceful
-                      degradation), intersected with this desired set.
+                      Which control-plane surfaces to expose. The operator drives only what the
+                      agent actually advertises in its manifest (graceful degradation),
+                      intersected with this desired set.
                     nullable: true
                     properties:
                       a2a:
@@ -259,12 +643,71 @@ spec:
                         default: false
                         type: boolean
                     type: object
+                  workflow:
+                    description: |-
+                      The workflow graph to drive. Required when `mode: workflow`; also valid
+                      alongside `mode: reactive` (a suspend/resume daemon graph). Source is
+                      inline JSON or a ConfigMap key; the operator materializes it to a mounted
+                      file passed as `--workflow <path>`.
+                    nullable: true
+                    properties:
+                      configMapKeyRef:
+                        description: A ConfigMap key holding the workflow JSON (mounted directly).
+                        nullable: true
+                        properties:
+                          key:
+                            description: The key within the `ConfigMap`'s data holding the workflow JSON.
+                            type: string
+                          name:
+                            description: The `ConfigMap` name (same namespace as the `Agent`).
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      inline:
+                        description: |-
+                          The workflow graph as an inline JSON string. The operator renders it into
+                          a generated ConfigMap and mounts it.
+                        nullable: true
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: workflow needs exactly one of inline or configMapKeyRef
+                      rule: has(self.inline) != has(self.configMapKeyRef)
                 required:
                 - mode
                 type: object
                 x-kubernetes-validations:
                 - message: schedule is required when mode is 'schedule'
                   rule: self.mode != 'schedule' || has(self.schedule)
+                - message: workflow is required when mode is 'workflow'
+                  rule: self.mode != 'workflow' || has(self.workflow)
+              workPolicy:
+                description: |-
+                  Work-fabric policy for this fleet's items: dead-letter threshold and the
+                  default lease TTL. Absent ⇒ unbounded redelivery + server-default TTL.
+                nullable: true
+                properties:
+                  claimTtlMs:
+                    description: |-
+                      Default lease TTL (ms) the operator advertises to workers for this fleet's
+                      claims. Absent ⇒ the agent/server default.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxAttempts:
+                    description: |-
+                      Dead-letter an item after it has been redelivered this many times without
+                      a terminal `ack`. Absent ⇒ unbounded redelivery. A poison item is moved to
+                      the `deadletter` state (surfaced at `dlq://items`) instead of cycling
+                      forever.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
               workSource:
                 description: The shared work source (an MCP resource URI) for claim/shard distribution.
                 nullable: true
@@ -276,16 +719,18 @@ spec:
             x-kubernetes-validations:
             - message: shards is required when scaling.mode is 'shard'
               rule: self.scaling.mode != 'shard' || has(self.scaling.shards)
+            - message: coordinator.template.mode must not be 'once' (the coordinator must be long-lived)
+              rule: '!has(self.coordinator) || self.coordinator.template.mode != ''once'''
           status:
             description: '`AgentFleet.status`.'
             nullable: true
             properties:
               conditions:
                 items:
-                  description: A status condition (RFC 0003 §6.2). Mirrors `metav1.Condition` shape.
+                  description: A status condition. Mirrors `metav1.Condition` shape.
                   properties:
                     lastTransitionTime:
-                      description: RFC 3339 timestamp.
+                      description: An ISO 8601 / UTC timestamp.
                       nullable: true
                       type: string
                     message:
@@ -325,6 +770,22 @@ spec:
                 minimum: 0.0
                 nullable: true
                 type: integer
+              replicas:
+                description: |-
+                  Current replica count surfaced through the `scale` subresource
+                  (`statusReplicasPath = .status.replicas`). Populated by the operator from
+                  the rendered workload's observed replicas; HPA reads this back.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              selector:
+                description: |-
+                  Serialized label selector for the `scale` subresource
+                  (`labelSelectorPath = .status.selector`); an HPA uses it to find the
+                  pods it scales. Populated by the operator with the workload's selector.
+                nullable: true
+                type: string
             type: object
         required:
         - spec
@@ -333,4 +794,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
       status: {}

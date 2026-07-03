@@ -44,7 +44,6 @@ allow = [
 # (see LICENSE-BUSL). Allow that license only for those crates.
 exceptions = [
     { allow = ["BUSL-1.1"], crate = "agentctl-operator" },
-    { allow = ["BUSL-1.1"], crate = "agentctl-node-agent" },
     { allow = ["BUSL-1.1"], crate = "agentctl-apiserver" },
     { allow = ["BUSL-1.1"], crate = "agentctl-gateway" },
     { allow = ["BUSL-1.1"], crate = "agentctl-modelgateway" },

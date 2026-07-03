@@ -29,8 +29,8 @@ spec:
           spec:
             description: |-
               A reusable, namespaced bundle of MCP tool servers an `Agent`/`AgentFleet`
-              binds via `spec.mcpServerSetRefs` (RFC 0004 §5 / RFC 0019). Agents are
-              **networkless-of-credentials**: they never hold a tool server's token. The
+              binds via `spec.mcpServerSetRefs`. Agents hold **NO tool-server
+              credentials**: they never hold a tool server's token. The
               control plane brokers every remote MCP server through a credential-injecting,
               attesting, policy-enforcing proxy (the `MCPGateway`, the tool-plane analog of
               the `ModelGateway`) configured by this CRD. Each server names its remote
@@ -94,8 +94,8 @@ spec:
                       type: object
                     endpoint:
                       description: |-
-                        The remote MCP server URL (Streamable HTTP, RFC 0004 transport). The
-                        AGENT never dials this — it dials the gateway, which dials this.
+                        The remote MCP server URL (Streamable HTTP transport). The AGENT never
+                        dials this — it dials the gateway, which dials this.
                       type: string
                     name:
                       description: |-
@@ -104,8 +104,8 @@ spec:
                       type: string
                     tags:
                       description: |-
-                        Per-tool trifecta capability tags (RFC 0012 §3.1) the operator declares
-                        for the Rule-of-Two check. A bare list is shorthand for the `*` glob.
+                        Per-tool trifecta capability tags the operator declares for the
+                        Rule-of-Two check. A bare list is shorthand for the `*` glob.
                       items:
                         type: string
                       type: array
@@ -134,7 +134,7 @@ spec:
               tagUnion:
                 description: |-
                   The union of trifecta tags across all servers (informational; the
-                  Agent-level union is the gate — RFC 0004 §5.3).
+                  Agent-level union is the gate).
                 items:
                   type: string
                 type: array

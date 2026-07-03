@@ -1,32 +1,49 @@
 # deploy/
 
-Raw per-component manifests + a local end-to-end walkthrough — useful for
-development, kustomize overlays, and understanding each object.
+Raw, per-component Kubernetes manifests for agentctl plus a local end-to-end
+walkthrough. Use this directory for development, Kustomize overlays, and reading
+each object in isolation.
 
-> **For a production-style install, use the Helm chart: [`charts/agentctl`](../charts/agentctl/README.md).**
-> One `helm install` brings up every component and wires all TLS (APIServer,
-> admission webhook, node-agent mTLS) through **cert-manager** with automatic
-> caBundle injection + rotation — superseding the `install.sh` cert scripts here.
+> **For a production install, use the Helm chart: [`charts/agentctl`](../charts/agentctl/README.md).**
+> One `helm install` brings up every control-plane component and issues all TLS
+> (the aggregated APIServer serving cert, the admission webhook cert, each
+> agent's serving identity, and the gateways' certs) through **cert-manager**
+> with automatic `caBundle` injection and rotation.
+
+## Layout
 
 ```
 deploy/
-  crds/                  # generated CRDs (cargo run -p agentctl-crdgen)
+  crds/                    # generated CRDs — regenerate with `cargo run -p agentctl-crdgen`
     agent.yaml
     agentfleet.yaml
-  operator/              # in-cluster operator install (namespace + RBAC + Deployment)
+    modelpool.yaml
+    mcpserverset.yaml
+  operator/                # in-cluster operator install (namespace + RBAC + Deployment)
     namespace.yaml
-    rbac.yaml            # ServiceAccount + least-privilege ClusterRole(+Binding)
+    rbac.yaml              # ServiceAccount + least-privilege ClusterRole(+Binding)
     deployment.yaml
-    Dockerfile           # distroless runtime over the host-built release binary
+    Dockerfile             # distroless runtime over the host-built release binary
     kustomization.yaml
-  examples/
-    agent-once.yaml      # a minimal once-mode Agent
-    agentfleet-claim.yaml # a claim-mode AgentFleet
+  apiserver/               # aggregated APIServer (management verbs): Deployment + RBAC + APIService
+  admission/               # validating + mutating webhooks: Deployment + RBAC + webhook config
+  gateway/                 # A2A gateway: Deployment + RBAC + signing Secret
+  modelgateway/            # intelligence broker: Deployment + RBAC
+  mcpgateway/              # tools broker (Dockerfile)
+  coordination/            # work-distribution MCP server (Dockerfile)
+  scaler/                  # KEDA external scaler (Dockerfile)
+  postgres/                # bundled durable store for gateway/modelgateway/coordination
+  hardening/               # NetworkPolicies (default-deny + control-plane allow) + mTLS helper
+  examples/                # sample CRs: Agent, AgentFleet, ModelPool, and mock fixtures
 ```
 
-## In-cluster install
+The `crds/` files are generated from the Rust CRD types in the `agent-api` crate.
+Never hand-edit them — run `cargo run -p agentctl-crdgen` to regenerate, and CI
+fails on drift.
 
-Run the operator *inside* the cluster (its own ServiceAccount + RBAC):
+## In-cluster operator install
+
+Run the operator inside the cluster with its own ServiceAccount and RBAC:
 
 ```console
 # build + load the operator image into kind
@@ -45,11 +62,16 @@ kubectl get agents
 kubectl logs -n agentctl-system deploy/agentctl-operator
 ```
 
+The `deploy/operator/` overlay is the only self-contained Kustomize install here.
+The other components (`apiserver/`, `admission/`, `gateway/`, `modelgateway/`,
+`postgres/`, `hardening/`) carry raw manifests you can apply individually, but
+they depend on cert-manager-issued TLS Secrets and shared configuration that the
+Helm chart wires for you. For a complete control plane, install the chart.
+
 ## Local end-to-end (kind)
 
-This runs the operator **out of cluster** against a kind cluster — the fastest
-loop. (In-cluster Helm/Kustomize packaging for the operator + node-agent +
-RBAC is a later step.)
+The fastest development loop runs the operator **out of cluster** against a kind
+cluster, reading your kubeconfig:
 
 ```console
 # 1. cluster + CRDs
@@ -75,9 +97,16 @@ kubectl get jobs                                  # gone
 kind delete cluster --name agentctl
 ```
 
-**Note on the example image.** `agent-once.yaml` uses `busybox` as a placeholder —
-there is no real conformant-agent image in this repo yet, so the rendered Job's
-pod will fail (busybox does not understand the agent args). That is expected: the
-walkthrough proves the *control plane* (reconcile → render → apply → status →
-GC), not a running agent. Point `.spec.image` at a real conformant-agent image to
-run an actual agent.
+**Note on the example image.** `agent-once.yaml` uses `busybox` as a placeholder.
+There is no conformant-agent image in this repo, so the rendered Job's pod will
+fail (busybox does not understand the agent arguments). That is expected: the
+walkthrough exercises the *control plane* — reconcile, render, apply, status, and
+garbage collection — not a running agent. Point `.spec.image` at a real
+conformant agent (the reference implementation is `agentd`) to run a live agent.
+
+## Related documentation
+
+- [`charts/agentctl/README.md`](../charts/agentctl/README.md) — the production Helm install.
+- [`docs/architecture.md`](../docs/architecture.md) — components, planes, and how they fit together.
+- [`docs/operations.md`](../docs/operations.md) — day-2 operations and management verbs.
+- [`docs/security.md`](../docs/security.md) — the identity, isolation, and hardening model.

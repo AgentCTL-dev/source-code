@@ -4,7 +4,7 @@
 #   - mode: once + an instruction — agentd only reaches intelligence when it does
 #     work; an idle reactive agent never infers. once-mode drives exactly the
 #     inference the ModelGateway meters/budgets.
-#   - No routed-infer annotation: contract 2.0 retired the node-agent infer-proxy.
+#   - Agents reach intelligence by dialing the ModelGateway directly over HTTPS.
 #     The operator ALWAYS renders AGENT_INTELLIGENCE=https://<modelgateway>… keyless
 #     and mounts the per-namespace CA; the ModelGateway attests the caller by
 #     SOURCE IP and injects the ModelPool credential (no key on the agent).

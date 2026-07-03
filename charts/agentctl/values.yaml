@@ -12,7 +12,8 @@ image:
   pullSecrets: []
   # Digest pins (require image.registry set). Map comp -> sha256:... ; a non-empty
   # entry renders "<registry>/<comp>@<digest>" instead of the :tag for that comp.
-  # Comps: operator, node-agent, apiserver, gateway, modelgateway, admission.
+  # Comps: operator, apiserver, admission, gateway, modelgateway, mcpgateway,
+  #   coordination, scaler.
   #   digests:
   #     operator: sha256:...
   digests: {}
@@ -58,14 +59,14 @@ observability:
 # Namespace the control plane runs in. Helm cannot reliably own the namespace it
 # installs into (release storage needs it to pre-exist), so the chart does NOT
 # create it by default. Either `helm install --create-namespace`, or pre-create it
-# with the PodSecurity label the node-agent (hostPath + hostPID) needs:
+# with the baseline PodSecurity label:
 #   kubectl create ns agentctl-system
-#   kubectl label ns agentctl-system pod-security.kubernetes.io/enforce=privileged
+#   kubectl label ns agentctl-system pod-security.kubernetes.io/enforce=baseline
 namespace:
   name: agentctl-system
   create: false
-  # baseline: no control-plane component needs hostPath/hostPID/privileged since
-  # the node-agent (the only such component) was retired in contract 2.0.
+  # baseline is sufficient: every control-plane component is an ordinary pod on the
+  # pod network — none needs hostPath, hostPID, or privileged.
   podSecurity: baseline
 
 # cert-manager wiring. When enabled (required), the chart creates a self-signed
@@ -103,7 +104,7 @@ postgres:
     #   - mounts that secret at /tls (defaultMode 0640; fsGroup=runAsUser so the
     #     key is group-readable by the postgres uid) and runs postgres ssl=on;
     #   - sets DATABASE_URL sslmode=require, so the gateway/modelgateway rustls
-    #     client encrypts the hop WITHOUT CA verification (see operations.md §1).
+    #     client encrypts the hop WITHOUT CA verification (see operations.md).
     tls:
       enabled: false
       # CA-pinned, hostname-verified Postgres hop. Requires tls.enabled. When ALSO
@@ -114,7 +115,7 @@ postgres:
       # sslmode=verify-full against the .svc host (which the cert SANs cover). The
       # rustls client then verifies the server cert chains to the chart CA and the
       # hostname matches. DEFAULT false: the sslmode=require (encrypt-no-verify) path
-      # is preserved. See operations.md §1 / security.md.
+      # is preserved. See operations.md / security.md.
       verifyFull: false
   external:
     # mode=external: point at a managed Postgres via a pre-created Secret holding
@@ -123,7 +124,7 @@ postgres:
     dsnSecretKey: DATABASE_URL
 
 # ---------------------------------------------------------------------------
-# Planes — per-component knobs. The operator + node-agent are always installed.
+# Planes — per-component knobs. The operator is always installed.
 # Every block shares the same shape: replicas, logLevel, resources, scheduling
 # (nodeSelector/affinity/tolerations/topologySpreadConstraints/priorityClassName),
 # pod metadata (podAnnotations/podLabels), env (extraEnv/envFrom), and a
@@ -137,7 +138,7 @@ operator:
   # Override the ModelGateway URL rendered into agent pods (AGENT_INTELLIGENCE,
   # keyless https dial). Empty => https://agentctl-modelgateway.<ns>.svc.cluster.local.
   modelgatewayUrl: ""
-  # Override the MCPGateway URL rendered into agent --mcp flags (RFC 0019).
+  # Override the MCPGateway URL rendered into agent --mcp flags.
   # Empty => https://agentctl-mcpgateway.<ns>.svc.cluster.local.
   mcpgatewayUrl: ""
   # Leader-elected singleton: default to the small footprint (was resources.small).
@@ -177,12 +178,10 @@ operator:
     enabled: false
     minAvailable: 1
 
-# The node-agent DaemonSet was RETIRED in contract 2.0 (agentd v2 removed all
-# non-HTTP transports): management verbs, intelligence, A2A, and MCP tools now
-# reach agents directly over their mTLS HTTPS surface / through the gateways, so
-# there is no on-node bridge, socket rendezvous, or routed-infer proxy. The
-# `nodeAgent` values block is gone; source-IP attestation at the ModelGateway /
-# MCPGateway (modelgateway.attestIdentity) is the identity mechanism now.
+# Management verbs, intelligence, A2A, and MCP tool calls all reach agents directly
+# over their mTLS HTTPS surface or through the gateways; agents are ordinary pods on
+# the pod network. Outbound agent identity is established by source-IP attestation at
+# the ModelGateway / MCPGateway (modelgateway.attestIdentity).
 
 apiserver:
   enabled: true
@@ -240,7 +239,7 @@ gateway:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 80
 
-# TRUSTED-PROXY mode for the A2A gateway (RFC 0013/0014). When enabled the gateway
+# TRUSTED-PROXY mode for the A2A gateway. When enabled the gateway
 # opens a second, mTLS-protected listener on :8443 that ONLY a trusted fronting
 # proxy (e.g. APISIX) may connect to. The proxy authenticates the external caller,
 # then forwards the request with the verified identity carried in the
@@ -264,8 +263,8 @@ trustedProxy:
   # prefix. -> TRUSTED_PROXY_IDENTITY_HEADERS
   identityHeaders: {}
 
-# MCPGateway (RFC 0019): the tool-plane broker. Networkless agents hold NO
-# tool-server credential; this gateway attests the calling agent by source IP,
+# MCPGateway: the tool-plane broker. Agents hold NO tool-server credential;
+# this gateway attests the calling agent by source IP,
 # scopes it to the servers of the MCPServerSets its Agent binds, injects each
 # server's credential (from a Secret, off-pod), and forwards MCP.
 mcpgateway:
@@ -355,7 +354,7 @@ admission:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 80
 
-# Claim-mode coordination server (RFC: pull/claim work source). Hands out work
+# Claim-mode coordination server (pull/claim work source). Hands out work
 # claims to AgentFleet replicas over an in-cluster HTTP/MCP endpoint. Disabled by
 # default — enable with coordination.enabled=true.
 coordination:
@@ -379,7 +378,7 @@ coordination:
   # coarse bearer could ack/release another tenant's claim. Set false only for a
   # trusted single-tenant install. (Only takes effect when coordination.enabled.)
   attestIdentity: true
-  # Scaler -> coordination mTLS (RFC 0011). When enabled (and certManager.enabled),
+  # Scaler -> coordination mTLS. When enabled (and certManager.enabled),
   # the chart issues a SERVING cert (agentctl-coordination-mtls-tls) for a second
   # coordination listener on :8443 and a CLIENT cert (agentctl-scaler-client-tls) the
   # scaler presents, both signed by the agentctl CA (both secrets carry ca.crt). The
@@ -431,7 +430,7 @@ coordination:
   # agentctl-coordination ServiceMonitor (templates/servicemonitor.yaml) so a
   # Prometheus-Operator scrapes it — pair store=postgres HA with that for visibility.
 
-# KEDA external scaler (RFC 0011) — claim-depth autoscaling for AgentFleets.
+# KEDA external scaler — claim-depth autoscaling for AgentFleets.
 # A stateless gRPC service (:9100) KEDA dials to drive claim-mode fleet replica
 # counts off the coordination backlog (with scale-from-zero). DISABLED by default
 # so a stock install ships no KEDA-coupled objects. Enabling it (scaler.enabled=
@@ -493,7 +492,7 @@ apiToken:
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the
 # sanctioned flows (aggregator->apiserver, webhook->admission, A2A ingress->gateway,
-# apiserver/gateway->node-agent control API, agents->modelgateway, gateway+
+# apiserver/gateway->agent pods over mTLS, agents->modelgateway, gateway+
 # modelgateway->postgres); and (b) per-agent-namespace data-plane policies
 # (default-deny + sanctioned egress/ingress) for each entry in agentNamespaces.
 networkPolicies:
@@ -505,11 +504,7 @@ networkPolicies:
   agentNamespaces:
     - default
 
-# Substrate: the on-node socket root the node-agent watches + the operator wires.
-substrate:
-  socketRoot: /run/agentctl/sockets
-
-# Shared default-resource anchor. Still consumed by the components not yet migrated
-# to per-component resources; kept as the small-footprint reference for new blocks.
+# Shared small-footprint resource anchor — the reference values the per-component
+# resources blocks above default to.
 resources:
   small: { requests: { cpu: 25m, memory: 32Mi }, limits: { cpu: 500m, memory: 256Mi } }

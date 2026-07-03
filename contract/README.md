@@ -1,223 +1,227 @@
-# Agent Control Contract (ACC) — v2
+# Agent Control Contract (ACC)
 
-The **Agent Control Contract (ACC)** is the neutral, language-neutral, machine-readable
-contract that **agentctl** (the Kubernetes control plane) consumes and that **any conformant
-agent** implements. It is published as a set of JSON Schemas (draft 2020-12) plus golden
-fixtures and frozen data catalogues.
+The **Agent Control Contract (ACC)** is the language-neutral, machine-readable contract that
+[agentctl](../README.md) — the Kubernetes control plane for fleets of AI agents — consumes, and that
+**any conformant agent** implements. It is published as a set of JSON Schemas (draft 2020-12), frozen
+data catalogues, and golden fixtures. This document is the overview and the guide to conforming; the
+normative, field-by-field surface lives in [`SPEC.md`](SPEC.md).
 
-> **Contract 2.0 — the network is the substrate.** v2 pivots from the v1 on-node substrate
-> (stdio / unix-socket / vsock transports, reachability-as-auth, a local exec surface) to a
-> network-native model: a conformant agent **serves its control surface over mTLS HTTPS**
-> (`POST /mcp`) and **dials the control-plane gateways keyless**. Identity is cryptographic —
-> a verified mTLS client cert (Management) or an attested source IP (the gateways) — not which
-> pipe a call arrived on. The non-HTTP transports and the exec surface were **removed**. See
-> [`SPEC.md`](SPEC.md) for the full law-by-law treatment.
-
-This directory is the **working home** for the contract while it is extracted out of the
-reference implementation's RFCs (agentd RFCs 0014–0020). It is structured to later lift into
-its own neutral repository — see *Open question P0* at the bottom.
+The contract version is **2.0** (see [`VERSION`](VERSION)).
 
 ---
 
-## P0 — agentctl depends on the CONTRACT, never on a specific agent
+## The core principle
 
-The foundational principle: **agentctl consumes only this contract; it never depends on a
-specific agent implementation.** The reference `agentd` binary is the *reference*
-implementation — the first agent to satisfy the ACC — but it is not privileged. Any binary
-that emits a conformant capabilities manifest, honors the exit-code table, serves the declared
-surfaces, and speaks the declared wire protocols is a conformant agent that agentctl can drive.
+**agentctl depends on this contract, never on a specific agent implementation.** Any binary that
+emits a conformant capabilities manifest, honors the frozen exit-code table, serves the surfaces it
+declares, and speaks the declared wire protocols is a conformant agent that agentctl can provision,
+scale, observe, secure, and expose — unchanged.
 
-The contract is **fully neutral**: it defines only the neutral tokens (`agent_*` env and
-metric prefix, `AGENT_*` env vars, the `agent://` URI scheme, the `agent/*` `_meta`
-namespace). Because these tokens are **vendor-neutral**, any agent can implement the
-contract; the reference implementation is **agentd 2.x**, which speaks this neutral
-contract (and keeps `agentd://` as a legacy alias of `agent://`) — see *Neutral-wire map*.
+`agentd` is the *reference* implementation: the first agent to satisfy the ACC. It is not privileged.
+The contract defines only **vendor-neutral tokens**, so any agent — in any language — can implement it.
+
+```mermaid
+flowchart LR
+    subgraph contract["Agent Control Contract (this directory)"]
+        S["schemas/ (9 files)"]
+        F["fixtures/ (golden captures)"]
+    end
+    A["agentctl control plane"] -- "codegens a typed client from" --> contract
+    G["any conformant agent"] -- "emits a manifest and serves surfaces per" --> contract
+    A -- "drives only what surfaces declares" --> G
+```
 
 ---
 
-## File map
+## The neutral tokens
+
+The contract uses one neutral spelling for every wire token, so no vendor name is load-bearing.
+
+| Concern | Neutral (canonical) token |
+|---|---|
+| Downward-API env prefix | `AGENT_*` |
+| URI scheme | `agent://` |
+| Metric name prefix | `agent_` |
+| Manifest version key | `agent_version` (required at the manifest root) |
+| `_meta` namespace | `agent/*` |
+| Capabilities entrypoint | `--capabilities` (the flag is neutral; the binary name is implementation-specific) |
+
+An agent may keep its own aliases internally, but the neutral tokens above are what the schemas
+require and what agentctl codegens against.
+
+---
+
+## The artifacts
+
+`schemas/` is the single canonical set. Every `$id` is `https://agentctl.dev/contract/v2/<file>` —
+the `v2` there is the contract major version, not a directory — and every `$ref` is file-internal
+(`#/$defs/...`) so the set resolves standalone.
 
 ```
 contract/
-  VERSION                                  # the contract version: 2.0
-  README.md                                # this file — the ACC overview + P0 + neutral-wire map
-  SPEC.md                                  # the spec-level companion: cross-cutting laws, frozen catalogues, sum types, gotchas
-  schemas/                                 # CANONICAL finalized schema set (draft 2020-12)
-    manifest.schema.json                   # capabilities manifest — the discovery spine
-    config.schema.json                     # agent config-file schema (reloadable + restart-only view)
-    report.schema.json                     # run-outcome report
-    events.schema.json                     # agent://events live event-stream envelope + closed event vocabulary
-    metrics.registry.json                  # FROZEN metrics_schema 1.0 registry (DATA catalogue)
-    a2a.methods.json                       # A2A method registry + types (bridge table)
-    exit-codes.table.json                  # FROZEN exit-code table (DATA catalogue)
-    management-profile.json                # operator tools + agent:// resources + PeerOrigin gating
-    env-convention.json                    # downward-API env-var convention
+  VERSION                        # the contract version: 2.0
+  README.md                      # this file — overview + how to conform
+  SPEC.md                        # the normative, field-by-field surface
+  schemas/
+    manifest.schema.json         # capabilities manifest — the discovery spine
+    config.schema.json           # the declarative agent config file
+    report.schema.json           # the run-outcome report
+    events.schema.json           # the agent://events live event-stream body
+    metrics.registry.json        # frozen Prometheus metrics registry (metrics_schema 1.0)
+    a2a.methods.json             # A2A method set + core wire types
+    exit-codes.table.json        # frozen exit-code table
+    management-profile.json      # operator methods, agent:// resources, PeerOrigin gating
+    env-convention.json          # the downward-API env-var convention
   fixtures/
     capabilities/
-      default.json                         # GOLDEN — real --capabilities capture (--mode once, surfaces off)
-      full-features.json                   # GOLDEN — real --capabilities capture (reactive, mTLS-HTTPS serve, surfaces on)
-      reference-full.json                  # synthetic full-feature manifest (schema-author fixture)
-      minimal-degraded.json                # synthetic all-surfaces-off manifest (graceful-degradation fixture)
+      default.json               # real --capabilities capture: once mode, listeners off
+      full-features.json         # real --capabilities capture: reactive, mTLS HTTPS, surfaces on
+      reference-full.json        # synthetic full-feature manifest
+      minimal-degraded.json      # synthetic all-surfaces-off manifest
 ```
 
-### Schema vs. data catalogue
+### Two categories of artifact
 
-`manifest.schema.json`, `config.schema.json`, and `report.schema.json` are **JSON-document
-validators** — they validate an instance (a manifest, a config file, a report). The other
-three (`metrics.registry.json`, `a2a.methods.json`, `exit-codes.table.json`) and the two
-control artifacts (`management-profile.json`, `env-convention.json`) are **draft-2020-12
-envelopes around frozen DATA catalogues** (registries/tables). They carry `$schema`/`$id`/
-`title`/`description` and pass the metaschema, but their payload is reference data for codegen,
-not an instance validator. (Prometheus `/metrics` output is text, not JSON — do not try to
-validate it against `metrics.registry.json`.)
+The nine schema files fall into two categories that must not be confused:
 
-### Canonical set
+- **Document validators** — `manifest.schema.json`, `config.schema.json`, `report.schema.json`, and
+  `events.schema.json` validate an instance (a manifest, a config file, a report, an events body).
+- **Data catalogues** — `metrics.registry.json`, `a2a.methods.json`, `exit-codes.table.json`,
+  `management-profile.json`, and `env-convention.json` are draft-2020-12 envelopes wrapping **frozen
+  reference data** (registries and tables). They carry `$schema`/`$id`/`title` and pass the
+  metaschema, but their payload is codegen input, not an instance validator. In particular,
+  Prometheus `/metrics` output is **text**, not JSON — do not validate it against
+  `metrics.registry.json`.
 
-`schemas/` is the single canonical set (9 files). The earlier parallel `v1/` extraction has
-been **removed**, and its one unique artifact (`events.schema.json`) promoted into `schemas/`.
-Every `$id` is unified under `https://agentctl.dev/contract/v2/<file>`, so there is no
-duplicate-`$id` clash. (The `v2` in the `$id` path is the *contract* major version, not a
-directory.) All `$ref`s are file-internal (`#/$defs/*`) and resolve.
+---
+
+## What conformance means
+
+A conformant agent is conformant by **behavior**, not by sharing code with the reference. Shape is
+necessary but not sufficient: a binary that parses but misbehaves (for example, a "clean drain" that
+exits non-zero) is non-conformant. To self-certify:
+
+1. **Emit a capabilities manifest** from the one-shot `--capabilities` entrypoint that validates
+   against [`schemas/manifest.schema.json`](schemas/manifest.schema.json), declaring
+   `contract_version`, `agent_version`, and an honest [`surfaces{}`](SPEC.md#4-the-capabilities-manifest)
+   block. The live `agent://capabilities` resource must be semantically equal to the one-shot output.
+
+2. **Honor the frozen exit-code table** ([`schemas/exit-codes.table.json`](schemas/exit-codes.table.json))
+   and, for a bounded run, write a run-outcome report that validates against
+   [`schemas/report.schema.json`](schemas/report.schema.json).
+
+3. **Serve each declared surface** to its schema. For every key you report as served in `surfaces{}`,
+   serve the matching surface: management methods and `agent://` resources
+   ([`management-profile.json`](schemas/management-profile.json)), metrics
+   ([`metrics.registry.json`](schemas/metrics.registry.json)), A2A
+   ([`a2a.methods.json`](schemas/a2a.methods.json)), config validation
+   ([`config.schema.json`](schemas/config.schema.json)), and the `agent://events` stream
+   ([`events.schema.json`](schemas/events.schema.json)).
+
+4. **Honor the downward-API env convention** ([`env-convention.json`](schemas/env-convention.json))
+   and the `agent://` resource naming.
+
+5. **Serve your control surface over mTLS HTTPS.** A conformant agent exposes its management/A2A
+   surface at `POST /mcp` over mutual TLS and dials the control-plane gateways with no embedded
+   credentials. Identity is cryptographic — see [Security model](#security-model).
+
+The golden fixtures in `fixtures/capabilities/` are the validation ground-truth. `default.json` and
+`full-features.json` are **real captures** from the reference `agentd` binary (both carry
+`agent_version` `2.1.0`) and together exercise both branches of every sum-type surface key.
 
 ---
 
 ## Version negotiation
 
-`contract_version` is **major.minor** (reference: `"2.0"`).
+`contract_version` is **`major.minor`** (reference `"2.0"`). Every version key in the contract follows
+the same discipline:
 
-- **Additive growth ⇒ MINOR bump.** New manifest fields, new `surfaces{}` keys, new operator
-  tools, new metrics, new config keys are additive. A consumer **MUST tolerate** them: every
-  open object uses `additionalProperties:true`. **Never apply `deny_unknown_fields` /
-  `additionalProperties:false` to an open object.** (The config-file *input* surface is the
-  deliberate exception — see *Provisional/open items*.)
-- **Breaking change ⇒ MAJOR bump.** Removing/renaming/narrowing a field, changing a sum-type
-  shape, or breaking a frozen table is major. A consumer **refuses only an unknown MAJOR**;
-  within a known major it accepts any unknown additive content.
-- **`surfaces{}` is the single discovery point** (RFC 0014 §6.2). Each control-plane surface
-  is reported honestly as served-or-not for *this* build/config. **A key absent ⇒ surface
-  unbuilt ⇒ degrade gracefully** — absence is never an error, and agentctl drives only what
-  is declared. Do not branch on a value that is not advertised in `surfaces{}`.
+- **Additive growth bumps MINOR.** New manifest fields, new `surfaces{}` keys, new operator methods,
+  new metrics, and new config keys are additive. A consumer **must tolerate** them: every open object
+  is `additionalProperties: true` and every enum-like array is open strings, not a closed enum.
+- **A breaking change bumps MAJOR.** Removing, renaming, or narrowing a field, changing a sum-type
+  shape, or breaking a frozen table is breaking. A consumer **refuses only an unknown MAJOR** and,
+  within a known major, accepts any unknown additive content.
 
-### Sum-type surface keys (hand-written deserializers required)
+`surfaces{}` is the **single discovery point**. Each control-plane surface is reported honestly as
+served-or-not for *this* build and config. **A key absent means the surface is unbuilt, so the
+consumer degrades gracefully** — absence is never an error, and agentctl drives only what is declared.
+Never branch on `build_features`; it is opaque diagnostic metadata.
 
-Several keys are **sum types** that codegen cannot derive (agentctl RFC 0018 §3.3). They each
-need a hand-written deserializer:
+Several `surfaces{}` keys are **sum types** that code generation cannot derive; a typed client needs a
+hand-written deserializer for each (this is the only hand-maintained code in the reference client,
+[`crates/agent-contract-client`](../crates/agent-contract-client)):
 
-| key | shape | meaning |
+| Key | Shape | Meaning |
 |---|---|---|
-| `surfaces.management` | `false \| string` | management address — v2: an mTLS **https** URL (`https://0.0.0.0:8443`), else `false` |
-| `surfaces.metrics` | `false \| string` | `/metrics` scrape address, else `false` |
-| `surfaces.a2a` | `false \| object{version,streaming,methods[]}` | A2A surface (advertises the *compiled* capability), else `false` |
-| `surfaces.claim` | `bool \| object{styles[]}` | claim styles — **omitted-when-absent, never `false`** |
+| `surfaces.management` | `false \| string` | management address — an mTLS HTTPS URL (e.g. `https://0.0.0.0:8443`), else `false` |
+| `surfaces.metrics` | `false \| string` | `/metrics` scrape address (e.g. `0.0.0.0:9090`), else `false` |
+| `surfaces.a2a` | `false \| object{version,streaming,methods[]}` | the compiled A2A capability, else `false` |
+| `surfaces.claim` | `bool \| object{styles[]}` | claim styles — **omitted when absent, never `false`** |
 | `surfaces.shard` | `string \| null` | `"K/N"` shard identity, else `null` |
-| `intelligence.healthy` | `bool \| "unknown"` | reachability, or `"unknown"` pre-connect |
+| `intelligence.healthy` | `bool \| "unknown"` | reachability, or `"unknown"` before the first connect |
+
+Full negotiation rules and the three distinct encodings of "not set" are in
+[`SPEC.md`](SPEC.md#2-the-cross-cutting-laws).
 
 ---
 
-## Neutral-wire map (P0)
+## The control surfaces at a glance
 
-The contract defines only the **neutral** canonical spellings, so any agent can implement it.
-The reference implementation is **agentd 2.x**, which speaks this neutral contract (and
-keeps `agentd://` as a legacy alias of `agent://`).
+`surfaces{}` advertises these. Each is normatively specified in [`SPEC.md`](SPEC.md); how agentctl
+consumes each is summarized here.
 
-| concern | neutral (canonical) |
-|---|---|
-| downward-API env prefix | `AGENT_*` |
-| URI scheme | `agent://` |
-| metric name prefix | `agent_` |
-| manifest version key | `agent_version` |
-| `_meta` namespace | `agent/*` |
-| capabilities entrypoint | `--capabilities` (neutral; binary name impl-specific) |
-
-Rules enforced by the schemas:
-
-- The manifest root requires **`agent_version`**.
-- `report.schema.json` `distillate_ref` matches **`^agent://`**.
-- Every metric in `metrics.registry.json` carries only the neutral `name`. Every env var in
-  `env-convention.json` carries the `AGENT_*` name. Same for `agent://` resources in
-  `management-profile.json`.
-
-Codegen targets the single neutral scheme.
+| Surface | Discovery key(s) | What the agent serves | How agentctl consumes it |
+|---|---|---|---|
+| **Capabilities manifest** | (always) | `--capabilities` + `agent://capabilities` | Codegens a typed client; reads `surfaces{}` to decide what to drive; projects the base Agent Card. |
+| **Management (MCP profile)** | `management`, `operator_tools` | `a2a.Drain`/`a2a.LameDuck`/`a2a.Pause`/`a2a.Resume`/`a2a.Cancel` on the mTLS `POST /mcp` listener, plus `agent://` resources | The apiserver serves `drain`/`lame-duck`/`pause`/`resume`/`cancel` by invoking these methods over mTLS, RBAC-gated. |
+| **A2A** | `a2a` | `SendMessage`/`GetTask`/`CancelTask`/`ListTasks` and the streaming pair over HTTPS JSON-RPC | The A2A gateway projects and signs the Agent Card, then relays `message/send` / `message/stream` to the agent over mTLS. |
+| **Metrics** | `metrics`, `metrics_schema` | Prometheus `/metrics` text | Scraped directly; autoscalers read the backlog signals; dashboards and alerts are codegenned from the registry. |
+| **Exit codes** | `exit_codes` | process exit codes per the frozen table | Each code's `intent` compiles into the Job `podFailurePolicy` / `onExitCodes`. |
+| **Run report** | `report_schema` | `agent://run/{run_id}` and the report file | The durable backend for `kubectl agents results` after the pod is gone. |
+| **Events** | `events` | `agent://events` bounded live stream | Operators tail live activity without scraping container stderr. |
+| **Config** | `config_validate`, `config_schema`, `hot_reload` | `--validate-config`, `--config-schema`, SIGHUP reload | The operator renders the config from the CRD spec and validates it before rollout. |
+| **Sharding / claim / standby** | `cluster`, `shard`, `claim`, `standby` | shard identity and work-claim styles | The operator wires StatefulSet partitioning (shard fleets) or KEDA-scaled claim routes (claim fleets). |
 
 ---
 
-## Provisional / open items
+## Security model
 
-These are the unresolved contract asks (design record §14). Each was given the best-grounded
-choice and recorded:
+Identity is cryptographic, not positional.
 
-- **P10 — metric-name reconciliation (RESOLVED, provisional).** The source-emitted RFC 0016
-  names are canonical. `agent_pending_events` is the primary autoscaling signal;
-  `agent_reactive_backlog` (RFC 0019) is recorded as a scaling alias. `agent_tokens_per_sec`
-  and `agent_intelligence_latency_ms` are marked provisional/not-emitted. The three histograms
-  (`agent_run_duration_ms`, `agent_intel_call_duration_ms`, `agent_tool_call_duration_ms`) are
-  provisional with **buckets undefined** (the reference emits no histograms). P10 does not
-  affect manifest shape — `metrics_schema` is an opaque version string.
-- **P2 — A2A wire strings (RESOLVED in v2).** The normative method names are the A2A spec §9
-  **bare PascalCase** spelling (`SendMessage`, `GetTask`, …) served over **HTTPS JSON-RPC**
-  (`POST /mcp`); the legacy `a2a.`-prefixed spelling is still *accepted* for back-compat but
-  the bare form is canonical (it is what the reference emits and the agentctl gateway sends).
-  The A2A surface **shares the management mTLS listener** (`surfaces.a2a.address` omitted), and
-  `surfaces.a2a` now advertises the *compiled* capability independent of any bound listener.
-- **P6 — `--config-schema` (RESOLVED-in-source, provisional).** The design record flagged it
-  unbuilt; the config-file extraction found `config_schema()` IS implemented. `surfaces.config_schema`
-  is kept boolean; a `true` value is contract-declared and now source-backed.
-- **P4 — `agent://metrics` text body + `agent://capacity` schema (OUT OF SCOPE / downstream).**
-  Undefined upstream. The manifest `surfaces.metrics` carries only the scrape address; the
-  byte-identical Prom-text resource and the capacity schema are deferred to a future resources
-  extraction. Recorded as a downstream dependency.
+- **Inbound to an agent.** A caller that presents a client certificate the agent's mTLS acceptor
+  **verifies against the pinned client CA** is the **Management** origin — the only origin allowed to
+  drive the management and A2A methods. A request on the HTTPS listener with no verified certificate
+  is unauthenticated and refused; it is never downgraded to a weaker origin. The A2A gateway relays to
+  the agent under the control-plane client certificate, so gateway-forwarded work arrives as
+  Management.
+- **Outbound from an agent.** The agent dials the control-plane gateways (intelligence, tools) with
+  **no embedded credential**. The gateways attest the caller and inject the provider or tool
+  credential off-pod.
+- **Secret-freedom is structural.** The manifest never carries a credential; the config file carries
+  only `{{secret:NAME}}` / `{{secret-file:PATH}}` references; credentials travel only the
+  `AGENT_*_TOKEN[_FILE]` env path.
 
-Additional grounded choices: operator-tools are the **5-method source set**
-`[a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel]` in frozen order (v2 spells them
-as `a2a.*` JSON-RPC admin methods, distinct from the bare A2A-protocol methods; not the design
-record's 3; `attach` = `subagent.send`, not a method; no `force` method). Exit-code version is the bare
-source string `"1.0"` (the `RFC-0011-§5` literal is a documentation alias). The config-file
-*input* surface is intentionally **closed** (`additionalProperties:false`, mirroring serde
-`deny_unknown_fields` → a typo'd key is exit 2) — this is the deliberate exception to the
-open-object rule, since config input is validated, not discovered.
+The full trust model — the closed `{Stdio, Management}` PeerOrigin set and what each may invoke — is
+in [`SPEC.md`](SPEC.md#5-the-mcp-management-profile).
 
 ---
 
 ## How agentctl consumes the contract
 
-agentctl **codegens** a typed `agent-contract-client` from these schemas (agentctl RFC 0018).
-The three sources of truth are the published JSON Schemas here, the reference source, and the
-behavioral conformance suite. Codegen notes:
+agentctl generates a typed `agent-contract-client` from these schemas. The reference client lives at
+[`crates/agent-contract-client`](../crates/agent-contract-client). The load-bearing codegen notes:
 
-1. Point the resolver at **`schemas/`** — the single canonical set, every `$id` unified.
-2. The **sum-type fields** (`management`, `metrics`, `a2a`, `claim`, `shard`,
-   `intelligence.healthy`) need **hand-written deserializers** — codegen cannot derive `oneOf`
-   bool|string|object discriminations (RFC 0018 §3.3).
-3. **Tolerate unknown additive content** (open objects, unknown surface keys, unknown operator
-   tools/metrics). Refuse only an unknown `contract_version` MAJOR.
-4. Target the **neutral spellings** — the contract is fully neutral (see neutral-wire map).
-5. Treat `build_features` as opaque diagnostic metadata — branch on `surfaces{}`, never on a
-   feature token.
-
-## How a new agent self-certifies
-
-A new agent is conformant by **behavior**, not by sharing code with the reference:
-
-1. Emit a manifest from `--capabilities` that validates against `schemas/manifest.schema.json`,
-   declaring `contract_version` and an honest `surfaces{}` block.
-2. Honor the frozen **exit-code table** (`schemas/exit-codes.table.json`) and emit a
-   run-outcome report that validates against `schemas/report.schema.json`.
-3. For each surface declared `true`/served in `surfaces{}`, serve it per the matching schema:
-   management tools (`management-profile.json`), metrics (`metrics.registry.json`,
-   `metrics_schema` 1.0), A2A (`a2a.methods.json`), config (`config.schema.json`), the
-   `agent://events` stream (`events.schema.json`).
-4. Honor the downward-API env convention (`env-convention.json`) and the `agent://` resource
-   naming.
-5. Pass the behavioral conformance suite. The golden fixtures in `fixtures/capabilities/` are
-   the validation ground-truth: `default.json` and `full-features.json` are **real captures**
-   from the reference `agentd` binary (carrying `agent_version` with value `2.1.0`) and together
-   exercise both branches of every sum-type surface key.
+1. **Point the resolver at `schemas/`** — the single canonical set, every `$id` unified.
+2. **Hand-write the sum-type deserializers** for `management`, `metrics`, `a2a`, `claim`, `shard`, and
+   `intelligence.healthy`; codegen cannot derive their `oneOf` discriminations.
+3. **Tolerate unknown additive content** — open objects, unknown surface keys, unknown operator
+   methods, unknown metrics — and refuse only an unknown `contract_version` MAJOR.
+4. **Target the neutral spellings** and treat `build_features` as opaque diagnostic metadata; branch
+   on `surfaces{}` alone.
 
 ---
 
-## Open question P0 — neutral home
-
-This contract currently lives inside the agentctl repo working tree. Per P0 it should be
-extracted into its **own neutral repository** so that neither agentctl nor any agent owns it.
-The `$id` namespace (`https://agentctl.dev/contract/v2/...`) anticipates a stable published
-home; the directory layout (`schemas/`, `fixtures/`, `VERSION`) is ready to lift wholesale.
+See [`SPEC.md`](SPEC.md) for the normative surface: the cross-cutting laws, the capabilities manifest,
+the MCP management profile, A2A over HTTPS, the frozen metrics and exit-code catalogues, the report
+and event schemas, the config schema, and the env convention.

@@ -1,6 +1,6 @@
-# A claim-mode AgentFleet: a reactive worker pool. The operator renders this to a
-# Deployment with .spec.replicas OMITTED (KEDA's HPA owns it, RFC 0011). (A fleet
-# reconciler is a later step; this manifest verifies the AgentFleet CRD schema.)
+# A claim-mode AgentFleet: an elastic reactive worker pool. The operator renders it
+# to a Deployment with .spec.replicas omitted — KEDA owns the replica count and
+# scales the pool from zero on the work backlog.
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: AgentFleet
 metadata:
@@ -9,7 +9,7 @@ metadata:
 spec:
   template:
     mode: reactive
-    image: busybox:1.36
+    image: agentd:1.0.0
     subscribe: ["queue://jobs"]
   scaling:
     mode: claim

@@ -52,7 +52,7 @@ subjects:
     name: agentctl-admission
     namespace: {{ $ns }}
 ---
-# The validating admission webhook (RFC 0007): enforces the cross-object + policy
+# The validating admission webhook: enforces the cross-object + policy
 # rules CEL can't — the lethal-trifecta override gate, an image-registry
 # allow-list, and "referenced ModelPool exists". Serves HTTPS on :8443 with a
 # cert from the agentctl-admission-tls Secret (created by templates/certificates.yaml).
@@ -158,7 +158,7 @@ spec:
 # gates entirely. ModelPool is NOT listed: its budget (maxTokens > 0) and
 # credentialSecretRef.name invariants are already enforced by CRD CEL
 # (x-kubernetes-validations), and provider/endpoint are structurally required — the
-# webhook would only duplicate CEL (RFC 0007 rung-A vs rung-B: no duplication).
+# webhook would only duplicate CEL.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -197,10 +197,10 @@ webhooks:
 # once, idempotently (every op is conditional on the field being absent). It shares
 # the :8443 server, the agentctl-admission Service, and the agentctl-admission-tls
 # cert with the validating webhook. NOTE: it deliberately does NOT default
-# spec.substrate — the secure default is tenancy-derived (RFC 0002 §5) and the
+# spec.substrate — the secure default is tenancy-derived and the
 # most-isolated tier (kata-hybrid) needs a Kata RuntimeClass absent on most stock
-# clusters (RFC 0002 §9); leaving it absent lets the operator/renderer resolve it
-# from AgentClass/tenancy (RFC 0007 B3) rather than breaking stock clusters.
+# clusters; leaving it absent lets the operator/renderer resolve it
+# from AgentClass/tenancy rather than breaking stock clusters.
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:

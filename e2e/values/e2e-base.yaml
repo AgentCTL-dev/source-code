@@ -24,7 +24,7 @@ modelgateway:
   enabled: true
   attestIdentity: true
 
-# Tool-plane broker (contract 2.0 / RFC 0019): agents dial MCP tools keyless; the
+# Tool-plane broker (contract 2.0): agents dial MCP tools keyless; the
 # MCPGateway attests source-IP -> scopes to the bound MCPServerSet -> injects the
 # credential -> forwards. Needed by the MCPServerSet tool scenario.
 mcpgateway:

@@ -56,7 +56,7 @@ subjects:
     name: agentctl-gateway
     namespace: {{ $ns }}
 ---
-# The A2A gateway (RFC 0013): a replicated, stateless HTTP service fronting each
+# The A2A gateway: a replicated, stateless HTTP service fronting each
 # agent's mTLS A2A surface (served on the agent pod, contract 2.0; the gateway
 # presents the Management client cert). Projects each agent's Agent Card and
 # routes spec-form A2A JSON-RPC to the bare v2.1 methods.
@@ -106,23 +106,23 @@ spec:
           ports:
             - { containerPort: 8080, name: http }
             {{- if .Values.trustedProxy.enabled }}
-            - { containerPort: 8443, name: https-proxy }   # TRUSTED-PROXY mTLS (RFC 0013)
+            - { containerPort: 8443, name: https-proxy }   # TRUSTED-PROXY mTLS
             {{- end }}
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "gateway") | nindent 12 }}
-            # Durable A2A task store (RFC 0013).
+            # Durable A2A task store.
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
             {{- with (include "agentctl.pgCaEnv" $) }}
             # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
             {{- . | nindent 12 }}
             {{- end }}
-            # Ed25519 seed for Agent Card JWS signing (RFC 0014).
+            # Ed25519 seed for Agent Card JWS signing.
             - name: GATEWAY_SIGNING_SEED
               valueFrom:
                 secretKeyRef:
                   name: agentctl-gateway-signing
                   key: GATEWAY_SIGNING_SEED
-            # Mesh registry federation (RFC 0014): peer gateway base URLs (CSV).
+            # Mesh registry federation: peer gateway base URLs (CSV).
             # Peers are queried with ?local=1 to prevent recursion.
             {{- with .Values.gateway.federationPeers }}
             - name: FEDERATION_PEERS
@@ -139,7 +139,7 @@ spec:
                   key: AGENTCTL_API_TOKEN
             {{- end }}
             {{- if .Values.trustedProxy.enabled }}
-            # TRUSTED-PROXY mode (RFC 0013): open a second mTLS listener on :8443
+            # TRUSTED-PROXY mode: open a second mTLS listener on :8443
             # that only the fronting proxy (APISIX) may reach. The gateway verifies
             # the proxy's client cert against the agentctl CA bundle (ca.crt) and the
             # allow-list, then trusts the identity headers the proxy injects.
@@ -238,10 +238,10 @@ spec:
   ports:
     - { port: 80, targetPort: 8080, name: http }
     {{- if .Values.trustedProxy.enabled }}
-    - { port: 8443, targetPort: 8443, name: https-proxy }   # TRUSTED-PROXY mTLS (RFC 0013)
+    - { port: 8443, targetPort: 8443, name: https-proxy }   # TRUSTED-PROXY mTLS
     {{- end }}
 ---
-# Ed25519 signing key for A2A Agent Card JWS signing (RFC 0014). The gateway
+# Ed25519 signing key for A2A Agent Card JWS signing. The gateway
 # loads the 32-byte seed (base64) and serves the public key at
 # /.well-known/jwks.json. Chart-generated and kept across upgrades so cards
 # verify consistently across replicas. Replace with a managed (rotated) secret

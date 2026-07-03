@@ -496,8 +496,8 @@ mod unit {
             SurfaceAddr::Off
         );
         assert_eq!(
-            serde_json::from_str::<SurfaceAddr>("\"vsock:7000\"").unwrap(),
-            SurfaceAddr::At("vsock:7000".into())
+            serde_json::from_str::<SurfaceAddr>("\"https://0.0.0.0:8443\"").unwrap(),
+            SurfaceAddr::At("https://0.0.0.0:8443".into())
         );
         assert!(serde_json::from_str::<SurfaceAddr>("true").is_err());
     }

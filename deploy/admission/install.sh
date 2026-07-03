@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision the validating webhook (RFC 0007): generate a CA + serving cert for
+# Provision the validating webhook: generate a CA + serving cert for
 # the webhook Service, create the TLS Secret, deploy the webhook, and register
 # the ValidatingWebhookConfiguration with the CA bundle. Run from the repo root.
 set -euo pipefail

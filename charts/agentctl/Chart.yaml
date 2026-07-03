@@ -2,9 +2,9 @@ apiVersion: v2
 name: agentctl
 description: >-
   The Kubernetes control plane for fleets of conformant agents — operator,
-  on-node bridge (node-agent), aggregated APIServer, A2A gateway, intelligence
-  ModelGateway, and admission webhook. Installs the Agent Control Contract CRDs
-  and wires all TLS via cert-manager.
+  aggregated apiserver, admission webhook, A2A gateway, intelligence
+  ModelGateway, tools MCPGateway, work-coordination server, and KEDA scaler.
+  Installs the Agent Control Contract CRDs and wires all TLS via cert-manager.
 type: application
 version: 0.1.0            # chart version
 appVersion: "0.1.0"      # agentctl control-plane version
@@ -16,8 +16,9 @@ maintainers:
   - name: Andrii Tsok
     email: andrii@tsok.org
 annotations:
-  # cert-manager is a hard prerequisite (TLS for the apiserver, admission webhook,
-  # and node-agent mTLS). The chart does not vendor it — install it first.
+  # cert-manager is a hard prerequisite (TLS for the apiserver, the admission
+  # webhook, and every control-plane/agent mTLS cert). The chart does not vendor
+  # it — install it first.
   # KEDA is optional — only for claim-mode autoscaling (scaler.enabled). Postgres is
   # bundled by the chart. A NetworkPolicy CNI is optional (networkPolicies.enabled).
   agentctl.dev/requires: "cert-manager >= 1.13 (hard); KEDA >= 2.x (optional, scaler.enabled); a CNI for NetworkPolicy (optional, networkPolicies.enabled)"

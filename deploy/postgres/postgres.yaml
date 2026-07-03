@@ -1,6 +1,6 @@
-# Postgres backing the gateway's durable A2A task store (RFC 0013 / brainstorm
-# D4). Dev-grade: a single pod with ephemeral storage. Production would use a
-# managed/replicated Postgres (or an operator) with a PVC + TLS + NetworkPolicy.
+# Postgres backing the gateway's durable A2A task store. Dev-grade: a single pod
+# with ephemeral storage. Production would use a managed/replicated Postgres (or
+# an operator) with a PVC + TLS + NetworkPolicy.
 apiVersion: v1
 kind: Secret
 metadata:
