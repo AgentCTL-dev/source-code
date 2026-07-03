@@ -21,7 +21,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_api::{ModelPool, ModelPoolSpec};
+use agent_api::{Agent, AgentFleet, ModelPool, ModelPoolSpec};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -305,7 +305,14 @@ async fn infer(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let want_pool = header_str(&headers, H_POOL);
+    // The X-Model-Pool header is an explicit override; otherwise honor the pool the
+    // attested agent's CR declares (spec.modelPool). The operator renders no header,
+    // so this is how an agent's declared intelligence choice actually takes effect
+    // (previously the gateway ignored it and used the first pool in the namespace).
+    let want_pool = match header_str(&headers, H_POOL) {
+        Some(p) => Some(p),
+        None => declared_pool(&state.client, &ns, &agent).await,
+    };
 
     // b. select the ModelPool.
     let pools: Api<ModelPool> = Api::namespaced(state.client.clone(), &ns);
@@ -636,10 +643,42 @@ async fn select_pool(
         .list(&ListParams::default())
         .await
         .map_err(|e| e.to_string())?;
-    Ok(list.items.into_iter().next().map(|mp| {
-        let name = mp.metadata.name.clone().unwrap_or_default();
-        (name, mp.spec)
-    }))
+    match list.items.len() {
+        0 => Ok(None),
+        1 => {
+            let mp = list.items.into_iter().next().unwrap();
+            let name = mp.metadata.name.clone().unwrap_or_default();
+            Ok(Some((name, mp.spec)))
+        }
+        // FAIL CLOSED on ambiguity: silently picking the first pool would bill an
+        // arbitrary tenant's pool/budget. The agent must declare spec.modelPool (or
+        // send X-Model-Pool) when more than one pool exists.
+        n => Err(format!(
+            "{n} ModelPools in the namespace and none selected — declare spec.modelPool on the Agent/AgentFleet (or send X-Model-Pool)"
+        )),
+    }
+}
+
+/// The `ModelPool` the attested caller's CR declares (`spec.modelPool`). Tries the
+/// `Agent` CR and, on a 404, an `AgentFleet`'s template (fleet pods carry the fleet
+/// name). `None` ⇒ the CR declares no pool (or neither exists) — the caller then
+/// falls back to the sole namespace pool, or [`select_pool`] fails closed on
+/// ambiguity. This is what lets an agent CHOOSE its intelligence source: the
+/// operator renders no `X-Model-Pool` header, so without this the gateway used the
+/// first pool in the namespace regardless of `spec.modelPool`.
+async fn declared_pool(client: &Client, ns: &str, agent: &str) -> Option<String> {
+    let agents: Api<Agent> = Api::namespaced(client.clone(), ns);
+    match agents.get(agent).await {
+        Ok(a) => return a.spec.model_pool,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => { /* not an Agent → try Fleet */ }
+        Err(_) => return None,
+    }
+    let fleets: Api<AgentFleet> = Api::namespaced(client.clone(), ns);
+    fleets
+        .get(agent)
+        .await
+        .ok()
+        .and_then(|f| f.spec.template.model_pool)
 }
 
 /// Read and UTF-8-decode the named key from a `Secret`. The typed kube client

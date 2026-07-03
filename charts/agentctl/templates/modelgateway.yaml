@@ -41,6 +41,12 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["modelpools/status"]
     verbs: ["get", "update", "patch"]
+  # agents + agentfleets: resolve the attested caller's declared spec.modelPool so an
+  # agent CHOOSES its intelligence source (the operator renders no X-Model-Pool
+  # header). The caller is a singleton Agent or a fleet member (fleet name), so both.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents", "agentfleets"]
+    verbs: ["get", "list", "watch"]
   # Source-IP identity attestation (modelgateway.attestIdentity): the gateway looks
   # up the calling pod by its source IP to derive the agent namespace, instead of
   # trusting the X-Agent-Namespace header. Needs cluster-wide pods get/list. The
