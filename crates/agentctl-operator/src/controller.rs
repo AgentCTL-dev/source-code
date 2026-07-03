@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use agent_api::{Agent, AgentFleet, AgentSpec, Condition, ContractStatus, MCPServerSet, Mode};
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
-use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::batch::v1::{CronJob, Job};
 use kube::api::{Patch, PatchParams};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::controller::Action;
@@ -474,6 +474,11 @@ async fn apply_workload(client: &Client, ns: &str, rendered: &Rendered) -> Resul
             let name = job.metadata.name.clone().ok_or(Error::MissingName)?;
             api.patch(&name, &pp, &Patch::Apply(job.as_ref())).await?;
         }
+        Rendered::CronJob(cj) => {
+            let api: Api<CronJob> = Api::namespaced(client.clone(), ns);
+            let name = cj.metadata.name.clone().ok_or(Error::MissingName)?;
+            api.patch(&name, &pp, &Patch::Apply(cj.as_ref())).await?;
+        }
         Rendered::Deployment(dep) => {
             let api: Api<Deployment> = Api::namespaced(client.clone(), ns);
             let name = dep.metadata.name.clone().ok_or(Error::MissingName)?;
@@ -525,6 +530,7 @@ fn status_changed<S: serde::Serialize>(
 pub fn rendered_kind(rendered: &Rendered) -> &'static str {
     match rendered {
         Rendered::Job(_) => "Job",
+        Rendered::CronJob(_) => "CronJob",
         Rendered::Deployment(_) => "Deployment",
         Rendered::StatefulSet(_) => "StatefulSet",
     }

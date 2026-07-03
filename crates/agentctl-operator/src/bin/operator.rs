@@ -24,7 +24,7 @@ use agentctl_operator::controller::{
 use agentctl_operator::{lease, serve, Metrics};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
-use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::coordination::v1::Lease;
 use kube::runtime::controller::Error as ControllerError;
 use kube::runtime::events::{Recorder, Reporter};
@@ -138,6 +138,10 @@ async fn main() -> Result<(), kube::Error> {
         watcher::Config::default(),
     )
     .owns(Api::<Job>::all(client.clone()), watcher::Config::default())
+    .owns(
+        Api::<CronJob>::all(client.clone()),
+        watcher::Config::default(),
+    )
     .owns(
         Api::<Deployment>::all(client.clone()),
         watcher::Config::default(),

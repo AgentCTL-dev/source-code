@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 use agent_api::{Agent, AgentFleet, AgentSpec, Mode, ScaleMode, Substrate};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
-use k8s_openapi::api::batch::v1::{Job, JobSpec};
+use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec, JobTemplateSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
     EnvVarSource, HTTPGetAction, ObjectFieldSelector, PodSecurityContext, PodSpec, PodTemplateSpec,
@@ -144,6 +144,7 @@ pub fn workflow_configmap_name(workload: &str) -> String {
 pub fn inject_workflow(rendered: &mut Rendered, configmap: &str, key: &str) {
     let pod = match rendered {
         Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::CronJob(cj) => cj.spec.job_template.spec.as_mut().map(|js| &mut js.template),
         Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
@@ -194,6 +195,7 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
     }
     let pod = match rendered {
         Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::CronJob(cj) => cj.spec.job_template.spec.as_mut().map(|js| &mut js.template),
         Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
@@ -239,8 +241,10 @@ pub const API_TOKEN_ENV: &str = "AGENTCTL_API_TOKEN";
 /// What the renderer produced. Boxed to keep the enum small (clippy).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rendered {
-    /// `once` mode → a batch Job.
+    /// `once`/`workflow` mode → a batch Job.
     Job(Box<Job>),
+    /// `schedule` mode → a CronJob firing the Job on its cron (RFC 0003 §5).
+    CronJob(Box<CronJob>),
     /// `loop`/`reactive` Agent, or a claim-mode AgentFleet → a Deployment.
     Deployment(Box<Deployment>),
     /// A shard-mode AgentFleet → a StatefulSet (stable shard identity, RFC 0011).
@@ -307,16 +311,38 @@ pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, Rende
         // `workflow` is a supervised one-shot like `once` (→ Job): drive the graph
         // to a terminal status, then exit. (`reactive` + a workflow stays a
         // Deployment — the daemon arm below.)
-        Mode::Once | Mode::Schedule | Mode::Workflow => {
-            // `schedule` renders a CronJob whose jobTemplate is this Job; for v1
-            // the renderer emits the Job and the CronJob wrap is layered later.
-            Ok(Rendered::Job(Box::new(Job {
+        // `workflow` is a supervised one-shot like `once` (→ Job).
+        Mode::Once | Mode::Workflow => Ok(Rendered::Job(Box::new(Job {
+            metadata: meta,
+            spec: Some(JobSpec {
+                template: pod,
+                backoff_limit: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))),
+        // `schedule` → a real CronJob firing the Job on its cron. Previously this
+        // rendered a plain one-shot Job, so a scheduled agent ran exactly ONCE and
+        // never on cadence. CEL guarantees `spec.schedule` is set for this mode.
+        Mode::Schedule => {
+            let sched = agent.spec.schedule.clone().unwrap_or_default();
+            Ok(Rendered::CronJob(Box::new(CronJob {
                 metadata: meta,
-                spec: Some(JobSpec {
-                    template: pod,
-                    backoff_limit: Some(0),
+                spec: CronJobSpec {
+                    schedule: sched.cron,
+                    time_zone: sched.timezone,
+                    // Don't stack runs if one overruns its interval.
+                    concurrency_policy: Some("Forbid".to_string()),
+                    job_template: JobTemplateSpec {
+                        spec: Some(JobSpec {
+                            template: pod,
+                            backoff_limit: Some(0),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                }),
+                },
                 ..Default::default()
             })))
         }
@@ -415,6 +441,7 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
 pub fn inject_api_token(rendered: &mut Rendered) {
     let pod = match rendered {
         Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::CronJob(cj) => cj.spec.job_template.spec.as_mut().map(|js| &mut js.template),
         Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
@@ -1381,6 +1408,28 @@ mod tests {
             render_fleet(&fleet(ScaleMode::Shard, None), &cfg()),
             Err(RenderError::MissingShards)
         );
+    }
+
+    #[test]
+    fn schedule_mode_renders_a_cronjob() {
+        // mode:schedule must render a CronJob firing on its cron — not a one-shot Job
+        // (which would run exactly once, never on cadence).
+        let mut a = agent(Mode::Schedule);
+        a.spec.schedule = Some(agent_api::Schedule {
+            cron: "*/5 * * * *".into(),
+            timezone: Some("UTC".into()),
+        });
+        let r = render_agent(&a, &cfg()).unwrap();
+        let Rendered::CronJob(cj) = r else {
+            panic!("mode:schedule must render a CronJob, got {r:?}");
+        };
+        let spec = cj.spec;
+        assert_eq!(spec.schedule, "*/5 * * * *");
+        assert_eq!(spec.time_zone.as_deref(), Some("UTC"));
+        assert_eq!(spec.concurrency_policy.as_deref(), Some("Forbid"));
+        // The jobTemplate carries the agent pod.
+        let pod = spec.job_template.spec.unwrap().template;
+        assert!(has_arg_pair(container_of(&pod), "--mode", "schedule"));
     }
 
     #[test]
