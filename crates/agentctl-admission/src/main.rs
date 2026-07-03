@@ -237,13 +237,7 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     // Evaluate every AgentSpec view under review (worker template always; the
     // coordinator template when present). The first denial is the verdict — a
     // fleet is admitted only if BOTH its members pass.
-    let mut verdict = evaluate_view(
-        &state,
-        view,
-        annotations,
-        &namespace,
-    )
-    .await;
+    let mut verdict = evaluate_view(&state, view, annotations, &namespace).await;
     if verdict.is_ok() {
         if let Some(coord) = coordinator_view {
             verdict = evaluate_view(&state, coord, annotations, &namespace)
@@ -697,7 +691,10 @@ mod tests {
         });
         let coord = coordinator_spec_view("AgentFleet", &fleet).unwrap();
         let err = evaluate(coord, &Map::new(), &[], None, "default").unwrap_err();
-        assert!(err.contains("lethal trifecta"), "coordinator trifecta must be denied: {err}");
+        assert!(
+            err.contains("lethal trifecta"),
+            "coordinator trifecta must be denied: {err}"
+        );
     }
 
     #[test]

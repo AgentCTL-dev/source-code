@@ -585,9 +585,17 @@ async fn handle_a2a(
             // Record which member served the task (owner_pod) so a later live op
             // (cancel/stream/get on a non-terminal task) routes back to it — task
             // affinity across fleet members (RFC 0022 §6). Harmless for a single agent.
-            if let Err(e) =
-                store::upsert(&state.pool, &ns, &name, tid, st, &input, artifact, Some(&pod_ip))
-                    .await
+            if let Err(e) = store::upsert(
+                &state.pool,
+                &ns,
+                &name,
+                tid,
+                st,
+                &input,
+                artifact,
+                Some(&pod_ip),
+            )
+            .await
             {
                 tracing::warn!(error = %e, "store upsert failed");
             } else {
@@ -977,7 +985,11 @@ fn registry_row(kind: &str, ns: &str, name: &str, mode: Option<&str>, base_url: 
     // A fleet's card + RPC live under /fleets/...; an agent's under /agents/... —
     // discovery must point consumers at the surface matching the kind, or the
     // x-agentctl-kind fleet marker is stripped by the /agents route.
-    let seg = if kind == "AgentFleet" { "fleets" } else { "agents" };
+    let seg = if kind == "AgentFleet" {
+        "fleets"
+    } else {
+        "agents"
+    };
     json!({
         "kind": kind,
         "namespace": ns,
@@ -1012,7 +1024,11 @@ fn project_card(
         .and_then(|m| m.pointer("/surfaces/a2a/streaming"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let seg = if kind == Some("AgentFleet") { "fleets" } else { "agents" };
+    let seg = if kind == Some("AgentFleet") {
+        "fleets"
+    } else {
+        "agents"
+    };
     let mut card = json!({
         "protocolVersion": "1.0",
         "name": format!("{ns}/{name}"),
@@ -1378,7 +1394,13 @@ mod tests {
             "agent_version": "2.1.0",
             "surfaces": { "a2a": { "streaming": true } }
         });
-        let card = project_card(Some(&manifest), "team-a", "echo", "https://gw.example", None);
+        let card = project_card(
+            Some(&manifest),
+            "team-a",
+            "echo",
+            "https://gw.example",
+            None,
+        );
 
         assert_eq!(card["protocolVersion"], "1.0");
         assert_eq!(card["name"], "team-a/echo");
@@ -1401,7 +1423,13 @@ mod tests {
     fn fleet_card_is_servable_at_rest_from_static_facts() {
         // No live manifest (replicas:0) → a VALID static fleet card: /fleets url,
         // streaming advertised (the gateway proxies it), and the kind marker set.
-        let card = project_card(None, "team-a", "crawlers", "https://gw.example", Some("AgentFleet"));
+        let card = project_card(
+            None,
+            "team-a",
+            "crawlers",
+            "https://gw.example",
+            Some("AgentFleet"),
+        );
         assert_eq!(card["name"], "team-a/crawlers");
         assert_eq!(card["url"], "https://gw.example/fleets/team-a/crawlers");
         assert_eq!(card["version"], "unknown");
@@ -1506,17 +1534,17 @@ mod tests {
         assert!(webhook::is_public(&pub_v4));
         // The classic SSRF targets are all rejected.
         for bad in [
-            "127.0.0.1",           // loopback
-            "169.254.169.254",     // cloud metadata (link-local)
-            "10.1.2.3",            // RFC1918
-            "192.168.0.5",         // RFC1918
-            "172.16.9.9",          // RFC1918
-            "100.64.0.1",          // CGNAT
-            "0.0.0.0",             // unspecified
-            "::1",                 // IPv6 loopback
-            "fd00::1",             // IPv6 ULA
-            "fe80::1",             // IPv6 link-local
-            "::ffff:127.0.0.1",    // IPv4-mapped loopback
+            "127.0.0.1",        // loopback
+            "169.254.169.254",  // cloud metadata (link-local)
+            "10.1.2.3",         // RFC1918
+            "192.168.0.5",      // RFC1918
+            "172.16.9.9",       // RFC1918
+            "100.64.0.1",       // CGNAT
+            "0.0.0.0",          // unspecified
+            "::1",              // IPv6 loopback
+            "fd00::1",          // IPv6 ULA
+            "fe80::1",          // IPv6 link-local
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
         ] {
             let ip: IpAddr = bad.parse().unwrap();
             assert!(!webhook::is_public(&ip), "{bad} must be blocked");

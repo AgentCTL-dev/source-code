@@ -163,8 +163,12 @@ pub trait ClaimStore: Send + Sync {
     /// dead-lettered. `max_attempts` (from the fleet `workPolicy`, RFC 0022 §7)
     /// bounds redelivery: after that many deliveries without a terminal ack the
     /// item is dead-lettered instead of re-offered. `None` ⇒ unbounded (today).
-    fn submit(&self, item: &str, claim_key: Option<&str>, max_attempts: Option<u32>)
-        -> SubmitOutcome;
+    fn submit(
+        &self,
+        item: &str,
+        claim_key: Option<&str>,
+        max_attempts: Option<u32>,
+    ) -> SubmitOutcome;
     /// Atomically claim `item` for `holder` under `claim_key`, for `ttl_ms`.
     fn claim(&self, item: &str, ttl_ms: u64, claim_key: &str, holder: &str) -> ClaimResult;
     /// Extend a live, owned lease. `Err` for an unknown or stale (expired) lease —
@@ -352,7 +356,14 @@ impl Inner {
     /// been delivered past its `max_attempts` (RFC 0022 §7). Shared by
     /// `sweep_expired`, the lazy-reclaim branch of `claim`, and `release`. Returns
     /// `true` if the unit was dead-lettered.
-    fn retire_or_requeue(&mut self, key: String, item: String, attempts: u32, max: Option<u32>, now: Instant) -> bool {
+    fn retire_or_requeue(
+        &mut self,
+        key: String,
+        item: String,
+        attempts: u32,
+        max: Option<u32>,
+        now: Instant,
+    ) -> bool {
         if max.is_some_and(|m| attempts >= m) {
             self.deadletter.insert(
                 key,
@@ -471,7 +482,13 @@ impl ClaimStore for InMemoryStore {
         let prior = if let Some(old) = g.claimed.remove(claim_key) {
             g.lease_index.remove(&old.lease_id);
             if old.max_attempts.is_some_and(|m| old.attempts >= m) {
-                g.retire_or_requeue(claim_key.to_string(), old.item, old.attempts, old.max_attempts, now);
+                g.retire_or_requeue(
+                    claim_key.to_string(),
+                    old.item,
+                    old.attempts,
+                    old.max_attempts,
+                    now,
+                );
                 return ClaimResult::Deadlettered;
             }
             (old.attempts, old.max_attempts)
@@ -496,7 +513,8 @@ impl ClaimStore for InMemoryStore {
             max_attempts: prior.1,
         };
         g.claimed.insert(claim_key.to_string(), lease);
-        g.lease_index.insert(lease_id.clone(), claim_key.to_string());
+        g.lease_index
+            .insert(lease_id.clone(), claim_key.to_string());
         g.pending.remove(claim_key);
         ClaimResult::Granted {
             lease_id,
@@ -688,11 +706,7 @@ impl ClaimStore for InMemoryStore {
                 result: None,
             };
         }
-        if g
-            .claimed
-            .get(claim_key)
-            .is_some_and(|l| l.expires_at > now)
-        {
+        if g.claimed.get(claim_key).is_some_and(|l| l.expires_at > now) {
             return WorkStatus {
                 state: WorkState::Claimed,
                 result: None,
@@ -919,8 +933,14 @@ mod tests {
     #[test]
     fn stats_counts_pending_and_claimed() {
         let store = InMemoryStore::new(4096);
-        assert_eq!(store.submit("p1", Some("kp1"), None), SubmitOutcome::Enqueued);
-        assert_eq!(store.submit("p2", Some("kp2"), None), SubmitOutcome::Enqueued);
+        assert_eq!(
+            store.submit("p1", Some("kp1"), None),
+            SubmitOutcome::Enqueued
+        );
+        assert_eq!(
+            store.submit("p2", Some("kp2"), None),
+            SubmitOutcome::Enqueued
+        );
         // Re-submit is a no-op count-wise.
         assert_eq!(
             store.submit("p1", Some("kp1"), None),
@@ -938,7 +958,10 @@ mod tests {
         let store = InMemoryStore::new(4096);
         let lease = lease_of(store.claim("d1", 60_000, "kd1", "h1"));
         store.ack(&lease, "kd1", None, None).expect("ack");
-        assert_eq!(store.submit("d1", Some("kd1"), None), SubmitOutcome::Deduped);
+        assert_eq!(
+            store.submit("d1", Some("kd1"), None),
+            SubmitOutcome::Deduped
+        );
         assert_eq!(store.stats().pending, 0);
     }
 
@@ -979,7 +1002,9 @@ mod tests {
         // by the true holder); the right holder settles + dedupes.
         let l_ack = lease_of(store.claim("w-ack", 60_000, "k-ack", "team-a/checkout"));
         assert!(is_holder_mismatch(
-            &store.ack(&l_ack, "k-ack", Some("team-b/evil"), None).unwrap_err()
+            &store
+                .ack(&l_ack, "k-ack", Some("team-b/evil"), None)
+                .unwrap_err()
         ));
         store
             .ack(&l_ack, "k-ack", Some("team-a/checkout"), None)
@@ -1043,7 +1068,12 @@ mod tests {
                 thread::spawn(move || {
                     barrier.wait();
                     // Same key, four different item URIs, four holders.
-                    store.claim(&format!("file:///item-{h}"), 60_000, "shared-key", &format!("h{h}"))
+                    store.claim(
+                        &format!("file:///item-{h}"),
+                        60_000,
+                        "shared-key",
+                        &format!("h{h}"),
+                    )
                 })
             })
             .collect();
@@ -1108,7 +1138,10 @@ mod tests {
         let store = InMemoryStore::new(4096);
         // Unknown before submit.
         assert_eq!(store.result_of("wk").state, WorkState::Unknown);
-        assert_eq!(store.submit("file:///w", Some("wk"), None), SubmitOutcome::Enqueued);
+        assert_eq!(
+            store.submit("file:///w", Some("wk"), None),
+            SubmitOutcome::Enqueued
+        );
         assert_eq!(store.result_of("wk").state, WorkState::Pending);
         let lease = lease_of(store.claim("file:///w", 60_000, "wk", "h1"));
         assert_eq!(store.result_of("wk").state, WorkState::Claimed);
@@ -1151,7 +1184,9 @@ mod tests {
         // Requeue re-offers with a fresh budget.
         assert!(store.requeue_dead("pk"));
         assert!(!store.requeue_dead("pk"), "already requeued");
-        assert!(store.pending_items().contains(&"file:///poison".to_string()));
+        assert!(store
+            .pending_items()
+            .contains(&"file:///poison".to_string()));
         assert!(matches!(
             store.claim("file:///poison", 60_000, "pk", "h3"),
             ClaimResult::Granted { .. }
@@ -1170,8 +1205,14 @@ mod tests {
         assert!(store.drop_dead("dk"));
         assert!(!store.drop_dead("dk"));
         // Tombstoned: a re-submit is deduped, a re-claim is deduped.
-        assert_eq!(store.submit("file:///d", Some("dk"), None), SubmitOutcome::Deduped);
-        assert_eq!(store.claim("file:///d", 60_000, "dk", "h2"), ClaimResult::Deduped);
+        assert_eq!(
+            store.submit("file:///d", Some("dk"), None),
+            SubmitOutcome::Deduped
+        );
+        assert_eq!(
+            store.claim("file:///d", 60_000, "dk", "h2"),
+            ClaimResult::Deduped
+        );
     }
 
     // (18) Under budget (max_attempts=3), an expired item is redelivered, not

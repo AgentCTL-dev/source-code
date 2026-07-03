@@ -328,7 +328,17 @@ async fn handle_fleet_verb(
         .filter_map(|v| v.to_str().ok().map(String::from))
         .collect();
 
-    match authorize(&state.client, &user, &groups, &ns, &name, &verb, "agentfleets").await {
+    match authorize(
+        &state.client,
+        &user,
+        &groups,
+        &ns,
+        &name,
+        &verb,
+        "agentfleets",
+    )
+    .await
+    {
         Ok(true) => {
             state.metrics.inc_authorized();
             match call_fleet_admin(&state.client, &state.na, &ns, &name, &verb).await {

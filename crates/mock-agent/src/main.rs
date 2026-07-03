@@ -34,8 +34,8 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rustls::server::WebPkiClientVerifier;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
 
@@ -110,9 +110,15 @@ async fn main() {
             let app = Router::new()
                 .route("/healthz", get(|| async { "ok" }))
                 .route("/readyz", get(|| async { "ok" }))
-                .route("/metrics", get(|| async {
-                    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], METRICS)
-                }));
+                .route(
+                    "/metrics",
+                    get(|| async {
+                        (
+                            [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+                            METRICS,
+                        )
+                    }),
+                );
             let l = tokio::net::TcpListener::bind(addr)
                 .await
                 .unwrap_or_else(|e| panic!("bind metrics {addr}: {e}"));
@@ -127,7 +133,10 @@ async fn main() {
         .unwrap_or_else(|e| panic!("build mock-agent TLS: {e}"));
     let mcp = Router::new().route("/mcp", post(handle_mcp));
     let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
-    eprintln!("mock-agent: serving mTLS self-MCP on https://{}/mcp", serve.addr);
+    eprintln!(
+        "mock-agent: serving mTLS self-MCP on https://{}/mcp",
+        serve.addr
+    );
     axum_server::bind_rustls(serve.addr, rustls_config)
         .serve(mcp.into_make_service())
         .await
@@ -150,21 +159,24 @@ fn build_mtls_config(cert: &str, key: &str, client_ca: &str) -> Result<ServerCon
 }
 
 fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>, String> {
-    let mut r = std::io::BufReader::new(fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?);
+    let mut r =
+        std::io::BufReader::new(fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?);
     rustls_pemfile::certs(&mut r)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("read certs {path}: {e}"))
 }
 
 fn load_key(path: &str) -> Result<PrivateKeyDer<'static>, String> {
-    let mut r = std::io::BufReader::new(fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?);
+    let mut r =
+        std::io::BufReader::new(fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?);
     rustls_pemfile::private_key(&mut r)
         .map_err(|e| format!("read key {path}: {e}"))?
         .ok_or_else(|| format!("no private key in {path}"))
 }
 
 fn load_ca(path: &str) -> Result<RootCertStore, String> {
-    let mut r = std::io::BufReader::new(fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?);
+    let mut r =
+        std::io::BufReader::new(fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?);
     let mut roots = RootCertStore::empty();
     for c in rustls_pemfile::certs(&mut r) {
         roots
@@ -233,7 +245,10 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
         // not MCP tools; tools/list carries only the read `status` tool.
         "tools/list" => Ok(json!({ "tools": [ { "name": "status" } ] })),
         "resources/read" => {
-            let uri = msg.pointer("/params/uri").and_then(Value::as_str).unwrap_or("");
+            let uri = msg
+                .pointer("/params/uri")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let text = match uri {
                 "agent://capabilities" => manifest().to_string(),
                 "agent://inventory" => json!({ "agents": [], "warm_sessions": 0 }).to_string(),
@@ -242,7 +257,9 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 "agent://metrics" => METRICS.to_string(),
                 other => return Err((-32602, format!("unknown resource: {other}"))),
             };
-            Ok(json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }))
+            Ok(
+                json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }),
+            )
         }
         // A2A methods — contract 2.0 bare PascalCase (a2a.-prefixed accepted). A
         // served run IS a Task; this mock echoes the input back as the distillate.
@@ -251,7 +268,9 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
             let input = a2a_text(msg);
             let id = a2a_msg_id(msg);
             eprintln!("mock-agent: SendMessage");
-            Ok(json!({ "task": task(&id, "TASK_STATE_COMPLETED", Some(&format!("echo: {input}"))) }))
+            Ok(
+                json!({ "task": task(&id, "TASK_STATE_COMPLETED", Some(&format!("echo: {input}"))) }),
+            )
         }
         "GetTask" | "a2a.GetTask" => {
             let id = a2a_id(msg);
@@ -272,9 +291,14 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
         "a2a.Resume" => Ok(json!({ "paused": false, "affected": 0 })),
         "a2a.Cancel" => Ok(json!({ "cancelling": true, "subtree_size": 0 })),
         "tools/call" => {
-            let name = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+            let name = msg
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             eprintln!("mock-agent: tools/call {name}");
-            Ok(json!({ "content": [{ "type": "text", "text": format!("{name}: ok (mock)") }], "isError": false }))
+            Ok(
+                json!({ "content": [{ "type": "text", "text": format!("{name}: ok (mock)") }], "isError": false }),
+            )
         }
         other => Err((-32601, format!("method not found: {other}"))),
     }
@@ -336,7 +360,12 @@ fn task(id: &str, state: &str, distillate: Option<&str>) -> Value {
 /// parses this). Identity comes from the downward-API env the operator injects.
 fn manifest() -> Value {
     let serve = env::var("AGENT_SERVE_MCP").unwrap_or_default();
-    let id = |name: &str| env::var(name).ok().map(Value::String).unwrap_or(Value::Null);
+    let id = |name: &str| {
+        env::var(name)
+            .ok()
+            .map(Value::String)
+            .unwrap_or(Value::Null)
+    };
     json!({
         "contract_version": "2.0",
         "agent_version": format!("mock-agent-{}", env!("CARGO_PKG_VERSION")),
@@ -406,7 +435,10 @@ mod tests {
         let a2a = m.surfaces.a2a.info().expect("a2a served");
         assert!(a2a.methods.iter().any(|x| x == "SendMessage"));
         assert!(!a2a.methods.iter().any(|x| x.starts_with("a2a.")));
-        assert_eq!(m.surfaces.operator_tools.first().map(String::as_str), Some("a2a.Drain"));
+        assert_eq!(
+            m.surfaces.operator_tools.first().map(String::as_str),
+            Some("a2a.Drain")
+        );
         assert!(!m.exec_enabled);
     }
 
@@ -438,9 +470,18 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(arg_val(&args, "--serve-mcp").as_deref(), Some("https://0.0.0.0:8443"));
+        assert_eq!(
+            arg_val(&args, "--serve-mcp").as_deref(),
+            Some("https://0.0.0.0:8443")
+        );
         assert_eq!(arg_val(&args, "--serve-cert"), None);
-        assert_eq!(parse_serve_addr("https://0.0.0.0:8443").to_string(), "0.0.0.0:8443");
-        assert_eq!(parse_serve_addr("127.0.0.1:9000").to_string(), "127.0.0.1:9000");
+        assert_eq!(
+            parse_serve_addr("https://0.0.0.0:8443").to_string(),
+            "0.0.0.0:8443"
+        );
+        assert_eq!(
+            parse_serve_addr("127.0.0.1:9000").to_string(),
+            "127.0.0.1:9000"
+        );
     }
 }

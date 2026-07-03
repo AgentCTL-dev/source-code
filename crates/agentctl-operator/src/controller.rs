@@ -624,11 +624,23 @@ pub fn readiness_condition(
             "idle — scaled to zero (elastic-from-zero on work backlog)".to_string(),
         )
     } else if ready >= desired {
-        ("True", "AllReplicasReady", format!("{ready}/{desired} replicas ready"))
+        (
+            "True",
+            "AllReplicasReady",
+            format!("{ready}/{desired} replicas ready"),
+        )
     } else if ready > 0 {
-        ("False", "Progressing", format!("{ready}/{desired} replicas ready"))
+        (
+            "False",
+            "Progressing",
+            format!("{ready}/{desired} replicas ready"),
+        )
     } else {
-        ("False", "Unavailable", format!("0/{desired} replicas ready ({kind})"))
+        (
+            "False",
+            "Unavailable",
+            format!("0/{desired} replicas ready ({kind})"),
+        )
     };
     Condition {
         type_: "Ready".to_string(),
@@ -910,14 +922,13 @@ async fn reconcile_coordinator(
     // Readiness: the coordinator is a Deployment of `replicas` (default 1). Ready
     // when its ready replicas meet the desired count.
     let desired_hint = coord.replicas.unwrap_or(1).max(1);
-    let ready = match workload_readiness(&ctx.client, ns, &coord_name, "Deployment", desired_hint)
-        .await
-    {
-        Some((ready, desired)) => desired > 0 && ready >= desired,
-        // No readback (unreadable status) — treat as applied; the next resync
-        // re-reads. Never blocks the fleet on a transient read.
-        None => true,
-    };
+    let ready =
+        match workload_readiness(&ctx.client, ns, &coord_name, "Deployment", desired_hint).await {
+            Some((ready, desired)) => desired > 0 && ready >= desired,
+            // No readback (unreadable status) — treat as applied; the next resync
+            // re-reads. Never blocks the fleet on a transient read.
+            None => true,
+        };
     Ok(Some(ready))
 }
 
@@ -1434,17 +1445,29 @@ mod tests {
     fn readiness_condition_reflects_replica_state() {
         // All ready → Ready=True.
         let c = readiness_condition(Some(1), "Deployment", 3, 3);
-        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("True", Some("AllReplicasReady")));
+        assert_eq!(
+            (c.status.as_str(), c.reason.as_deref()),
+            ("True", Some("AllReplicasReady"))
+        );
         // Partial → NOT Ready.
         let c = readiness_condition(Some(1), "Deployment", 1, 3);
-        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("False", Some("Progressing")));
+        assert_eq!(
+            (c.status.as_str(), c.reason.as_deref()),
+            ("False", Some("Progressing"))
+        );
         // Zero ready with a desired → Unavailable (the CrashLoop case that used to
         // falsely report Ready=WorkloadApplied).
         let c = readiness_condition(Some(1), "StatefulSet", 0, 3);
-        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("False", Some("Unavailable")));
+        assert_eq!(
+            (c.status.as_str(), c.reason.as_deref()),
+            ("False", Some("Unavailable"))
+        );
         // Claim fleet scaled to zero → healthy-but-idle Ready.
         let c = readiness_condition(Some(1), "Deployment", 0, 0);
-        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("True", Some("ScaledToZero")));
+        assert_eq!(
+            (c.status.as_str(), c.reason.as_deref()),
+            ("True", Some("ScaledToZero"))
+        );
     }
 
     #[test]

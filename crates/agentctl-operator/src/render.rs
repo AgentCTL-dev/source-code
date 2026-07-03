@@ -154,7 +154,12 @@ pub fn workflow_configmap_name(workload: &str) -> String {
 pub fn inject_workflow(rendered: &mut Rendered, configmap: &str, key: &str) {
     let pod = match rendered {
         Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj.spec.job_template.spec.as_mut().map(|js| &mut js.template),
+        Rendered::CronJob(cj) => cj
+            .spec
+            .job_template
+            .spec
+            .as_mut()
+            .map(|js| &mut js.template),
         Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
@@ -205,7 +210,12 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
     }
     let pod = match rendered {
         Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj.spec.job_template.spec.as_mut().map(|js| &mut js.template),
+        Rendered::CronJob(cj) => cj
+            .spec
+            .job_template
+            .spec
+            .as_mut()
+            .map(|js| &mut js.template),
         Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
@@ -490,7 +500,11 @@ fn render_coordinator_inner(
     coord: &agent_api::Coordinator,
     cfg: &RenderConfig,
 ) -> Result<Rendered, RenderError> {
-    let fleet_name = fleet.metadata.name.clone().ok_or(RenderError::MissingName)?;
+    let fleet_name = fleet
+        .metadata
+        .name
+        .clone()
+        .ok_or(RenderError::MissingName)?;
     let name = coordinator_name(&fleet_name);
     // The coordinator is a long-lived A2A front door: coerce to reactive so a
     // run-to-exit mode does not CrashLoop under the Deployment (admission already
@@ -588,7 +602,12 @@ fn apply_distribution(
 pub fn inject_api_token(rendered: &mut Rendered) {
     let pod = match rendered {
         Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj.spec.job_template.spec.as_mut().map(|js| &mut js.template),
+        Rendered::CronJob(cj) => cj
+            .spec
+            .job_template
+            .spec
+            .as_mut()
+            .map(|js| &mut js.template),
         Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
@@ -1621,7 +1640,12 @@ mod tests {
         assert!(has_arg_pair(&c, "--max-depth", "3"));
         assert!(has_arg_pair(&c, "--max-steps", "40"));
         // tree_token_budget has no agentd flag; it must NOT be passed to an unknown one.
-        assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--tree-token-budget"));
+        assert!(!c
+            .args
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|a| a == "--tree-token-budget"));
     }
 
     #[test]
@@ -1727,7 +1751,9 @@ mod tests {
     fn claim_fleet_has_no_shard_flag() {
         let f = fleet(ScaleMode::Claim, None);
         let r = render_fleet(&f, &cfg()).unwrap();
-        let Rendered::Deployment(dep) = r else { unreachable!() };
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
         let c = container_of(&dep.spec.as_ref().unwrap().template);
         assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--shard"));
     }
@@ -1746,7 +1772,9 @@ mod tests {
             replicas: Some(2),
             distribution: None, // default queue
         });
-        let r = render_coordinator(&f, &cfg()).expect("coordinator present").unwrap();
+        let r = render_coordinator(&f, &cfg())
+            .expect("coordinator present")
+            .unwrap();
         let Rendered::Deployment(dep) = r else {
             panic!("coordinator renders a Deployment, got {r:?}");
         };
@@ -1756,12 +1784,23 @@ mod tests {
         assert_eq!(spec.replicas, Some(2));
         // Pod labels carry the fleet-role + fleet labels AND the coordinator's own
         // agent label (so the worker `agent=workers` selector never grabs it).
-        let labels = spec.template.metadata.as_ref().unwrap().labels.as_ref().unwrap();
+        let labels = spec
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .labels
+            .as_ref()
+            .unwrap();
         assert_eq!(labels[FLEET_ROLE_LABEL], "coordinator");
         assert_eq!(labels[FLEET_LABEL], "workers");
         assert_eq!(labels["agentctl.dev/agent"], "workers-coordinator");
         // Long-lived: coerced to reactive so it does not CrashLoop under a Deployment.
-        assert!(has_arg_pair(container_of(&spec.template), "--mode", "reactive"));
+        assert!(has_arg_pair(
+            container_of(&spec.template),
+            "--mode",
+            "reactive"
+        ));
         // Owned by the fleet (GC'd with it).
         let owner = &dep.metadata.owner_references.as_ref().unwrap()[0];
         assert_eq!(owner.kind, "AgentFleet");
@@ -1777,8 +1816,14 @@ mod tests {
             distribution: None,
         });
         let r = render_coordinator(&f, &cfg()).unwrap().unwrap();
-        let Rendered::Deployment(dep) = r else { unreachable!() };
-        assert_eq!(dep.spec.unwrap().replicas, Some(1), "singleton main agent by default");
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
+        assert_eq!(
+            dep.spec.unwrap().replicas,
+            Some(1),
+            "singleton main agent by default"
+        );
     }
 
     #[test]
@@ -1791,10 +1836,15 @@ mod tests {
             distribution: Some(agent_api::Distribution::Queue),
         });
         let r = render_coordinator(&f, &cfg()).unwrap().unwrap();
-        let Rendered::Deployment(dep) = r else { unreachable!() };
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
         let c = container_of(&dep.spec.as_ref().unwrap().template);
         let env = c.env.as_ref().unwrap();
-        let ws = env.iter().find(|e| e.name == "AGENT_FLEET_WORKSOURCE").expect("worksource env");
+        let ws = env
+            .iter()
+            .find(|e| e.name == "AGENT_FLEET_WORKSOURCE")
+            .expect("worksource env");
         assert_eq!(ws.value.as_deref(), Some("https://coord.svc/mcp"));
         // Queue mode does NOT add an --a2a-peer.
         assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--a2a-peer"));
@@ -1811,9 +1861,15 @@ mod tests {
         let mut c = cfg();
         c.gateway_url = "http://gw.svc:8080".into();
         let r = render_coordinator(&f, &c).unwrap().unwrap();
-        let Rendered::Deployment(dep) = r else { unreachable!() };
+        let Rendered::Deployment(dep) = r else {
+            unreachable!()
+        };
         let container = container_of(&dep.spec.as_ref().unwrap().template);
         // `--a2a-peer worker=<gateway>/fleets/<ns>/<fleet>`.
-        assert!(has_arg_pair(container, "--a2a-peer", "worker=http://gw.svc:8080/fleets/agents/workers"));
+        assert!(has_arg_pair(
+            container,
+            "--a2a-peer",
+            "worker=http://gw.svc:8080/fleets/agents/workers"
+        ));
     }
 }

@@ -354,7 +354,17 @@ async fn infer(
     //    return below.
     let reservation: Option<(i64, i64)> = if budget.is_some() || fleet_budget.is_some() {
         let est = estimate_reservation(&body, state.default_reserve);
-        match store::reserve(&state.pool, &ns, &pool_name, &agent, est, budget, fleet_budget).await {
+        match store::reserve(
+            &state.pool,
+            &ns,
+            &pool_name,
+            &agent,
+            est,
+            budget,
+            fleet_budget,
+        )
+        .await
+        {
             Ok(Some(id)) => Some((id, est)),
             Ok(None) => {
                 state.metrics.inc_budget_rejection();
@@ -968,16 +978,23 @@ mod tests {
         );
         // Anthropic input+output (the shape the old `total_tokens`-only path metered as 0).
         assert_eq!(
-            extract_token_count(&serde_json::json!({ "usage": { "input_tokens": 40, "output_tokens": 60 } })),
+            extract_token_count(
+                &serde_json::json!({ "usage": { "input_tokens": 40, "output_tokens": 60 } })
+            ),
             Some(100)
         );
         // OpenAI prompt+completion without a total.
         assert_eq!(
-            extract_token_count(&serde_json::json!({ "usage": { "prompt_tokens": 10, "completion_tokens": 5 } })),
+            extract_token_count(
+                &serde_json::json!({ "usage": { "prompt_tokens": 10, "completion_tokens": 5 } })
+            ),
             Some(15)
         );
         // No usage at all → None (caller charges an estimate, never 0).
-        assert_eq!(extract_token_count(&serde_json::json!({ "choices": [] })), None);
+        assert_eq!(
+            extract_token_count(&serde_json::json!({ "choices": [] })),
+            None
+        );
     }
 
     #[test]

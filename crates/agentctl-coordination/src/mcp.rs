@@ -274,7 +274,10 @@ fn tool_claim(
             metrics.inc_claim_deadlettered();
             // A normal "lost" outcome (not isError): the claimer treats it as Lost
             // and stops — the item is poison, held out until an admin requeues it.
-            (json!({ "granted": false, "held_by": "<deadletter>" }), false)
+            (
+                json!({ "granted": false, "held_by": "<deadletter>" }),
+                false,
+            )
         }
     }
 }
@@ -348,7 +351,12 @@ fn tool_ack(
         Ok(e) => e,
         Err(reject) => return reject,
     };
-    let outcome = store.ack(lease_id, claim_key, expected.as_deref(), result_str.as_deref());
+    let outcome = store.ack(
+        lease_id,
+        claim_key,
+        expected.as_deref(),
+        result_str.as_deref(),
+    );
     if outcome.is_ok() {
         metrics.inc_acked();
     }
@@ -478,18 +486,27 @@ fn tool_stats(store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) 
 /// Result: `{state, result?}` where `state` ∈ pending|claimed|done|deadletter|unknown
 /// and `result` is the JSON the worker recorded on `work.ack` (only for `done`).
 /// Token-gated like submit/stats (a coordinator/producer may be external).
-fn tool_work_result(args: &Value, store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) {
+fn tool_work_result(
+    args: &Value,
+    store: &dyn ClaimStore,
+    caller: &CallerIdentity,
+) -> (Value, bool) {
     log_attested_caller("work.result", caller);
     let work_id = match args.get("work_id").and_then(Value::as_str) {
         Some(w) => w,
-        None => return (json!({ "error": "work.result requires arguments.work_id" }), true),
+        None => {
+            return (
+                json!({ "error": "work.result requires arguments.work_id" }),
+                true,
+            )
+        }
     };
     let status = store.result_of(work_id);
     // The stored result is a JSON string; re-parse it so the caller gets structured
     // JSON back (falling back to the raw string if it was a bare string).
-    let result = status.result.map(|s| {
-        serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s))
-    });
+    let result = status
+        .result
+        .map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s)));
     (
         json!({ "work_id": work_id, "state": status.state.as_str(), "result": result }),
         false,
@@ -527,7 +544,10 @@ fn tool_deadletter(args: &Value, store: &dyn ClaimStore, caller: &CallerIdentity
             } else {
                 store.drop_dead(work_id)
             };
-            (json!({ "ok": true, "action": action, "work_id": work_id, "found": found }), false)
+            (
+                json!({ "ok": true, "action": action, "work_id": work_id, "found": found }),
+                false,
+            )
         }
         other => (
             json!({ "error": format!("work.deadletter: unknown action {other:?} (want list|requeue|drop)") }),
@@ -554,14 +574,20 @@ fn resources_read(id: Value, params: &Value, store: &dyn ClaimStore) -> Value {
         .unwrap_or_default();
     let (matched_uri, body) = if uri == PENDING_URI {
         let items = store.pending_items();
-        (PENDING_URI, json!({ "pending": items.len(), "items": items }))
+        (
+            PENDING_URI,
+            json!({ "pending": items.len(), "items": items }),
+        )
     } else if uri == DLQ_URI {
         let items: Vec<Value> = store
             .dead_items()
             .into_iter()
             .map(|d| json!({ "work_id": d.claim_key, "item": d.item, "attempts": d.attempts }))
             .collect();
-        (DLQ_URI, json!({ "deadletter": items.len(), "items": items }))
+        (
+            DLQ_URI,
+            json!({ "deadletter": items.len(), "items": items }),
+        )
     } else {
         return err(id, -32602, &format!("unknown resource uri: {uri}"));
     };

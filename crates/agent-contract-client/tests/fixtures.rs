@@ -65,7 +65,13 @@ fn default_capture_has_surfaces_off() {
     // spells them as the a2a.* admin JSON-RPC methods.
     assert_eq!(
         m.surfaces.operator_tools,
-        ["a2a.Drain", "a2a.LameDuck", "a2a.Pause", "a2a.Resume", "a2a.Cancel"]
+        [
+            "a2a.Drain",
+            "a2a.LameDuck",
+            "a2a.Pause",
+            "a2a.Resume",
+            "a2a.Cancel"
+        ]
     );
 }
 

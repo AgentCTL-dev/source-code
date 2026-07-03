@@ -59,10 +59,11 @@ const SCHEMA_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// row is a live `claimed` (contended) or `acked` (deduped); the caller reads it.
 /// The fresh, globally-unique, opaque `lease_id` is minted server-side from a
 /// shared sequence (uniqueness) plus an `md5(random())` suffix (opacity).
-/// `$1`=claim_key, `$2`=item, `$3`=holder, `$4`=ttl_ms. A GRANT increments
-/// `attempts` (this delivery). The reclaim clause requires an expired `claimed`
-/// row to still be UNDER its `max_attempts` budget — a poison row past budget is
-/// left for the sweeper (or the read-back) to dead-letter, never re-granted.
+///
+/// A GRANT increments `attempts` (this delivery). The reclaim clause requires an
+/// expired `claimed` row to still be UNDER its `max_attempts` budget (RFC 0022 §7)
+/// — a poison row past budget is left for the sweeper (or the read-back) to
+/// dead-letter, never re-granted.
 const CLAIM_SQL: &str = "\
 INSERT INTO work_items (claim_key, item, status, lease_id, holder, expires_at, attempts, created_at, updated_at)
 VALUES (
@@ -281,7 +282,14 @@ impl ClaimStore for PgClaimStore {
         let result = result.map(str::to_string);
         let pool = self.pool.clone();
         self.block(async move {
-            db_ack(&pool, &lease_id, &claim_key, expected.as_deref(), result.as_deref()).await
+            db_ack(
+                &pool,
+                &lease_id,
+                &claim_key,
+                expected.as_deref(),
+                result.as_deref(),
+            )
+            .await
         })
     }
 
@@ -800,7 +808,11 @@ async fn db_result_of(pool: &Pool, key: &str) -> Result<WorkStatus, String> {
     Ok(WorkStatus {
         state,
         // Only a terminal ack carries a result.
-        result: if state == WorkState::Done { result } else { None },
+        result: if state == WorkState::Done {
+            result
+        } else {
+            None
+        },
     })
 }
 

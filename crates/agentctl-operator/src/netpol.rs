@@ -293,7 +293,10 @@ mod tests {
             enabled: true,
             control_plane_ns: None,
         };
-        assert!(!cfg.active(), "no control-plane ns ⇒ inactive (fail closed)");
+        assert!(
+            !cfg.active(),
+            "no control-plane ns ⇒ inactive (fail closed)"
+        );
         cfg.control_plane_ns = Some("agentctl-system".to_string());
         assert!(cfg.active());
         cfg.enabled = false;
@@ -352,11 +355,21 @@ mod tests {
         let gw = &egress[1];
         let peer = &gw.to.as_ref().unwrap()[0];
         assert_eq!(
-            peer.namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap()
-                ["kubernetes.io/metadata.name"],
+            peer.namespace_selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref()
+                .unwrap()["kubernetes.io/metadata.name"],
             "agentctl-system"
         );
-        let req = &peer.pod_selector.as_ref().unwrap().match_expressions.as_ref().unwrap()[0];
+        let req = &peer
+            .pod_selector
+            .as_ref()
+            .unwrap()
+            .match_expressions
+            .as_ref()
+            .unwrap()[0];
         assert_eq!(req.operator, "In");
         let vals = req.values.as_ref().unwrap();
         for g in GATEWAY_APP_NAMES {
@@ -376,8 +389,12 @@ mod tests {
         let ingress = spec.ingress.unwrap();
         let peer = &ingress[0].from.as_ref().unwrap()[0];
         assert_eq!(
-            peer.namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap()
-                ["kubernetes.io/metadata.name"],
+            peer.namespace_selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref()
+                .unwrap()["kubernetes.io/metadata.name"],
             "agentctl-system"
         );
         // No podSelector ⇒ any control-plane pod may reach the agent's mTLS surface.
