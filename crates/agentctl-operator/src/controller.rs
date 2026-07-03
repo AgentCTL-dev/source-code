@@ -34,9 +34,9 @@ use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
 use crate::{
-    fleet_selector_string, inject_api_token, inject_mcp_servers, render_agent, render_fleet,
-    render_scaled_object, McpBinding, RenderConfig, RenderError, Rendered,
-    DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
+    fleet_selector_string, inject_api_token, inject_mcp_servers, inject_workflow, render_agent,
+    render_fleet, render_scaled_object, workflow_configmap_name, McpBinding, RenderConfig,
+    RenderError, Rendered, DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
 
 /// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
@@ -296,12 +296,16 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             // fatal (surfaces as a missing tool, not a failed reconcile).
             let bindings = resolve_mcp_bindings(&ctx.client, ns, &agent.spec).await;
             inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
-            // Workload PKI first (serving Certificate + per-ns CA ConfigMap),
-            // so the pod's mounts resolve as it schedules.
+            let owner = agent
+                .controller_owner_ref(&())
+                .expect("Agent CRs always carry name+uid on the live object");
+            // Workflow (agentd v2 --mode workflow): materialize the graph
+            // (inline → generated ConfigMap; ref → mount) + --workflow <file>.
+            ensure_and_inject_workflow(&ctx.client, ns, &name, &agent.spec, &owner, &mut rendered)
+                .await?;
+            // Workload PKI (serving Certificate + per-ns CA ConfigMap), so the
+            // pod's mounts resolve as it schedules.
             if ctx.pki.enabled() {
-                let owner = agent
-                    .controller_owner_ref(&())
-                    .expect("Agent CRs always carry name+uid on the live object");
                 crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
             }
             apply_workload(&ctx.client, ns, &rendered).await?;
@@ -366,6 +370,57 @@ fn cleanup(agent: &Agent) -> Action {
 }
 
 /// Server-side-apply the rendered workload into `ns` under our field manager.
+/// Materialize an agent/fleet-template's workflow source (if any) and inject the
+/// `--workflow <file>` mount into the rendered pod (RFC 0006 / agentd v2). For an
+/// inline graph the operator server-side-applies a generated ConfigMap
+/// (`<workload>-workflow`, owner-ref'd so GC reclaims it); a `configMapKeyRef` is
+/// mounted directly. No-op when the spec carries no workflow. Errors bubble to
+/// the reconcile (transient apiserver → retried).
+async fn ensure_and_inject_workflow(
+    client: &Client,
+    ns: &str,
+    workload: &str,
+    spec: &AgentSpec,
+    owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
+    rendered: &mut Rendered,
+) -> Result<(), Error> {
+    let Some(wf) = &spec.workflow else {
+        return Ok(());
+    };
+    // Inline → SSA a generated ConfigMap; ref → mount it directly.
+    let (cm_name, key) = if let Some(inline) = &wf.inline {
+        use k8s_openapi::api::core::v1::ConfigMap;
+        let name = workflow_configmap_name(workload);
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("workflow.json".to_string(), inline.clone());
+        let cm = ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(ns.to_string()),
+                owner_references: Some(vec![owner.clone()]),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+        let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+        cms.patch(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&cm),
+        )
+        .await?;
+        (name, "workflow.json".to_string())
+    } else if let Some(r) = &wf.config_map_key_ref {
+        (r.name.clone(), r.key.clone())
+    } else {
+        // CEL guarantees exactly one is set; defensively no-op otherwise.
+        return Ok(());
+    };
+    inject_workflow(rendered, &cm_name, &key);
+    Ok(())
+}
+
 /// Resolve an agent/fleet-template's `mcpServerSetRefs` into the flat list of
 /// bound MCP servers (name + trifecta tags) the renderer wires to the MCPGateway
 /// (RFC 0019). Reads each referenced `MCPServerSet` in the workload's namespace.
@@ -573,12 +628,22 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             // singleton Agent; the fleet's template carries mcpServerSetRefs).
             let bindings = resolve_mcp_bindings(&ctx.client, ns, &fleet.spec.template).await;
             inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
-            // Workload PKI first (serving Certificate + per-ns CA ConfigMap),
-            // so fleet pods' mounts resolve as they schedule.
+            let owner = fleet
+                .controller_owner_ref(&())
+                .expect("AgentFleet CRs always carry name+uid on the live object");
+            // Workflow for the fleet template (same as a singleton Agent).
+            ensure_and_inject_workflow(
+                &ctx.client,
+                ns,
+                &name,
+                &fleet.spec.template,
+                &owner,
+                &mut rendered,
+            )
+            .await?;
+            // Workload PKI (serving Certificate + per-ns CA ConfigMap), so fleet
+            // pods' mounts resolve as they schedule.
             if ctx.pki.enabled() {
-                let owner = fleet
-                    .controller_owner_ref(&())
-                    .expect("AgentFleet CRs always carry name+uid on the live object");
                 crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
             }
             apply_workload(&ctx.client, ns, &rendered).await?;

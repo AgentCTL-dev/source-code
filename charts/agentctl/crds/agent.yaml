@@ -202,6 +202,7 @@ spec:
                 - loop
                 - reactive
                 - schedule
+                - workflow
                 type: string
               model:
                 description: |-
@@ -267,12 +268,46 @@ spec:
                     default: false
                     type: boolean
                 type: object
+              workflow:
+                description: |-
+                  The workflow graph to drive (agentd v2 `--mode workflow`). Required when
+                  `mode: workflow`; also valid alongside `mode: reactive` (a suspend/resume
+                  daemon graph). Source is inline JSON or a ConfigMap key; the operator
+                  materializes it to a mounted file passed as `--workflow <path>`.
+                nullable: true
+                properties:
+                  configMapKeyRef:
+                    description: A ConfigMap key holding the workflow JSON (mounted directly).
+                    nullable: true
+                    properties:
+                      key:
+                        description: The key within the `ConfigMap`'s data holding the workflow JSON.
+                        type: string
+                      name:
+                        description: The `ConfigMap` name (same namespace as the `Agent`).
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  inline:
+                    description: |-
+                      The workflow graph as an inline JSON string. The operator renders it into
+                      a generated ConfigMap and mounts it.
+                    nullable: true
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: workflow needs exactly one of inline or configMapKeyRef
+                  rule: has(self.inline) != has(self.configMapKeyRef)
             required:
             - mode
             type: object
             x-kubernetes-validations:
             - message: schedule is required when mode is 'schedule'
               rule: self.mode != 'schedule' || has(self.schedule)
+            - message: workflow is required when mode is 'workflow'
+              rule: self.mode != 'workflow' || has(self.workflow)
           status:
             description: |-
               `Agent.status` — a curated projection of the live capabilities manifest +

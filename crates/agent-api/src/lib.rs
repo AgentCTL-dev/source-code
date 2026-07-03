@@ -46,10 +46,16 @@ pub const GROUP: &str = "agents.x-k8s.io";
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
-#[schemars(extend("x-kubernetes-validations" = [{
-    "rule": "self.mode != 'schedule' || has(self.schedule)",
-    "message": "schedule is required when mode is 'schedule'"
-}]))]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.mode != 'schedule' || has(self.schedule)",
+        "message": "schedule is required when mode is 'schedule'"
+    },
+    {
+        "rule": "self.mode != 'workflow' || has(self.workflow)",
+        "message": "workflow is required when mode is 'workflow'"
+    }
+]))]
 pub struct AgentSpec {
     /// The run shape. Determines the rendered workload kind.
     pub mode: Mode,
@@ -101,6 +107,13 @@ pub struct AgentSpec {
     /// Schedule-mode cron. Used only for `schedule`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+
+    /// The workflow graph to drive (agentd v2 `--mode workflow`). Required when
+    /// `mode: workflow`; also valid alongside `mode: reactive` (a suspend/resume
+    /// daemon graph). Source is inline JSON or a ConfigMap key; the operator
+    /// materializes it to a mounted file passed as `--workflow <path>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<WorkflowSource>,
 
     /// Resolved limits/budgets (override the agent defaults).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,6 +216,13 @@ pub enum Mode {
     Reactive,
     /// Internal cron (→ CronJob). Production cron prefers an external scheduler.
     Schedule,
+    /// Drive a declarative **workflow** graph instead of a single instruction
+    /// (agentd v2 `--mode workflow --workflow <file>`). Supervised like `once`
+    /// (→ Job): same exit-code table, the result carries the workflow outcome.
+    /// Requires `spec.workflow`. A `reactive` daemon may ALSO carry a workflow
+    /// (a suspend/resume graph) — that is `mode: reactive` + `spec.workflow`,
+    /// not this mode.
+    Workflow,
 }
 
 /// Substrate tier (RFC 0002). Names are the canonical tier ids.
@@ -247,6 +267,35 @@ pub struct Schedule {
     pub cron: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+}
+
+/// Where an agent's workflow graph comes from (agentd v2 `--mode workflow`).
+/// Exactly one of `inline` / `configMapKeyRef` is set (CEL). The operator
+/// materializes it to a file mounted into the pod and passed as `--workflow`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(extend("x-kubernetes-validations" = [{
+    "rule": "has(self.inline) != has(self.configMapKeyRef)",
+    "message": "workflow needs exactly one of inline or configMapKeyRef"
+}]))]
+pub struct WorkflowSource {
+    /// The workflow graph as an inline JSON string. The operator renders it into
+    /// a generated ConfigMap and mounts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<String>,
+    /// A ConfigMap key holding the workflow JSON (mounted directly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_map_key_ref: Option<ConfigMapKeyRef>,
+}
+
+/// A reference to a specific key within a namespace-local `ConfigMap`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigMapKeyRef {
+    /// The `ConfigMap` name (same namespace as the `Agent`).
+    pub name: String,
+    /// The key within the `ConfigMap`'s data holding the workflow JSON.
+    pub key: String,
 }
 
 /// Resolved limits/budgets (subset; additive).

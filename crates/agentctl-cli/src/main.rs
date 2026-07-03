@@ -166,6 +166,7 @@ fn mode_str(mode: Mode) -> &'static str {
         Mode::Loop => "loop",
         Mode::Reactive => "reactive",
         Mode::Schedule => "schedule",
+        Mode::Workflow => "workflow",
     }
 }
 

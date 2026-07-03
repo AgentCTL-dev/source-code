@@ -127,6 +127,61 @@ pub struct McpBinding {
     pub tags: Vec<String>,
 }
 
+/// In-pod mount of the workflow graph (agentd v2 `--mode workflow`). The
+/// operator mounts a ConfigMap holding the graph JSON and passes the file path
+/// as `--workflow`.
+const WORKFLOW_MOUNT: &str = "/etc/agentctl/workflow";
+const WORKFLOW_VOLUME: &str = "agentctl-workflow";
+/// The generated-ConfigMap name for an inline workflow on a workload.
+pub fn workflow_configmap_name(workload: &str) -> String {
+    format!("{workload}-workflow")
+}
+
+/// Mount the workflow ConfigMap (key `key` at [`WORKFLOW_MOUNT`]) and pass
+/// `--workflow <mount>/<key>` to the agent (agentd v2). Idempotent. `configmap`
+/// is either the operator-generated `<workload>-workflow` (inline source) or the
+/// user's `configMapKeyRef.name`.
+pub fn inject_workflow(rendered: &mut Rendered, configmap: &str, key: &str) {
+    let pod = match rendered {
+        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
+        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
+    };
+    let Some(pod) = pod else { return };
+    let Some(spec) = pod.spec.as_mut() else {
+        return;
+    };
+    // Volume (idempotent).
+    let volumes = spec.volumes.get_or_insert_with(Vec::new);
+    if !volumes.iter().any(|v| v.name == WORKFLOW_VOLUME) {
+        volumes.push(Volume {
+            name: WORKFLOW_VOLUME.to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: configmap.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    let Some(container) = spec.containers.first_mut() else {
+        return;
+    };
+    let mounts = container.volume_mounts.get_or_insert_with(Vec::new);
+    if !mounts.iter().any(|m| m.name == WORKFLOW_VOLUME) {
+        mounts.push(VolumeMount {
+            name: WORKFLOW_VOLUME.to_string(),
+            mount_path: WORKFLOW_MOUNT.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
+    let args = container.args.get_or_insert_with(Vec::new);
+    if !args.iter().any(|a| a == "--workflow") {
+        args.push("--workflow".to_string());
+        args.push(format!("{WORKFLOW_MOUNT}/{key}"));
+    }
+}
+
 /// Append the agent's bound MCP servers to the rendered container args, each
 /// pointing at the MCPGateway facade (`--mcp <name>=<gateway>/s/<name>`) with
 /// its trifecta tags (`--mcp-tags <name>=<comma-list>`). The agent dials the
@@ -249,7 +304,10 @@ pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, Rende
     let pod = pod_template(&agent.spec, &image, &labels, &name, cfg);
 
     match agent.spec.mode {
-        Mode::Once | Mode::Schedule => {
+        // `workflow` is a supervised one-shot like `once` (→ Job): drive the graph
+        // to a terminal status, then exit. (`reactive` + a workflow stays a
+        // Deployment — the daemon arm below.)
+        Mode::Once | Mode::Schedule | Mode::Workflow => {
             // `schedule` renders a CronJob whose jobTemplate is this Job; for v1
             // the renderer emits the Job and the CronJob wrap is layered later.
             Ok(Rendered::Job(Box::new(Job {
@@ -569,7 +627,7 @@ fn pod_template(
     cfg: &RenderConfig,
 ) -> PodTemplateSpec {
     let restart_policy = match spec.mode {
-        Mode::Once | Mode::Schedule => Some("Never".to_string()),
+        Mode::Once | Mode::Schedule | Mode::Workflow => Some("Never".to_string()),
         // Deployments/StatefulSets require Always.
         Mode::Loop | Mode::Reactive => None,
     };
@@ -802,6 +860,7 @@ fn mode_str(mode: Mode) -> &'static str {
         Mode::Loop => "loop",
         Mode::Reactive => "reactive",
         Mode::Schedule => "schedule",
+        Mode::Workflow => "workflow",
     }
 }
 
@@ -1171,6 +1230,63 @@ mod tests {
         assert_eq!(n, 1);
         // The agent trusts the gateway via the already-rendered --tls-ca.
         assert!(has_arg_pair(c, "--tls-ca", "/etc/agentctl/ca/ca.crt"));
+    }
+
+    #[test]
+    fn workflow_mode_renders_a_job_with_workflow_mount() {
+        let mut a = agent(Mode::Once);
+        a.spec.mode = Mode::Workflow;
+        a.spec.workflow = Some(agent_api::WorkflowSource {
+            inline: Some(r#"{"nodes":[]}"#.into()),
+            config_map_key_ref: None,
+        });
+        let mut r = render_agent(&a, &cfg()).unwrap();
+        // workflow is a supervised one-shot → a Job.
+        let Rendered::Job(job) = &r else {
+            panic!("workflow mode must render a Job")
+        };
+        let c = container_of(&job.spec.as_ref().unwrap().template);
+        assert!(has_arg_pair(c, "--mode", "workflow"));
+
+        // The controller injects the mount (inline → the generated ConfigMap).
+        inject_workflow(&mut r, &workflow_configmap_name("demo"), "workflow.json");
+        inject_workflow(&mut r, &workflow_configmap_name("demo"), "workflow.json"); // idempotent
+        let Rendered::Job(job) = &r else {
+            unreachable!()
+        };
+        let pod = &job.spec.as_ref().unwrap().template;
+        let c = container_of(pod);
+        assert!(has_arg_pair(
+            c,
+            "--workflow",
+            "/etc/agentctl/workflow/workflow.json"
+        ));
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let wf = mounts
+            .iter()
+            .find(|m| m.mount_path == "/etc/agentctl/workflow")
+            .expect("workflow mount present");
+        assert_eq!(wf.read_only, Some(true));
+        let vol = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "agentctl-workflow")
+            .expect("workflow volume present");
+        assert_eq!(vol.config_map.as_ref().unwrap().name, "demo-workflow");
+        // Idempotent: exactly one --workflow flag.
+        let n = c
+            .args
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|a| a.as_str() == "--workflow")
+            .count();
+        assert_eq!(n, 1);
     }
 
     #[test]
