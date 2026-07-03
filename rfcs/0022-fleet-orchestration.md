@@ -1,8 +1,16 @@
 # agentctl RFC 0022: Fleet orchestration — coordinator/worker topology, the work fabric, and the fleet as an addressable endpoint
 
-**Status:** Proposed (agentctl plane track; extends 0003/0011/0013/0014; amends 0012)
+**Status:** Implemented (agentctl plane track; extends 0003/0011/0013/0014; amends 0012)
 **Author:** Andrii Tsok
 **Date:** 2026-07-03
+
+> **Implemented** — Phases 1–5 and the shard-identity half of Phase 6 have landed
+> (CRD + admission; the result/correlation + dead-letter work fabric; coordinator
+> render/reconcile; the fleet-addressable A2A endpoint with LB + task affinity;
+> per-fleet budget; `--shard auto/N` identity injection). The only carried-forward
+> item is the **guarded shard *resize*** (a `Resizing` condition + drain-before-
+> reassign on an `N` change), which needs an agent-side drain acknowledgement and is
+> tracked as a follow-up (§8, §10).
 **Part of:** the agentctl control plane — turns `AgentFleet` from a bag of fungible replicas into a **distributed agent system**: a "main agent" (coordinator) that fans work out to an elastic worker pool over a result-bearing work fabric, addressable from outside as a **single A2A endpoint**, with per-fleet budget isolation.
 
 > **Contract-first, not agent-first (P0).** This RFC adds control-plane *orchestration*
