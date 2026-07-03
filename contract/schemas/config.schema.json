@@ -1,230 +1,154 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/config.schema.json",
-  "title": "Agent Control Contract — declarative agent config file",
-  "description": "The declarative, language-neutral agent config-file surface of the Agent Control Contract (v1). It carries ONLY verbose, environment-stable STRUCTURAL config: the model/limits knobs, the MCP-server inventory, declared subscriptions, A2A delegation peers, the log level, and declared intelligence headers. It is secret-free — only structural REFERENCES live here, via {{secret:NAME}} / {{secret-file:PATH}} templates (resolved values NEVER land in the file or a log). The file is the lowest non-default precedence layer: built-in default < FILE < env < flag; list keys (mcp_servers/subscribe/a2a_peers) are REPLACED at the file boundary but repeatable flags (--mcp/--subscribe/--a2a-peer) ADD to the file's list. Validated/exported by `<agent> --validate-config` (exit 0 valid / 2 invalid) and `<agent> --config-schema`, and served live at agent://config/schema + agent://config/effective. This file is the CONTRACT VIEW: it additionally DECLARES the restart-only mode discriminator (mode/interval/cron) so a consumer that finds them in a file emits a WARNING rather than a hard deny_unknown_fields error — the strict serde mirror (only the reloadable file keys) is published separately. Extracted from agent RFC 0017 (declarative-config-and-hot-reload), RFC 0008 (modes), RFC 0011 (precedence/secrets/validate-at-startup), RFC 0020 (a2a peers), and the reference source crates/agent/src/config_file.rs (ConfigFile/LimitsFile/McpServerFile/A2aPeerFile, config_schema()) + crates/agent/src/config.rs (Mode enum, env/flag handling).",
-  "type": "object",
-  "additionalProperties": false,
-  "x-contract-version": "1.0",
-  "x-provisional": {
-    "P6": "The agentctl design-record §14 marked `--config-schema` / `--validate-config` as UNBUILT. This is RESOLVED IN SOURCE, contrary to that note: crates/agent/src/config_file.rs::config_schema() is a hand-written serde_json::Value (no schemars — a forbidden dependency), wired at config.rs (the --config-schema and --validate-config entrypoints) and kept drift-free against the ConfigFile struct by tests schema_properties_match_struct_fields / schema_contract_version_matches_manifest. This schema is extracted faithfully from that source plus RFC 0017; treat it as provisional pending the design-record reconciliation.",
-    "mode-in-file": "mode/interval/cron are RESTART-ONLY (env/flag), NOT reloadable file keys in the reference ConfigFile struct (which is serde deny_unknown_fields over only the reloadable keys). This contract view DECLARES them so they are recognized (a typo'd reloadable key is still exit 2; a restart-only key present in the file is a WARNING, and changing one on a LIVE reload is REJECTED). See x-restart-only."
-  },
-  "x-versioning": {
-    "posture": "CLOSED object (additionalProperties:false), mirroring serde deny_unknown_fields — a typo'd key (max_token vs max_tokens) is caught at the gate as exit 2. This deliberately DIFFERS from the manifest/metrics OPEN-object additive-tolerance rule, because this is the config-INPUT surface (catch operator typos), not a discovery surface.",
-    "additive": "A new OPTIONAL field is an additive change → contract MINOR bump.",
-    "breaking": "Removing/renaming/narrowing a field, or making an optional field required → contract MAJOR bump. A consumer refuses only an unknown MAJOR (config_version / x-contract-version major)."
-  },
-  "x-precedence": "built-in default < FILE (this schema) < env (AGENT_*) < flag. List keys mcp_servers/subscribe/a2a_peers are REPLACED at the file boundary; repeatable --mcp/--subscribe/--a2a-peer flags ADD to the file list.",
-  "x-cli": {
-    "config": "--config <path> (env AGENT_CONFIG)",
-    "validate-config": "--validate-config — exit 0 valid / exit 2 invalid (config-class)",
-    "config-schema": "--config-schema — emit this schema to stdout",
-    "watch-config": "--watch-config (config-watch feature) — hot-reload on file change"
-  },
-  "x-reloadable": [
-    "intelligence",
-    "model_swap",
-    "model",
-    "max_tokens",
-    "limits",
-    "mcp_servers",
-    "subscribe",
-    "a2a_peers",
-    "log_level",
-    "intelligence_headers"
-  ],
-  "x-restart-only": {
-    "note": "env/flag ONLY — declared here so the file validator can WARN (not error) and a live reload can REJECT a change. Reloadable bounds for the loop live in limits.deadline_secs.",
-    "fields": {
-      "mode": "--mode / env AGENT_MODE",
-      "interval": "--interval (loop/schedule interval, e.g. \"5m\")",
-      "cron": "--cron (5-field UTC cron; needs the `cron` build feature; only valid with mode=schedule)",
-      "intelligence_token": "env AGENT_INTELLIGENCE_TOKEN / _TOKEN_FILE",
-      "run_id": "--run-id / env AGENT_RUN_ID",
-      "serve_mcp_transport": "env AGENT_SERVE_MCP",
-      "enable_exec": "--enable-exec",
-      "drain_timeout": "env AGENT_DRAIN_TIMEOUT"
+ "$defs": {
+  "A2aPeer": {
+   "additionalProperties": false,
+   "properties": {
+    "client_cert": {
+     "description": "client certificate PEM file path (mutual TLS to the peer; requires client_key)",
+     "type": "string"
+    },
+    "client_key": {
+     "description": "client private-key PEM file path",
+     "type": "string"
+    },
+    "endpoint": {
+     "type": "string"
+    },
+    "headers": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "secret-free auth header templates presented to the peer ({{secret:NAME}} references)",
+     "type": "object"
+    },
+    "name": {
+     "pattern": "^[a-zA-Z0-9_-]+$",
+     "type": "string"
     }
+   },
+   "required": [
+    "name",
+    "endpoint"
+   ],
+   "type": "object"
   },
-  "properties": {
-    "config_version": {
-      "type": "string",
-      "pattern": "^\\d+\\.\\d+$",
-      "description": "OPTIONAL. The file's OWN pin to a contract major the operator authored against (distinct from x-contract-version, which is the schema's version). A consumer refuses only an unknown MAJOR."
+  "Limits": {
+   "additionalProperties": false,
+   "properties": {
+    "deadline_secs": {
+     "minimum": 0,
+     "type": "integer"
     },
-    "intelligence": {
-      "type": "string",
-      "description": "Reloadable. The primary intelligence transport/endpoint — the ordered intelligence endpoint list URI (RFC 0018 §3.1). File-settable + RELOADABLE so a ConfigMap update can repoint the endpoint list as a hot-swap (RFC 0018 §5): the reload fans ctrl/swap_intel to in-flight work and re-points new spawns. The transport SCHEME is data, not a secret; the per-endpoint credential is NEVER inline here (env/_FILE only). Flag --intelligence; env AGENT_INTELLIGENCE. Source = config_file.rs (ConfigFile.intelligence)."
+    "max_depth": {
+     "minimum": 0,
+     "type": "integer"
     },
-    "model_swap": {
-      "enum": ["finish-on-old", "restart-turn"],
-      "description": "Reloadable. The model hot-swap policy (RFC 0018 §5.3): finish-on-old | restart-turn. Validated against config::SwapPolicy. Flag --model-swap; env AGENT_MODEL_SWAP. Source = config_file.rs (ConfigFile.model_swap)."
-    },
-    "model": {
-      "type": "string",
-      "description": "Reloadable. Operator-declared model id param (NOT the intelligence transport/endpoint — that is the reloadable `intelligence` file key). Never a secret. Flag --model; env AGENT_MODEL."
-    },
-    "max_tokens": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Reloadable. Token budget per turn. Reference type is u64. Flag --max-tokens; env AGENT_MAX_TOKENS."
-    },
-    "limits": { "$ref": "#/$defs/Limits" },
-    "mcp_servers": {
-      "type": "array",
-      "description": "Reloadable. Default []. The MCP server inventory; one object == one `--mcp name=cmd ... --mcp-tags ...` flag group. Merge is REPLACE at the file layer, but repeatable --mcp flags ADD to this list.",
-      "items": { "$ref": "#/$defs/McpServer" }
-    },
-    "subscribe": {
-      "type": "array",
-      "description": "Reloadable. Default []. Declared subscriptions (reactive mode). Each string == one `--subscribe URI`. Repeatable --subscribe flags ADD to this list.",
-      "items": { "type": "string" }
-    },
-    "a2a_peers": {
-      "type": "array",
-      "description": "Reloadable. Default []. Declared remote-A2A delegation peers; each == one `--a2a-peer name=endpoint` (RFC 0020). Present in the reference source (A2aPeerFile); absent from the RFC 0017 §3.3 example — source wins.",
-      "items": { "$ref": "#/$defs/A2aPeer" }
-    },
-    "log_level": {
-      "type": "string",
-      "enum": ["trace", "debug", "info", "warn", "error"],
-      "description": "Reloadable LIVE. Flag --log-level; env AGENT_LOG_LEVEL. Enum order per the reference config_schema() (trace..error)."
-    },
-    "intelligence_headers": {
-      "type": "object",
-      "description": "Reloadable. Declared intelligence HTTP headers. Header NAMES are structural; each VALUE is EITHER a literal header value OR a secret-ref TEMPLATE ({{secret:NAME}} / {{secret-file:PATH}}). Both serialize as a plain string, so the literal-vs-template distinction is a runtime/validation concern, not a schema type. A credential-shaped header name (see x-secret-shaped-names) MUST carry a secret reference, not an inline literal, or validation fails exit 2.",
-      "additionalProperties": { "$ref": "#/$defs/HeaderValue" },
-      "x-secret-shaped-names": [
-        "authorization", "x-api-key", "api-key", "token", "*-token", "*_token",
-        "password", "secret", "*-key", "*_key"
-      ]
-    },
-    "mode": {
-      "type": "string",
-      "enum": ["once", "loop", "reactive", "schedule"],
-      "x-restart-only": true,
-      "description": "RESTART-ONLY (env AGENT_MODE / flag --mode) — declared here only so a consumer WARNs rather than hard-rejects when it appears in a file; changing it on a LIVE reload is REJECTED. The execution mode: `once` runs the instruction to a terminal status then exits; `loop` repeats per --interval; `reactive` processes subscribe[] events (no terminal run-report); `schedule` is per-fire-identical-to-once driven by --interval or --cron. See the per-mode discriminator in allOf."
-    },
-    "interval": {
-      "type": "string",
-      "x-restart-only": true,
-      "examples": ["5m", "30s", "1h"],
-      "description": "RESTART-ONLY (flag --interval). The loop/schedule interval as a human duration (e.g. \"5m\"). Valid with mode=loop or mode=schedule; for mode=schedule, one of interval or cron is required."
-    },
-    "cron": {
-      "type": "string",
-      "x-restart-only": true,
-      "x-feature": "cron",
-      "examples": ["0 9 * * 1-5"],
-      "description": "RESTART-ONLY (flag --cron). A 5-field UTC cron expression; honoured only in `cron`-feature builds (the production path is an external CronJob -> mode=once). Only valid with mode=schedule."
+    "max_steps": {
+     "minimum": 1,
+     "type": "integer"
     }
+   },
+   "type": "object"
   },
-  "allOf": [
-    {
-      "$comment": "Per-mode discriminated params (RFC 0008; config.rs validate()). mode=schedule requires interval OR cron.",
-      "if": {
-        "properties": { "mode": { "const": "schedule" } },
-        "required": ["mode"]
+  "McpServer": {
+   "additionalProperties": false,
+   "properties": {
+    "endpoint": {
+     "type": "string"
+    },
+    "headers": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "type": "object"
+    },
+    "name": {
+     "pattern": "^[a-zA-Z0-9_-]+$",
+     "type": "string"
+    },
+    "tags": {
+     "additionalProperties": {
+      "items": {
+       "enum": [
+        "untrusted_input",
+        "sensitive",
+        "egress"
+       ]
       },
-      "then": {
-        "anyOf": [
-          { "required": ["interval"] },
-          { "required": ["cron"] }
-        ],
-        "$comment": "--mode schedule requires --interval <dur> or --cron <expr>."
-      }
-    },
-    {
-      "$comment": "cron is only valid with mode=schedule.",
-      "if": { "required": ["cron"] },
-      "then": {
-        "properties": { "mode": { "const": "schedule" } },
-        "required": ["mode"]
-      }
+      "type": "array"
+     },
+     "type": "object"
     }
-  ],
-  "$defs": {
-    "Limits": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Reloadable bounds on the model loop, applied to NEW spawns/turns (in-flight children keep their minted budgets). NOTE: RFC 0017 §3.3 also listed tree_token_budget + max_total_subagents here, but the reference LimitsFile struct exposes ONLY these three as file keys — source wins.",
-      "properties": {
-        "max_steps": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Flag --max-steps. Reference type u32."
-        },
-        "max_depth": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Flag --max-depth. Reference type u32."
-        },
-        "deadline_secs": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Whole seconds. Flag --deadline. A finite deadline is mandatory at resolution (RFC 0011 §3.3). Reference type u64."
-        }
-      }
-    },
-    "McpServer": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "command"],
-      "description": "One MCP server. name/command/argv map to a `--mcp name=\"command argv...\"` flag group; tags is the RFC 0012 §3.1 glob->tags wire.",
-      "properties": {
-        "name": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_-]+$",
-          "description": "Stable server identifier."
-        },
-        "command": { "type": "string", "description": "argv[0]." },
-        "argv": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "argv[1..]."
-        },
-        "transport": {
-          "type": "string",
-          "enum": ["stdio", "unix"],
-          "description": "stdio (default) is the only transport the reference client speaks today; unix is accepted in the schema."
-        },
-        "env_passthrough": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Env var NAMES only — values come from the process env, never inline (no secrets in the file)."
-        },
-        "tags": {
-          "type": "object",
-          "description": "Glob pattern -> trifecta tags (RFC 0012 §3.1). Keys are GLOB patterns (e.g. \"*\", \"read_*\"), NOT literal tool names. An untagged server defaults to untrusted_input.",
-          "additionalProperties": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "enum": ["untrusted_input", "sensitive", "egress"]
-            }
-          }
-        }
-      }
-    },
-    "A2aPeer": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "endpoint"],
-      "description": "One A2A delegation peer — maps to `--a2a-peer name=endpoint` (RFC 0020).",
-      "properties": {
-        "name": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
-        "endpoint": {
-          "type": "string",
-          "pattern": "^(unix:.+|vsock:[0-9]+:[0-9]+)$",
-          "description": "Scheme-discriminated: unix:/path | vsock:cid:port (RFC 0020). No tcp."
-        }
-      }
-    },
-    "HeaderValue": {
-      "type": "string",
-      "description": "An intelligence header value: EITHER a literal string OR a secret-ref template. The secret-ref forms are {{secret:NAME}} (env/loaded secret by name) and {{secret-file:PATH}} (mounted-secret file). Both are plain strings on the wire; the schema type cannot distinguish them. A credential-shaped header name MUST use a template (validator enforces, exit 2).",
-      "x-secret-ref-pattern": "^\\{\\{secret(-file)?:[^}]+\\}\\}$"
-    }
+   },
+   "required": [
+    "name",
+    "endpoint"
+   ],
+   "type": "object"
   }
+ },
+ "$id": "https://agentctl.dev/contract/v2/config.schema.json",
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "additionalProperties": false,
+ "properties": {
+  "a2a_peers": {
+   "items": {
+    "$ref": "#/$defs/A2aPeer"
+   },
+   "type": "array"
+  },
+  "config_version": {
+   "type": "string"
+  },
+  "intelligence": {
+   "type": "string"
+  },
+  "intelligence_headers": {
+   "additionalProperties": {
+    "type": "string"
+   },
+   "type": "object"
+  },
+  "limits": {
+   "$ref": "#/$defs/Limits"
+  },
+  "log_level": {
+   "enum": [
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error"
+   ]
+  },
+  "max_tokens": {
+   "minimum": 1,
+   "type": "integer"
+  },
+  "mcp_servers": {
+   "items": {
+    "$ref": "#/$defs/McpServer"
+   },
+   "type": "array"
+  },
+  "model": {
+   "type": "string"
+  },
+  "model_swap": {
+   "enum": [
+    "finish-on-old",
+    "restart-turn"
+   ]
+  },
+  "subscribe": {
+   "items": {
+    "type": "string"
+   },
+   "type": "array"
+  }
+ },
+ "title": "Agent Control Contract \u2014 declarative agent config file (contract 2.0)",
+ "type": "object",
+ "x-agentd-contract-version": "2.0",
+ "x-contract-version": "2.0"
 }

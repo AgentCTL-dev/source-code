@@ -1,9 +1,17 @@
-# Agent Control Contract (ACC) — v1
+# Agent Control Contract (ACC) — v2
 
 The **Agent Control Contract (ACC)** is the neutral, language-neutral, machine-readable
 contract that **agentctl** (the Kubernetes control plane) consumes and that **any conformant
 agent** implements. It is published as a set of JSON Schemas (draft 2020-12) plus golden
 fixtures and frozen data catalogues.
+
+> **Contract 2.0 — the network is the substrate.** v2 pivots from the v1 on-node substrate
+> (stdio / unix-socket / vsock transports, reachability-as-auth, a local exec surface) to a
+> network-native model: a conformant agent **serves its control surface over mTLS HTTPS**
+> (`POST /mcp`) and **dials the control-plane gateways keyless**. Identity is cryptographic —
+> a verified mTLS client cert (Management) or an attested source IP (the gateways) — not which
+> pipe a call arrived on. The non-HTTP transports and the exec surface were **removed**. See
+> [`SPEC.md`](SPEC.md) for the full law-by-law treatment.
 
 This directory is the **working home** for the contract while it is extracted out of the
 reference implementation's RFCs (agentd RFCs 0014–0020). It is structured to later lift into
@@ -22,7 +30,7 @@ surfaces, and speaks the declared wire protocols is a conformant agent that agen
 The contract is **fully neutral**: it defines only the neutral tokens (`agent_*` env and
 metric prefix, `AGENT_*` env vars, the `agent://` URI scheme, the `agent/*` `_meta`
 namespace). Because these tokens are **vendor-neutral**, any agent can implement the
-contract; the reference implementation is **agentd v1.0.0**, which speaks this neutral
+contract; the reference implementation is **agentd 2.x**, which speaks this neutral
 contract (and keeps `agentd://` as a legacy alias of `agent://`) — see *Neutral-wire map*.
 
 ---
@@ -31,7 +39,7 @@ contract (and keeps `agentd://` as a legacy alias of `agent://`) — see *Neutra
 
 ```
 contract/
-  VERSION                                  # the contract version: 1.0
+  VERSION                                  # the contract version: 2.0
   README.md                                # this file — the ACC overview + P0 + neutral-wire map
   SPEC.md                                  # the spec-level companion: cross-cutting laws, frozen catalogues, sum types, gotchas
   schemas/                                 # CANONICAL finalized schema set (draft 2020-12)
@@ -46,8 +54,8 @@ contract/
     env-convention.json                    # downward-API env-var convention
   fixtures/
     capabilities/
-      default.json                         # GOLDEN — real --capabilities capture (release build, surfaces off)
-      full-features.json                   # GOLDEN — real --capabilities capture (debug build, surfaces on)
+      default.json                         # GOLDEN — real --capabilities capture (--mode once, surfaces off)
+      full-features.json                   # GOLDEN — real --capabilities capture (reactive, mTLS-HTTPS serve, surfaces on)
       reference-full.json                  # synthetic full-feature manifest (schema-author fixture)
       minimal-degraded.json                # synthetic all-surfaces-off manifest (graceful-degradation fixture)
 ```
@@ -67,15 +75,15 @@ validate it against `metrics.registry.json`.)
 
 `schemas/` is the single canonical set (9 files). The earlier parallel `v1/` extraction has
 been **removed**, and its one unique artifact (`events.schema.json`) promoted into `schemas/`.
-Every `$id` is unified under `https://agentctl.dev/contract/v1/<file>`, so there is no
-duplicate-`$id` clash. (The `v1` in the `$id` path is the *contract* major version, not a
+Every `$id` is unified under `https://agentctl.dev/contract/v2/<file>`, so there is no
+duplicate-`$id` clash. (The `v2` in the `$id` path is the *contract* major version, not a
 directory.) All `$ref`s are file-internal (`#/$defs/*`) and resolve.
 
 ---
 
 ## Version negotiation
 
-`contract_version` is **major.minor** (reference: `"1.0"`).
+`contract_version` is **major.minor** (reference: `"2.0"`).
 
 - **Additive growth ⇒ MINOR bump.** New manifest fields, new `surfaces{}` keys, new operator
   tools, new metrics, new config keys are additive. A consumer **MUST tolerate** them: every
@@ -97,9 +105,9 @@ need a hand-written deserializer:
 
 | key | shape | meaning |
 |---|---|---|
-| `surfaces.management` | `false \| string` | management transport address, else `false` |
+| `surfaces.management` | `false \| string` | management address — v2: an mTLS **https** URL (`https://0.0.0.0:8443`), else `false` |
 | `surfaces.metrics` | `false \| string` | `/metrics` scrape address, else `false` |
-| `surfaces.a2a` | `false \| object{version,streaming,methods[]}` | A2A surface, else `false` |
+| `surfaces.a2a` | `false \| object{version,streaming,methods[]}` | A2A surface (advertises the *compiled* capability), else `false` |
 | `surfaces.claim` | `bool \| object{styles[]}` | claim styles — **omitted-when-absent, never `false`** |
 | `surfaces.shard` | `string \| null` | `"K/N"` shard identity, else `null` |
 | `intelligence.healthy` | `bool \| "unknown"` | reachability, or `"unknown"` pre-connect |
@@ -109,7 +117,7 @@ need a hand-written deserializer:
 ## Neutral-wire map (P0)
 
 The contract defines only the **neutral** canonical spellings, so any agent can implement it.
-The reference implementation is **agentd v1.0.0**, which speaks this neutral contract (and
+The reference implementation is **agentd 2.x**, which speaks this neutral contract (and
 keeps `agentd://` as a legacy alias of `agent://`).
 
 | concern | neutral (canonical) |
@@ -145,13 +153,12 @@ choice and recorded:
   (`agent_run_duration_ms`, `agent_intel_call_duration_ms`, `agent_tool_call_duration_ms`) are
   provisional with **buckets undefined** (the reference emits no histograms). P10 does not
   affect manifest shape — `metrics_schema` is an opaque version string.
-- **P2 — A2A wire strings (OPEN).** Both spellings are recorded on every method:
-  `reference_method` (PascalCase `a2a.*` over JSON-RPC NDJSON — what `dispatch_a2a` routes
-  today) and `spec_method` (A2A slash-form: `message/send`, `tasks/get`, `tasks/cancel`,
-  `tasks/list`, `message/stream`, `tasks/resubscribe`). **The normative spelling is deferred**
-  to a later contract decision; a gateway translates until then. Sub-question: the reference
-  A2A surface shares the management listener and omits a dedicated `address` (the manifest
-  `surfaces.a2a.address` is optional).
+- **P2 — A2A wire strings (RESOLVED in v2).** The normative method names are the A2A spec §9
+  **bare PascalCase** spelling (`SendMessage`, `GetTask`, …) served over **HTTPS JSON-RPC**
+  (`POST /mcp`); the legacy `a2a.`-prefixed spelling is still *accepted* for back-compat but
+  the bare form is canonical (it is what the reference emits and the agentctl gateway sends).
+  The A2A surface **shares the management mTLS listener** (`surfaces.a2a.address` omitted), and
+  `surfaces.a2a` now advertises the *compiled* capability independent of any bound listener.
 - **P6 — `--config-schema` (RESOLVED-in-source, provisional).** The design record flagged it
   unbuilt; the config-file extraction found `config_schema()` IS implemented. `surfaces.config_schema`
   is kept boolean; a `true` value is contract-declared and now source-backed.
@@ -160,9 +167,10 @@ choice and recorded:
   byte-identical Prom-text resource and the capacity schema are deferred to a future resources
   extraction. Recorded as a downstream dependency.
 
-Additional grounded choices: operator-tools are the **5-tool source set**
-`[drain, lame-duck, pause, resume, cancel]` in frozen order (not the design record's 3;
-`attach` = `subagent.send`, not a tool; no `force` tool). Exit-code version is the bare
+Additional grounded choices: operator-tools are the **5-method source set**
+`[a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel]` in frozen order (v2 spells them
+as `a2a.*` JSON-RPC admin methods, distinct from the bare A2A-protocol methods; not the design
+record's 3; `attach` = `subagent.send`, not a method; no `force` method). Exit-code version is the bare
 source string `"1.0"` (the `RFC-0011-§5` literal is a documentation alias). The config-file
 *input* surface is intentionally **closed** (`additionalProperties:false`, mirroring serde
 `deny_unknown_fields` → a typo'd key is exit 2) — this is the deliberate exception to the
@@ -202,7 +210,7 @@ A new agent is conformant by **behavior**, not by sharing code with the referenc
    naming.
 5. Pass the behavioral conformance suite. The golden fixtures in `fixtures/capabilities/` are
    the validation ground-truth: `default.json` and `full-features.json` are **real captures**
-   from the reference `agentd` binary (carrying `agent_version` with value `1.0.0`) and together
+   from the reference `agentd` binary (carrying `agent_version` with value `2.1.0`) and together
    exercise both branches of every sum-type surface key.
 
 ---
@@ -211,5 +219,5 @@ A new agent is conformant by **behavior**, not by sharing code with the referenc
 
 This contract currently lives inside the agentctl repo working tree. Per P0 it should be
 extracted into its **own neutral repository** so that neither agentctl nor any agent owns it.
-The `$id` namespace (`https://agentctl.dev/contract/v1/...`) anticipates a stable published
+The `$id` namespace (`https://agentctl.dev/contract/v2/...`) anticipates a stable published
 home; the directory layout (`schemas/`, `fixtures/`, `VERSION`) is ready to lift wholesale.

@@ -3,12 +3,19 @@
 //! conformance.
 //!
 //! It is NOT a real agent (no agentic loop, no intelligence): it just serves the
-//! contract **management profile** (the self-MCP, RFC 0005/0015) as NDJSON
-//! JSON-RPC over the substrate unix socket — `initialize`, `tools/list` (status +
-//! the operator tools), `resources/read agent://capabilities|inventory`, and
-//! `tools/call`. That is exactly the surface agentctl's node-agent bridge drives,
-//! so it lets the keystone path be exercised end-to-end without the real runtime
-//! — and demonstrates P0: agentctl manages *any* conformant agent.
+//! contract **management profile** (the self-MCP, RFC 0005/0015) — `initialize`,
+//! `tools/list`, `resources/read agent://capabilities|inventory`, `tools/call`,
+//! and the A2A methods — so the keystone path can be exercised without the real
+//! runtime, demonstrating P0: agentctl manages *any* conformant agent.
+//!
+//! **Contract-2.0 status.** The emitted `agent://capabilities` manifest is
+//! contract 2.0 (`contract_version` "2.0"; bare PascalCase A2A method names; no
+//! exec surface) — that is what `agent-contract-client` parses and the capability
+//! fixtures mirror. The *transport* is still the v1 NDJSON-JSON-RPC-over-unix
+//! stand-in (and the A2A streaming frames still carry the v1 `final` field); the
+//! full mTLS-HTTPS `POST /mcp` mock is deferred to the e2e-harness rework. To
+//! avoid a manifest/dispatch mismatch, the A2A methods are dispatched under BOTH
+//! the bare (v2 normative) and the legacy `a2a.`-prefixed spellings.
 //!
 //! Bind address comes from the contract bind instruction
 //! `AGENT_SERVE_MCP` (e.g. `unix:/run/agent/mgmt.sock`),
@@ -77,10 +84,12 @@ fn serve_conn(stream: UnixStream) {
             continue; // a notification (e.g. notifications/initialized)
         };
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-        // A2A streaming (RFC 0020): one request → MULTIPLE same-id response frames
-        // (working → artifact-update echo → completed/final), then resume reading.
-        if method == "a2a.SendStreamingMessage" {
-            eprintln!("mock-agent: a2a.SendStreamingMessage (stream)");
+        // A2A streaming: one request → MULTIPLE same-id response frames (working →
+        // artifact-update echo → completed), then resume reading. Contract 2.0
+        // spells the method `SendStreamingMessage`; the `a2a.` prefix is accepted
+        // for back-compat. (The v1 `final` frame flag is a deferred wire-shape fix.)
+        if method == "SendStreamingMessage" || method == "a2a.SendStreamingMessage" {
+            eprintln!("mock-agent: SendStreamingMessage (stream)");
             let input = msg
                 .pointer("/params/message/parts/0/text")
                 .and_then(Value::as_str)
@@ -146,9 +155,9 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
             let text = match uri {
                 "agent://capabilities" => manifest().to_string(),
                 "agent://inventory" => json!({ "agents": [], "warm_sessions": 0 }).to_string(),
-                // Prometheus 0.0.4 text exposed as an MCP resource (RFC 0010 / P4):
-                // the node-agent reads this over the socket and re-exposes it, so a
-                // networkless agent is still scrapeable.
+                // Prometheus 0.0.4 text exposed as an MCP resource (RFC 0010). In
+                // contract 2.0 the agent also serves /metrics directly over its
+                // mTLS listener; this resource is the in-band mirror.
                 "agent://metrics" => METRICS.to_string(),
                 other => {
                     return Err((-32602, format!("unknown resource: {other}")));
@@ -158,10 +167,10 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }),
             )
         }
-        // A2A reference methods (RFC 0020 binding; the gateway translates the
-        // spec slash-form message/send|tasks/get|tasks/cancel → these). A served
-        // run IS a Task; this mock echoes the input back as the distillate.
-        "a2a.SendMessage" => {
+        // A2A methods. Contract 2.0 uses the bare PascalCase spec-§9 names; the
+        // `a2a.`-prefixed spellings are accepted for back-compat. A served run IS a
+        // Task; this mock echoes the input back as the distillate.
+        "SendMessage" | "a2a.SendMessage" => {
             let input = msg
                 .pointer("/params/message/parts/0/text")
                 .and_then(Value::as_str)
@@ -182,12 +191,12 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 "kind": "task"
             }))
         }
-        "a2a.GetTask" => {
+        "GetTask" | "a2a.GetTask" => {
             let id = msg
                 .pointer("/params/id")
                 .and_then(Value::as_str)
                 .unwrap_or("task-1");
-            eprintln!("mock-agent: a2a.GetTask {id}");
+            eprintln!("mock-agent: GetTask {id}");
             Ok(json!({
                 "id": id,
                 "contextId": "ctx-1",
@@ -199,12 +208,12 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 "kind": "task"
             }))
         }
-        "a2a.CancelTask" => {
+        "CancelTask" | "a2a.CancelTask" => {
             let id = msg
                 .pointer("/params/id")
                 .and_then(Value::as_str)
                 .unwrap_or("task-1");
-            eprintln!("mock-agent: a2a.CancelTask {id}");
+            eprintln!("mock-agent: CancelTask {id}");
             Ok(json!({
                 "id": id,
                 "contextId": "ctx-1",
@@ -237,7 +246,7 @@ fn manifest() -> Value {
             .unwrap_or(Value::Null)
     };
     json!({
-        "contract_version": "1.0",
+        "contract_version": "2.0",
         "agent_version": format!("mock-agent-{}", env!("CARGO_PKG_VERSION")),
         "build_features": [],
         "identity": {
@@ -261,10 +270,12 @@ fn manifest() -> Value {
             "a2a": {
                 "version": "1.0",
                 "streaming": false,
-                "methods": ["a2a.SendMessage", "a2a.SendStreamingMessage", "a2a.GetTask", "a2a.CancelTask"]
+                // Contract 2.0: bare PascalCase spec-§9 A2A method names.
+                "methods": ["SendMessage", "SendStreamingMessage", "GetTask", "CancelTask"]
             },
             "events": false,
-            "operator_tools": ["drain", "lame-duck", "cancel"],
+            // Contract 2.0: operator tools are the a2a.* admin JSON-RPC methods.
+            "operator_tools": ["a2a.Drain", "a2a.LameDuck", "a2a.Pause", "a2a.Resume", "a2a.Cancel"],
             "metrics_schema": "1.0",
             "report_schema": "1.0",
             "exit_codes": "1.0",

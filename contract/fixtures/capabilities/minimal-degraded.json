@@ -1,35 +1,74 @@
 {
-  "contract_version": "1.0",
-  "agent_version": "1.0.0",
-  "build_features": [],
+  "a2a_peers": [],
+  "agent_version": "2.1.0",
+  "allow_trifecta": false,
+  "build_features": [
+    "tls",
+    "serve-mcp",
+    "serve-https",
+    "a2a",
+    "cron",
+    "events",
+    "cluster",
+    "hot-reload",
+    "config-watch",
+    "metrics",
+    "otel",
+    "workflow"
+  ],
+  "contract_version": "2.0",
   "identity": {
-    "run_id": "01J8X9ABCDEF0123456789ABCD",
     "instance": null,
-    "uid": null,
+    "namespace": null,
     "node": null,
-    "namespace": null
+    "run_id": "19f25a40a5d1ed7ee",
+    "uid": null
   },
+  "intelligence": {
+    "discovery": false,
+    "endpoints": 0,
+    "healthy": "unknown",
+    "models": [],
+    "transport": null
+  },
+  "intelligence_summary": {
+    "toolmode": "native"
+  },
+  "limits": {
+    "deadline_ms": 600000,
+    "drain_timeout_ms": 25000,
+    "max_children": 8,
+    "max_depth": 4,
+    "max_steps": 50,
+    "max_tokens": 200000,
+    "max_total_subagents": 64,
+    "tree_token_budget": 2000000
+  },
+  "mcp_servers": [],
   "mode": "once",
   "model": null,
-  "intelligence": {
-    "transport": null,
-    "endpoints": 0,
-    "healthy": "unknown"
-  },
   "surfaces": {
-    "management": false,
-    "operator_tools": [],
     "a2a": false,
+    "claim": false,
+    "cluster": false,
+    "config_effective": true,
+    "config_schema": true,
+    "config_validate": true,
+    "events": false,
+    "exit_codes": "1.0",
+    "hot_reload": false,
+    "intelligence": true,
+    "management": false,
     "metrics": false,
     "metrics_schema": "1.0",
-    "events": false,
+    "operator_tools": [
+      "a2a.Drain",
+      "a2a.LameDuck",
+      "a2a.Pause",
+      "a2a.Resume",
+      "a2a.Cancel"
+    ],
     "report_schema": "1.0",
-    "exit_codes": "1.0",
-    "intelligence": false,
-    "hot_reload": false,
-    "config_validate": true,
-    "config_schema": true,
-    "cluster": false,
     "shard": null,
     "standby": false
   }

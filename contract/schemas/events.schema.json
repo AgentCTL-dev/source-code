@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/events.schema.json",
+  "$id": "https://agentctl.dev/contract/v2/events.schema.json",
   "title": "Agent Control Contract — Live Event Stream (agent://events read body)",
   "description": "The read body of the `agent://events` resource: a subscribable, bounded live-event window an operator drains to tail activity — loop steps, refusals, spawns, drain progress — over the self-MCP, without scraping container stderr (agent RFC 0016 §7). It is a PROJECTION of the same stderr JSON-lines stream (RFC 0010 §3.2/§3.3), not a second telemetry path: identical lines, identical closed event vocabulary, plus a monotonic ring `seq`. Backed by a fixed-size in-memory ring (env AGENT_EVENTS_RING; default 1024) that is LOSSY BY DESIGN — an overrun drops the oldest and bumps `dropped`, never blocking a slow subscriber. The transport is RFC 0005 notify-then-read: a payload-free `notifications/resources/updated{uri}` fires on new events; the subscriber `resources/read(\"agent://events?after=<seq>\")` to pull the window with seq > after, optionally filtered by `?level=` and `?event=<dotted-prefix-comma-list>`, advancing `after` to the last seq it saw. The ring is in-memory and dropped wholesale on SIGKILL; the durable record is stderr + the run report. This envelope is OPEN/additive-tolerant.",
   "type": "object",

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/exit-codes.table.json",
+  "$id": "https://agentctl.dev/contract/v2/exit-codes.table.json",
   "title": "Agent Control Contract — Exit-Code Table",
   "description": "The FROZEN exit-code table of the Agent Control Contract. Authority: agent RFC 0011 §5 (the table) framed/versioned by RFC 0016 §5.1/§5.2 (podFailurePolicy intent mapping). Reference source of truth: crates/agent/src/exit.rs (EXIT_CODES const, the SUCCESS..DEADLINE consts, SIGKILL_EXIT/SIGTERM_EXIT, once_exit(), pod_failure_intent()). This artifact is a DATA catalogue (not a JSON-document validator) carrying the code -> {neutral name, reference const alias, meaning, podFailurePolicy intent} mapping plus mode reachability. agentctl compiles `intent` into Job onExitCodes / podFailurePolicy rules. Versioned by `exit_codes_version` (== surfaces.exit_codes); additive => minor; any change to a code's meaning or to its intent => major. A consumer MUST refuse only an unknown MAJOR; an unrecognised code defaults to intent `retriable` (never a silent FailJob).",
   "type": "object",
@@ -10,7 +10,7 @@
   "exit_codes_version": "1.0",
   "x-version-note": "exit.rs EXIT_CODES = \"1.0\" and RFC 0016 §5.1 pin \"1.0\". RFC 0014 §5 jsonc sketch literally showed \"RFC-0011-§5\"; that form is kept only as a documentation alias below. The contract uses the bare major.minor string \"1.0\".",
   "x-version-alias": "RFC-0011-§5",
-  "x-contract-version": "1.0",
+  "x-contract-version": "2.0",
 
   "intent_vocabulary": {
     "description": "The CLOSED podFailurePolicy intent vocabulary agentctl compiles into onExitCodes (RFC 0016 §5.2). pod_failure_intent() in exit.rs is total over the table and defaults an unrecognised code to `retriable`.",

@@ -1,12 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/a2a.methods.json",
+  "$id": "https://agentctl.dev/contract/v2/a2a.methods.json",
   "title": "Agent Control Contract — A2A method set & core wire types",
-  "description": "The A2A (Agent2Agent) JSON-RPC method set and the core object types a conformant agent serves over the substrate (vsock/unix) for an on-node gateway to bridge to HTTP/SSE. This is the method-registry companion to contract/v1/a2a.schema.json (the full type schema); it enumerates the served methods with both spellings and points params/result at the shared $defs. Extracted from agent RFC 0020 (the reference binding) + the A2A specification (https://a2a-protocol.org); reference source crates/agent/src/mcp/a2a.rs (dispatch_a2a) and crates/agent/src/capabilities.rs (a2a_surface). Per P0 the contract depends on this shape, never on a specific binary; agent is the reference impl. The agent serves ONLY the live task core (SendMessage/GetTask/CancelTask/ListTasks + the streaming pair); the gateway owns HTTP, SSE, OAuth/OIDC/mTLS, webhooks, durable history, version negotiation, and the push-notification-config + getAuthenticatedExtendedCard methods (agentctl RFC 0013). P2 BINDING-CONFORMANCE QUESTION (OPEN, agentctl RFC 0018 a2a.methods.json PENDING; brainstorm §14 P2): the reference impl dispatches PascalCase 'a2a.<Method>' names inside the NDJSON JSON-RPC envelope (RFC 0004) — this matches NEITHER the A2A JSON-RPC slash-form binding (message/send, tasks/get, ...) NOR the A2A gRPC/protobuf binding; it is a PascalCase-over-vsock convention. Committing to the slash-form is a real wire change, not a relabel. This file records BOTH spellings on every method: 'reference_method' (what is dispatched today, FROZEN for contract v1 as the reference binding) and 'spec_method' (the A2A-spec slash-form, the migration target). Which is normative is the unresolved binding-conformance decision; until commit the gateway is the translation layer.",
+  "description": "The A2A (Agent2Agent) JSON-RPC method set and the core object types a conformant agent serves. This is the method-registry companion to the full type schema; it enumerates the served methods and points params/result at the shared $defs. Extracted from agent RFC 0020 (the reference binding) + the A2A specification (https://a2a-protocol.org); reference source crates/agentd/src/mcp/a2a.rs (dispatch) and capabilities.rs (a2a_surface). Per P0 the contract depends on this shape, never on a specific binary; agentd is the reference impl. The agent serves ONLY the live task core (SendMessage/GetTask/CancelTask/ListTasks + the streaming pair); the gateway owns durable history, version negotiation, OAuth/OIDC, webhooks, and the push-notification-config + getAuthenticatedExtendedCard methods (agentctl RFC 0013). CONTRACT 2.0 BINDING (the v1 P2 open question is now RESOLVED — see x-contract-2-binding): the agent serves A2A over mTLS HTTPS (POST /mcp, SSE for streaming), NOT the retired vsock/unix substrate, and the normative wire name is the A2A spec §9 BARE PascalCase form (SendMessage, GetTask, …). The per-method 'reference_method' below keeps the legacy a2a.-prefixed spelling (still ACCEPTED for back-compat) and 'spec_method' records the A2A slash-form for reference; the bare form is what agentd v2 EMITS and is canonical.",
 
   "type": "object",
-  "x-contract-version": "1.0",
+  "x-contract-version": "2.0",
   "x-protocol-version": "1.0",
+  "x-contract-2-binding": {
+    "resolved": "The v1 P2 binding-conformance question is settled in contract 2.0.",
+    "transport": "mTLS HTTPS, JSON-RPC 2.0 over POST /mcp; streaming is an SSE text/event-stream of StreamResponse frames terminated by the terminal task state + stream close (no non-spec `final` flag).",
+    "normative_name": "The A2A spec §9 BARE PascalCase method name (SendMessage, GetTask, CancelTask, ListTasks, SendStreamingMessage, SubscribeToTask) — i.e. the per-entry reference_method with the `a2a.` prefix stripped.",
+    "accepted_aliases": "The legacy a2a.-prefixed spelling (reference_method) is still accepted for back-compat; the A2A slash-form (spec_method) is NOT served by agentd v2.",
+    "gating": "A2A methods require a Management-origin (mTLS client-cert) caller; the agentctl gateway relays under the control-plane client cert."
+  },
 
   "properties": {
 
@@ -17,19 +24,19 @@
     },
 
     "transport": {
-      "description": "Where the agent serves these methods. The reference impl serves the A2A surface over the SAME management listener (vsock/unix), gated to a PeerOrigin::Management peer (RFC 0015 §3.3); a Stdio peer gets -32601. P2 sub-question (OPEN): whether A2A gets its own surfaces.a2a.address or shares the management listener — the reference shares it and omits address.",
+      "description": "Where the agent serves these methods. Contract 2.0: the A2A surface is served over the SAME mTLS HTTPS management listener (POST /mcp, SSE for streaming), gated to a PeerOrigin::Management (verified mTLS client-cert) peer (RFC 0015 §3.3); a Stdio peer gets -32601. The reference shares the management listener and omits surfaces.a2a.address (the v1 vsock/unix substrate was retired).",
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "substrate": { "type": "array", "items": { "enum": ["vsock", "unix"] } },
-        "codec": { "const": "JSON-RPC 2.0 over NDJSON (RFC 0004)" },
+        "substrate": { "type": "array", "items": { "enum": ["https"] } },
+        "codec": { "const": "JSON-RPC 2.0 over HTTPS POST /mcp; SSE text/event-stream for streaming" },
         "peer_origin_gate": { "const": "Management" },
         "stdio_peer_result": { "const": -32601 }
       }
     },
 
     "methods": {
-      "description": "The served method set. Each entry records the reference spelling (FROZEN v1 reference binding, what dispatch_a2a routes today), the A2A-spec slash-form (migration target), and $refs into $defs for params/result. served_by: 'live' = the agent serves it; 'gateway' = the agent returns -32601 and the gateway owns it. The agent serves ONLY the six 'live' methods (mcp/a2a.rs dispatch_a2a; capabilities.rs a2a_surface methods[]).",
+      "description": "The served method set. Contract 2.0: the normative wire name is the BARE PascalCase form (reference_method with the a2a. prefix stripped). Each entry records the legacy reference spelling (still accepted for back-compat), the A2A-spec slash-form (reference only, not served by v2), and $refs into $defs for params/result. served_by: 'live' = the agent serves it; 'gateway' = the agent returns -32601 and the gateway owns it. The agent serves ONLY the six 'live' methods (mcp/a2a.rs dispatch; capabilities.rs a2a_surface methods[]).",
       "type": "array",
       "items": { "$ref": "#/$defs/MethodEntry" },
       "x-served-methods": [
@@ -48,6 +55,7 @@
       "additionalProperties": false,
       "properties": {
         "TASK_NOT_FOUND": { "const": -32001, "description": "GetTask/CancelTask/SubscribeToTask for an id not in the live registry (mcp/a2a.rs TASK_NOT_FOUND)." },
+        "UNSUPPORTED_OPERATION": { "const": -32004, "description": "A2A spec §5.4 UnsupportedOperationError — e.g. CancelTask on an already-terminal task (mcp/a2a.rs UNSUPPORTED_OPERATION)." },
         "METHOD_NOT_FOUND": { "const": -32601, "description": "Unsupported a2a method, or a Stdio-origin peer, or a gateway-owned method the agent does not serve." },
         "INVALID_PARAMS": { "const": -32602, "description": "e.g. SendMessage with no non-empty text part." },
         "INTERNAL_ERROR": { "const": -32603, "description": "spawn/dispatch failure." }
@@ -58,13 +66,13 @@
   "$defs": {
 
     "MethodEntry": {
-      "description": "One A2A method, recorded in BOTH spellings (P2 binding-conformance OPEN). reference_method is the FROZEN v1 reference binding (PascalCase-over-vsock); spec_method is the A2A slash-form JSON-RPC binding (the migration target). params/result $ref the shared types.",
+      "description": "One A2A method. Contract 2.0: the normative wire name is the BARE PascalCase form (reference_method minus the a2a. prefix). reference_method is the legacy a2a.-prefixed spelling (still accepted); spec_method is the A2A slash-form (reference only, not served by v2). params/result $ref the shared types.",
       "type": "object",
       "additionalProperties": true,
       "required": ["reference_method", "spec_method", "served_by"],
       "properties": {
         "reference_method": {
-          "description": "EXACT reference spelling dispatched today (mcp/a2a.rs dispatch_a2a; the a2a.<PascalCase> dotted name over the NDJSON JSON-RPC codec). Also the A2A gRPC/protobuf service-method name. The gateway MUST emit exactly this when bridging to the reference impl.",
+          "description": "The legacy a2a.<PascalCase> dotted spelling — still ACCEPTED by the reference for back-compat. Contract 2.0: the agent EMITS and the gateway SENDS the BARE PascalCase form (this value with the a2a. prefix stripped, e.g. SendMessage); the bare name is canonical.",
           "type": "string",
           "enum": [
             "a2a.SendMessage",
@@ -81,7 +89,7 @@
           ]
         },
         "spec_method": {
-          "description": "A2A-spec slash-form JSON-RPC method (since 0.2.x) — the migration target. P2: not yet committed as normative.",
+          "description": "A2A-spec slash-form JSON-RPC method (since 0.2.x), recorded for reference. Contract 2.0: agentd does NOT serve the slash-form — the normative binding is the bare PascalCase name.",
           "type": "string",
           "enum": [
             "message/send",
@@ -110,7 +118,7 @@
           "type": "object"
         },
         "streaming": {
-          "description": "true ⇒ the result is a same-id StreamResponse frame stream terminated by statusUpdate.final==true, NOT a unary reply (see StreamResponse).",
+          "description": "true ⇒ the result is an SSE StreamResponse frame stream terminated by the terminal task STATE + stream close, NOT a unary reply (see StreamResponse). Contract 2.0 emits no non-spec `final` flag.",
           "type": "boolean"
         },
         "note": { "type": "string" }
@@ -120,8 +128,8 @@
         { "reference_method": "a2a.GetTask", "spec_method": "tasks/get", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/GetTaskParams" }, "result": { "$ref": "#/$defs/Task" }, "note": "Unknown id ⇒ -32001. Completed run carries the distillate artifact (distillate-only invariant, RFC 0009 §8)." },
         { "reference_method": "a2a.CancelTask", "spec_method": "tasks/cancel", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/TaskIdParams" }, "result": { "$ref": "#/$defs/Task" }, "note": "Live run ⇒ CANCELED; already-terminal ⇒ its real terminal state (cancel-of-finished is a read). Unknown id ⇒ -32001." },
         { "reference_method": "a2a.ListTasks", "spec_method": "tasks/list", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/ListTasksParams" }, "result": { "$ref": "#/$defs/ListTasksResult" }, "note": "LIVE instance-local registry only; durable cross-pod history is gateway-held (RFC 0020 §5/§7). Pagination params accepted; nextPageToken omitted (registry bounded by MAX_SESSIONS)." },
-        { "reference_method": "a2a.SendStreamingMessage", "spec_method": "message/stream", "served_by": "live", "streaming": true, "params": { "$ref": "#/$defs/SendMessageParams" }, "result": { "$ref": "#/$defs/StreamResponse" }, "note": "Status-level streaming: writes statusUpdate{WORKING,final:false}, then (on completion) artifactUpdate{distillate,lastChunk:true}, then RETURNS statusUpdate{<terminal>,final:true}. Same-id frames; read as a stream until final==true." },
-        { "reference_method": "a2a.SubscribeToTask", "spec_method": "tasks/resubscribe", "served_by": "live", "streaming": true, "params": { "$ref": "#/$defs/TaskIdParams" }, "result": { "$ref": "#/$defs/StreamResponse" }, "note": "Resubscribe to an existing run by id. Unknown ⇒ -32001 (nothing streamed). Already-terminal ⇒ artifact (completed-only) + final frame now; live ⇒ WORKING then poll to terminal." },
+        { "reference_method": "a2a.SendStreamingMessage", "spec_method": "message/stream", "served_by": "live", "streaming": true, "params": { "$ref": "#/$defs/SendMessageParams" }, "result": { "$ref": "#/$defs/StreamResponse" }, "note": "Status-level streaming over SSE: writes statusUpdate{WORKING}, then (on completion) artifactUpdate{distillate,lastChunk:true}, then RETURNS statusUpdate{<terminal>} and closes the stream. Same-id frames; read until a terminal task state (no `final` flag in v2)." },
+        { "reference_method": "a2a.SubscribeToTask", "spec_method": "tasks/resubscribe", "served_by": "live", "streaming": true, "params": { "$ref": "#/$defs/TaskIdParams" }, "result": { "$ref": "#/$defs/StreamResponse" }, "note": "Resubscribe to an existing run by id. Unknown ⇒ -32001 (nothing streamed). Already-terminal ⇒ artifact (completed-only) + terminal status frame then close; live ⇒ WORKING then poll to terminal." },
         { "reference_method": "a2a.SetTaskPushNotificationConfig", "spec_method": "tasks/pushNotificationConfig/set", "served_by": "gateway", "note": "Gateway-owned (RFC 0020 §7); agent ⇒ -32601." },
         { "reference_method": "a2a.GetTaskPushNotificationConfig", "spec_method": "tasks/pushNotificationConfig/get", "served_by": "gateway", "note": "Gateway-owned; agent ⇒ -32601." },
         { "reference_method": "a2a.ListTaskPushNotificationConfig", "spec_method": "tasks/pushNotificationConfig/list", "served_by": "gateway", "note": "Gateway-owned; agent ⇒ -32601." },
@@ -131,7 +139,7 @@
     },
 
     "TaskState": {
-      "description": "A2A TaskState, recorded in BOTH spellings (P2 OPEN, defeats naive codegen — needs a translation layer). reference_state is the proto-enum string the reference wire actually carries in status.state (mcp/a2a.rs TaskState::as_str); a2a_state is the A2A JSON-RPC lowercase binding. The four terminal states are completed/failed/canceled/rejected; submitted/working are in-flight; input-required/auth-required/unknown(unspecified) are non-terminal interaction/unknown states the reference agent never produces but a richer gateway peer might.",
+      "description": "A2A TaskState. Contract 2.0: the reference wire carries the proto-enum spelling in status.state (mcp/a2a.rs TaskState::as_str — TASK_STATE_COMPLETED, TASK_STATE_WORKING, …); reference_state records that normative form and a2a_state records the lowercase A2A JSON-RPC binding for reference. The four terminal states are completed/failed/canceled/rejected; submitted/working are in-flight; input-required/auth-required/unknown(unspecified) are non-terminal interaction/unknown states the reference agent never produces but a richer gateway peer might.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -183,7 +191,7 @@
     },
 
     "Role": {
-      "description": "Message role, recorded in BOTH spellings (P2 OPEN; gateway-translated). The reference emits/consumes the proto spelling ROLE_USER (send_message_params); the A2A JSON-RPC binding is user/agent.",
+      "description": "Message role. Contract 2.0: the reference emits/consumes the proto spelling (ROLE_USER, send_message_params) as normative; the lowercase A2A JSON-RPC binding (user/agent) is recorded for reference.",
       "type": "string",
       "enum": ["ROLE_USER", "ROLE_AGENT", "user", "agent"]
     },
@@ -256,7 +264,7 @@
     },
 
     "TaskStatusUpdateEvent": {
-      "description": "The statusUpdate arm of a StreamResponse (A2A TaskStatusUpdateEvent). statusUpdate.final is the wire 'final' flag (mcp/a2a.rs status_update_frame, renamed from the Rust keyword): the gateway closes the SSE stream on the frame whose final==true. The agent emits a WORKING{final:false} opener and a terminal{final:true} closer.",
+      "description": "The statusUpdate arm of a StreamResponse (A2A TaskStatusUpdateEvent). Contract 2.0: the agent emits a WORKING opener and a terminal-state closer, then CLOSES the SSE stream — termination is by the terminal task STATE + stream close, so agentd emits no `final` flag. `final` remains OPTIONAL in the type (a richer gateway peer MAY set it), but a consumer MUST key termination off status.state.is_terminal() + stream close, NOT off `final`.",
       "type": "object",
       "additionalProperties": false,
       "required": ["statusUpdate"],
@@ -264,13 +272,13 @@
         "statusUpdate": {
           "type": "object",
           "additionalProperties": true,
-          "required": ["taskId", "status", "final"],
+          "required": ["taskId", "status"],
           "properties": {
             "taskId": { "type": "string", "minLength": 1 },
             "contextId": { "type": "string" },
             "status": { "$ref": "#/$defs/TaskStatus" },
             "final": {
-              "description": "Stream-termination flag. true ⇒ the last frame for this request id; the gateway closes the SSE stream. Consumers MUST read same-id frames as a stream until final==true, NOT as one unary reply.",
+              "description": "OPTIONAL legacy stream-termination flag. Contract 2.0: agentd does NOT emit it; termination is the terminal task state + SSE stream close. Consumers MUST read same-id frames as a stream until a terminal task state, NOT rely on `final`.",
               "type": "boolean"
             }
           }
@@ -299,7 +307,7 @@
     },
 
     "StreamResponse": {
-      "description": "The A2A StreamResponse oneof: { task | message | statusUpdate | artifactUpdate }. Carried as the 'result' of a same-id JSON-RPC reply frame: for one streaming request id the agent emits SEVERAL frames {jsonrpc,id,result:<StreamResponse>} (mcp/a2a.rs module doc — the agent↔gateway streaming convention). The agent emits ONLY the statusUpdate and artifactUpdate variants (status-level streaming). CONSUMER CONTRACT: read same-id frames as a STREAM until statusUpdate.final==true; do NOT treat them as duplicate unary replies. P-seq (OPEN): no monotonic per-frame seq, so gap-free SSE resume (Last-Event-ID) is not guaranteed — the gateway falls back to terminal-state reconstruction (agentctl RFC 0013 §3.3).",
+      "description": "The A2A StreamResponse oneof: { task | message | statusUpdate | artifactUpdate }. Carried as the 'result' of a same-id JSON-RPC reply frame: for one streaming request id the agent emits SEVERAL frames {jsonrpc,id,result:<StreamResponse>} over an SSE text/event-stream (mcp/a2a.rs module doc — the agent↔gateway streaming convention). The agent emits ONLY the statusUpdate and artifactUpdate variants (status-level streaming). CONSUMER CONTRACT (contract 2.0): read same-id frames as a STREAM until a terminal task state + stream close (agentd emits no `final` flag); do NOT treat them as duplicate unary replies. P-seq (OPEN): no monotonic per-frame seq, so gap-free SSE resume (Last-Event-ID) is not guaranteed — the gateway falls back to terminal-state reconstruction (agentctl RFC 0013 §3.3).",
       "oneOf": [
         { "$ref": "#/$defs/TaskStatusUpdateEvent" },
         { "$ref": "#/$defs/TaskArtifactUpdateEvent" },

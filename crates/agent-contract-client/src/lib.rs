@@ -35,7 +35,14 @@ use serde::{Deserialize, Deserializer};
 /// The contract major version this client understands. A manifest whose
 /// `contract_version` major differs is refused ([`Manifest::negotiate`]); a
 /// differing minor is tolerated (additive-by-minor).
-pub const SUPPORTED_MAJOR: u32 = 1;
+///
+/// **Contract 2.0** (agentd v2 HTTPS-everywhere pivot): the reference agent
+/// removed all non-HTTP transports (unix/vsock/stdio + exec). The manifest's
+/// `contract_version` is now `"2.0"`, MCP servers are remote `https://`
+/// endpoints, the A2A methods are the bare PascalCase spec-§9 binding, and the
+/// serving surface is mTLS HTTPS. The `surfaces{}` sum types below are
+/// transport-agnostic, so they parse both eras; the major gate is what moved.
+pub const SUPPORTED_MAJOR: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // The capabilities manifest

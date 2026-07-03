@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/metrics.registry.json",
+  "$id": "https://agentctl.dev/contract/v2/metrics.registry.json",
   "title": "Agent Control Contract — Metrics Registry (metrics_schema 1.0)",
   "description": "DATA catalogue (not a JSON-Schema validator) of the frozen, versioned Prometheus metrics a conformant agent exposes on the opt-in /metrics surface, gated by manifest surfaces.metrics_schema. Metrics are Prometheus 0.0.4 text exposition, not a JSON document, so a per-metric registry of neutral agent_* names is the right artifact for agentctl to codegen dashboards/alerts/scalers from. Versioned additive-within-major (new series / new bounded label values tolerated); removal/rename bumps major. A consumer MUST ignore unknown additive series + unknown bounded-label values and refuse only an unknown major. NOTE: the reference exposition (obs/metrics.rs render()) emits ONLY counters and gauges — NO histograms — so all histograms here are provisional/unbuilt with bucket boundaries undefined.",
 
   "metrics_schema": "1.0",
-  "x-contract-version": "1.0",
+  "x-contract-version": "2.0",
 
   "prefix": {
     "neutral": "agent_"

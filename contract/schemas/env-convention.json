@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/env-convention.json",
+  "$id": "https://agentctl.dev/contract/v2/env-convention.json",
   "title": "Agent Control Contract — Kubernetes Downward-API Env Convention",
   "description": "The environment-variable convention of the Agent Control Contract: the Kubernetes downward-API identity vars, drain-vs-grace hint, sharding vars, and per-endpoint intelligence credentials. Authority: agent RFC 0014 §6.4 (the downward-API env table), RFC 0015 §6 (identity from downward API, env-only), RFC 0011 §3.3/§10 (drain-vs-grace, AGENT_POD_GRACE_SECONDS), RFC 0019 §4.2 (sharding K/N). Reference source of truth: crates/agent/src/identity.rs (from_env, var() empty=>unset), config.rs (lifecycle env), cluster/shard.rs (AGENT_SHARD parse + label), intel/endpoints.rs (TOKEN_ENV per-endpoint). Read from env ONLY (valueFrom.fieldRef); the agent NEVER calls the kube API. ALL vars are OPTIONAL; absence is never a config error. Identity is DESCRIPTIVE, never load-bearing (no placement/scheduling decision). Secrets travel ONLY the *_TOKEN[_FILE] env-secret path; the config file never carries a credential.",
   "type": "object",
   "additionalProperties": true,
   "required": ["env_vars", "rules"],
 
-  "x-contract-version": "1.0",
+  "x-contract-version": "2.0",
 
   "env_vars": {
     "identity": {
@@ -56,9 +56,9 @@
     },
 
     "lifecycle": {
-      "description": "Other control/lifecycle env (config.rs). Restart-only (env/flag, never a config-file key).",
-      "AGENT_SERVE_MCP":     { "type": "string (transport addr) | absent", "owner": "RFC-0015", "note": "management transport address; serve_mcp:Option<String>; drives surfaces.management" },
-      "AGENT_INTELLIGENCE":  { "type": "string (transport/endpoint)", "owner": "RFC-0006", "note": "intelligence primary endpoint; restart-only" },
+      "description": "Other control/lifecycle env (config.rs). Restart-only (env/flag, never a config-file key). Contract 2.0: the served control surface and the intelligence endpoint are BOTH mTLS HTTPS URLs. The reference agent takes its serving-TLS material (leaf cert, key, and the client-CA it verifies management peers against) and the outbound private-CA trust anchor via flags/paths (--serve-cert / --serve-key / --serve-client-ca / --tls-ca), NOT via this neutral env convention — that material is filesystem paths to mounted cert-manager Secrets, never inline in env.",
+      "AGENT_SERVE_MCP":     { "type": "string (mTLS https URL) | absent", "owner": "RFC-0015", "note": "management address; contract 2.0 an mTLS HTTPS URL e.g. https://0.0.0.0:8443; serve_mcp:Option<String>; drives surfaces.management" },
+      "AGENT_INTELLIGENCE":  { "type": "string (https URL)", "owner": "RFC-0006", "note": "intelligence primary endpoint; contract 2.0 a keyless HTTPS URL to the ModelGateway (credential injected by the gateway, never on the pod); restart-only" },
       "AGENT_MODE":          { "type": "enum(once|loop|reactive|schedule)", "owner": "RFC-0011", "note": "restart-only; also --mode" },
       "AGENT_MODEL":         { "type": "string", "owner": "RFC-0014", "note": "operator-declared model; never a secret; reloadable via config file too" }
     }
