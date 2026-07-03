@@ -70,6 +70,10 @@ pub struct Ctx {
     /// envs `AGENTCTL_ISSUER_REF` / `AGENTCTL_CA_FILE`). Read once at startup
     /// ([`crate::pki::PkiConfig::from_env`]).
     pub pki: crate::pki::PkiConfig,
+    /// Per-tenant-namespace agent NetworkPolicy reconciliation (env
+    /// `NETWORK_POLICIES_ENABLED`; chart `networkPolicies.enabled`). Read once at
+    /// startup ([`crate::netpol::NetPolConfig::from_env`]).
+    pub netpol: crate::netpol::NetPolConfig,
 }
 
 /// Operator-side wiring for the optional in-cluster bearer-token gate (chart
@@ -307,6 +311,12 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             // pod's mounts resolve as it schedules.
             if ctx.pki.enabled() {
                 crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
+            }
+            // Tenant network isolation (RFC 0015): ensure the agent NetworkPolicies
+            // in THIS namespace, so a dynamically-created tenant namespace is
+            // isolated without a chart re-render. No-op unless enabled.
+            if ctx.netpol.active() {
+                crate::netpol::ensure_agent_netpols(&ctx.client, &ctx.netpol, ns).await?;
             }
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(agent = %name, workload = kind, "applied workload");
@@ -747,6 +757,12 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             // pods' mounts resolve as they schedule.
             if ctx.pki.enabled() {
                 crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
+            }
+            // Tenant network isolation (RFC 0015): same per-namespace agent
+            // NetworkPolicies as the single-Agent path — a fleet's pods carry the
+            // same `app.kubernetes.io/name: agent` label the policies select.
+            if ctx.netpol.active() {
+                crate::netpol::ensure_agent_netpols(&ctx.client, &ctx.netpol, ns).await?;
             }
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(fleet = %name, workload = kind, "applied fleet workload");

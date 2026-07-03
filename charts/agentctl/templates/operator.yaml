@@ -57,6 +57,16 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
+{{- if .Values.networkPolicies.enabled }}
+  # Tenant isolation (RFC 0015): when networkPolicies.enabled, the operator
+  # reconciles the per-namespace agent NetworkPolicies (default-deny + sanctioned
+  # gateway/DNS egress + control-plane-only ingress) into each Agent/Fleet's OWN
+  # namespace, so a dynamically-created tenant namespace is isolated without a
+  # chart re-render.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+{{- end }}
   # Bound MCP tool servers (RFC 0019): the operator reads the MCPServerSets an
   # Agent binds to render its --mcp gateway URLs + trifecta tags.
   - apiGroups: ["agents.x-k8s.io"]
@@ -187,6 +197,13 @@ spec:
             # secretKeyRef at pod start, not the operator.
             - name: API_TOKEN_ENABLED
               value: {{ .Values.apiToken.enabled | default false | quote }}
+            # Tenant network isolation (RFC 0015): when on, the operator reconciles
+            # the per-namespace agent NetworkPolicies into each Agent/Fleet's own
+            # namespace (scoped to the control-plane namespace read from
+            # POD_NAMESPACE above). Off -> no reconciliation (unchanged); the
+            # chart's static agentNamespaces set still applies where listed.
+            - name: NETWORK_POLICIES_ENABLED
+              value: {{ .Values.networkPolicies.enabled | default false | quote }}
             # Workload PKI + keyless intelligence wiring (contract 2.0). The
             # operator issues a per-workload serving Certificate (issuerRef
             # below), distributes the CA public cert per namespace (read from

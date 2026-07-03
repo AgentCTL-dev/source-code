@@ -86,11 +86,13 @@ spec:
 {{- end }}
 # NOTE (contract 2.0): the node-agent ingress policy is gone with the DaemonSet.
 # Agents now SERVE their mTLS surface on :8443 in TENANT namespaces and are
-# reached directly by the apiserver + A2A gateway. Per-tenant-namespace ingress
-# to agent :8443 (from the control-plane components) and egress to the gateways
-# is the tenancy boundary — a follow-up that renders NetworkPolicies into agent
-# namespaces (the operator, per agent), out of scope for this control-plane-ns
-# policy set.
+# reached directly by the apiserver + A2A gateway. The per-tenant-namespace agent
+# policies below (default-deny + gateway/DNS egress + control-plane-only ingress)
+# are the tenancy boundary. They are rendered here for the STATICALLY listed
+# .Values.networkPolicies.agentNamespaces AND — for namespaces created after
+# install — reconciled dynamically by the operator into each Agent/Fleet's own
+# namespace (crate netpol; gated by the same networkPolicies.enabled). The two use
+# identical bodies + names, so they co-own rather than conflict.
 {{- if .Values.modelgateway.enabled }}
 ---
 # ModelGateway: the inference proxy on :8080, reached by agent pods in the tenant
@@ -150,6 +152,8 @@ spec:
 # (intelligence), the MCPGateway (tools), the A2A gateway (delegation-out), and
 # the coordination server (claims) — never the internet or other tenants — and
 # accepts ingress only from the control plane (which reaches its mTLS :8443).
+# The operator reconciles these SAME policies (identical names + bodies) into any
+# agent namespace not listed here, so dynamic tenant namespaces are covered too.
 {{- range $agentNs := $agentNamespaces }}
 ---
 apiVersion: networking.k8s.io/v1

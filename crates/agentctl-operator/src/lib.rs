@@ -10,6 +10,7 @@
 pub mod controller;
 pub mod lease;
 pub mod metrics;
+pub mod netpol;
 pub mod pki;
 pub mod render;
 pub mod serve;

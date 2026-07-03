@@ -30,7 +30,7 @@ use kube::runtime::controller::Error as ControllerError;
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Client};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), kube::Error> {
@@ -120,6 +120,21 @@ async fn main() -> Result<(), kube::Error> {
         enabled = pki.enabled(),
         "workload PKI config"
     );
+    let netpol = agentctl_operator::netpol::NetPolConfig::from_env();
+    info!(
+        enabled = netpol.enabled,
+        control_plane_ns = ?netpol.control_plane_ns,
+        active = netpol.active(),
+        "agent NetworkPolicy config"
+    );
+    if netpol.enabled && !netpol.active() {
+        warn!(
+            "NETWORK_POLICIES_ENABLED set but POD_NAMESPACE is unset/empty: agent \
+             NetworkPolicies will NOT be reconciled (cannot scope gateway egress \
+             without the control-plane namespace). Set POD_NAMESPACE (downward API \
+             metadata.namespace)."
+        );
+    }
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
@@ -128,6 +143,7 @@ async fn main() -> Result<(), kube::Error> {
         api_token,
         render,
         pki,
+        netpol,
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");
