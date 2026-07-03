@@ -135,6 +135,9 @@ operator:
   # Override the ModelGateway URL rendered into agent pods (AGENT_INTELLIGENCE,
   # keyless https dial). Empty => https://agentctl-modelgateway.<ns>.svc.cluster.local.
   modelgatewayUrl: ""
+  # Override the MCPGateway URL rendered into agent --mcp flags (RFC 0019).
+  # Empty => https://agentctl-mcpgateway.<ns>.svc.cluster.local.
+  mcpgatewayUrl: ""
   # Leader-elected singleton: default to the small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }
@@ -288,6 +291,21 @@ trustedProxy:
   # X-Forwarded-User). Empty keys keep the prefix-derived name. Leave {} to use the
   # prefix. -> TRUSTED_PROXY_IDENTITY_HEADERS
   identityHeaders: {}
+
+# MCPGateway (RFC 0019): the tool-plane broker. Networkless agents hold NO
+# tool-server credential; this gateway attests the calling agent by source IP,
+# scopes it to the servers of the MCPServerSets its Agent binds, injects each
+# server's credential (from a Secret, off-pod), and forwards MCP.
+mcpgateway:
+  enabled: true
+  replicas: 1
+  logLevel: info               # -> RUST_LOG
+  # Namespaces the MCPGateway may read tool-server credential Secrets in. Empty =
+  # cluster-wide secrets get/list (dev default). Scope in production.
+  secretsNamespaces: []
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 128Mi }
 
 modelgateway:
   enabled: true

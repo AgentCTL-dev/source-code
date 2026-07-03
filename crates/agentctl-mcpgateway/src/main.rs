@@ -75,8 +75,10 @@ async fn main() {
         .route("/s/{server}/{*rest}", post(proxy))
         .with_state(state);
 
-    // Server-auth-only TLS (agents dial keyless; identity = source IP). Enabled
-    // when MCPGATEWAY_TLS_ADDR + _DIR are set; otherwise plaintext :8080 (dev).
+    // Server-auth-only TLS for the AGENT dials (keyless; identity = source IP),
+    // when MCPGATEWAY_TLS_ADDR + _DIR are set — spawned as a background task.
+    // The plaintext :8080 ALWAYS runs (health/readiness probes + dev dials), so
+    // the kubelet probes never race the TLS mount.
     if let (Ok(tls_addr), Ok(tls_dir)) = (
         std::env::var("MCPGATEWAY_TLS_ADDR"),
         std::env::var("MCPGATEWAY_TLS_DIR"),
@@ -85,21 +87,46 @@ async fn main() {
         let cfg =
             tls_server_config(std::path::Path::new(&tls_dir)).expect("build mcpgateway TLS config");
         let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(cfg));
+        let tls_app = app
+            .clone()
+            .into_make_service_with_connect_info::<SocketAddr>();
         tracing::info!(%tls_addr, dir = %tls_dir, "mcpgateway TLS listener (keyless agent dials)");
-        axum_server::bind_rustls(tls_addr, rustls_config)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .expect("serve mcpgateway TLS");
-    } else {
-        let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        tracing::info!(%addr, "mcpgateway serving (plaintext — dev)");
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .expect("serve");
+        tokio::spawn(async move {
+            axum_server::bind_rustls(tls_addr, rustls_config)
+                .serve(tls_app)
+                .await
+                .expect("serve mcpgateway TLS");
+        });
+    }
+
+    let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    tracing::info!(%addr, "mcpgateway serving (plaintext :8080 — health + dev dials)");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("serve");
+}
+
+/// Wait for SIGTERM/SIGINT, then resolve so hyper drains in-flight requests.
+async fn shutdown_signal() {
+    let term = async {
+        #[cfg(unix)]
+        {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler")
+                .recv()
+                .await;
+        }
+        #[cfg(not(unix))]
+        std::future::pending::<()>().await;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = term => {},
     }
 }
 
@@ -155,7 +182,11 @@ async fn proxy(
     };
 
     // 4. Forward to the upstream MCP server (transparent + credential-injected).
-    let mut url = server.endpoint.clone();
+    // Absolutize an in-cluster Service FQDN (trailing dot) so a node-inherited
+    // wildcard search domain under ndots:5 cannot capture the 4-dot name and
+    // leak the call to a foreign host (the DNS-search-list trap the node-agent
+    // infer proxy also defends against).
+    let mut url = absolutize_endpoint(&server.endpoint);
     if let Some(rest) = rest {
         if !url.ends_with('/') {
             url.push('/');
@@ -307,6 +338,35 @@ async fn credential_header(
     }
 }
 
+/// Append the DNS root dot to an in-cluster Service FQDN host
+/// (`*.svc.cluster.local` → `*.svc.cluster.local.`) so it resolves absolutely,
+/// bypassing any node-inherited wildcard search domain. Only rewrites a
+/// cluster-Service host missing the trailing dot; every other endpoint (an
+/// external URL, an IP, an already-absolute name) is returned unchanged. Pure.
+fn absolutize_endpoint(endpoint: &str) -> String {
+    // Split scheme://host[:port][/path...]; operate only on the authority host.
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return endpoint.to_string();
+    };
+    let (authority, tail) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        // Only treat as host:port when the port is numeric (avoid IPv6/edge).
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (h, Some(p)),
+        _ => (authority, None),
+    };
+    if host.ends_with(".svc.cluster.local") {
+        let host = format!("{host}.");
+        return match port {
+            Some(p) => format!("{scheme}://{host}:{p}{tail}"),
+            None => format!("{scheme}://{host}{tail}"),
+        };
+    }
+    endpoint.to_string()
+}
+
 fn tls_server_config(dir: &std::path::Path) -> Result<rustls::ServerConfig, String> {
     let load = |name: &str| -> Result<std::io::BufReader<std::fs::File>, String> {
         let p = dir.join(name);
@@ -334,4 +394,39 @@ fn bad_gateway(msg: &str) -> Response {
 }
 fn error_json(msg: &str) -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "error": msg }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::absolutize_endpoint;
+
+    #[test]
+    fn absolutize_adds_trailing_dot_only_to_cluster_service_hosts() {
+        // In-cluster Service FQDN, with + without a port → trailing dot added.
+        assert_eq!(
+            absolutize_endpoint("http://echo.ns.svc.cluster.local:9000/"),
+            "http://echo.ns.svc.cluster.local.:9000/"
+        );
+        assert_eq!(
+            absolutize_endpoint("https://mcp.ns.svc.cluster.local"),
+            "https://mcp.ns.svc.cluster.local."
+        );
+        assert_eq!(
+            absolutize_endpoint("http://a.b.svc.cluster.local:80/mcp/x"),
+            "http://a.b.svc.cluster.local.:80/mcp/x"
+        );
+        // Already absolute, external, and IP hosts are untouched.
+        assert_eq!(
+            absolutize_endpoint("http://echo.ns.svc.cluster.local.:9000/"),
+            "http://echo.ns.svc.cluster.local.:9000/"
+        );
+        assert_eq!(
+            absolutize_endpoint("https://mcp.github.example.com/mcp"),
+            "https://mcp.github.example.com/mcp"
+        );
+        assert_eq!(
+            absolutize_endpoint("http://10.0.0.5:9000/"),
+            "http://10.0.0.5:9000/"
+        );
+    }
 }

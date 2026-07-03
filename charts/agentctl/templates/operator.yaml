@@ -57,6 +57,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
+  # Bound MCP tool servers (RFC 0019): the operator reads the MCPServerSets an
+  # Agent binds to render its --mcp gateway URLs + trifecta tags.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["mcpserversets"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
@@ -197,6 +202,12 @@ spec:
             {{- if .Values.modelgateway.enabled }}
             - name: AGENTCTL_MODELGATEWAY_URL
               value: {{ .Values.operator.modelgatewayUrl | default (printf "https://agentctl-modelgateway.%s.svc.cluster.local." $ns) | quote }}
+            {{- end }}
+            {{- if .Values.mcpgateway.enabled }}
+            # The MCPGateway URL rendered into each bound MCP server's --mcp flag
+            # (RFC 0019; absolute trailing-dot FQDN, keyless dial).
+            - name: AGENTCTL_MCPGATEWAY_URL
+              value: {{ .Values.operator.mcpgatewayUrl | default (printf "https://agentctl-mcpgateway.%s.svc.cluster.local." $ns) | quote }}
             {{- end }}
           {{- with .Values.operator.envFrom }}
           envFrom:

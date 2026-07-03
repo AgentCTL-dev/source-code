@@ -131,6 +131,29 @@ spec:
   issuerRef:
     {{- include "agentctl.caIssuer" . | nindent 4 }}
 {{- end }}
+{{- if .Values.mcpgateway.enabled }}
+---
+# MCPGateway serving cert (RFC 0019): agents dial their rendered
+# --mcp <name>=https://agentctl-mcpgateway.../s/<name> keyless — this cert
+# chains to the same cluster CA the agent trusts via --tls-ca.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-mcpgateway
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-mcpgateway-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-mcpgateway.{{ $ns }}.svc
+    - agentctl-mcpgateway.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+{{- end }}
 ---
 # Control-plane client cert (apiserver + gateway present this to the node-agent).
 apiVersion: cert-manager.io/v1

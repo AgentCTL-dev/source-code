@@ -1,0 +1,163 @@
+{{- if .Values.mcpgateway.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+# The MCPGateway (RFC 0019): the tool-plane broker. Networkless agents hold NO
+# tool-server credential; the gateway attests the calling agent by source IP,
+# scopes it to the servers of the MCPServerSets its Agent CR binds, injects each
+# server's credential (from a Secret, held off-pod), and forwards MCP. RBAC: read
+# Agent + MCPServerSet CRs, pods (source-IP attest), and the credential Secrets.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-mcpgateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-mcpgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-mcpgateway
+  labels:
+    app.kubernetes.io/name: agentctl-mcpgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["agents", "mcpserversets"]
+    verbs: ["get", "list", "watch"]
+  # Source-IP identity attestation: look up the calling pod by its source IP to
+  # derive the (namespace, agent). Cluster-wide pods get/list.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # The tool-server credentials the gateway injects so agents never hold them.
+  # Cluster-wide (dev default); scope with mcpgateway.secretsNamespaces in prod.
+  {{- if not (.Values.mcpgateway.secretsNamespaces | default (list)) }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  {{- else }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-mcpgateway
+  labels:
+    app.kubernetes.io/name: agentctl-mcpgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-mcpgateway
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-mcpgateway
+    namespace: {{ $ns }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-mcpgateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-mcpgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.mcpgateway.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-mcpgateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-mcpgateway
+        {{- include "agentctl.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: agentctl-mcpgateway
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "comp" "mcpgateway")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcpgateway
+          image: {{ include "agentctl.image" (dict "root" $ "component" "mcpgateway") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8080, name: http }
+            {{- if .Values.certManager.enabled }}
+            - { containerPort: 8443, name: https }
+            {{- end }}
+          env:
+            {{- include "agentctl.podEnv" (dict "root" $ "comp" "mcpgateway") | nindent 12 }}
+            {{- if .Values.certManager.enabled }}
+            # TLS listener (contract 2.0): agents dial their rendered
+            # --mcp <name>=https://agentctl-mcpgateway.../s/<name> keyless; the
+            # serving cert chains to the cluster CA the agent trusts (--tls-ca).
+            # Server-auth only — the agent's identity is source-IP attestation.
+            - name: MCPGATEWAY_TLS_ADDR
+              value: 0.0.0.0:8443
+            - name: MCPGATEWAY_TLS_DIR
+              value: /etc/agentctl/tls
+            {{- end }}
+          {{- if .Values.certManager.enabled }}
+          volumeMounts:
+            - name: mcpgateway-tls
+              mountPath: /etc/agentctl/tls
+              readOnly: true
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml (.Values.mcpgateway.resources | default dict) | nindent 12 }}
+      {{- if .Values.certManager.enabled }}
+      volumes:
+        - name: mcpgateway-tls
+          secret:
+            secretName: agentctl-mcpgateway-tls
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-mcpgateway
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-mcpgateway
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-mcpgateway
+  ports:
+    - { port: 80, targetPort: 8080, name: http }
+    {{- if .Values.certManager.enabled }}
+    - { port: 443, targetPort: 8443, name: https }
+    {{- end }}
+{{- end }}
