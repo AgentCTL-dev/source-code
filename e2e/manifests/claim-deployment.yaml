@@ -1,4 +1,4 @@
-# e2e: the REAL agentd<->coordination claim loop (contract 2.0).
+# e2e: the REAL agentd<->coordination claim loop (contract 1.0).
 #
 # agentd speaks HTTPS MCP natively, so a claim-mode agent dials the coordination
 # server's /mcp DIRECTLY. The coordination server serves
@@ -11,7 +11,7 @@
 #
 # This is a RAW Deployment (not operator-rendered) — a deliberately minimal claim
 # worker that only DIALS (it serves no management surface), so it needs no serving
-# cert. It runs restricted-PSS (contract 2.0: no hostPath, no privilege). Scenario:
+# cert. It runs restricted-PSS (contract 1.0: no hostPath, no privilege). Scenario:
 # submit work over /mcp, assert agentd claims + acks it (atomic single-grant,
 # dedupe, re-offer). NOTE: the exact coordination dial (plaintext vs MCPGateway-
 # brokered) is confirmed during the kind run; requires coordination.enabled.
@@ -40,7 +40,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agentd
-          image: agentd:2.1.0
+          image: agentd:1.0.0
           imagePullPolicy: IfNotPresent
           args:
             - "--mode"

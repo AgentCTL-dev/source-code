@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! mTLS client for the apiserver → **agent pod** hop (contract 2.0).
+//! mTLS client for the apiserver → **agent pod** hop (contract 1.0).
 //!
 //! Every rendered agent serves its self-MCP/A2A surface mTLS-gated on :8443;
 //! the admin verbs (`a2a.Drain`/…) require the `Management` origin, minted from

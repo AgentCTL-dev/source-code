@@ -311,7 +311,7 @@ async fn build_signed_card(
 }
 
 /// Read the `agent://capabilities` manifest from a live pod over its mTLS `/mcp`
-/// (contract 2.0; our client cert mints Management). `resources/read` returns
+/// (contract 1.0; our client cert mints Management). `resources/read` returns
 /// `contents[0].text` = the manifest JSON.
 async fn fetch_capabilities(state: &AppState, pod_ip: &str) -> Result<Value, String> {
     let url = format!("https://{pod_ip}:8443/mcp");
@@ -1240,7 +1240,7 @@ fn forward_request(
 
 // --- routing (kube; needs a cluster to run, not to compile/test) -----------
 
-/// Resolve `{ns,name}` → the agent's **Running pod IP** (contract 2.0). The agent
+/// Resolve `{ns,name}` → the agent's **Running pod IP** (contract 1.0). The agent
 /// serves its A2A + capabilities surface mTLS-gated on its own `:8443/mcp`; the
 /// gateway holds the control-plane client cert that mints the `Management` origin
 /// those methods require, so it reaches the pod directly.
@@ -1394,7 +1394,7 @@ mod tests {
     #[test]
     fn project_card_reads_neutral_version_and_streaming() {
         let manifest = json!({
-            "agent_version": "2.1.0",
+            "agent_version": "1.0.0",
             "surfaces": { "a2a": { "streaming": true } }
         });
         let card = project_card(
@@ -1408,7 +1408,7 @@ mod tests {
         assert_eq!(card["protocolVersion"], "1.0");
         assert_eq!(card["name"], "team-a/echo");
         assert_eq!(card["url"], "https://gw.example/agents/team-a/echo");
-        assert_eq!(card["version"], "2.1.0");
+        assert_eq!(card["version"], "1.0.0");
         // Streaming is read from the manifest.
         assert_eq!(card["capabilities"]["streaming"], true);
         assert_eq!(card["defaultInputModes"], json!(["text/plain"]));

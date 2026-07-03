@@ -107,7 +107,7 @@ spec:
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "mcpgateway") | nindent 12 }}
             {{- if .Values.certManager.enabled }}
-            # TLS listener (contract 2.0): agents dial their rendered
+            # TLS listener (contract 1.0): agents dial their rendered
             # --mcp <name>=https://agentctl-mcpgateway.../s/<name> keyless; the
             # serving cert chains to the cluster CA the agent trusts (--tls-ca).
             # Server-auth only — the agent's identity is source-IP attestation.

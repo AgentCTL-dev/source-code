@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `mock-agent` — a minimal **conformant-agent stand-in** for dev / e2e /
-//! conformance, at **contract 2.0**.
+//! conformance, at **contract 1.0**.
 //!
 //! It is NOT a real agent (no agentic loop, no intelligence): it serves the
 //! contract **management + A2A profile** (the self-MCP) over
@@ -12,7 +12,7 @@
 //! exercised end-to-end without the real runtime — demonstrating that agentctl
 //! manages *any* conformant agent.
 //!
-//! **Contract 2.0 — the network is the substrate.** The agent *serves* mTLS HTTPS
+//! **Contract 1.0 — the network is the substrate.** The agent *serves* mTLS HTTPS
 //! and *dials nothing*. A caller that presents a client cert the TLS acceptor
 //! verified against the pinned client CA (`--serve-client-ca`) is
 //! `PeerOrigin::Management`; the listener **requires** a client cert, so every
@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 const PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Mock Prometheus metrics (text exposition 0.0.4) served on the metrics listener
-/// (contract 2.0: the pod is network-attached and scraped directly — no proxy).
+/// (contract 1.0: the pod is network-attached and scraped directly — no proxy).
 const METRICS: &str = "\
 # HELP agent_pending_events Reactive events awaiting processing.
 # TYPE agent_pending_events gauge
@@ -206,7 +206,7 @@ async fn handle_mcp(body: String) -> Response {
     let id = parsed.get("id").cloned();
     let method = parsed.get("method").and_then(Value::as_str).unwrap_or("");
     // A2A streaming: one request → several same-id SSE frames terminated by the
-    // terminal task state + stream close (contract 2.0: no `final` flag).
+    // terminal task state + stream close (contract 1.0: no `final` flag).
     if matches!(method, "SendStreamingMessage" | "a2a.SendStreamingMessage") {
         return sse_stream(id.unwrap_or(json!("task-1")), &parsed);
     }
@@ -241,7 +241,7 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
             "serverInfo": { "name": "mock-agent", "version": env!("CARGO_PKG_VERSION") }
         })),
         "ping" => Ok(json!({})),
-        // In contract 2.0 the operator admin family is the a2a.* JSON-RPC methods,
+        // In contract 1.0 the operator admin family is the a2a.* JSON-RPC methods,
         // not MCP tools; tools/list carries only the read `status` tool.
         "tools/list" => Ok(json!({ "tools": [ { "name": "status" } ] })),
         "resources/read" => {
@@ -261,7 +261,7 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
                 json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }),
             )
         }
-        // A2A methods — contract 2.0 bare PascalCase (a2a.-prefixed accepted). A
+        // A2A methods — contract 1.0 bare PascalCase (a2a.-prefixed accepted). A
         // served run IS a Task; this mock echoes the input back as the distillate.
         // SendMessage returns the SendMessageResponse oneof {"task": <Task>}.
         "SendMessage" | "a2a.SendMessage" => {
@@ -306,7 +306,7 @@ fn dispatch(method: &str, msg: &Value) -> Result<Value, (i64, String)> {
 
 /// SSE `text/event-stream` of same-id StreamResponse frames: statusUpdate(WORKING)
 /// → artifactUpdate(echo) → statusUpdate(COMPLETED), then the stream closes.
-/// Contract 2.0 carries no `final` flag — termination is the terminal task state.
+/// Contract 1.0 carries no `final` flag — termination is the terminal task state.
 fn sse_stream(id: Value, msg: &Value) -> Response {
     let input = a2a_text(msg);
     let tid = a2a_msg_id(msg);
@@ -356,7 +356,7 @@ fn task(id: &str, state: &str, distillate: Option<&str>) -> Value {
     t
 }
 
-/// A minimal but contract-2.0-valid capabilities manifest (agent-contract-client
+/// A minimal but contract-1.0-valid capabilities manifest (agent-contract-client
 /// parses this). Identity comes from the downward-API env the operator injects.
 fn manifest() -> Value {
     let serve = env::var("AGENT_SERVE_MCP").unwrap_or_default();
@@ -367,7 +367,7 @@ fn manifest() -> Value {
             .unwrap_or(Value::Null)
     };
     json!({
-        "contract_version": "2.0",
+        "contract_version": "1.0",
         "agent_version": format!("mock-agent-{}", env!("CARGO_PKG_VERSION")),
         "build_features": [],
         "identity": {
@@ -391,11 +391,11 @@ fn manifest() -> Value {
             "a2a": {
                 "version": "1.0",
                 "streaming": true,
-                // Contract 2.0: bare PascalCase A2A method names.
+                // Contract 1.0: bare PascalCase A2A method names.
                 "methods": ["SendMessage", "SendStreamingMessage", "GetTask", "CancelTask", "ListTasks", "SubscribeToTask"]
             },
             "events": false,
-            // Contract 2.0: operator tools are the a2a.* admin JSON-RPC methods.
+            // Contract 1.0: operator tools are the a2a.* admin JSON-RPC methods.
             "operator_tools": ["a2a.Drain", "a2a.LameDuck", "a2a.Pause", "a2a.Resume", "a2a.Cancel"],
             "metrics_schema": "1.0",
             "report_schema": "1.0",
@@ -421,7 +421,7 @@ mod tests {
     // dispatch + manifest logic, which is where a wire bug would actually live.
 
     #[test]
-    fn manifest_is_contract_2_0_conformant() {
+    fn manifest_is_contract_1_0_conformant() {
         // The REAL typed client (the conformance oracle) must parse + negotiate it.
         std::env::set_var("AGENT_POD_NAMESPACE", "agents");
         let json = manifest().to_string();
@@ -429,9 +429,9 @@ mod tests {
         let v = m.negotiate().expect("negotiates");
         assert_eq!(
             v,
-            agent_contract_client::ContractVersion { major: 2, minor: 0 }
+            agent_contract_client::ContractVersion { major: 1, minor: 0 }
         );
-        // Bare PascalCase A2A + a2a.* operator tools + no exec (contract 2.0).
+        // Bare PascalCase A2A + a2a.* operator tools + no exec (contract 1.0).
         let a2a = m.surfaces.a2a.info().expect("a2a served");
         assert!(a2a.methods.iter().any(|x| x == "SendMessage"));
         assert!(!a2a.methods.iter().any(|x| x.starts_with("a2a.")));

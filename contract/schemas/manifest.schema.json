@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v2/manifest.schema.json",
+  "$id": "https://agentctl.dev/contract/v1/manifest.schema.json",
   "title": "Agent Control Contract — Capabilities Manifest",
   "description": "The neutral, machine-readable capabilities manifest: the discovery spine of the Agent Control Contract (ACC). A conformant agent emits this object from the one-shot `--capabilities` entrypoint and (later) from the live `agent://capabilities` resource. agentctl consumes ONLY this contract, never an agent-specific shape. The `surfaces{}` block is the SINGLE discovery point for every control-plane surface: a key ABSENT means the surface is unbuilt and the consumer degrades gracefully; never branch on a value that is not advertised here. VERSIONING: `contract_version` is major.minor; additive growth (new fields/tools/metrics/surfaces keys) bumps MINOR and a consumer MUST tolerate it (this object and its open sub-objects use additionalProperties:true); a consumer refuses ONLY an unknown MAJOR. NEUTRAL TOKENS: the contract uses neutral tokens only — agent_version, agent://, agent_, AGENT_*. SECRETS: this manifest NEVER carries credentials — intelligence is structural (transport scheme + endpoint count) only.",
   "type": "object",
@@ -18,8 +18,8 @@
     "contract_version": {
       "type": "string",
       "pattern": "^\\d+\\.\\d+$",
-      "description": "The Agent Control Contract version this binary speaks, major.minor (current value \"2.0\"). Negotiation is on MAJOR only: a consumer refuses an instance whose MAJOR it does not understand and tolerates any unknown additive content within a MAJOR it knows. In contract 2.0 the network is the substrate: a conformant agent serves its entire control surface over mTLS HTTPS; there are no non-HTTP transports and no local exec surface.",
-      "examples": ["2.0"]
+      "description": "The Agent Control Contract version this binary speaks, major.minor (current value \"2.0\"). Negotiation is on MAJOR only: a consumer refuses an instance whose MAJOR it does not understand and tolerates any unknown additive content within a MAJOR it knows. In contract 1.0 the network is the substrate: a conformant agent serves its entire control surface over mTLS HTTPS; there are no non-HTTP transports and no local exec surface.",
+      "examples": ["1.0"]
     },
     "agent_version": {
       "type": "string",
@@ -46,7 +46,7 @@
     "mcp_servers": {
       "type": "array",
       "items": { "$ref": "#/$defs/mcp_server" },
-      "description": "Operator-declared MCP client servers, structural name + trifecta tags only — never the endpoint URL or headers. Contract 2.0: MCP servers are remote HTTPS endpoints, so there is no argv to leak."
+      "description": "Operator-declared MCP client servers, structural name + trifecta tags only — never the endpoint URL or headers. Contract 1.0: MCP servers are remote HTTPS endpoints, so there is no argv to leak."
     },
     "a2a_peers": {
       "type": "array",
@@ -101,7 +101,7 @@
       "properties": {
         "transport": {
           "type": ["string", "null"],
-          "description": "The PRIMARY endpoint's transport scheme, or null when no endpoint is configured / scheme is unrecognized. Contract 2.0 scheme set: https — intelligence is reached over an HTTPS URL.",
+          "description": "The PRIMARY endpoint's transport scheme, or null when no endpoint is configured / scheme is unrecognized. Contract 1.0 scheme set: https — intelligence is reached over an HTTPS URL.",
           "examples": ["https", null]
         },
         "endpoints": {
@@ -157,7 +157,7 @@
         "name": { "type": "string" },
         "transport": {
           "type": "string",
-          "description": "Peer transport scheme. Contract 2.0 set: https | unknown (unknown when the endpoint scheme is unrecognized). A2A peers are dialed over mTLS HTTPS.",
+          "description": "Peer transport scheme. Contract 1.0 set: https | unknown (unknown when the endpoint scheme is unrecognized). A2A peers are dialed over mTLS HTTPS.",
           "examples": ["https", "unknown"]
         }
       }
@@ -183,19 +183,19 @@
       "description": "The graceful-degradation contract and SINGLE discovery point. Each control-plane surface is reported HONESTLY as served-or-not for THIS build/config; agentctl drives ONLY what is declared here. A key ABSENT means the surface is unbuilt — degrade gracefully; do NOT treat absence as an error. additionalProperties:true is mandatory (additive-tolerance): NEVER apply deny-unknown / additionalProperties:false here — new surface keys are additive and bump MINOR. Several keys are SUM TYPES (bool|string, bool|object) and require hand-written deserializers in any codegen target: codegen cannot derive these.",
       "properties": {
         "management": {
-          "description": "SUM TYPE (bool|string): the served self-MCP management address when configured (contract 2.0: an mTLS HTTPS URL, e.g. \"https://0.0.0.0:8443\"), else false. A conformant agent emits either the address string or the boolean false; codegen needs a hand-written deserializer.",
+          "description": "SUM TYPE (bool|string): the served self-MCP management address when configured (contract 1.0: an mTLS HTTPS URL, e.g. \"https://0.0.0.0:8443\"), else false. A conformant agent emits either the address string or the boolean false; codegen needs a hand-written deserializer.",
           "oneOf": [
             { "type": "boolean", "const": false },
-            { "type": "string", "description": "Management address — contract 2.0 serves the self-MCP over mTLS HTTPS, e.g. \"https://0.0.0.0:8443\"." }
+            { "type": "string", "description": "Management address — contract 1.0 serves the self-MCP over mTLS HTTPS, e.g. \"https://0.0.0.0:8443\"." }
           ]
         },
         "operator_tools": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Operator admin methods advertised on the management surface, invokable only by a Management-origin peer. Contract 2.0 spells these as the a2a.* admin JSON-RPC methods, in FROZEN order: a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel. These are operator extensions, distinct from the A2A-protocol methods in surfaces.a2a (which keep the bare PascalCase spelling). `attach` is NOT a tool — it maps to subagent.send and is excluded. There is NO `force` tool (force = a second SIGTERM). Empty array when the build cannot serve the management surface. Items are typed as open strings (not a closed enum) for additive-tolerance: a consumer MUST tolerate an unknown additive tool name and refuse only at a new MAJOR."
+          "description": "Operator admin methods advertised on the management surface, invokable only by a Management-origin peer. Contract 1.0 spells these as the a2a.* admin JSON-RPC methods, in FROZEN order: a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel. These are operator extensions, distinct from the A2A-protocol methods in surfaces.a2a (which keep the bare PascalCase spelling). `attach` is NOT a tool — it maps to subagent.send and is excluded. There is NO `force` tool (force = a second SIGTERM). Empty array when the build cannot serve the management surface. Items are typed as open strings (not a closed enum) for additive-tolerance: a consumer MUST tolerate an unknown additive tool name and refuse only at a new MAJOR."
         },
         "a2a": {
-          "description": "SUM TYPE (bool|object): the A2A external-agent surface. false when this build does not serve A2A; otherwise an object advertising the served method set. Contract 2.0: this key advertises the COMPILED A2A capability independent of whether a listener is bound, so a no-serve build still advertises it. The normative method names are the A2A protocol's canonical BARE PascalCase spelling served over HTTPS JSON-RPC (POST /mcp); the legacy a2a.-prefixed spelling is accepted for back-compat but the bare form is canonical. Requires a hand-written deserializer (bool|object).",
+          "description": "SUM TYPE (bool|object): the A2A external-agent surface. false when this build does not serve A2A; otherwise an object advertising the served method set. Contract 1.0: this key advertises the COMPILED A2A capability independent of whether a listener is bound, so a no-serve build still advertises it. The normative method names are the A2A protocol's canonical BARE PascalCase spelling served over HTTPS JSON-RPC (POST /mcp); the legacy a2a.-prefixed spelling is accepted for back-compat but the bare form is canonical. Requires a hand-written deserializer (bool|object).",
           "oneOf": [
             { "type": "boolean", "const": false },
             {
@@ -210,17 +210,17 @@
                 },
                 "streaming": {
                   "type": "boolean",
-                  "description": "Whether status-level streaming (SendStreamingMessage + SubscribeToTask) is served. Contract 2.0: streaming is an SSE text/event-stream of StreamResponse frames terminated by the terminal task STATE plus stream close — there is no non-spec `final` flag."
+                  "description": "Whether status-level streaming (SendStreamingMessage + SubscribeToTask) is served. Contract 1.0: streaming is an SSE text/event-stream of StreamResponse frames terminated by the terminal task STATE plus stream close — there is no non-spec `final` flag."
                 },
                 "methods": {
                   "type": "array",
                   "items": { "type": "string" },
-                  "description": "The served method names. Contract 2.0 canonical set is the A2A protocol's BARE PascalCase spelling over HTTPS JSON-RPC: SendMessage, GetTask, CancelTask, ListTasks, SendStreamingMessage, SubscribeToTask. The legacy a2a.-prefixed spelling (a2a.SendMessage, …) is accepted for back-compat. Open string items for additive-tolerance.",
+                  "description": "The served method names. Contract 1.0 canonical set is the A2A protocol's BARE PascalCase spelling over HTTPS JSON-RPC: SendMessage, GetTask, CancelTask, ListTasks, SendStreamingMessage, SubscribeToTask. The legacy a2a.-prefixed spelling (a2a.SendMessage, …) is accepted for back-compat. Open string items for additive-tolerance.",
                   "examples": [["SendMessage", "GetTask", "CancelTask", "ListTasks", "SendStreamingMessage", "SubscribeToTask"]]
                 },
                 "address": {
                   "type": "string",
-                  "description": "OPTIONAL dedicated A2A listener address. Contract 2.0: A2A is served on the same mTLS HTTPS /mcp listener as management, so this key is omitted by default; it is present only if a build serves A2A on its own separate address."
+                  "description": "OPTIONAL dedicated A2A listener address. Contract 1.0: A2A is served on the same mTLS HTTPS /mcp listener as management, so this key is omitted by default; it is present only if a build serves A2A on its own separate address."
                 }
               }
             }

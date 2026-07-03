@@ -3,7 +3,7 @@
 {{- if not .Values.certManager.caIssuerRef }}
 # Bootstrap: self-signed CLUSTER issuer -> the agentctl CA -> a CA CLUSTER
 # issuer that mints the leaf certs below AND the per-workload serving certs the
-# operator requests in AGENT namespaces (contract 2.0: every agent pod serves
+# operator requests in AGENT namespaces (contract 1.0: every agent pod serves
 # mTLS HTTPS). A ClusterIssuer reads its CA secret from cert-manager's
 # "cluster resource namespace" (the cert-manager install namespace by default),
 # so the CA Certificate is placed THERE — that is the one cross-namespace write
@@ -91,7 +91,7 @@ spec:
 {{- end }}
 {{- if .Values.modelgateway.enabled }}
 ---
-# ModelGateway serving cert (contract 2.0): agents dial their rendered
+# ModelGateway serving cert (contract 1.0): agents dial their rendered
 # AGENT_INTELLIGENCE=https://agentctl-modelgateway... keyless — this cert
 # chains to the same cluster CA the agent trusts via --tls-ca.
 apiVersion: cert-manager.io/v1

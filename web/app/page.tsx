@@ -89,7 +89,7 @@ function Hero() {
       <div className="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-2 lg:py-28">
         <div className="flex flex-col justify-center">
           <Badge variant="outline" className="mb-5 w-fit gap-1.5 font-mono text-xs">
-            <span className="size-1.5 rounded-full bg-emerald-400" /> Contract 2.0 · the network is the substrate
+            <span className="size-1.5 rounded-full bg-emerald-400" /> Declarative agents · secret-free · elastic fleets
           </Badge>
           <h1 className="text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
             The Kubernetes control plane for fleets of conformant agents.
@@ -98,7 +98,7 @@ function Hero() {
             agentctl provisions, secures, scales, and routes fleets of contract-conformant
             agents. Agents <strong className="text-foreground">serve mTLS HTTPS</strong> and
             dial the gateways <strong className="text-foreground">keyless</strong>. Identity is
-            the boundary — a verified client cert, or an attested source IP. No node agent, no
+            the boundary — a verified client cert, or an attested source IP. No per-node agent, no
             pod-resident secrets.
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
@@ -148,8 +148,8 @@ function Model() {
     <Section
       id="model"
       eyebrow="The model"
-      title="The network is the substrate; identity is the boundary."
-      lead="Contract 2.0 removed every non-HTTP transport and the local exec surface. Agents are reached the way Kubernetes reaches anything else — over the network, with a verified identity — which keeps the control plane out of the agent's execution layer while managing it completely."
+      title="Reached over the network, bounded by identity."
+      lead="Agents are reached the way Kubernetes reaches anything else — over the network, with a verified identity. The whole control surface is mTLS HTTPS, and agents act only through brokered MCP tools, so there is no local execution surface. The control plane manages an agent completely while staying out of its execution layer."
     >
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="p-6">
@@ -178,7 +178,7 @@ function Model() {
       </div>
       <div className="text-muted-foreground mt-6 grid gap-2 font-mono text-xs sm:grid-cols-3">
         <div className="border-border/60 bg-muted/30 rounded-md border px-3 py-2">
-          ✓ node-agent retired
+          ✓ no per-node agent
         </div>
         <div className="border-border/60 bg-muted/30 rounded-md border px-3 py-2">
           ✓ zero pod credentials
@@ -217,7 +217,7 @@ const PLANES = [
   {
     icon: Workflow,
     title: "A2A mesh",
-    body: "The gateway fronts each agent's public A2A surface — forwarding direct to the pod with the contract-2.0 wire (bare PascalCase methods, SSE streaming), signing the Agent Card, and holding the durable task store.",
+    body: "The gateway fronts each agent's public A2A surface — forwarding direct to the pod on the contract's A2A wire (bare PascalCase methods, SSE streaming), signing the Agent Card, and holding the durable task store.",
   },
   {
     icon: Gauge,
@@ -283,7 +283,7 @@ spec:
 EOF
 
 kubectl get agents -n team-a   # READY=True
-# the pod now serves mTLS :8443/mcp and dials keyless.`}
+# the pod serves mTLS :8443/mcp and dials keyless.`}
         />
       </div>
     </Section>
@@ -296,7 +296,7 @@ const STATS = [
   { value: "~1m", label: "CPU / idle agent", sub: "sub-MiB working set" },
   { value: "0", label: "pod credentials", sub: "keyless dials, mTLS serve" },
   { value: "~18m", label: "control plane CPU", sub: "~79 MiB across 9 pods" },
-  { value: "0", label: "per-node cost", sub: "node-agent retired" },
+  { value: "0", label: "per-node cost", sub: "no per-node agent" },
 ];
 
 function Benchmarks() {
@@ -305,7 +305,7 @@ function Benchmarks() {
       id="benchmarks"
       eyebrow="Measured"
       title="Light data plane, negligible control plane."
-      lead="Live kubectl-top readings from a running v2 stack: a full control plane plus a reactive agent bound to a brokered MCP tool, all Ready."
+      lead="Live kubectl-top readings from a running stack: a full control plane plus a reactive agent bound to a brokered MCP tool, all Ready."
     >
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {STATS.map((s) => (

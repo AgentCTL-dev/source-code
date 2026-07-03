@@ -1,6 +1,6 @@
 # e2e: a once-mode agentd Agent that reaches intelligence (intelligence scenario).
 #
-# Why these choices (contract 2.0):
+# Why these choices (contract 1.0):
 #   - mode: once + an instruction — agentd only reaches intelligence when it does
 #     work; an idle reactive agent never infers. once-mode drives exactly the
 #     inference the ModelGateway meters/budgets.
@@ -11,7 +11,7 @@
 #   - modelPool: mockpool — binds the ModelPool from modelpool-mock.yaml (apply that
 #     + mock-provider.yaml first). The pool caps the budget at 150 tokens (mock
 #     returns 100/call) so the 3rd call 429s.
-#   - image: agentd:2.1.0 — the real contract-2.0 reference agent (images.sh builds/loads it).
+#   - image: agentd:1.0.0 — the real contract-1.0 reference agent (images.sh builds/loads it).
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: Agent
 metadata:
@@ -19,6 +19,6 @@ metadata:
   namespace: default
 spec:
   mode: once
-  image: agentd:2.1.0
+  image: agentd:1.0.0
   instruction: "Summarize the input in one sentence."
   modelPool: mockpool

@@ -17,7 +17,7 @@ mTLS client certificate (Management) or an attested source (the gateways).
 
 ## 1. The artifacts
 
-Nine files in two categories. Every `$id` is `https://agentctl.dev/contract/v2/<file>` (the `v2` is the
+Nine files in two categories. Every `$id` is `https://agentctl.dev/contract/v1/<file>` (the `v2` is the
 contract major version, not a directory); every `$ref` is file-internal (`#/$defs/...`).
 
 | File | Category | Validates / carries |
@@ -120,7 +120,7 @@ conformant). Validator: [`manifest.schema.json`](schemas/manifest.schema.json).
 | Field | Type | Notes |
 |---|---|---|
 | `contract_version` | string `^\d+\.\d+$` | reference `"2.0"`; negotiate on major. |
-| `agent_version` | string | build/version string; free-form (reference emits `2.1.0`). |
+| `agent_version` | string | build/version string; free-form (reference emits `1.0.0`). |
 | `build_features` | string[] | opaque diagnostic tokens; **never branch on a value**. |
 | `identity` | object | downward-API identity; descriptive only (see below). |
 | `mode` | string (open) | reference set `once \| loop \| reactive \| schedule`; tolerate unknown values. |
@@ -172,8 +172,8 @@ Abridged from [`fixtures/capabilities/default.json`](fixtures/capabilities/defau
 
 ```json
 {
-  "contract_version": "2.0",
-  "agent_version": "2.1.0",
+  "contract_version": "1.0",
+  "agent_version": "1.0.0",
   "build_features": ["tls", "serve-mcp", "serve-https", "a2a", "metrics"],
   "mode": "once",
   "identity": { "run_id": "19f25a529241ed9b0", "instance": null, "namespace": null, "node": null, "uid": null },

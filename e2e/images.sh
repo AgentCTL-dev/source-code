@@ -7,12 +7,12 @@
 #                      with SKIP_BRINGUP=1 against a real cluster; install.sh /
 #                      the chart's image.registry must then point at REGISTRY).
 #
-# Images produced (contract 2.0):
-#   agentd:2.1.0                 the real reference agent (built from
+# Images produced (contract 1.0):
+#   agentd:1.0.0                 the real reference agent (built from
 #                                $AGENTD_SRC/Dockerfile — serves mTLS HTTPS /mcp,
 #                                dials gateways keyless). Built from source to match
-#                                the exact contract-2.0 build under test; the
-#                                published ghcr.io/agentd-dev/agentd:2.1.0 is used
+#                                the exact contract-1.0 build under test; the
+#                                published ghcr.io/agentd-dev/agentd:1.0.0 is used
 #                                when AGENTD_GHCR is set.
 #   mock-agent:dev               conformant-agent stand-in (mTLS HTTPS self-MCP).
 #   agentctl/<comp>:dev          the 8 control-plane components, each from
@@ -27,11 +27,11 @@ CLUSTER="${CLUSTER:-agentctl-e2e}"
 TAG="${TAG:-dev}"
 REGISTRY="${REGISTRY:-}"                       # empty = kind load; set = push
 AGENTD_SRC="${AGENTD_SRC:-/root/agentd-dev/source-code}"
-AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:2.1.0}"
-AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:2.1.0}"
+AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:1.0.0}"
+AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:1.0.0}"
 
 # The 8 control-plane components (component == deploy/<comp>/Dockerfile dir),
-# matching the release.yml build matrix. Contract 2.0: agents serve HTTPS MCP natively;
+# matching the release.yml build matrix. Contract 1.0: agents serve HTTPS MCP natively;
 # the mcpgateway is the tool-plane broker.
 COMPONENTS=(operator mcpgateway apiserver gateway modelgateway admission coordination scaler)
 
@@ -58,7 +58,7 @@ publish() {
   fi
 }
 
-# ---- agentd (contract 2.0) -----------------------------------------------
+# ---- agentd (contract 1.0) -----------------------------------------------
 if [ -n "${AGENTD_PULL:-}" ] || [ ! -f "$AGENTD_SRC/Dockerfile" ]; then
   log "pulling $AGENTD_GHCR -> $AGENTD_IMAGE"
   docker pull "$AGENTD_GHCR"
@@ -82,7 +82,7 @@ for comp in "${COMPONENTS[@]}"; do
   publish "agentctl/$comp:$TAG"
 done
 
-# The v1 stdio->HTTP work.* bridge is RETIRED in contract 2.0 — agentd speaks
+# The v1 stdio->HTTP work.* bridge is RETIRED in contract 1.0 — agentd speaks
 # HTTPS MCP natively, so claim-mode agents dial the coordination
 # server's /mcp directly.
 

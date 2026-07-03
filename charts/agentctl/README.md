@@ -172,7 +172,7 @@ common knobs `replicas`, `logLevel` (maps to `RUST_LOG`), `resources`, `nodeSele
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy. |
 | `image.pullSecrets` | `[]` | Image pull secrets. |
 | `image.digests` | `{}` | Per-component `sha256:` digest pins (requires `image.registry`); a digest wins over the tag. |
-| `referenceAgent.image` | `ghcr.io/agentd-dev/agentd:2.1.0` | The reference agent image used only by the bundled examples. |
+| `referenceAgent.image` | `ghcr.io/agentd-dev/agentd:1.0.0` | The reference agent image used only by the bundled examples. |
 | `commonLabels` | `{}` | Labels stamped on every rendered object and pod template. |
 | `commonAnnotations` | `{}` | Annotations stamped on every rendered object and pod template. |
 

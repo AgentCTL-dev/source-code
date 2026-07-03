@@ -12,7 +12,7 @@ repository.workspace = true
 name = "agentctl-coordination"
 path = "src/main.rs"
 
-# The v1 stdio<->HTTP `work-mcp-bridge` sidecar is RETIRED in contract 2.0: agentd
+# The v1 stdio<->HTTP `work-mcp-bridge` sidecar is RETIRED in contract 1.0: agentd
 # speaks HTTPS MCP natively (no spawned stdio MCP child), so claim-mode agents dial
 # the coordination server's /mcp directly. The bin + its Dockerfile are removed.
 

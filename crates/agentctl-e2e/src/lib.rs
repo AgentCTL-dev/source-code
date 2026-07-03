@@ -30,16 +30,16 @@ pub mod prom;
 pub mod results;
 pub mod shell;
 
-/// Default reference agent image — agentd 2.x (contract 2.0; the density subject).
+/// Default reference agent image — agentd 2.x (contract 1.0; the density subject).
 ///
 /// This is the LOCAL tag `e2e/images.sh` builds (from `/root/agentd-dev`) and
 /// `kind load`s, and that every `e2e/manifests/*` hard-codes. It is a
-/// contract-2.0 build that **serves mTLS HTTPS `/mcp`** and dials the gateways
+/// contract-1.0 build that **serves mTLS HTTPS `/mcp`** and dials the gateways
 /// keyless (`build_features`: serve-mcp, serve-https, a2a, shard/cluster, cron,
 /// metrics, …). The e2e builds it from `/root/agentd-dev` to match the exact
 /// source under test; override `AGENTD_IMAGE` to a registry-qualified ref such as
-/// `ghcr.io/agentd-dev/agentd:2.1.0` for a real cluster.
-pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:2.1.0";
+/// `ghcr.io/agentd-dev/agentd:1.0.0` for a real cluster.
+pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:1.0.0";
 /// Default control-plane (Helm release) namespace.
 pub const DEFAULT_SYSTEM_NS: &str = "agentctl-system";
 /// Default workload namespace the scenarios apply CRs into.

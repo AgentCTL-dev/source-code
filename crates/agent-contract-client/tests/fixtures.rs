@@ -35,21 +35,21 @@ fn every_fixture_parses_and_negotiates() {
         let v = m
             .negotiate()
             .unwrap_or_else(|e| panic!("{name} negotiate: {e}"));
-        assert_eq!(v, ContractVersion { major: 2, minor: 0 }, "{name}");
+        assert_eq!(v, ContractVersion { major: 1, minor: 0 }, "{name}");
     }
 }
 
 #[test]
 fn default_capture_has_surfaces_off() {
-    // Real v2 capture (agentd --capabilities --mode once): a once-mode build with
+    // Real capture (agentd --capabilities --mode once): a once-mode build with
     // the management/metrics/a2a surfaces off.
     let m = load("default.json");
-    assert_eq!(m.version(), Some("2.1.0")); // resolves via agent_version
+    assert_eq!(m.version(), Some("1.0.0")); // resolves via agent_version
     assert_eq!(m.mode.as_deref(), Some("once"));
     // No serve target ⇒ the management + metrics LISTENERS are off.
     assert!(!m.surfaces.management.is_served());
     assert!(!m.surfaces.metrics.is_served());
-    // Contract 2.0: `surfaces.a2a` advertises the compiled A2A capability
+    // Contract 1.0: `surfaces.a2a` advertises the compiled A2A capability
     // (methods the build can serve) independent of whether a listener is bound —
     // so a once-mode, no-serve build still advertises it.
     assert!(m.surfaces.a2a.is_served());
@@ -60,7 +60,7 @@ fn default_capture_has_surfaces_off() {
         m.surfaces.claim.as_ref().and_then(ClaimSurface::styles),
         Some(["tool".to_string(), "resource".to_string()].as_slice())
     );
-    // operator tools are read from the manifest, never assumed. Contract 2.0
+    // operator tools are read from the manifest, never assumed. Contract 1.0
     // spells them as the a2a.* admin JSON-RPC methods.
     assert_eq!(
         m.surfaces.operator_tools,
@@ -76,7 +76,7 @@ fn default_capture_has_surfaces_off() {
 
 #[test]
 fn full_features_capture_has_surfaces_on() {
-    // Real v2 capture: a reactive, fully-featured build serving mTLS HTTPS with
+    // Real capture: a reactive, fully-featured build serving mTLS HTTPS with
     // every surface on. Management is served at an `https://` address on port 8443.
     let m = load("full-features.json");
     assert_eq!(m.surfaces.management.addr(), Some("https://0.0.0.0:8443"));
@@ -87,11 +87,11 @@ fn full_features_capture_has_surfaces_on() {
     assert_eq!(a2a.version, "1.0");
     assert!(a2a.streaming);
     assert_eq!(a2a.methods.len(), 6);
-    // Contract 2.0: the A2A methods are the bare PascalCase binding.
+    // Contract 1.0: the A2A methods are the bare PascalCase binding.
     assert!(a2a.methods.iter().any(|x| x == "SendMessage"));
 
     assert_eq!(m.identity.namespace.as_deref(), Some("agents"));
-    // Contract 2.0 has no exec surface — no build advertises it.
+    // Contract 1.0 has no exec surface — no build advertises it.
     assert!(!m.exec_enabled);
     assert!(m.allow_trifecta);
     assert_eq!(m.mcp_servers.first().map(|s| s.name.as_str()), Some("fs"));
@@ -111,8 +111,20 @@ fn additive_tolerance_unknown_keys_ignored() {
 #[test]
 fn refuses_unknown_major_but_parses() {
     // An unknown MAJOR parses fine (still a manifest) but fails negotiation.
-    // The supported major is 2 (contract 2.0); a 3.x agent is the future one
+    // The supported major is 1 (contract 1.0); a 2.x agent is a future one
     // this client does not yet understand.
+    let mut v = load_value("default.json");
+    v["contract_version"] = serde_json::json!("2.0");
+    let m: Manifest = serde_json::from_value(v).unwrap();
+    assert!(matches!(
+        m.negotiate(),
+        Err(NegotiationError::UnsupportedMajor {
+            found: 2,
+            supported: 1
+        })
+    ));
+
+    // A far-future major is likewise unsupported.
     let mut v = load_value("default.json");
     v["contract_version"] = serde_json::json!("3.0");
     let m: Manifest = serde_json::from_value(v).unwrap();
@@ -120,20 +132,7 @@ fn refuses_unknown_major_but_parses() {
         m.negotiate(),
         Err(NegotiationError::UnsupportedMajor {
             found: 3,
-            supported: 2
-        })
-    ));
-
-    // Contract 1.x is likewise unsupported: the supported major is 2, so a
-    // 1.x agent does not negotiate.
-    let mut v = load_value("default.json");
-    v["contract_version"] = serde_json::json!("1.0");
-    let m: Manifest = serde_json::from_value(v).unwrap();
-    assert!(matches!(
-        m.negotiate(),
-        Err(NegotiationError::UnsupportedMajor {
-            found: 1,
-            supported: 2
+            supported: 1
         })
     ));
 }

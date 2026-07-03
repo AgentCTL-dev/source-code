@@ -198,13 +198,13 @@ mod tests {
 
     #[test]
     fn manifest_validation_round_trips() {
-        // Contract 2.0: management is an mTLS https URL, and the typed client
-        // negotiates major 2.
+        // Contract 1.0: management is an mTLS https URL, and the typed client
+        // negotiates major 1.
         let json = r#"{
-            "contract_version": "2.0",
+            "contract_version": "1.0",
             "surfaces": { "management": "https://0.0.0.0:8443", "metrics": false, "a2a": false }
         }"#;
         let m = validate_manifest(json).unwrap();
-        assert_eq!(m.contract_version, "2.0");
+        assert_eq!(m.contract_version, "1.0");
     }
 }

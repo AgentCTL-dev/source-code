@@ -43,7 +43,7 @@ spec:
                       user = ''
                       for m in req.get('messages', []):
                           if m.get('role') == 'user': user = m.get('content', '')
-                      # OpenAI chat-completions shape (contract 2.0 agents parse `choices`).
+                      # OpenAI chat-completions shape (contract 1.0 agents parse `choices`).
                       resp = {"id": "chatcmpl-mock", "object": "chat.completion", "model": model,
                               "choices": [{"index": 0, "finish_reason": "stop",
                                            "message": {"role": "assistant",

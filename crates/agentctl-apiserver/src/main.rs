@@ -427,7 +427,7 @@ async fn authorize(
     Ok(resp.status.map(|s| s.allowed).unwrap_or(false))
 }
 
-/// Deliver a management verb directly to the agent pod as a contract-2.0 A2A
+/// Deliver a management verb directly to the agent pod as a contract-1.0 A2A
 /// admin JSON-RPC (`a2a.Drain`/`a2a.LameDuck`/`a2a.Pause`/`a2a.Resume`/
 /// `a2a.Cancel` on `POST /mcp`). The agent serves mTLS-gated HTTPS on :8443
 /// (rendered by the operator); our client certificate chains to the cluster CA
@@ -478,7 +478,7 @@ async fn running_pod_ips(client: &Client, ns: &str, name: &str) -> Result<Vec<St
         .collect())
 }
 
-/// POST an admin verb to one agent pod's mTLS `/mcp` as a contract-2.0 A2A admin
+/// POST an admin verb to one agent pod's mTLS `/mcp` as a contract-1.0 A2A admin
 /// JSON-RPC. A bounded timeout keeps a single hung replica from stalling a fleet
 /// fan-out.
 async fn forward_verb_to_ip(

@@ -9,7 +9,7 @@ metadata:
 spec:
   template:
     mode: reactive
-    image: ghcr.io/agentd-dev/agentd:2.1.0
+    image: ghcr.io/agentd-dev/agentd:1.0.0
     subscribe: ["queue://jobs"]
   scaling:
     mode: claim

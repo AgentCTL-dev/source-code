@@ -53,7 +53,7 @@ require and what agentctl codegens against.
 
 ## The artifacts
 
-`schemas/` is the single canonical set. Every `$id` is `https://agentctl.dev/contract/v2/<file>` —
+`schemas/` is the single canonical set. Every `$id` is `https://agentctl.dev/contract/v1/<file>` —
 the `v2` there is the contract major version, not a directory — and every `$ref` is file-internal
 (`#/$defs/...`) so the set resolves standalone.
 
@@ -127,7 +127,7 @@ exits non-zero) is non-conformant. To self-certify:
 
 The golden fixtures in `fixtures/capabilities/` are the validation ground-truth. `default.json` and
 `full-features.json` are **real captures** from the reference `agentd` binary (both carry
-`agent_version` `2.1.0`) and together exercise both branches of every sum-type surface key.
+`agent_version` `1.0.0`) and together exercise both branches of every sum-type surface key.
 
 ---
 

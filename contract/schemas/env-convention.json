@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v2/env-convention.json",
+  "$id": "https://agentctl.dev/contract/v1/env-convention.json",
   "title": "Agent Control Contract — Kubernetes Downward-API Env Convention",
   "description": "The environment-variable convention of the Agent Control Contract: the Kubernetes downward-API identity vars, drain-vs-grace hint, sharding vars, and per-endpoint intelligence credentials. All values are read from the environment ONLY (valueFrom.fieldRef); a conformant agent NEVER calls the Kubernetes API. ALL vars are OPTIONAL; absence is never a config error. Identity is DESCRIPTIVE, never load-bearing (no placement or scheduling decision is made from it). Secrets travel ONLY the *_TOKEN[_FILE] env-secret path; the config file never carries a credential.",
   "type": "object",
   "additionalProperties": true,
   "required": ["env_vars", "rules"],
 
-  "x-contract-version": "2.0",
+  "x-contract-version": "1.0",
 
   "env_vars": {
     "identity": {
@@ -54,9 +54,9 @@
     },
 
     "lifecycle": {
-      "description": "Other control/lifecycle env. Restart-only (env/flag, never a config-file key). Contract 2.0: the served control surface and the intelligence endpoint are BOTH mTLS HTTPS URLs. Serving-TLS material (leaf cert, key, and the client-CA used to verify management peers) and the outbound private-CA trust anchor are supplied via flags/paths (--serve-cert / --serve-key / --serve-client-ca / --tls-ca), NOT via this env convention — that material is filesystem paths to mounted Secrets, never inline in env.",
-      "AGENT_SERVE_MCP":     { "type": "string (mTLS https URL) | absent", "note": "management address; contract 2.0 an mTLS HTTPS URL e.g. https://0.0.0.0:8443; optional; drives surfaces.management" },
-      "AGENT_INTELLIGENCE":  { "type": "string (https URL)", "note": "intelligence primary endpoint; contract 2.0 a keyless HTTPS URL to the ModelGateway (credential injected by the gateway, never on the pod); restart-only" },
+      "description": "Other control/lifecycle env. Restart-only (env/flag, never a config-file key). Contract 1.0: the served control surface and the intelligence endpoint are BOTH mTLS HTTPS URLs. Serving-TLS material (leaf cert, key, and the client-CA used to verify management peers) and the outbound private-CA trust anchor are supplied via flags/paths (--serve-cert / --serve-key / --serve-client-ca / --tls-ca), NOT via this env convention — that material is filesystem paths to mounted Secrets, never inline in env.",
+      "AGENT_SERVE_MCP":     { "type": "string (mTLS https URL) | absent", "note": "management address; contract 1.0 an mTLS HTTPS URL e.g. https://0.0.0.0:8443; optional; drives surfaces.management" },
+      "AGENT_INTELLIGENCE":  { "type": "string (https URL)", "note": "intelligence primary endpoint; contract 1.0 a keyless HTTPS URL to the ModelGateway (credential injected by the gateway, never on the pod); restart-only" },
       "AGENT_MODE":          { "type": "enum(once|loop|reactive|schedule)", "note": "restart-only; also --mode" },
       "AGENT_MODEL":         { "type": "string", "note": "operator-declared model; never a secret; reloadable via config file too" }
     }

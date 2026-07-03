@@ -6,14 +6,14 @@ import { REPO_DOCS } from "@/data/site";
 export const metadata: Metadata = {
   title: "Architecture",
   description:
-    "How the agentctl control plane and the data-plane agents connect in contract 2.0: agents serve mTLS HTTPS and dial the gateways keyless; identity is the boundary.",
+    "How the agentctl control plane and the data-plane agents connect: agents serve mTLS HTTPS and dial the gateways keyless; identity is the boundary.",
 };
 
 export default function Page() {
   return (
     <DocShell
       title="Architecture"
-      lead="How the control-plane components and the data-plane agents connect. Contract 2.0: the network is the substrate; identity is the boundary."
+      lead="How the control-plane components and the data-plane agents connect — agents are ordinary pods reached over the network, and identity is the boundary."
       editHref={`${REPO_DOCS}/architecture.md`}
     >
       <H2>The two directions</H2>
@@ -67,7 +67,7 @@ export default function Page() {
         <C>pause</C> / <C>resume</C> as SAR-gated verbs. Each resolves the Agent to its{" "}
         <C>status.podIP</C> and issues an <C>a2a.*</C> admin JSON-RPC call direct to the pod under
         the control-plane client cert. Per-verb RBAC and end-user identity survive the aggregation
-        seam; there is no <C>pods/proxy</C>, no node agent, no host socket.
+        seam; there is no <C>pods/proxy</C>, no per-node agent, no host socket.
       </P>
 
       <H2>Intelligence &amp; tools</H2>
@@ -82,7 +82,7 @@ export default function Page() {
 
       <H2>A2A</H2>
       <P>
-        The A2A gateway forwards direct to the agent pod <C>/mcp</C> with the contract-2.0 wire —
+        The A2A gateway forwards direct to the agent pod <C>/mcp</C> on the contract&apos;s A2A wire —
         bare PascalCase methods (<C>SendMessage</C>, <C>GetTask</C>, …), the <C>{`{"task"}`}</C>{" "}
         envelope, and SSE streaming terminated by the terminal task state (no <C>final</C> flag). It
         builds the signed Agent Card from <C>agent://capabilities</C> and holds the durable task
@@ -91,8 +91,7 @@ export default function Page() {
 
       <Note>
         There is no per-node agent and nothing privileged on the host. Management, telemetry,
-        inference, A2A, and MCP are each a network-native call between ordinary pods over mTLS —
-        the network is the substrate.
+        inference, A2A, and MCP are each a network-native call between ordinary pods over mTLS.
       </Note>
     </DocShell>
   );

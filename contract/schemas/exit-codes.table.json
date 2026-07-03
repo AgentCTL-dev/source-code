@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v2/exit-codes.table.json",
+  "$id": "https://agentctl.dev/contract/v1/exit-codes.table.json",
   "title": "Agent Control Contract — Exit-Code Table",
   "description": "The FROZEN exit-code table of the Agent Control Contract. This artifact is a DATA catalogue (not a JSON-document validator) carrying the code -> {neutral name, const alias, meaning, podFailurePolicy intent} mapping plus mode reachability. agentctl compiles `intent` into Job onExitCodes / podFailurePolicy rules. Versioned by `exit_codes_version` (== surfaces.exit_codes); additive => minor; any change to a code's meaning or to its intent => major. A consumer MUST refuse only an unknown MAJOR; an unrecognised code defaults to intent `retriable` (never a silent FailJob).",
   "type": "object",
@@ -9,7 +9,7 @@
 
   "exit_codes_version": "1.0",
   "x-version-note": "The contract pins exit_codes_version to the bare major.minor string \"1.0\".",
-  "x-contract-version": "2.0",
+  "x-contract-version": "1.0",
 
   "intent_vocabulary": {
     "description": "The CLOSED podFailurePolicy intent vocabulary agentctl compiles into onExitCodes. The intent mapping is total over the table; an unrecognised code defaults to `retriable`.",

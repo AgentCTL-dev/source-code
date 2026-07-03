@@ -6,7 +6,7 @@ import { REPO_CONTRACT } from "@/data/site";
 export const metadata: Metadata = {
   title: "The Agent Control Contract",
   description:
-    "The neutral, machine-readable contract agentctl consumes and any conformant agent implements. Contract 2.0: mTLS HTTPS, bare-PascalCase A2A, identity-is-the-boundary.",
+    "The neutral, machine-readable contract agentctl consumes and any conformant agent implements: mTLS HTTPS, bare-PascalCase A2A, identity is the boundary.",
 };
 
 export default function Page() {
@@ -33,8 +33,8 @@ export default function Page() {
         plane degrades gracefully and never branches on <C>build_features</C>.
       </P>
       <CodeBlock
-        lang="surfaces{} — contract 2.0 (excerpt)"
-        code={`"contract_version": "2.0",
+        lang="surfaces{} — the capabilities manifest (excerpt)"
+        code={`"contract_version": "1.0",
 "surfaces": {
   "management": "https://0.0.0.0:8443",   // mTLS https URL
   "a2a": { "streaming": true,

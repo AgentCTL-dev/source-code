@@ -7,5 +7,5 @@ metadata:
   namespace: default
 spec:
   mode: once
-  image: ghcr.io/agentd-dev/agentd:2.1.0
+  image: ghcr.io/agentd-dev/agentd:1.0.0
   instruction: "Read /data/report.md and write a 3-bullet summary to /data/summary.md"

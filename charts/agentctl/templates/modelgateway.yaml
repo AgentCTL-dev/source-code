@@ -207,7 +207,7 @@ spec:
                   key: AGENTCTL_API_TOKEN
             {{- end }}
             {{- if .Values.certManager.enabled }}
-            # TLS listener (contract 2.0): agents dial the rendered
+            # TLS listener (contract 1.0): agents dial the rendered
             # AGENT_INTELLIGENCE=https://agentctl-modelgateway... keyless; the
             # serving cert chains to the cluster CA the agent trusts (--tls-ca).
             # Server-auth only — the agent's identity is source-IP attestation.

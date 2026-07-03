@@ -20,7 +20,7 @@ image:
 
 # The neutral reference agent (data plane) — used only by the bundled examples.
 referenceAgent:
-  image: ghcr.io/agentd-dev/agentd:2.1.0
+  image: ghcr.io/agentd-dev/agentd:1.0.0
 
 # Global metadata stamped onto every rendered object (merged alongside the
 # chart's own labels). commonLabels also flow into pod templates; commonAnnotations

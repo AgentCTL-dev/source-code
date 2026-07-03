@@ -36,12 +36,12 @@ use serde::{Deserialize, Deserializer};
 /// `contract_version` major differs is refused ([`Manifest::negotiate`]); a
 /// differing minor is tolerated (additive-by-minor).
 ///
-/// Under contract major 2 the reference agent serves exclusively over HTTP:
+/// Under contract major 1 the reference agent serves exclusively over HTTP:
 /// MCP servers are remote `https://` endpoints, the A2A methods use the bare
 /// PascalCase binding, and the serving surface is mTLS HTTPS. The `surfaces{}`
 /// sum types below are transport-agnostic, so they remain valid regardless of
 /// transport; the major version is the compatibility gate.
-pub const SUPPORTED_MAJOR: u32 = 2;
+pub const SUPPORTED_MAJOR: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // The capabilities manifest

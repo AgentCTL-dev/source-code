@@ -1196,7 +1196,7 @@ async fn conf_metrics_registry(ctx: &Ctx) -> Result<Outcome> {
             pass()
         }
         Err(e) => skip(format!(
-            "agent /metrics on :9090 was unreachable (contract 2.0 wires it \
+            "agent /metrics on :9090 was unreachable (contract 1.0 wires it \
              unconditionally, so this is unexpected): {e}"
         )),
     };

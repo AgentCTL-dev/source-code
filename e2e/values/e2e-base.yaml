@@ -12,19 +12,19 @@ coordination:
   enabled: true
   store: memory                 # overlay store-postgres.yaml flips this
 
-# Secretless/budgeted intelligence plane (contract 2.0: agent dials the ModelGateway
+# Secretless/budgeted intelligence plane (contract 1.0: agent dials the ModelGateway
 # keyless over TLS -> mock-provider). Enabled by default in the chart; pinned here.
 #
 # attestIdentity is ON so the ModelGateway derives the agent's identity from the
 # caller's SOURCE IP (a kube pod lookup on status.podIP), never a spoofable header —
-# the contract-2.0 identity model. The intelligence scenarios (intel-infer, plus
+# the contract-1.0 identity model. The intelligence scenarios (intel-infer, plus
 # prov-once / conf-exit-codes — agentd once-mode REQUIRES an intelligence endpoint)
 # all ride this path; sec-mg-attest exercises the anti-spoof rejection on top of it.
 modelgateway:
   enabled: true
   attestIdentity: true
 
-# Tool-plane broker (contract 2.0): agents dial MCP tools keyless; the
+# Tool-plane broker (contract 1.0): agents dial MCP tools keyless; the
 # MCPGateway attests source-IP -> scopes to the bound MCPServerSet -> injects the
 # credential -> forwards. Needed by the MCPServerSet tool scenario.
 mcpgateway:

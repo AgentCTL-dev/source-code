@@ -47,7 +47,7 @@ rules:
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Workload PKI (contract 2.0): a per-workload serving Certificate is applied
+  # Workload PKI (contract 1.0): a per-workload serving Certificate is applied
   # into each Agent/Fleet's namespace (same soft-dependency discipline as KEDA),
   # and the cluster-CA PUBLIC cert is distributed as the per-namespace
   # agentctl-ca ConfigMap agent pods mount for client-CA + outbound trust.
@@ -204,7 +204,7 @@ spec:
             # chart's static agentNamespaces set still applies where listed.
             - name: NETWORK_POLICIES_ENABLED
               value: {{ .Values.networkPolicies.enabled | default false | quote }}
-            # Workload PKI + keyless intelligence wiring (contract 2.0). The
+            # Workload PKI + keyless intelligence wiring (contract 1.0). The
             # operator issues a per-workload serving Certificate (issuerRef
             # below), distributes the CA public cert per namespace (read from
             # its own mount), and renders AGENT_INTELLIGENCE at the ModelGateway

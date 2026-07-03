@@ -57,7 +57,7 @@ subjects:
     namespace: {{ $ns }}
 ---
 # The A2A gateway: a replicated, stateless HTTP service fronting each
-# agent's mTLS A2A surface (served on the agent pod, contract 2.0; the gateway
+# agent's mTLS A2A surface (served on the agent pod, contract 1.0; the gateway
 # presents the Management client cert). Projects each agent's Agent Card and
 # routes spec-form A2A JSON-RPC to the bare v2.1 methods.
 apiVersion: apps/v1

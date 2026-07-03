@@ -956,7 +956,7 @@ fn pod_template(
     }
 }
 
-/// The HTTPS serve + trust args every rendered agent gets (contract 2.0): serve
+/// The HTTPS serve + trust args every rendered agent gets (contract 1.0): serve
 /// the self-MCP/A2A surface mTLS-gated on [`SERVE_PORT`], trust cluster-CA
 /// client certs (`Management` = the control plane), and trust the same CA for
 /// outbound dials (the gateways).
@@ -1195,7 +1195,7 @@ mod tests {
 
     #[test]
     fn serve_wiring_v2() {
-        // Every rendered pod SERVES mTLS-gated HTTPS (contract 2.0): the serve
+        // Every rendered pod SERVES mTLS-gated HTTPS (contract 1.0): the serve
         // argv, its own serving-identity Secret mount, the cluster-CA ConfigMap
         // mount (client-CA + outbound trust), ports, and the /readyz probe.
         let r = render_agent(&agent(Mode::Once), &cfg()).unwrap();

@@ -189,7 +189,7 @@ async fn main() {
             default_reserve,
         });
 
-    // Optional TLS listener (contract 2.0): agents dial their rendered
+    // Optional TLS listener (contract 1.0): agents dial their rendered
     // `AGENT_INTELLIGENCE=https://…` keyless — the serving cert (cert-manager,
     // chains to the cluster CA the agent trusts via `--tls-ca`) authenticates
     // US to the agent; the AGENT's identity stays source-IP attestation, so

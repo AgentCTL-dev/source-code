@@ -41,8 +41,8 @@ export default function Page() {
 
       <H2>2 · the control plane</H2>
       <P>
-        No control-plane component needs hostPath / hostPID / privilege (the node-agent is
-        retired), so the <C>baseline</C> PodSecurity level suffices.
+        No control-plane component needs hostPath / hostPID / privilege — every component is an
+        ordinary pod on the pod network — so the <C>baseline</C> PodSecurity level suffices.
       </P>
       <CodeBlock
         lang="bash"
