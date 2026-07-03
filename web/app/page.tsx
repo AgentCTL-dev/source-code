@@ -16,7 +16,7 @@ import { CodeBlock } from "@/components/site/code-block";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { GITHUB_URL, REPO_RFCS, AGENTD_IMAGE } from "@/data/site";
+import { GITHUB_URL, REPO_DOCS, AGENTD_IMAGE } from "@/data/site";
 
 export default function Home() {
   return (
@@ -354,11 +354,10 @@ function Principles() {
         ))}
       </div>
       <p className="text-muted-foreground mt-6 text-sm">
-        The full design lives in{" "}
-        <a href={`${REPO_RFCS}/0021-contract-2.0-network-substrate-pivot.md`} className="text-foreground underline underline-offset-4" target="_blank" rel="noreferrer">
-          RFC 0021
-        </a>{" "}
-        and the RFC track in the repo.
+        The full architecture, contract specification, and operational guides live in the{" "}
+        <a href={REPO_DOCS} className="text-foreground underline underline-offset-4" target="_blank" rel="noreferrer">
+          repository documentation
+        </a>.
       </p>
     </Section>
   );

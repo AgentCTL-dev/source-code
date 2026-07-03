@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { DocShell, H2, P, Ul, C, Note } from "@/components/site/doc-shell";
 import { CodeBlock } from "@/components/site/code-block";
-import { REPO_CONTRACT, rfc } from "@/data/site";
+import { REPO_CONTRACT } from "@/data/site";
 
 export const metadata: Metadata = {
   title: "The Agent Control Contract",
@@ -36,34 +36,35 @@ export default function Page() {
         lang="surfaces{} — contract 2.0 (excerpt)"
         code={`"contract_version": "2.0",
 "surfaces": {
-  "management": "https://0.0.0.0:8443",   // mTLS https URL (was unix/vsock)
+  "management": "https://0.0.0.0:8443",   // mTLS https URL
   "a2a": { "streaming": true,
            "methods": ["SendMessage","GetTask",...] },  // bare PascalCase
   "operator_tools": ["a2a.Drain","a2a.LameDuck",
                      "a2a.Pause","a2a.Resume","a2a.Cancel"],
   "metrics": "0.0.0.0:9090"
 },
-"exec_enabled": false                     // exec surface removed in 2.0`}
+"exec_enabled": false                     // no local exec surface`}
       />
 
-      <H2>What changed in 2.0</H2>
+      <H2>The shape of the contract</H2>
       <Ul>
         <li>
-          <strong className="text-foreground">Transports.</strong> stdio / unix / vsock removed —
-          agents serve over mTLS HTTPS <C>POST /mcp</C> and dial the gateways keyless.
+          <strong className="text-foreground">One transport.</strong> The entire control surface is
+          mTLS HTTPS — agents serve <C>POST /mcp</C> and dial the gateways keyless. There is no
+          stdio, unix-socket, or vsock transport.
         </li>
         <li>
           <strong className="text-foreground">Identity is authority.</strong> A verified mTLS
-          client cert is <C>Management</C>; reachability is no longer authorization.
+          client cert is the <C>Management</C> origin; reachability is never authorization.
         </li>
         <li>
-          <strong className="text-foreground">A2A binding resolved.</strong> Bare PascalCase over
+          <strong className="text-foreground">A2A is bound.</strong> Bare PascalCase over
           HTTPS is normative; SSE streaming terminates on the terminal task state (no{" "}
           <C>final</C> flag). Config MCP servers and A2A peers are HTTPS endpoints.
         </li>
         <li>
-          <strong className="text-foreground">exec removed.</strong> Agents work only through
-          operator-provided MCP tools — no local execution surface.
+          <strong className="text-foreground">No local exec.</strong> Agents work only through
+          operator-provided MCP tools — there is no local execution surface.
         </li>
       </Ul>
 
@@ -78,16 +79,16 @@ export default function Page() {
       <Note>
         Shape is necessary but not sufficient: a binary that parses but misbehaves is
         non-conformant. The behavioral conformance suite is the executable definition of &ldquo;a
-        conformant agent.&rdquo; The full spec and schemas — and{" "}
+        conformant agent.&rdquo; The full{" "}
         <a
-          href={rfc("0021", "contract-2.0-network-substrate-pivot")}
+          href={REPO_CONTRACT}
           className="text-foreground underline underline-offset-4"
           target="_blank"
           rel="noreferrer"
         >
-          RFC 0021
+          specification and JSON schemas
         </a>{" "}
-        for the pivot rationale — live in the repo.
+        live in the repository.
       </Note>
     </DocShell>
   );

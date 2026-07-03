@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { GITHUB_URL, REPO_RFCS, REPO_DOCS, CONTRACT_VERSION } from "@/data/site";
+import { GITHUB_URL, REPO_DOCS, CONTRACT_VERSION } from "@/data/site";
 
 export function Footer() {
   return (
@@ -17,9 +17,6 @@ export function Footer() {
           </Link>
           <a href={REPO_DOCS} className="hover:text-foreground transition" target="_blank" rel="noreferrer">
             Docs
-          </a>
-          <a href={REPO_RFCS} className="hover:text-foreground transition" target="_blank" rel="noreferrer">
-            RFCs
           </a>
           <a href={GITHUB_URL} className="hover:text-foreground transition" target="_blank" rel="noreferrer">
             GitHub

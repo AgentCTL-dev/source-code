@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { DocShell, H2, P, Ul, C, Note } from "@/components/site/doc-shell";
 import { CodeBlock } from "@/components/site/code-block";
-import { REPO_DOCS, rfc } from "@/data/site";
+import { REPO_DOCS } from "@/data/site";
 
 export const metadata: Metadata = {
   title: "Architecture",
@@ -90,18 +90,9 @@ export default function Page() {
       </P>
 
       <Note>
-        The node-agent DaemonSet of v1 is <strong>retired</strong> — every function it performed
-        (management bridge, telemetry proxy, infer proxy, A2A relay, MCP bridge) is re-homed to a
-        network-native path. See{" "}
-        <a
-          href={rfc("0021", "contract-2.0-network-substrate-pivot")}
-          className="text-foreground underline underline-offset-4"
-          target="_blank"
-          rel="noreferrer"
-        >
-          RFC 0021
-        </a>{" "}
-        for the full pivot design and the supersession map.
+        There is no per-node agent and nothing privileged on the host. Management, telemetry,
+        inference, A2A, and MCP are each a network-native call between ordinary pods over mTLS —
+        the network is the substrate.
       </Note>
     </DocShell>
   );
