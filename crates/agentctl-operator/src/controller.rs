@@ -21,7 +21,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_api::{Agent, AgentFleet, AgentSpec, Condition, ContractStatus, MCPServerSet, Mode};
+use agent_api::{
+    Agent, AgentFleet, AgentSpec, Condition, ContractStatus, MCPServerSet, Mode, ScaleMode,
+};
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use kube::api::{Patch, PatchParams};
@@ -777,6 +779,19 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             if ctx.netpol.active() {
                 crate::netpol::ensure_agent_netpols(&ctx.client, &ctx.netpol, ns).await?;
             }
+            // Guarded shard resize (RFC 0022 §8): when a shard fleet's N changed,
+            // drive a stop-the-world rebalance (quiesce the old-N pods to 0, then
+            // flip N and scale up) instead of the naive rolling update Kubernetes
+            // would do — which runs mixed moduli and double-owns / orphans keys
+            // across the seam. Returns Some while the rebalance is in flight (the
+            // StatefulSet is already patched + status set): short-circuit and requeue.
+            if fleet.spec.scaling.mode == ScaleMode::Shard {
+                if let Some(action) =
+                    drive_shard_resize(ctx.as_ref(), ns, &name, &fleet, &rendered, observed).await?
+                {
+                    return Ok(action);
+                }
+            }
             apply_workload(&ctx.client, ns, &rendered).await?;
             info!(fleet = %name, workload = kind, "applied fleet workload");
             publish_event(
@@ -942,6 +957,211 @@ fn coordinator_progressing_condition(observed_generation: Option<i64>) -> Condit
         message: Some("fleet coordinator (main agent) is not yet ready".to_string()),
         observed_generation,
         last_transition_time: None,
+    }
+}
+
+/// Poll cadence while a guarded shard resize is in flight — short, so the
+/// quiesce→flip→converge choreography advances promptly across reconciles.
+const SHARD_RESIZE_POLL: Duration = Duration::from_secs(5);
+
+/// The next step of a guarded shard **resize** (RFC 0022 §8), decided purely from
+/// the live StatefulSet's applied shard count vs the desired one, plus its replica
+/// state. Pure so the state machine is unit-testable without a cluster.
+///
+/// The key signal is the live pod template's `--shard auto/N` value (`applied`): it
+/// is the OLD `N` until the operator flips it, so it distinguishes "resize not yet
+/// applied" from "already flipped, now converging". A `None` applied means no live
+/// StatefulSet (a fresh fleet) — nothing to guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShardResizeStep {
+    /// No guarded action: fresh create, steady state, or already-flipped and
+    /// converging. The caller does the normal apply + readiness.
+    None,
+    /// The shard count changed and old-`N` pods are still running: scale the
+    /// StatefulSet to 0 (a stop-the-world barrier) before flipping `N`, so no item
+    /// is ever evaluated under two different moduli at once.
+    Quiesce,
+    /// Quiesced (0 pods): apply the new-`N` StatefulSet (flip the template + scale
+    /// back up to the new partition count).
+    Flip,
+}
+
+/// Decide the guarded-resize step. `desired` = `spec.scaling.shards`; `applied` =
+/// the live StatefulSet's `--shard auto/N` (None ⇒ no live StatefulSet);
+/// `spec_replicas`/`running` = its declared vs live-running replica counts.
+fn plan_shard_resize(
+    desired: u32,
+    applied: Option<u32>,
+    spec_replicas: i32,
+    running: i32,
+) -> ShardResizeStep {
+    match applied {
+        // No live workload yet (fresh fleet) → normal create.
+        None => ShardResizeStep::None,
+        // Template already on the desired N → steady, or converging after a flip.
+        Some(n) if n == desired => ShardResizeStep::None,
+        // Template still on the OLD N → a resize is in flight.
+        Some(_old) => {
+            if running > 0 || spec_replicas != 0 {
+                // Old-N pods still around (or scale-down not yet requested): quiesce.
+                ShardResizeStep::Quiesce
+            } else {
+                // Fully quiesced (0 pods): safe to flip N and scale up.
+                ShardResizeStep::Flip
+            }
+        }
+    }
+}
+
+/// Parse the shard modulus `N` a live StatefulSet's agent container was rendered
+/// with — the value after `--shard` (spelled `auto/N`, and tolerant of a `K/N`
+/// form). `None` when the flag is absent (a pre-RFC-0022 StatefulSet) or unparsable.
+fn applied_shard_count(sts: &StatefulSet) -> Option<u32> {
+    let args = sts
+        .spec
+        .as_ref()?
+        .template
+        .spec
+        .as_ref()?
+        .containers
+        .first()?
+        .args
+        .as_ref()?;
+    let idx = args.iter().position(|a| a == "--shard")?;
+    let value = args.get(idx + 1)?;
+    // `auto/N` or `K/N` — the modulus is the segment after the last '/'.
+    value.rsplit('/').next()?.parse::<u32>().ok()
+}
+
+/// Drive the guarded shard resize (RFC 0022 §8). Returns `Ok(Some(action))` when a
+/// rebalance is IN FLIGHT — the StatefulSet has been quiesced (scaled to 0) or
+/// flipped (new-`N` applied) and the fleet status carries a `Resizing` condition,
+/// so the caller returns that requeue and SKIPS the normal apply. Returns `Ok(None)`
+/// when there is nothing to guard (fresh / steady / already-flipped-and-converging)
+/// and the caller proceeds with the normal apply + readiness.
+///
+/// **Best-effort stop-the-world.** The barrier is a scale-to-0 of the StatefulSet:
+/// a deleted pod definitively processes nothing, so the entire mixed-`N` window is
+/// closed (no drain-confirms-quiesced handshake required — standard pod termination
+/// SIGTERM + grace lets the agent finish in flight). The residual gap is that a
+/// crash-restart of the operator mid-flip, or an agent that ignores SIGTERM, could
+/// still briefly overlap; a per-item ownership *epoch* (a data-plane / contract
+/// change) would close that, and is tracked as a follow-up (RFC 0022 §8/§10).
+async fn drive_shard_resize(
+    ctx: &Ctx,
+    ns: &str,
+    name: &str,
+    fleet: &AgentFleet,
+    rendered: &Rendered,
+    observed_gen: Option<i64>,
+) -> Result<Option<Action>, Error> {
+    // Shard mode guarantees `shards` (render succeeded, CEL-enforced); default-guard.
+    let Some(desired) = fleet.spec.scaling.shards else {
+        return Ok(None);
+    };
+    let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);
+    let Some(live) = sts_api.get_opt(name).await? else {
+        // No live StatefulSet yet → fresh create; the normal path applies it.
+        return Ok(None);
+    };
+    let applied = applied_shard_count(&live);
+    let spec_replicas = live.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
+    let running = live.status.as_ref().map(|s| s.replicas).unwrap_or(0);
+
+    match plan_shard_resize(desired, applied, spec_replicas, running) {
+        ShardResizeStep::None => Ok(None),
+        ShardResizeStep::Quiesce => {
+            // Scale the live StatefulSet to 0 with a MERGE patch — it keeps the
+            // old-N pod template (no premature rollout) and does not disturb the SSA
+            // template ownership; the forced flip-apply reclaims `replicas` later.
+            let old = applied
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            sts_api
+                .patch(
+                    name,
+                    &PatchParams::default(),
+                    &Patch::Merge(&serde_json::json!({ "spec": { "replicas": 0 } })),
+                )
+                .await?;
+            let msg = format!(
+                "draining {running} shard pod(s) (N={old}) before rebalancing to N={desired}"
+            );
+            info!(fleet = %name, %msg, "shard resize: quiescing");
+            publish_event(
+                ctx,
+                fleet,
+                EventType::Normal,
+                "Resizing",
+                "ShardQuiesce",
+                msg.clone(),
+            )
+            .await;
+            patch_resizing_status(ctx, ns, name, observed_gen, &msg).await;
+            Ok(Some(Action::requeue(SHARD_RESIZE_POLL)))
+        }
+        ShardResizeStep::Flip => {
+            // Fully quiesced (0 pods): apply the new-N StatefulSet (the caller's
+            // fully-injected render already carries `--shard auto/<desired>` +
+            // replicas=<desired>, plus MCP/token/workflow wiring). The forced SSA
+            // reclaims `replicas` from the merge-patched 0.
+            let msg = format!("rebalancing to N={desired} shard(s)");
+            apply_workload(&ctx.client, ns, rendered).await?;
+            info!(fleet = %name, %msg, "shard resize: flipping N and scaling up");
+            publish_event(
+                ctx,
+                fleet,
+                EventType::Normal,
+                "Resizing",
+                "ShardRebalance",
+                msg.clone(),
+            )
+            .await;
+            patch_resizing_status(ctx, ns, name, observed_gen, &msg).await;
+            Ok(Some(Action::requeue(SHARD_RESIZE_POLL)))
+        }
+    }
+}
+
+/// The `Ready=False / Resizing` condition surfaced while a guarded shard resize is
+/// in flight (the fleet is intentionally not-Ready during the rebalance).
+fn resizing_condition(observed_generation: Option<i64>, message: &str) -> Condition {
+    Condition {
+        type_: "Ready".to_string(),
+        status: "False".to_string(),
+        reason: Some("Resizing".to_string()),
+        message: Some(message.to_string()),
+        observed_generation,
+        last_transition_time: None,
+    }
+}
+
+/// Best-effort status write during a resize: set the `Resizing` condition + a
+/// `Resizing` phase (merge patch preserves replicas/selector from prior reconciles).
+async fn patch_resizing_status(
+    ctx: &Ctx,
+    ns: &str,
+    name: &str,
+    observed_gen: Option<i64>,
+    msg: &str,
+) {
+    let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
+    let cond = resizing_condition(observed_gen, msg);
+    let Ok(cond_json) = serde_json::to_value(&cond) else {
+        return;
+    };
+    let patch = serde_json::json!({
+        "status": {
+            "conditions": [cond_json],
+            "observedGeneration": observed_gen,
+            "phase": "Resizing",
+        }
+    });
+    if let Err(e) = fleets
+        .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        warn!(fleet = %name, error = %e, "failed to patch resizing status (best-effort)");
     }
 }
 
@@ -1316,6 +1536,80 @@ mod tests {
         claim.spec.replicas = None;
         let rendered = render_fleet(&claim, &RenderConfig::default()).unwrap();
         assert_eq!(fleet_replica_count(&claim, &rendered), 0);
+    }
+
+    // ── RFC 0022 §8: guarded shard resize state machine ─────────────────────
+
+    #[test]
+    fn plan_shard_resize_covers_the_choreography() {
+        // (`ShardResizeStep::None` is not glob-imported so it can't shadow Option::None.)
+        let none = ShardResizeStep::None;
+        // No live StatefulSet (fresh fleet) → normal create, nothing to guard.
+        assert_eq!(plan_shard_resize(4, None, 0, 0), none);
+        // Steady: the live template is already on the desired N.
+        assert_eq!(plan_shard_resize(4, Some(4), 4, 4), none);
+        // Already flipped, still ramping up (applied==desired) → normal converge path.
+        assert_eq!(plan_shard_resize(8, Some(8), 8, 3), none);
+
+        // Resize just triggered: old-N pods still running → QUIESCE (scale to 0).
+        assert_eq!(
+            plan_shard_resize(8, Some(4), 4, 4),
+            ShardResizeStep::Quiesce
+        );
+        // Scale-to-0 requested but pods still terminating (spec 0, running>0) → keep quiescing.
+        assert_eq!(
+            plan_shard_resize(8, Some(4), 0, 2),
+            ShardResizeStep::Quiesce
+        );
+        // spec still nonzero but running already 0 (edge) → still quiesce to settle spec.
+        assert_eq!(
+            plan_shard_resize(8, Some(4), 4, 0),
+            ShardResizeStep::Quiesce
+        );
+        // Fully quiesced (0 pods, 0 desired on the old STS) → FLIP to the new N.
+        assert_eq!(plan_shard_resize(8, Some(4), 0, 0), ShardResizeStep::Flip);
+    }
+
+    #[test]
+    fn applied_shard_count_parses_the_shard_flag() {
+        use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
+        use k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec};
+
+        let sts = |args: Option<Vec<&str>>| StatefulSet {
+            spec: Some(StatefulSetSpec {
+                template: PodTemplateSpec {
+                    spec: Some(PodSpec {
+                        containers: vec![Container {
+                            name: "agent".into(),
+                            args: args.map(|a| a.into_iter().map(str::to_string).collect()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // `--shard auto/N` → N.
+        assert_eq!(
+            applied_shard_count(&sts(Some(vec!["--mode", "reactive", "--shard", "auto/4"]))),
+            Some(4)
+        );
+        // Tolerant of a `K/N` form → the modulus N.
+        assert_eq!(
+            applied_shard_count(&sts(Some(vec!["--shard", "2/8"]))),
+            Some(8)
+        );
+        // No --shard flag (pre-RFC-0022 StatefulSet) → None.
+        assert_eq!(
+            applied_shard_count(&sts(Some(vec!["--mode", "reactive"]))),
+            None
+        );
+        // No args at all → None.
+        assert_eq!(applied_shard_count(&sts(None)), None);
     }
 
     #[test]
