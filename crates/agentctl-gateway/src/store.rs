@@ -44,13 +44,19 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
                 PRIMARY KEY (namespace, agent, task_id)
             );
             -- Idempotent migration for stores created before the auth token landed.
-            ALTER TABLE a2a_push_configs ADD COLUMN IF NOT EXISTS token text NOT NULL DEFAULT ''",
+            ALTER TABLE a2a_push_configs ADD COLUMN IF NOT EXISTS token text NOT NULL DEFAULT '';
+            -- RFC 0022 §6: which fleet member (pod IP) served the task, so a later
+            -- live op routes back to it (task affinity). Additive.
+            ALTER TABLE a2a_tasks ADD COLUMN IF NOT EXISTS owner_pod text",
         )
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Insert or update a task record for `(ns, agent, id)`.
+/// Insert or update a task record for `(ns, agent, id)`. `owner_pod` (the member
+/// pod IP that served the task) is recorded/refreshed for fleet task affinity
+/// (RFC 0022 §6); `None` leaves any existing value untouched.
+#[allow(clippy::too_many_arguments)] // a flat task row: (ns, agent, id, state, input, artifact, owner_pod)
 pub async fn upsert(
     pool: &Pool,
     ns: &str,
@@ -59,19 +65,41 @@ pub async fn upsert(
     state: &str,
     input: &str,
     artifact: &str,
+    owner_pod: Option<&str>,
 ) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     client
         .execute(
-            "INSERT INTO a2a_tasks (namespace, agent, id, state, input, artifact)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO a2a_tasks (namespace, agent, id, state, input, artifact, owner_pod)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (namespace, agent, id)
-             DO UPDATE SET state = $4, artifact = $6, updated_at = now()",
-            &[&ns, &agent, &id, &state, &input, &artifact],
+             DO UPDATE SET state = $4, artifact = $6,
+                           owner_pod = COALESCE($7, a2a_tasks.owner_pod), updated_at = now()",
+            &[&ns, &agent, &id, &state, &input, &artifact, &owner_pod],
         )
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// The member pod IP (`owner_pod`) that served task `(ns, agent, id)`, if recorded
+/// — used to route a later live op back to the same fleet member (RFC 0022 §6).
+pub async fn owner_pod(
+    pool: &Pool,
+    ns: &str,
+    agent: &str,
+    id: &str,
+) -> Result<Option<String>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let row = client
+        .query_opt(
+            "SELECT owner_pod FROM a2a_tasks
+             WHERE namespace = $1 AND agent = $2 AND id = $3",
+            &[&ns, &agent, &id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
 }
 
 /// Fetch one task record, if present.

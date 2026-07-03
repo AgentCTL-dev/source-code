@@ -66,6 +66,10 @@ struct AppState {
     /// it inline for agents WITHOUT per-agent OIDC (the gate middleware defers the
     /// POST RPC route — see [`auth::gate`]).
     auth: auth::Auth,
+    /// Round-robin cursor for load-balancing a fleet endpoint across its worker
+    /// replicas (RFC 0022 §6). Per-replica (each gateway replica has its own), which
+    /// is fine for spreading load; strict global fairness is not required.
+    round_robin: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[tokio::main]
@@ -125,6 +129,10 @@ async fn main() {
             get(fleet_card),
         )
         .route("/agents/{ns}/{name}", post(a2a_rpc))
+        // The fleet as a single addressable A2A endpoint (RFC 0022 §6): the same
+        // RPC surface as an agent, but member selection routes to the coordinator
+        // (front door) or load-balances across worker replicas.
+        .route("/fleets/{ns}/{name}", post(a2a_fleet_rpc))
         .layer(axum::middleware::from_fn_with_state(
             gate.clone(),
             auth::gate,
@@ -140,6 +148,7 @@ async fn main() {
             // Same coarse gate the middleware uses; the RPC handler falls back to
             // it for non-OIDC agents.
             auth: gate,
+            round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
 
     // TRUSTED-PROXY mode (front-proxy trust over mTLS). OFF by default — when off
@@ -271,12 +280,24 @@ async fn build_signed_card(
     base_url: &str,
     kind: Option<&str>,
 ) -> Result<Value, String> {
+    // A fleet card is projected from the COORDINATOR (the front door) when the fleet
+    // declares one, else from a worker replica (RFC 0022 §6). An agent projects from
+    // its own pods.
+    let manifest_source = if kind == Some("AgentFleet") {
+        let fleets: Api<AgentFleet> = Api::namespaced(state.client.clone(), ns);
+        match fleets.get_opt(name).await {
+            Ok(Some(f)) if f.spec.coordinator.is_some() => coordinator_agent_name(name),
+            _ => name.to_string(),
+        }
+    } else {
+        name.to_string()
+    };
     // Best-effort: read the RICH manifest from a live pod; fall back to a STATIC card
     // projected from the CR identity when no replica is Running, so the card is
     // servable at `replicas:0` (a claim fleet idles at zero — its card, discovery, and
     // task-acceptance must NOT depend on a live pod; RFC 0014 §3.2). We never 502 a
     // card merely because the fleet is scaled down.
-    let manifest = match resolve(&state.client, ns, name).await {
+    let manifest = match resolve(&state.client, ns, &manifest_source).await {
         Ok(pod_ip) => fetch_capabilities(state, &pod_ip).await.ok(),
         Err(e) => {
             tracing::debug!(%ns, %name, error = %e, "no live replica; projecting a static card");
@@ -366,7 +387,38 @@ async fn a2a_rpc(
     Path((ns, name)): Path<(String, String)>,
     trusted_proxy::TrustedDecision(decision): trusted_proxy::TrustedDecision,
     headers: HeaderMap,
-    Json(mut req): Json<Value>,
+    Json(req): Json<Value>,
+) -> Response {
+    handle_a2a(state, ns, name, false, decision, headers, req).await
+}
+
+/// `POST /fleets/{ns}/{name}` — the fleet as a single addressable A2A endpoint
+/// (RFC 0022 §6). Identical RPC surface + access enforcement to a single agent
+/// (`enforce_access` already reads a fleet's `spec.template.access`); only member
+/// selection differs (coordinator front door / worker load-balancing).
+#[tracing::instrument(name = "gateway.fleet_rpc", skip_all, fields(ns = %ns, fleet = %name))]
+async fn a2a_fleet_rpc(
+    State(state): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+    trusted_proxy::TrustedDecision(decision): trusted_proxy::TrustedDecision,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
+    handle_a2a(state, ns, name, true, decision, headers, req).await
+}
+
+/// The shared A2A RPC handler for both an agent (`is_fleet=false`) and a fleet
+/// (`is_fleet=true`). The only fleet-specific behaviour is member selection at the
+/// forward step (see [`select_member`]); auth, the gateway-owned verbs, and task
+/// persistence are keyed by `name` (the agent OR fleet name) identically.
+async fn handle_a2a(
+    state: AppState,
+    ns: String,
+    name: String,
+    is_fleet: bool,
+    decision: trusted_proxy::Decision,
+    headers: HeaderMap,
+    mut req: Value,
 ) -> Response {
     state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -466,11 +518,11 @@ async fn a2a_rpc(
         obj.insert("method".to_string(), json!(reference));
     }
 
-    let pod_ip = match resolve(&state.client, &ns, &name).await {
+    let pod_ip = match select_member(&state, &ns, &name, is_fleet, &spec, &req).await {
         Ok(ip) => ip,
         Err(e) => {
             state.metrics.inc_upstream_error();
-            tracing::warn!(%ns, agent = %name, error = %e, "rpc resolve failed");
+            tracing::warn!(%ns, target = %name, is_fleet, error = %e, "rpc resolve failed");
             return Json(rpc_error(id, -32603, &e)).into_response();
         }
     };
@@ -530,7 +582,12 @@ async fn a2a_rpc(
                 .pointer("/artifacts/0/parts/0/text")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if let Err(e) = store::upsert(&state.pool, &ns, &name, tid, st, &input, artifact).await
+            // Record which member served the task (owner_pod) so a later live op
+            // (cancel/stream/get on a non-terminal task) routes back to it — task
+            // affinity across fleet members (RFC 0022 §6). Harmless for a single agent.
+            if let Err(e) =
+                store::upsert(&state.pool, &ns, &name, tid, st, &input, artifact, Some(&pod_ip))
+                    .await
             {
                 tracing::warn!(error = %e, "store upsert failed");
             } else {
@@ -1185,6 +1242,92 @@ async fn resolve(client: &Client, ns: &str, name: &str) -> Result<String, String
         .ok_or_else(|| format!("agent pod for {ns}/{name} has no podIP"))
 }
 
+/// The coordinator workload name for a fleet (mirrors the operator's
+/// `render::coordinator_name`): `<fleet>-coordinator`. Its own
+/// `agentctl.dev/agent=<fleet>-coordinator` label keeps it distinct from the worker
+/// pool's `agentctl.dev/agent=<fleet>`.
+fn coordinator_agent_name(fleet: &str) -> String {
+    format!("{fleet}-coordinator")
+}
+
+/// Every Running pod IP for `agentctl.dev/agent={name}` (the worker pool of a
+/// fleet, or the replicas of an agent). Ordered as the apiserver returns them.
+async fn resolve_all(client: &Client, ns: &str, name: &str) -> Result<Vec<String>, String> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
+    let ips: Vec<String> = pods
+        .list(&lp)
+        .await
+        .map_err(|e| format!("list pods: {e}"))?
+        .items
+        .into_iter()
+        .filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
+        .filter_map(|p| p.status.and_then(|s| s.pod_ip))
+        .collect();
+    Ok(ips)
+}
+
+/// Select the target pod IP for an A2A request. An agent resolves to its single
+/// pod (unchanged). A **fleet** (RFC 0022 §6) routes to a member:
+///   1. **task affinity** — a live op (cancel/stream/get) on an existing task goes
+///      back to the member that served it (`owner_pod`), if still reachable;
+///   2. else the **coordinator** (front door), when the fleet declares one;
+///   3. else **load-balance** round-robin across the worker replicas.
+async fn select_member(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+    is_fleet: bool,
+    spec: &str,
+    req: &Value,
+) -> Result<String, String> {
+    if !is_fleet {
+        return resolve(&state.client, ns, name).await;
+    }
+
+    // (1) Task affinity for live ops on an existing task.
+    if matches!(spec, "message/stream" | "tasks/cancel" | "tasks/get") {
+        if let Some(tid) = req
+            .pointer("/params/id")
+            .and_then(Value::as_str)
+            .or_else(|| req.pointer("/params/taskId").and_then(Value::as_str))
+        {
+            if let Ok(Some(owner)) = store::owner_pod(&state.pool, ns, name, tid).await {
+                // Only honour the affinity if that pod is still Running (else fall
+                // through to fresh selection — the member is gone).
+                if resolve_all(&state.client, ns, name)
+                    .await
+                    .map(|ips| ips.contains(&owner))
+                    .unwrap_or(false)
+                {
+                    return Ok(owner);
+                }
+            }
+        }
+    }
+
+    // (2) The coordinator front door, if the fleet declares one.
+    let fleets: Api<AgentFleet> = Api::namespaced(state.client.clone(), ns);
+    let has_coordinator = matches!(
+        fleets.get_opt(name).await,
+        Ok(Some(f)) if f.spec.coordinator.is_some()
+    );
+    if has_coordinator {
+        return resolve(&state.client, ns, &coordinator_agent_name(name)).await;
+    }
+
+    // (3) Load-balance across the worker replicas (round-robin).
+    let ips = resolve_all(&state.client, ns, name).await?;
+    if ips.is_empty() {
+        return Err(format!("no running worker for fleet {ns}/{name}"));
+    }
+    let idx = state
+        .round_robin
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        % ips.len();
+    Ok(ips[idx].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,6 +1361,15 @@ mod tests {
         assert_eq!(translate_method("tasks/list"), None);
         assert_eq!(translate_method(""), None);
         assert_eq!(translate_method("a2a.SendMessage"), None);
+    }
+
+    #[test]
+    fn coordinator_agent_name_matches_the_operator_convention() {
+        // MUST equal the operator's render::coordinator_name so the gateway resolves
+        // the very pods the operator labels (agentctl.dev/agent=<fleet>-coordinator).
+        assert_eq!(coordinator_agent_name("research"), "research-coordinator");
+        // Distinct from the worker label value, so neither selector captures the other.
+        assert_ne!(coordinator_agent_name("research"), "research");
     }
 
     #[test]
