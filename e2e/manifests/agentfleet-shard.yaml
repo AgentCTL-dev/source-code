@@ -13,7 +13,7 @@ metadata:
 spec:
   template:
     mode: reactive
-    image: agentd:2.x
+    image: agentd:2.1.0
     subscribe: ["queue://shards"]
   scaling:
     mode: shard

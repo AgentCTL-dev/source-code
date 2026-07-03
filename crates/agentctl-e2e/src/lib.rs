@@ -36,10 +36,10 @@ pub mod shell;
 /// `kind load`s, and that every `e2e/manifests/*` hard-codes. It is a
 /// contract-2.0 build that **serves mTLS HTTPS `/mcp`** and dials the gateways
 /// keyless (`build_features`: serve-mcp, serve-https, a2a, shard/cluster, cron,
-/// metrics, …). No tagged `ghcr.io/agentd-dev/agentd:2.x` is published, so the
-/// e2e builds it from `/root/agentd-dev`. Override
-/// `AGENTD_IMAGE` to a registry-qualified ref for a real cluster.
-pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:2.x";
+/// metrics, …). The e2e builds it from `/root/agentd-dev` to match the exact
+/// source under test; override `AGENTD_IMAGE` to a registry-qualified ref such as
+/// `ghcr.io/agentd-dev/agentd:2.1.0` for a real cluster.
+pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:2.1.0";
 /// Default control-plane (Helm release) namespace.
 pub const DEFAULT_SYSTEM_NS: &str = "agentctl-system";
 /// Default workload namespace the scenarios apply CRs into.

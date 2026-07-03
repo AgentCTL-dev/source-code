@@ -246,7 +246,7 @@ metadata:
   namespace: default
 spec:
   mode: once
-  image: agentd:1.0.0
+  image: ghcr.io/agentd-dev/agentd:2.1.0
   instruction: "Read /data/report.md and write a 3-bullet summary to /data/summary.md"
   modelPool: mockpool
 EOF
@@ -273,7 +273,7 @@ metadata:
 spec:
   template:
     mode: reactive
-    image: agentd:1.0.0
+    image: ghcr.io/agentd-dev/agentd:2.1.0
     subscribe: ["queue://jobs"]
     modelPool: mockpool
   scaling:

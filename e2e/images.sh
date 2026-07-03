@@ -8,10 +8,12 @@
 #                      the chart's image.registry must then point at REGISTRY).
 #
 # Images produced (contract 2.0):
-#   agentd:2.x                   the real reference agent (built from
+#   agentd:2.1.0                 the real reference agent (built from
 #                                $AGENTD_SRC/Dockerfile — serves mTLS HTTPS /mcp,
-#                                dials gateways keyless). No 2.x tag is published on
-#                                GHCR yet, so this builds from source.
+#                                dials gateways keyless). Built from source to match
+#                                the exact contract-2.0 build under test; the
+#                                published ghcr.io/agentd-dev/agentd:2.1.0 is used
+#                                when AGENTD_GHCR is set.
 #   mock-agent:dev               conformant-agent stand-in (mTLS HTTPS self-MCP).
 #   agentctl/<comp>:dev          the 8 control-plane components, each from
 #                                deploy/<comp>/Dockerfile (v2: mcpgateway, not the
@@ -25,8 +27,8 @@ CLUSTER="${CLUSTER:-agentctl-e2e}"
 TAG="${TAG:-dev}"
 REGISTRY="${REGISTRY:-}"                       # empty = kind load; set = push
 AGENTD_SRC="${AGENTD_SRC:-/root/agentd-dev/source-code}"
-AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:2.x}"
-AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:2.x}"
+AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:2.1.0}"
+AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:2.1.0}"
 
 # The 8 control-plane components (component == deploy/<comp>/Dockerfile dir),
 # matching the release.yml build matrix. Contract 2.0: agents serve HTTPS MCP natively;
