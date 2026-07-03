@@ -21,6 +21,7 @@ members = [
     "crates/agentctl-apiserver",
     "crates/agentctl-gateway",
     "crates/agentctl-modelgateway",
+    "crates/agentctl-mcpgateway",
     "crates/agentctl-admission",
     "crates/agentctl-telemetry",
     "crates/agentctl-coordination",

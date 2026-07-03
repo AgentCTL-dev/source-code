@@ -133,6 +133,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentctl-mcpgateway"
+version = "0.1.0"
+dependencies = [
+ "agent-api",
+ "agentctl-telemetry",
+ "axum",
+ "axum-server",
+ "k8s-openapi",
+ "kube",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentctl-modelgateway"
 version = "0.1.0"
 dependencies = [
