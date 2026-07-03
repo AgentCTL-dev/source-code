@@ -542,6 +542,119 @@ pub struct ModelPoolStatus {
     pub used_tokens: Option<i64>,
 }
 
+// ===========================================================================
+// MCPServerSet
+// ===========================================================================
+
+/// A reusable, namespaced bundle of MCP tool servers an `Agent`/`AgentFleet`
+/// binds via `spec.mcpServerSetRefs` (RFC 0004 §5 / RFC 0019). Agents are
+/// **networkless-of-credentials**: they never hold a tool server's token. The
+/// control plane brokers every remote MCP server through a credential-injecting,
+/// attesting, policy-enforcing proxy (the `MCPGateway`, the tool-plane analog of
+/// the `ModelGateway`) configured by this CRD. Each server names its remote
+/// endpoint, its auth (a `Secret`-backed token held at the gateway, never the
+/// pod), its per-tool trifecta tags, and an optional call budget.
+#[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[kube(
+    group = "agents.x-k8s.io",
+    version = "v1alpha1",
+    kind = "MCPServerSet",
+    namespaced,
+    status = "MCPServerSetStatus",
+    shortname = "mcpset",
+    printcolumn = r#"{"name":"Servers","type":"integer","jsonPath":".status.serverCount"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
+#[serde(rename_all = "camelCase")]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.servers.all(s, s.name != '')",
+        "message": "every server needs a non-empty name"
+    },
+    {
+        "rule": "self.servers.all(s, s.endpoint.startsWith('https://') || s.endpoint.startsWith('http://'))",
+        "message": "each server endpoint must be an http(s):// URL"
+    }
+]))]
+pub struct MCPServerSetSpec {
+    /// The MCP tool servers this set bundles.
+    pub servers: Vec<McpServer>,
+}
+
+/// One remote MCP tool server, brokered by the MCPGateway.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServer {
+    /// Server name — the key an `Agent` references and the gateway facade path
+    /// segment (`/s/<name>`). Unique within the resolved `Agent` union.
+    pub name: String,
+
+    /// The remote MCP server URL (Streamable HTTP, RFC 0004 transport). The
+    /// AGENT never dials this — it dials the gateway, which dials this.
+    pub endpoint: String,
+
+    /// How the gateway authenticates to the remote server. The credential lives
+    /// in a `Secret` the gateway reads; it is NEVER placed on the agent pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<McpAuth>,
+
+    /// Per-tool trifecta capability tags (RFC 0012 §3.1) the operator declares
+    /// for the Rule-of-Two check. A bare list is shorthand for the `*` glob.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+
+    /// Optional per-server call budget (enforced by the gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
+}
+
+/// How the MCPGateway authenticates to a remote MCP server. v1 ships the
+/// `staticToken` bearer (a long-lived credential held off-pod at the gateway);
+/// the OAuth client-credentials / EMA tiers (RFC 0019 §6/§7) extend this enum.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAuth {
+    /// Auth mode. `none` (unauthenticated server) | `staticToken` (a bearer the
+    /// gateway attaches upstream).
+    #[serde(default)]
+    pub mode: McpAuthMode,
+
+    /// The bearer credential for `staticToken` mode: a `Secret` key the gateway
+    /// reads and attaches as `Authorization: Bearer <value>` on the upstream
+    /// hop. Required iff `mode == staticToken`. NEVER placed on the agent pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret_ref: Option<SecretKeyRef>,
+
+    /// Header name to carry the token (default `Authorization` as
+    /// `Bearer <value>`). A custom header (e.g. `X-API-Key`) sends the raw value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+}
+
+/// The MCP-server auth mode enum.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum McpAuthMode {
+    /// The remote server needs no credential.
+    #[default]
+    None,
+    /// A `Secret`-backed bearer the gateway attaches upstream (off-pod).
+    StaticToken,
+}
+
+/// `MCPServerSet.status` — resolution + per-server broker health.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MCPServerSetStatus {
+    /// Number of servers in the set (printer column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_count: Option<i64>,
+    /// The union of trifecta tags across all servers (informational; the
+    /// Agent-level union is the gate — RFC 0004 §5.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tag_union: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +716,59 @@ mod tests {
             .as_ref()
             .and_then(|s| s.status.as_ref())
             .is_some());
+    }
+
+    #[test]
+    fn mcpserverset_crd_generates() {
+        let crd = MCPServerSet::crd();
+        assert_eq!(crd.spec.group, "agents.x-k8s.io");
+        assert_eq!(crd.spec.names.kind, "MCPServerSet");
+        assert!(crd
+            .spec
+            .names
+            .short_names
+            .as_ref()
+            .unwrap()
+            .contains(&"mcpset".to_string()));
+        let v = &crd.spec.versions[0];
+        assert!(v
+            .subresources
+            .as_ref()
+            .and_then(|s| s.status.as_ref())
+            .is_some());
+    }
+
+    #[test]
+    fn mcpserverset_roundtrips_with_static_token_auth() {
+        // A server with a Secret-backed bearer + tags parses back to the same spec.
+        let spec = MCPServerSetSpec {
+            servers: vec![McpServer {
+                name: "github".into(),
+                endpoint: "https://mcp.example.com/mcp".into(),
+                auth: Some(McpAuth {
+                    mode: McpAuthMode::StaticToken,
+                    token_secret_ref: Some(SecretKeyRef {
+                        name: "gh-mcp-token".into(),
+                        key: "token".into(),
+                    }),
+                    header: None,
+                }),
+                tags: vec!["untrusted_input".into(), "egress".into()],
+                budget: Some(Budget { max_tokens: 1000 }),
+            }],
+        };
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["servers"][0]["auth"]["mode"], "staticToken");
+        assert_eq!(
+            json["servers"][0]["auth"]["tokenSecretRef"]["name"],
+            "gh-mcp-token"
+        );
+        let back: MCPServerSetSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.servers[0].name, "github");
+        assert_eq!(
+            back.servers[0].auth.as_ref().unwrap().mode,
+            McpAuthMode::StaticToken
+        );
     }
 
     #[test]
