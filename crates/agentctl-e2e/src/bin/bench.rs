@@ -4,8 +4,8 @@
 //! Sweeps (the plan's full set):
 //!   * **(a) density ceiling** — sweep N idle agentd pods until `Pending` and record
 //!     max-Running + the binding resource (host-bound: a *trend*, not a capacity claim).
-//!   * **(b) per-agent overhead** — agentd pod mem/CPU, the constant node-agent
-//!     per-node cost, and the marginal control-plane Δ per agent.
+//!   * **(b) per-agent overhead** — agentd pod mem/CPU and the marginal
+//!     control-plane Δ per agent (contract 2.0 retired the node-agent DaemonSet).
 //!   * **(c) CP scaling trends** — operator reconcile p50/p95 from the histogram +
 //!     control-plane CPU/mem vs N.
 //!   * **(d) coordination throughput** — a concurrent tokio load-gen on `/mcp`
@@ -205,8 +205,8 @@ fn binding_resource(_ctx: &Ctx) -> String {
 // (b) per-agent overhead
 // ===========================================================================
 
-/// The headline overhead numbers: one agentd pod's mem/CPU, the node-agent per-node
-/// cost, and the marginal control-plane Δ per agent (CP usage at N minus at 0, ÷ N).
+/// The headline overhead numbers: one agentd pod's mem/CPU and the marginal
+/// control-plane Δ per agent (CP usage at N minus at 0, ÷ N).
 async fn sweep_overhead(ctx: &Ctx, rd: &results::ResultsDir) -> Result<Value> {
     let name = "e2e-bench-overhead";
     let probe_n = 10u32;
@@ -230,14 +230,9 @@ async fn sweep_overhead(ctx: &Ctx, rd: &results::ResultsDir) -> Result<Value> {
     let agent_cpu = mean(pods.iter().map(|p| p.cpu_millicores));
     let agent_mem = mean(pods.iter().map(|p| p.mem_mib));
 
-    // Node-agent per-node constant cost.
-    let na: Vec<shell::TopRow> = shell::top_pods(&ctx.cfg.system_ns)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p| p.name.contains("node-agent"))
-        .collect();
-    let na_cpu = mean(na.iter().map(|p| p.cpu_millicores));
-    let na_mem = mean(na.iter().map(|p| p.mem_mib));
+    // Contract 2.0 retired the node-agent DaemonSet, so there is no per-node
+    // constant cost — the only per-agent footprint is the agentd pod itself plus
+    // the marginal control-plane delta.
 
     let n = probe_n.max(1) as f64;
     let cp_cpu_delta = (cpn.0 - cp0.0).max(0.0) / n;
@@ -247,7 +242,6 @@ async fn sweep_overhead(ctx: &Ctx, rd: &results::ResultsDir) -> Result<Value> {
 
     let rows = vec![
         vec!["agentd-pod".into(), fmt2(agent_cpu), fmt2(agent_mem)],
-        vec!["node-agent".into(), fmt2(na_cpu), fmt2(na_mem)],
         vec![
             "control-plane-marginal".into(),
             fmt2(cp_cpu_delta),
@@ -262,7 +256,6 @@ async fn sweep_overhead(ctx: &Ctx, rd: &results::ResultsDir) -> Result<Value> {
 
     Ok(json!({
         "agentd_pod": { "cpu_millicores": agent_cpu, "mem_mib": agent_mem },
-        "node_agent": { "cpu_millicores": na_cpu, "mem_mib": na_mem },
         "control_plane_marginal_per_agent": { "cpu_millicores": cp_cpu_delta, "mem_mib": cp_mem_delta },
         "probe_n": probe_n,
     }))
@@ -615,7 +608,7 @@ fn scale_idle(ctx: &Ctx, name: &str, replicas: u32) -> Result<()> {
          \x20       - name: agentd\n\
          \x20         image: {image}\n\
          \x20         imagePullPolicy: IfNotPresent\n\
-         \x20         args: [\"--mode\",\"reactive\",\"--instruction\",\"idle\",\"--subscribe\",\"file:///tmp/inbox\",\"--intelligence\",\"unix:/tmp/llm.sock\"]\n",
+         \x20         args: [\"--mode\",\"reactive\",\"--instruction\",\"idle\",\"--subscribe\",\"file:///tmp/inbox\",\"--intelligence\",\"https://agentctl-modelgateway.agentctl-system.svc.cluster.local./\"]\n",
         name = name,
         ns = ctx.cfg.ns,
         replicas = replicas,
@@ -821,7 +814,6 @@ fn render_markdown(summary: &Value, rd: &results::ResultsDir) -> String {
         s.push_str("## Per-agent overhead (headline)\n\n");
         s.push_str("| Component | CPU (millicores) | Memory (MiB) |\n|---|---|---|\n");
         push_overhead_row(&mut s, "agentd pod", b.get("agentd_pod"));
-        push_overhead_row(&mut s, "node-agent (per node)", b.get("node_agent"));
         push_overhead_row(
             &mut s,
             "control-plane (marginal / agent)",

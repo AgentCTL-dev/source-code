@@ -37,10 +37,11 @@ for ov in "$@"; do
   VALUE_FLAGS+=(-f "$f")
 done
 
-# ---- namespace (privileged PSA: node-agent needs hostPath + hostPID) -----
-log "ensuring namespace $NAMESPACE (privileged PodSecurity)"
+# ---- namespace (baseline PSA — contract 2.0 retired the privileged node-agent,
+# so no control-plane component needs hostPath/hostPID/privileged) ----------
+log "ensuring namespace $NAMESPACE (baseline PodSecurity)"
 kubectl get ns "$NAMESPACE" >/dev/null 2>&1 || kubectl create ns "$NAMESPACE"
-kubectl label ns "$NAMESPACE" pod-security.kubernetes.io/enforce=privileged --overwrite
+kubectl label ns "$NAMESPACE" pod-security.kubernetes.io/enforce=baseline --overwrite
 
 # ---- helm upgrade --install ----------------------------------------------
 log "helm upgrade --install $RELEASE -> $NAMESPACE"

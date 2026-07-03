@@ -42,7 +42,7 @@ const SCALE_TIMEOUT: Duration = Duration::from_secs(240);
 /// Where the mock provider + ModelPool fixtures live, relative to the repo root
 /// (override with `AGENTCTL_EXAMPLES_DIR`). Defaults to `e2e/manifests`, whose
 /// `mock-provider.yaml` answers in the OpenAI `chat/completions` envelope the real
-/// agentd parses (so a routed-infer once agent COMPLETES), while still carrying
+/// agentd parses (so a once agent COMPLETES), while still carrying
 /// `usage.total_tokens` for the gateway to meter/budget. Point it at
 /// `deploy/examples` for the metering-only (non-OpenAI) mock.
 fn examples_dir() -> String {
@@ -249,17 +249,12 @@ fn scrape(ctx: &Ctx, svc: &str, port: u16, scheme: &str) -> Result<prom::Metrics
     prom::scrape_proxy(&ctx.cfg.system_ns, svc, port, scheme, "/metrics")
 }
 
-/// The annotation that opts an Agent/Fleet onto the routed-infer path: the
-/// operator wires `AGENT_INTELLIGENCE=unix:/run/agentctl/infer/infer.sock` and
-/// mounts the node-agent infer socket (read-only). agentd REQUIRES an
-/// intelligence endpoint to start in EVERY mode (`once` infers immediately; a
-/// reactive/shard daemon only dials it when it does work, but still validates the
-/// endpoint at boot — without it agentd exits 2/USAGE), so every agentd Agent the
-/// suite renders carries it. See `crates/agentctl-operator/src/render.rs`.
-const ROUTED_INFER_ANNOTATION: &str = "agentctl.dev/routed-infer";
-
-/// Build an agentd-backed `Agent` CR in the scenario namespace. Always on the
-/// routed-infer path so the operator wires a valid `AGENT_INTELLIGENCE` socket.
+/// Build an agentd-backed `Agent` CR in the scenario namespace. Contract 2.0: the
+/// operator ALWAYS renders `AGENT_INTELLIGENCE=https://<modelgateway>…` keyless and
+/// mounts the per-namespace CA — there is no routed-infer annotation and no node-agent
+/// socket. agentd validates the intelligence endpoint at boot in every mode (`once`
+/// infers immediately; a reactive/shard daemon dials it only when it does work), so a
+/// bound `modelPool` is enough. See `crates/agentctl-operator/src/render.rs`.
 fn agentd_agent(ctx: &Ctx, name: &str, mode: Mode, instruction: &str) -> Agent {
     let mut a = Agent::new(
         name,
@@ -271,10 +266,6 @@ fn agentd_agent(ctx: &Ctx, name: &str, mode: Mode, instruction: &str) -> Agent {
         },
     );
     a.metadata.namespace = Some(ctx.cfg.ns.clone());
-    a.metadata
-        .annotations
-        .get_or_insert_with(Default::default)
-        .insert(ROUTED_INFER_ANNOTATION.to_string(), "true".to_string());
     a
 }
 
@@ -384,8 +375,9 @@ fn expect_denied(res: Result<String>) -> Result<()> {
 // ===========================================================================
 
 /// `mode: once` → the operator renders a Job; the agent does its work through the
-/// secretless routed-infer path (to the headroom mock pool), runs to a terminal
-/// status, and the pod exits with a clean, contract-known `complete` exit code.
+/// secretless keyless-dial path (to the headroom mock pool via the ModelGateway),
+/// runs to a terminal status, and the pod exits with a clean, contract-known
+/// `complete` exit code.
 async fn prov_once_ready_exit(ctx: &Ctx) -> Result<Outcome> {
     // agentd once-mode REQUIRES intelligence and infers immediately; give it the
     // headroom mock pool so the run reaches a clean completion (exit 0).
@@ -417,8 +409,8 @@ async fn prov_once_ready_exit(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// `mode: reactive` → the node-agent discovers the pod and reads `agent://capabilities`;
-/// the live manifest must validate against the contract (`manifest.schema.json`).
+/// `mode: reactive` → the live manifest read from the running agent (via `kubectl exec
+/// --capabilities`) must validate against the contract (`manifest.schema.json`).
 async fn prov_reactive_capabilities(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-prov-reactive";
     let mut agent = agentd_agent(ctx, name, Mode::Reactive, "serve the management profile");
@@ -551,97 +543,24 @@ async fn mgmt_rbac_403(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// pause + resume via the node-agent bridge (data-plane only — these mgmt-profile
-/// tools are NOT aggregated subresources, per Finding C).
+/// pause + resume via the aggregated APIServer subresources. Contract 2.0: these are
+/// real aggregated verbs (the apiserver discovery adds `agents/pause` + `agents/resume`),
+/// SAR-gated and forwarded DIRECT to the agent pod as `a2a.Pause`/`a2a.Resume` over
+/// mTLS — the v1 node-agent bridge is retired. Same round-trip as drain/lame-duck/cancel.
 async fn mgmt_pause_resume(ctx: &Ctx) -> Result<Outcome> {
-    let name = "e2e-pause";
-    let mut agent = agentd_agent(ctx, name, Mode::Reactive, "serve the management profile");
-    agent.spec.subscribe = vec!["queue://noop".to_string()];
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
-    let pod = wait_for_first_pod(ctx, name).await?;
-    kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
-
-    // pause/resume ride the node-agent CONTROL surface, which is mTLS on :8443.
-    // The harness holds no client cert (it is not the apiserver/gateway), so a
-    // plaintext port-forward POST is rejected at the TLS layer ("invalid HTTP
-    // version"). These are data-plane-only tools (Finding C) verified out-of-band;
-    // without provisioning a client cert into the harness they are skipped here.
-    let pause = node_agent_verb(ctx, name, "pause").await;
-    if pause.is_ok() {
-        node_agent_verb(ctx, name, "resume").await.ok();
+    let pause = run_mgmt_verb(ctx, "pause").await?;
+    if matches!(pause, Outcome::Skipped(_)) {
+        return Ok(pause);
     }
-    cleanup_agent(ctx, name).await?;
-    match pause {
-        Ok(()) => pass(),
-        Err(e) => skip(format!(
-            "node-agent control surface is mTLS on :8443 and the harness holds no client cert \
-             (data-plane-only pause/resume per Finding C; verified out-of-band): {e}"
-        )),
-    }
-}
-
-/// Resolve `Agent` → pod uid → node-agent on the same node, then POST a mgmt verb to
-/// the node-agent bridge over a port-forward.
-///
-/// NOTE: the node-agent control surface is mTLS on :8443; the e2e install overlay
-/// provisions the data-plane probe path for this (otherwise the POST is rejected).
-/// This is intentionally documented as a data-plane-only path (Finding C).
-async fn node_agent_verb(ctx: &Ctx, agent: &str, verb: &str) -> Result<()> {
-    let ns = &ctx.cfg.ns;
-    let label = agent_label(agent);
-    let uid = shell::kubectl(&[
-        "get",
-        "pods",
-        "-n",
-        ns,
-        "-l",
-        &label,
-        "-o",
-        "jsonpath={.items[0].metadata.uid}",
-    ])?;
-    let uid = uid.trim().to_string();
-    let node = shell::kubectl(&[
-        "get",
-        "pods",
-        "-n",
-        ns,
-        "-l",
-        &label,
-        "-o",
-        "jsonpath={.items[0].spec.nodeName}",
-    ])?;
-    let na_pod = shell::kubectl(&[
-        "get",
-        "pods",
-        "-n",
-        &ctx.cfg.system_ns,
-        "-l",
-        "app.kubernetes.io/name=agentctl-node-agent",
-        "--field-selector",
-        &format!("spec.nodeName={}", node.trim()),
-        "-o",
-        "jsonpath={.items[0].metadata.name}",
-    ])?;
-    let pf = shell::PortForward::pod(&ctx.cfg.system_ns, na_pod.trim(), 8443, 18443)?;
-    let url = format!("{}/v1/agents/{}/{}", pf.base_url(), uid, verb);
-    let resp = ctx
-        .http
-        .post(&url)
-        .send()
-        .await
-        .with_context(|| format!("node-agent {verb} POST {url}"))?;
-    if !resp.status().is_success() {
-        bail!("node-agent {verb} returned {}", resp.status());
-    }
-    Ok(())
+    run_mgmt_verb(ctx, "resume").await
 }
 
 // ===========================================================================
 // Intelligence (secretless infer + budgets)
 // ===========================================================================
 
-/// Once-mode inference through the routed-infer path: the ModelGateway meters tokens
-/// + requests and injects the pool credential (the agent never holds a key).
+/// Once-mode inference (keyless dial + source-IP attest): the ModelGateway meters
+/// tokens + requests and injects the pool credential (the agent never holds a key).
 async fn intel_once_infer(ctx: &Ctx) -> Result<Outcome> {
     let dir = examples_dir();
     apply_mock_provider(ctx, &dir)?;
@@ -686,11 +605,12 @@ async fn intel_once_infer(ctx: &Ctx) -> Result<Outcome> {
 /// budget with a budget 429.
 ///
 /// Driven from an IN-CLUSTER probe pod, not a harness port-forward: with
-/// ModelGateway attest ON (the e2e base — required by routed-infer), the gateway
-/// trusts only a real pod IP (Direct) or the node-agent forwarder, and a
-/// port-forwarded request attests as neither. A curl pod in `ns` has a real pod
-/// IP, so it attests as `Direct(ns)`; it loops `/v1/infer` POSTs (selecting the
-/// pool via `X-Model-Pool`) until the gateway returns a budget 429. The pool's
+/// ModelGateway attest ON (the e2e base — contract 2.0), the gateway derives the
+/// caller's identity from its SOURCE IP (a kube pod lookup), and a port-forwarded
+/// request owns no pod so it fails closed. A curl pod in `ns` has a real pod IP, so
+/// it attests as `Direct(ns)`; it loops `/v1/infer` POSTs (selecting the pool via
+/// `X-Model-Pool`) on the modelgateway's plaintext :8080 (the same app serves the
+/// TLS :8443 the agent dials) until the gateway returns a budget 429. The pool's
 /// token usage is cumulative, so we assert the rejection COUNTER increased rather
 /// than a fixed absolute (robust to usage already on the pool from intel-infer).
 async fn intel_budget_429(ctx: &Ctx) -> Result<Outcome> {
@@ -1129,7 +1049,9 @@ async fn a2a_card_jws(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// `message/send` round-trips a JSON-RPC call through the gateway to the agent.
+/// `SendMessage` round-trips a JSON-RPC call through the gateway to the agent.
+/// Contract 2.0: bare PascalCase method + proto3-JSON message; the result is the
+/// `SendMessageResponse` `{"task": …}` envelope (the gateway normalizes it).
 async fn a2a_message_send(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-a2a-send";
     let agent = a2a_agent(ctx, name);
@@ -1144,8 +1066,8 @@ async fn a2a_message_send(ctx: &Ctx) -> Result<Outcome> {
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "message/send",
-            "params": { "message": { "role": "user", "parts": [{ "kind": "text", "text": "ping" }] } },
+            "method": "SendMessage",
+            "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-1", "parts": [{ "text": "ping" }] } },
         }))
         .send()
         .await?
@@ -1153,17 +1075,17 @@ async fn a2a_message_send(ctx: &Ctx) -> Result<Outcome> {
         .json()
         .await?;
     if resp.get("result").is_none() && resp.get("error").is_some() {
-        bail!("message/send returned a JSON-RPC error: {}", resp["error"]);
+        bail!("SendMessage returned a JSON-RPC error: {}", resp["error"]);
     }
     if resp.get("result").is_none() {
-        bail!("message/send returned no result");
+        bail!("SendMessage returned no result");
     }
 
     cleanup_agent(ctx, name).await?;
     pass()
 }
 
-/// `message/stream` returns an SSE stream the gateway proxies from the agent.
+/// `SendStreamingMessage` returns an SSE stream the gateway proxies from the agent.
 async fn a2a_message_stream(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-a2a-stream";
     let agent = a2a_agent(ctx, name);
@@ -1185,8 +1107,8 @@ async fn a2a_message_stream(ctx: &Ctx) -> Result<Outcome> {
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "message/stream",
-            "params": { "message": { "role": "user", "parts": [{ "kind": "text", "text": "ping" }] } },
+            "method": "SendStreamingMessage",
+            "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-1", "parts": [{ "text": "ping" }] } },
         }))
         .send()
         .await?
@@ -1206,7 +1128,7 @@ async fn a2a_message_stream(ctx: &Ctx) -> Result<Outcome> {
     drop(resp); // close the streaming connection so the agent run is released
     if !ok {
         bail!(
-            "message/stream produced no SSE data frames within 20s (read {} bytes)",
+            "SendStreamingMessage produced no SSE data frames within 20s (read {} bytes)",
             buf.len()
         );
     }
@@ -1258,12 +1180,11 @@ async fn conf_metrics_registry(ctx: &Ctx) -> Result<Outcome> {
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
-    // Scrape the agent's own /metrics (its metrics surface). agentd serves /metrics
-    // over HTTP only when `--metrics-addr` / `AGENTD_METRICS_ADDR` is set, but the
-    // operator does NOT translate `surfaces.metrics=true` into that flag + a
-    // container port, so nothing listens on :9090 (the connection closes). The
-    // registry oracle itself is exercised by the crate's contract unit tests; the
-    // live scrape is skipped until the operator wires the agent metrics surface.
+    // Scrape the agent's own /metrics. Contract 2.0: the operator renders
+    // `AGENT_METRICS_ADDR=0.0.0.0:9090` + the container port unconditionally (the
+    // /readyz + direct-scrape listener — the pod is network-attached, no proxy), so
+    // the agent serves :9090 and this scrape SUCCEEDS. (A skip remains as a
+    // defensive fallback only if the listener is somehow absent.)
     let pf = shell::PortForward::pod(&ctx.cfg.ns, &pod, 9090, 19090)?;
     let scraped = prom::scrape_url(&ctx.http, &format!("{}/metrics", pf.base_url())).await;
     drop(pf);
@@ -1276,9 +1197,8 @@ async fn conf_metrics_registry(ctx: &Ctx) -> Result<Outcome> {
             pass()
         }
         Err(e) => skip(format!(
-            "operator does not wire agentd's opt-in HTTP /metrics surface \
-             (--metrics-addr + containerPort) for surfaces.metrics=true, so the agent serves no \
-             scrape port (operator gap, RFC 0010): {e}"
+            "agent /metrics on :9090 was unreachable (contract 2.0 wires it \
+             unconditionally, so this is unexpected): {e}"
         )),
     };
     cleanup_agent(ctx, name).await?;
@@ -1303,8 +1223,8 @@ async fn sec_oidc(ctx: &Ctx) -> Result<Outcome> {
 
     let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18097)?;
     let url = format!("{}/agents/{}/{}", pf.base_url(), ctx.cfg.ns, name);
-    let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send",
-        "params": { "message": { "role": "user", "parts": [{ "kind": "text", "text": "x" }] } } });
+    let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+        "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-1", "parts": [{ "text": "x" }] } } });
 
     // Deny: no bearer.
     let deny = ctx.http.post(&url).json(&rpc).send().await?;
@@ -1356,7 +1276,7 @@ async fn sec_trusted_proxy(ctx: &Ctx) -> Result<Outcome> {
         .http
         .post(&url)
         .header("x-forwarded-user", "attacker@evil.example")
-        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {} }))
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": { "id": "t1" } }))
         .send()
         .await?;
     let m = scrape(ctx, SVC_GATEWAY, PORT_HTTP, "http")?;
@@ -1368,8 +1288,10 @@ async fn sec_trusted_proxy(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// ModelGateway attest anti-spoof: a self-asserted identity that does not match the
-/// kernel-attested peer is counted as a spoof and rejected.
+/// ModelGateway attest anti-spoof (contract 2.0): identity is the caller's SOURCE
+/// IP, never a header. A caller whose source IP owns no pod (and who self-asserts an
+/// identity header anyway) is counted as a spoof and rejected — the header does not
+/// help.
 async fn sec_mg_attest(ctx: &Ctx) -> Result<Outcome> {
     apply_overlay(ctx, "sec-mg-attest")?;
     let _g = OverlayGuard { ctx };
@@ -1379,8 +1301,9 @@ async fn sec_mg_attest(ctx: &Ctx) -> Result<Outcome> {
     apply_example(&dir, "modelpool-mock.yaml")?;
 
     let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_MODELGATEWAY, PORT_HTTP, 18099)?;
-    // The harness is not a pod, so its peer cannot be attested; a self-asserted
-    // identity header is therefore a spoof and must be rejected.
+    // The harness reaches the gateway via a port-forward, so its source IP owns no
+    // tenant pod and cannot be attested; the self-asserted identity headers are
+    // ignored and the unattestable request is rejected (a spoof).
     let resp = ctx
         .http
         .post(format!("{}/v1/infer", pf.base_url()))
@@ -1606,10 +1529,6 @@ fn claim_fleet(ctx: &Ctx, name: &str) -> AgentFleet {
         },
     );
     f.metadata.namespace = Some(ctx.cfg.ns.clone());
-    f.metadata
-        .annotations
-        .get_or_insert_with(Default::default)
-        .insert(ROUTED_INFER_ANNOTATION.to_string(), "true".to_string());
     f
 }
 
@@ -1635,10 +1554,6 @@ fn shard_fleet(ctx: &Ctx, name: &str, n: u32) -> AgentFleet {
         },
     );
     f.metadata.namespace = Some(ctx.cfg.ns.clone());
-    f.metadata
-        .annotations
-        .get_or_insert_with(Default::default)
-        .insert(ROUTED_INFER_ANNOTATION.to_string(), "true".to_string());
     f
 }
 

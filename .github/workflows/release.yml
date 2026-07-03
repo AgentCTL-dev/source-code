@@ -30,9 +30,9 @@ jobs:
           - component: operator
             crate: agentctl-operator
             bin: agentctl-operator
-          - component: node-agent
-            crate: agentctl-node-agent
-            bin: node-agent
+          - component: mcpgateway
+            crate: agentctl-mcpgateway
+            bin: agentctl-mcpgateway
           - component: apiserver
             crate: agentctl-apiserver
             bin: agentctl-apiserver

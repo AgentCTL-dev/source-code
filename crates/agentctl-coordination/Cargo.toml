@@ -12,15 +12,9 @@ repository.workspace = true
 name = "agentctl-coordination"
 path = "src/main.rs"
 
-# stdio<->HTTP MCP bridge (agentctl RFC 0011 §3.2 / plan Phase 4 Finding B):
-# agentd spawns an MCP server as a CHILD PROCESS and speaks JSON-RPC as NDJSON over
-# stdin/stdout, but this coordination server serves work.* over HTTP. This tiny
-# bridge reads NDJSON requests from stdin, POSTs each to the coordination /mcp
-# endpoint, and writes each HTTP JSON response back to stdout as one NDJSON line,
-# so the real agentd↔coordination claim loop runs unchanged.
-[[bin]]
-name = "work-mcp-bridge"
-path = "src/bin/work-mcp-bridge.rs"
+# The v1 stdio<->HTTP `work-mcp-bridge` sidecar is RETIRED in contract 2.0: agentd
+# speaks HTTPS MCP natively (no spawned stdio MCP child), so claim-mode agents dial
+# the coordination server's /mcp directly. The bin + its Dockerfile are removed.
 
 [dependencies]
 # axum HTTP surface — same version the gateway/node-agent serve on.

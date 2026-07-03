@@ -1929,7 +1929,13 @@ dependencies = [
 name = "mock-agent"
 version = "0.1.0"
 dependencies = [
+ "agent-contract-client",
+ "axum",
+ "axum-server",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -7,16 +7,15 @@
 #                      with SKIP_BRINGUP=1 against a real cluster; install.sh /
 #                      the chart's image.registry must then point at REGISTRY).
 #
-# Images produced:
-#   agentd:1.0.0                 the real reference agent (built from
-#                                $AGENTD_SRC/Dockerfile, or pulled from
-#                                ghcr.io/agentd-dev/agentd:1.0.0 if AGENTD_PULL=1
-#                                or the source tree is absent).
-#   mock-agent:dev               conformant-agent stand-in (mgmt profile).
+# Images produced (contract 2.0):
+#   agentd:2.x                   the real reference agent (built from
+#                                $AGENTD_SRC/Dockerfile — serves mTLS HTTPS /mcp,
+#                                dials gateways keyless). No 2.x tag is published on
+#                                GHCR yet (RFC 0021 §14), so this builds from source.
+#   mock-agent:dev               conformant-agent stand-in (mTLS HTTPS self-MCP).
 #   agentctl/<comp>:dev          the 8 control-plane components, each from
-#                                deploy/<comp>/Dockerfile.
-#   agentctl/work-mcp-bridge:dev stdio->HTTP work.* bridge sidecar (built only
-#                                when its bin source exists; see Finding B).
+#                                deploy/<comp>/Dockerfile (v2: mcpgateway, not the
+#                                retired node-agent).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,12 +25,13 @@ CLUSTER="${CLUSTER:-agentctl-e2e}"
 TAG="${TAG:-dev}"
 REGISTRY="${REGISTRY:-}"                       # empty = kind load; set = push
 AGENTD_SRC="${AGENTD_SRC:-/root/agentd-dev/source-code}"
-AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:1.0.0}"
-AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:1.0.0}"
+AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:2.x}"
+AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:2.x}"
 
 # The 8 control-plane components (component == deploy/<comp>/Dockerfile dir),
-# matching the release.yml build matrix.
-COMPONENTS=(operator node-agent apiserver gateway modelgateway admission coordination scaler)
+# matching the release.yml build matrix. Contract 2.0: the node-agent is retired;
+# the mcpgateway is the tool-plane broker.
+COMPONENTS=(operator mcpgateway apiserver gateway modelgateway admission coordination scaler)
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -56,7 +56,7 @@ publish() {
   fi
 }
 
-# ---- agentd:1.0.0 --------------------------------------------------------
+# ---- agentd (contract 2.0) -----------------------------------------------
 if [ -n "${AGENTD_PULL:-}" ] || [ ! -f "$AGENTD_SRC/Dockerfile" ]; then
   log "pulling $AGENTD_GHCR -> $AGENTD_IMAGE"
   docker pull "$AGENTD_GHCR"
@@ -80,16 +80,8 @@ for comp in "${COMPONENTS[@]}"; do
   publish "agentctl/$comp:$TAG"
 done
 
-# ---- work-mcp-bridge:dev (Finding B) -------------------------------------
-# The stdio->HTTP bridge binary is a NEW crate bin (planned at
-# crates/agentctl-coordination/src/bin/work-mcp-bridge.rs). Build its image only
-# once that source lands so this script stays green before the bin exists.
-BRIDGE_SRC="$REPO_ROOT/crates/agentctl-coordination/src/bin/work-mcp-bridge.rs"
-if [ -f "$BRIDGE_SRC" ]; then
-  build "agentctl/work-mcp-bridge:$TAG" "$SCRIPT_DIR/work-mcp-bridge.Dockerfile" "$REPO_ROOT"
-  publish "agentctl/work-mcp-bridge:$TAG"
-else
-  log "skipping work-mcp-bridge image — $BRIDGE_SRC not present yet"
-fi
+# The v1 stdio->HTTP work.* bridge is RETIRED in contract 2.0 — agentd speaks
+# HTTPS MCP natively (RFC 0021 §9), so claim-mode agents dial the coordination
+# server's /mcp directly (no bridge sidecar, no hostPath socket).
 
 log "images ready"

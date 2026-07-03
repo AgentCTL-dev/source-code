@@ -30,15 +30,16 @@ pub mod prom;
 pub mod results;
 pub mod shell;
 
-/// Default reference agent image — agentd v1.0.0 (the plan's density subject).
+/// Default reference agent image — agentd 2.x (contract 2.0; the density subject).
 ///
-/// This is the LOCAL tag `e2e/images.sh` builds (from `/root/agentd-dev`) or
-/// re-tags the GHCR image to, and `kind load`s, and that every `e2e/manifests/*`
-/// hard-codes. It is the full-featured build (`build_features`: serve-mcp, a2a,
-/// shard/cluster, cron, metrics, …) the a2a + shard scenarios need — the public
-/// `ghcr.io/agentd-dev/agentd:1.0.0` is a minimal build without those surfaces.
-/// Override `AGENTD_IMAGE` to a registry-qualified ref for a real cluster.
-pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:1.0.0";
+/// This is the LOCAL tag `e2e/images.sh` builds (from `/root/agentd-dev`) and
+/// `kind load`s, and that every `e2e/manifests/*` hard-codes. It is a
+/// contract-2.0 build that **serves mTLS HTTPS `/mcp`** and dials the gateways
+/// keyless (`build_features`: serve-mcp, serve-https, a2a, shard/cluster, cron,
+/// metrics, …). No tagged `ghcr.io/agentd-dev/agentd:2.x` is published yet
+/// (RFC 0021 §14), so the e2e builds it from `/root/agentd-dev`. Override
+/// `AGENTD_IMAGE` to a registry-qualified ref for a real cluster.
+pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:2.x";
 /// Default control-plane (Helm release) namespace.
 pub const DEFAULT_SYSTEM_NS: &str = "agentctl-system";
 /// Default workload namespace the scenarios apply CRs into.

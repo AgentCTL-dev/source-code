@@ -1,26 +1,24 @@
-# e2e: a once-mode agentd Agent on the ROUTED-INFER path (intelligence scenario).
+# e2e: a once-mode agentd Agent that reaches intelligence (intelligence scenario).
 #
-# Why these choices (per the plan's Finding A):
+# Why these choices (contract 2.0):
 #   - mode: once + an instruction — agentd only reaches intelligence when it does
 #     work; an idle reactive agent never infers. once-mode drives exactly the
 #     inference the ModelGateway meters/budgets.
-#   - annotation agentctl.dev/routed-infer: "true" — the operator wires
-#     AGENT_INTELLIGENCE=unix:/run/agentctl/infer/infer.sock and mounts the
-#     node-agent infer socket dir read-only (needs nodeAgent.inferProxy.enabled,
-#     set in values/e2e-base.yaml). No model key ever lands on the agent.
-#   - modelPool: mockpool — binds the ModelPool from deploy/examples/modelpool-mock.yaml
-#     (apply that + deploy/examples/mock-provider.yaml first). The pool caps the
-#     budget at 150 tokens (mock returns 100/call) so the 3rd call 429s.
-#   - image: agentd:1.0.0 — the real reference agent (images.sh builds/loads it).
+#   - No routed-infer annotation: contract 2.0 retired the node-agent infer-proxy.
+#     The operator ALWAYS renders AGENT_INTELLIGENCE=https://<modelgateway>… keyless
+#     and mounts the per-namespace CA; the ModelGateway attests the caller by
+#     SOURCE IP and injects the ModelPool credential (no key on the agent).
+#   - modelPool: mockpool — binds the ModelPool from modelpool-mock.yaml (apply that
+#     + mock-provider.yaml first). The pool caps the budget at 150 tokens (mock
+#     returns 100/call) so the 3rd call 429s.
+#   - image: agentd:2.x — the real contract-2.0 reference agent (images.sh builds/loads it).
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: Agent
 metadata:
   name: intel-once
   namespace: default
-  annotations:
-    agentctl.dev/routed-infer: "true"
 spec:
   mode: once
-  image: agentd:1.0.0
+  image: agentd:2.x
   instruction: "Summarize the input in one sentence."
   modelPool: mockpool
