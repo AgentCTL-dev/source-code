@@ -319,9 +319,21 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
                 format!("{kind} workload applied"),
             )
             .await;
+            // Ready reflects the single pod's OBSERVED readiness (a reactive/loop
+            // Deployment); a once/workflow Job keeps the applied condition (its
+            // health is the exit-code disposition, not replica readiness).
+            let condition = match workload_readiness(&ctx.client, ns, &name, kind, 1).await {
+                Some((ready, desired)) => readiness_condition(observed, kind, ready, desired),
+                None => ready_condition(observed, kind),
+            };
+            let phase: &str = if condition.status == "True" {
+                "Ready"
+            } else {
+                "Progressing"
+            };
             (
-                ready_condition(observed, kind),
-                "Ready",
+                condition,
+                phase,
                 ContractStatus {
                     mode: Some(mode_label(agent.spec.mode)),
                     ..Default::default()
@@ -518,13 +530,94 @@ pub fn rendered_kind(rendered: &Rendered) -> &'static str {
     }
 }
 
-/// The success condition: the workload was applied for this generation.
+/// The applied-only condition, used for a Job (once/loop/schedule/workflow) whose
+/// health is its exit-code disposition, not replica readiness. Long-lived workloads
+/// use [`readiness_condition`] against observed readback instead.
 pub fn ready_condition(observed_generation: Option<i64>, rendered_kind: &str) -> Condition {
     Condition {
         type_: "Ready".to_string(),
         status: "True".to_string(),
         reason: Some("WorkloadApplied".to_string()),
         message: Some(format!("{rendered_kind} workload applied")),
+        observed_generation,
+        last_transition_time: None,
+    }
+}
+
+/// Read back the applied workload's OBSERVED readiness so `Ready` reflects reality
+/// rather than "the object was server-side-applied" (RFC 0003 §6.2). The
+/// `.owns(Deployment/StatefulSet)` watches re-trigger reconcile when the workload's
+/// status changes, so this converges: applied → `0/N` (Unavailable) → `k/N`
+/// (Progressing) → `N/N` (Ready). Returns `(ready, desired)` for the long-lived
+/// kinds, or `None` for a Job (which keeps the applied condition). An unreadable
+/// status is treated as `0` ready (fail-safe: a CrashLooping / PKI-misconfigured /
+/// image-pull-failing workload never becomes Ready).
+async fn workload_readiness(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    kind: &str,
+    desired_hint: u32,
+) -> Option<(u32, u32)> {
+    match kind {
+        "Deployment" => {
+            let api: Api<Deployment> = Api::namespaced(client.clone(), ns);
+            let (ready, desired) = match api.get_status(name).await {
+                Ok(d) => {
+                    let st = d.status.unwrap_or_default();
+                    let ready = st.ready_replicas.unwrap_or(0).max(0) as u32;
+                    // The Deployment's own observed desired (KEDA-driven for claim);
+                    // fall back to the hint when status has no replicas yet.
+                    let desired = st.replicas.map(|r| r.max(0) as u32).unwrap_or(desired_hint);
+                    (ready, desired)
+                }
+                Err(_) => (0, desired_hint),
+            };
+            Some((ready, desired))
+        }
+        "StatefulSet" => {
+            let api: Api<StatefulSet> = Api::namespaced(client.clone(), ns);
+            let ready = match api.get_status(name).await {
+                Ok(s) => s
+                    .status
+                    .unwrap_or_default()
+                    .ready_replicas
+                    .unwrap_or(0)
+                    .max(0) as u32,
+                Err(_) => 0,
+            };
+            Some((ready, desired_hint))
+        }
+        _ => None,
+    }
+}
+
+/// The `Ready` condition derived from observed replica readiness.
+pub fn readiness_condition(
+    observed_generation: Option<i64>,
+    kind: &str,
+    ready: u32,
+    desired: u32,
+) -> Condition {
+    let (status, reason, message): (&str, &str, String) = if desired == 0 {
+        // A claim fleet scaled to zero is HEALTHY-but-idle (scale-from-zero on backlog).
+        (
+            "True",
+            "ScaledToZero",
+            "idle — scaled to zero (elastic-from-zero on work backlog)".to_string(),
+        )
+    } else if ready >= desired {
+        ("True", "AllReplicasReady", format!("{ready}/{desired} replicas ready"))
+    } else if ready > 0 {
+        ("False", "Progressing", format!("{ready}/{desired} replicas ready"))
+    } else {
+        ("False", "Unavailable", format!("0/{desired} replicas ready ({kind})"))
+    };
+    Condition {
+        type_: "Ready".to_string(),
+        status: status.to_string(),
+        reason: Some(reason.to_string()),
+        message: Some(message),
         observed_generation,
         last_transition_time: None,
     }
@@ -614,6 +707,9 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // `.status.selector` (the label-selector string matching the fleet pods), so
     // `kubectl get agentfleet` shows replicas and an HPA can read both back. On a
     // render error we leave them unset (the merge patch keeps the last value).
+    // Observed readiness, populated inside the Ok arm from the workload readback.
+    let mut ready_replicas: Option<u32> = None;
+    let mut desired_replicas: Option<u32> = None;
     let (condition, replicas, selector, scaler_condition) = match render_fleet(&fleet, &ctx.render)
     {
         Ok(mut rendered) => {
@@ -661,9 +757,22 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             // best-effort: never hard-fails the Deployment reconcile (e.g. when
             // the KEDA CRDs are absent) — it only surfaces a condition.
             let scaler_condition = reconcile_scaled_object(ctx.as_ref(), ns, &fleet).await;
+            // Ready reflects the fleet's OBSERVED replica readiness (Deployment /
+            // StatefulSet), not merely "applied": an all-CrashLoop fleet is NOT Ready,
+            // and a claim fleet scaled to zero is Ready-but-idle. Populates the
+            // long-declared status.readyReplicas / desiredReplicas.
+            let scale_target = fleet_replica_count(&fleet, &rendered);
+            let condition = match workload_readiness(&ctx.client, ns, &name, kind, scale_target).await {
+                Some((ready, desired)) => {
+                    ready_replicas = Some(ready);
+                    desired_replicas = Some(desired);
+                    readiness_condition(observed, kind, ready, desired)
+                }
+                None => ready_condition(observed, kind),
+            };
             (
-                ready_condition(observed, kind),
-                Some(fleet_replica_count(&fleet, &rendered)),
+                condition,
+                Some(scale_target),
                 Some(fleet_selector_string(&name)),
                 scaler_condition,
             )
@@ -689,6 +798,8 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
         replicas,
         selector.as_deref(),
         scaler_condition.as_ref(),
+        ready_replicas,
+        desired_replicas,
     )?;
     if status_changed(fleet.status.as_ref(), &desired)? {
         let patch = serde_json::json!({ "status": desired });
@@ -811,12 +922,15 @@ fn fleet_replica_count(fleet: &AgentFleet, rendered: &Rendered) -> u32 {
 /// when a render succeeded; those are omitted on a render error so the merge
 /// patch preserves the last-known values. An optional `extra` condition (e.g. the
 /// KEDA ScaledObject apply outcome) is appended after the primary one.
+#[allow(clippy::too_many_arguments)]
 fn desired_fleet_status(
     condition: &Condition,
     observed: Option<i64>,
     replicas: Option<u32>,
     selector: Option<&str>,
     extra: Option<&Condition>,
+    ready_replicas: Option<u32>,
+    desired_replicas: Option<u32>,
 ) -> Result<serde_json::Value, Error> {
     let mut conditions = vec![serde_json::to_value(condition)?];
     // A best-effort outcome (e.g. the KEDA ScaledObject apply) is appended as a
@@ -834,6 +948,14 @@ fn desired_fleet_status(
     }
     if let Some(selector) = selector {
         status["selector"] = serde_json::to_value(selector)?;
+    }
+    // The long-declared, formerly-blank kubectl columns (Desired/Ready), now driven
+    // by the observed workload readback.
+    if let Some(ready) = ready_replicas {
+        status["readyReplicas"] = serde_json::to_value(ready)?;
+    }
+    if let Some(desired) = desired_replicas {
+        status["desiredReplicas"] = serde_json::to_value(desired)?;
     }
     Ok(status)
 }
@@ -977,6 +1099,8 @@ mod tests {
             Some(5),
             Some("agentctl.dev/agent=fleet,app.kubernetes.io/name=agent"),
             None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(status["observedGeneration"], 2);
@@ -999,6 +1123,8 @@ mod tests {
         let status = desired_fleet_status(
             &validated_failed_condition("bad spec"),
             Some(1),
+            None,
+            None,
             None,
             None,
             None,
@@ -1180,12 +1306,48 @@ mod tests {
             Some(2),
             Some("agentctl.dev/agent=f"),
             Some(&scaled_object_failed_condition("boom")),
+            Some(2),
+            Some(2),
         )
         .unwrap();
         // primary condition first, the best-effort ScaledObject outcome second.
         assert_eq!(status["conditions"][0]["type"], "Ready");
         assert_eq!(status["conditions"][1]["type"], "ScaledObject");
         assert_eq!(status["conditions"][1]["status"], "False");
+    }
+
+    #[test]
+    fn readiness_condition_reflects_replica_state() {
+        // All ready → Ready=True.
+        let c = readiness_condition(Some(1), "Deployment", 3, 3);
+        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("True", Some("AllReplicasReady")));
+        // Partial → NOT Ready.
+        let c = readiness_condition(Some(1), "Deployment", 1, 3);
+        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("False", Some("Progressing")));
+        // Zero ready with a desired → Unavailable (the CrashLoop case that used to
+        // falsely report Ready=WorkloadApplied).
+        let c = readiness_condition(Some(1), "StatefulSet", 0, 3);
+        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("False", Some("Unavailable")));
+        // Claim fleet scaled to zero → healthy-but-idle Ready.
+        let c = readiness_condition(Some(1), "Deployment", 0, 0);
+        assert_eq!((c.status.as_str(), c.reason.as_deref()), ("True", Some("ScaledToZero")));
+    }
+
+    #[test]
+    fn desired_fleet_status_emits_readiness_columns() {
+        let status = desired_fleet_status(
+            &readiness_condition(Some(1), "Deployment", 2, 3),
+            Some(1),
+            Some(3),
+            Some("sel"),
+            None,
+            Some(2),
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(status["readyReplicas"], 2);
+        assert_eq!(status["desiredReplicas"], 3);
+        assert_eq!(status["conditions"][0]["reason"], "Progressing");
     }
 
     #[test]
