@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The durable, HA-capable Postgres claim store (agentctl RFC 0011 §3.2 / §10).
+//! The durable, HA-capable Postgres claim store.
 //!
 //! [`PgClaimStore`] implements the same [`ClaimStore`] trait as the in-memory
 //! store, with semantically identical behaviour — but the serializing point is no
@@ -61,8 +61,8 @@ const SCHEMA_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// shared sequence (uniqueness) plus an `md5(random())` suffix (opacity).
 ///
 /// A GRANT increments `attempts` (this delivery). The reclaim clause requires an
-/// expired `claimed` row to still be UNDER its `max_attempts` budget (RFC 0022 §7)
-/// — a poison row past budget is left for the sweeper (or the read-back) to
+/// expired `claimed` row to still be UNDER its `max_attempts` budget — a poison
+/// row past budget is left for the sweeper (or the read-back) to
 /// dead-letter, never re-granted.
 const CLAIM_SQL: &str = "\
 INSERT INTO work_items (claim_key, item, status, lease_id, holder, expires_at, attempts, created_at, updated_at)
@@ -153,8 +153,8 @@ fn submit_conflict_outcome(status: RowStatus) -> SubmitOutcome {
 
 /// PURE: the `ack` idempotency decision, mirroring the in-memory store. A row was
 /// settled (`updated`) ⇒ Ok. Otherwise the lease is gone: Ok only if this
-/// `claim_key` is already an acked tombstone (idempotent re-ack, agentd RFC 0019
-/// §3.5); else an unknown-lease error. We never fabricate done-state from a bare
+/// `claim_key` is already an acked tombstone (idempotent re-ack); else an
+/// unknown-lease error. We never fabricate done-state from a bare
 /// ack of an unknown lease (that would let a stray call dedupe-block a future
 /// claim).
 fn ack_result(updated: bool, key_already_acked: bool, lease_id: &str) -> Result<(), String> {
@@ -469,7 +469,7 @@ async fn ensure_schema(pool: &Pool) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS work_items_status_idx ON work_items (status);
             CREATE UNIQUE INDEX IF NOT EXISTS work_items_lease_id_idx
                 ON work_items (lease_id) WHERE lease_id IS NOT NULL;
-            -- RFC 0022 §7: redelivery accounting + the ack result. Additive, so an
+            -- Redelivery accounting + the ack result. Additive, so an
             -- existing table upgrades in place.
             ALTER TABLE work_items ADD COLUMN IF NOT EXISTS attempts     int NOT NULL DEFAULT 0;
             ALTER TABLE work_items ADD COLUMN IF NOT EXISTS max_attempts int;
@@ -581,7 +581,7 @@ async fn db_claim(
 
 /// `work.renew` → extend a LIVE, owned lease. Never resurrects an expired lease
 /// (the `expires_at > now()` guard). The `($3::text IS NULL OR holder = $3)`
-/// predicate is the attested-identity gate (RFC 0015): `NULL` ⇒ unconstrained
+/// predicate is the attested-identity gate: `NULL` ⇒ unconstrained
 /// (attest off); otherwise the UPDATE matches ONLY when the recorded holder equals
 /// the attested caller — atomic, so a tenant cannot renew another's lease. 0 rows
 /// ⇒ unknown/expired, or (when gated) a holder mismatch — distinguished by a
@@ -727,8 +727,8 @@ async fn lease_is_live(client: &deadpool_postgres::Client, lease_id: &str) -> Re
 async fn db_sweep(pool: &Pool) -> Result<usize, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     // Expired rows return to `pending`, EXCEPT those past their `max_attempts`
-    // budget, which are dead-lettered (RFC 0022 §7) — the same decision the
-    // in-memory `retire_or_requeue` makes.
+    // budget, which are dead-lettered — the same decision the in-memory
+    // `retire_or_requeue` makes.
     let sql = format!(
         "UPDATE work_items
             SET status = {REDELIVER_STATUS}, lease_id = NULL, holder = NULL,
@@ -742,7 +742,7 @@ async fn db_sweep(pool: &Pool) -> Result<usize, String> {
     Ok(usize::try_from(n).unwrap_or(0))
 }
 
-/// `work.stats` → the P9 backlog snapshot: pending count, LIVE-claimed count, and
+/// `work.stats` → the backlog snapshot: pending count, LIVE-claimed count, and
 /// the age of the oldest pending item (a pending row's `updated_at` is the instant
 /// it entered `pending`, so `now() - min(updated_at)` is its age).
 async fn db_stats(pool: &Pool) -> Result<Stats, String> {

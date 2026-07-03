@@ -2,8 +2,8 @@
 //! Shell-outs to `kubectl` and `helm`, plus the resource-quantity parsing the
 //! benchmark needs.
 //!
-//! The harness is a hybrid (the plan's "bash/Make bringup + a Rust kube-rs crate"):
-//! typed CR apply/watch goes through kube-rs ([`crate::kube_helpers`]), while
+//! The harness is a hybrid: bash/Make bringup plus a Rust kube-rs crate. Typed CR
+//! apply/watch goes through kube-rs ([`crate::kube_helpers`]), while
 //! cluster-wide reads that are simpler as a one-liner — `kubectl top`, `helm
 //! upgrade`, the apiserver Service proxy — shell out here. Everything honors the
 //! ambient `KUBECONFIG`, so the identical suite runs against a real cluster.
@@ -86,7 +86,7 @@ pub fn helm_template(release: &str, chart: &str, values_files: &[&str]) -> Resul
 
 /// A live `kubectl port-forward` child, exposing a remote port on `127.0.0.1`.
 /// The process is killed on drop, so a scenario can scrape/hit a cluster Service
-/// over plain HTTP (the plan's "port-forward" scrape path + the coordination `/mcp`
+/// over plain HTTP (the port-forward scrape path plus the coordination `/mcp`
 /// throughput load-gen) without leaving a tunnel behind.
 #[derive(Debug)]
 pub struct PortForward {

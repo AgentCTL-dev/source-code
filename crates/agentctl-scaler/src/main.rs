@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! agentctl KEDA EXTERNAL gRPC scaler (agentctl RFC 0011 §5) — the off-pod,
-//! scale-from-zero trigger for claim-mode `AgentFleet`s.
+//! The KEDA external gRPC scaler — the off-pod, scale-from-zero trigger for
+//! claim-mode `AgentFleet`s.
 //!
 //! At replica 0 there is no pod to scrape, so a Prometheus trigger reading the
-//! per-pod `agent_pending_events` gauge sums to zero and can never wake the fleet
-//! (RFC 0011 §5.1). The only thing that knows work is pending while no worker runs
-//! is the **reference coordination MCP server** (`crates/agentctl-coordination`),
-//! which exposes the off-pod backlog (`work.stats` → `pending`, contract ask P9).
-//! This binary serves KEDA's `externalscaler.proto` over gRPC, reading that
-//! backlog and mapping it onto the four RPCs (see [`scaler`]).
+//! per-pod `agent_pending_events` gauge sums to zero and can never wake the fleet.
+//! The only thing that knows work is pending while no worker runs is the reference
+//! coordination MCP server (`crates/agentctl-coordination`), which exposes the
+//! off-pod backlog (`work.stats` → `pending`). This binary serves KEDA's
+//! `externalscaler.proto` over gRPC, reading that backlog and mapping it onto the
+//! four RPCs (see [`scaler`]).
 //!
 //! Surfaces:
 //!   * gRPC `ExternalScaler` on `GRPC_PORT` (default 9100) — what KEDA dials.
 //!   * HTTP on `HEALTH_PORT` (default 8080): `GET /healthz`, `/readyz`, `/metrics`
 //!     (`agentctl_scaler_{stats_reads_total,stats_errors_total,last_backlog}`).
 //!
-//! Plaintext is fine for v1 — the scaler sits behind the cluster network (RFC 0011
-//! §3.4), exactly like the coordination server. Graceful shutdown on SIGTERM/SIGINT
-//! drains both servers (matches the gateway). Hand-rolled in Rust; agentctl is
-//! Rust-only.
+//! Plaintext is acceptable because the scaler sits behind the cluster network,
+//! like the coordination server. Graceful shutdown on SIGTERM/SIGINT drains both
+//! servers.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +39,7 @@ use metrics::Metrics;
 use pb::external_scaler_server::ExternalScalerServer;
 use scaler::{Scaler, DEFAULT_STREAM_POLL_INTERVAL_MS};
 
-/// Default gRPC port KEDA dials (`agentctl-scaler.agentctl-system:9100`, RFC 0011 §5.2).
+/// Default gRPC port KEDA dials (`agentctl-scaler.agentctl-system:9100`).
 const DEFAULT_GRPC_PORT: u16 = 9100;
 /// Default HTTP port for `/healthz` + `/readyz` + `/metrics`.
 const DEFAULT_HEALTH_PORT: u16 = 8080;
@@ -56,7 +55,7 @@ struct HttpState {
 #[tokio::main]
 async fn main() {
     // fmt layer (honoring RUST_LOG, default info) + OTLP export when
-    // OTEL_EXPORTER_OTLP_ENDPOINT is set — matches every other control-plane bin.
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set.
     agentctl_telemetry::init("agentctl-scaler");
 
     // ring crypto provider as the process default: no aws-lc-rs → no C toolchain.
@@ -73,10 +72,10 @@ async fn main() {
     let metrics = Arc::new(Metrics::new());
     let ready = Arc::new(AtomicBool::new(false));
 
-    // Coordination-hop client. Gated on COORDINATION_CLIENT_CERT_DIR: unset ⇒
-    // today's plaintext-http client (optional bearer applied per-request); set ⇒ a
+    // Coordination-hop client. Gated on COORDINATION_CLIENT_CERT_DIR: unset ⇒ a
+    // plaintext-http client (optional bearer applied per-request); set ⇒ a
     // ring-backed mTLS client presenting the scaler's client cert and verifying the
-    // coordination server cert against COORDINATION_CA (see src/client.rs). No
+    // coordination server cert against COORDINATION_CA (see [`client`]). No
     // native-tls/openssl/aws-lc → no C toolchain.
     let client_mode = client::mode_from_env();
     if let client::ClientMode::Mtls { cert, ca, .. } = &client_mode {
@@ -89,9 +88,9 @@ async fn main() {
     }
     let http = client::build_client(&client_mode).expect("build coordination HTTP client");
 
-    // Bearer token presented to the coordination server's gated work.stats endpoint
-    // (agentctl RFC 0011 §3.4). Read once from AGENTCTL_API_TOKEN (set by the
-    // operator/chart). Unset/empty ⇒ no header (back-compat with an open coordinator).
+    // Bearer token presented to the coordination server's gated work.stats
+    // endpoint. Read once from AGENTCTL_API_TOKEN (set by the operator/chart).
+    // Unset/empty ⇒ no header, for an unauthenticated coordinator.
     let auth_token = std::env::var("AGENTCTL_API_TOKEN")
         .ok()
         .filter(|t| !t.is_empty())
@@ -168,7 +167,7 @@ async fn readyz(State(state): State<HttpState>) -> StatusCode {
     }
 }
 
-/// `GET /metrics` — Prometheus exposition (node-agent text format).
+/// `GET /metrics` — Prometheus text-format exposition.
 async fn serve_metrics(
     State(state): State<HttpState>,
 ) -> ([(header::HeaderName, &'static str); 1], String) {

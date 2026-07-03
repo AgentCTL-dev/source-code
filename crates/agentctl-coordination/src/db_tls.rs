@@ -14,7 +14,7 @@
 //! to whoever holds that key), but it does not validate the chain or the server
 //! name. The control plane reaches the bundled Postgres over a NetworkPolicy-
 //! scoped in-cluster Service; CA-verifying (`verify-full`) the bundled cert is
-//! future hardening — for a verified DSN today, point at an external managed
+//! not implemented — for a verified DSN, point at an external managed
 //! Postgres. Built on rustls 0.23 with the **ring** provider (no aws-lc-rs, no C
 //! toolchain — the SAME stack the gateway/modelgateway use for their stores).
 

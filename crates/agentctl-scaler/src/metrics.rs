@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Prometheus `/metrics` exposition for the external scaler.
 //!
-//! Hand-rolled in the node-agent / coordination style (agentctl RFC 0010): no
-//! client library, body is `text/plain; version=0.0.4`, each metric emits its
-//! `# HELP`/`# TYPE` once then the sample. `stats_reads_total` /
+//! Hand-rolled without a client library: the body is
+//! `text/plain; version=0.0.4`, and each metric emits its `# HELP`/`# TYPE` once
+//! then the sample. `stats_reads_total` /
 //! `stats_errors_total` are lifecycle counters; `last_backlog` is a gauge holding
 //! the most recent `pending` the scaler observed from the coordination server.
 
@@ -20,7 +20,7 @@ pub struct Metrics {
     /// Failed `work.stats` reads (transport/decode/missing field). On these the
     /// scaler serves the LAST known IsActive value, never flapping to 0.
     stats_errors: AtomicU64,
-    /// The most recent `pending` count observed (the off-pod backlog, P9).
+    /// The most recent `pending` count observed (the off-pod backlog).
     last_backlog: AtomicI64,
 }
 
@@ -101,7 +101,7 @@ fn unix_now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Emit one `counter` metric (HELP + TYPE + sample), node-agent style.
+/// Emit one `counter` metric (HELP + TYPE + sample).
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     out.push_str(&format!(
         "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"

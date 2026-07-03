@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The claim store — the **single serializing point** (agentctl RFC 0011 §3.2).
+//! The claim store — the **single serializing point**.
 //!
 //! Everything that makes exactly-one-owner hold lives here, behind ONE `Mutex`:
 //! the atomic `work.claim` (exactly one of N concurrent racers for a work unit
 //! wins), the lease lifecycle (`renew`/`ack`/`release` + TTL expiry), and the
 //! transactional dedupe on `claim_key` (a redelivered-but-already-acked unit is a
-//! no-op — the at-least-once safety net, agentd RFC 0019 §3.5).
+//! no-op — the at-least-once safety net).
 //!
 //! **The unit of exclusivity is the `claim_key`, not the `item` URI.** The
 //! `claim_key` is the stable identity of a piece of work; the `item` is the payload
@@ -17,13 +17,13 @@
 //! without a `claim_key`, the `item` URI is its own key — matching the durable
 //! store's `claim_key.unwrap_or(item)`.) In normal claim-mode use each `item` has
 //! one stable `claim_key`, so the distinction is invisible; it matters only under
-//! contention with reused keys, where both backends now agree.
+//! contention with reused keys, where both backends agree.
 //!
 //! The store sits behind the [`ClaimStore`] trait so a durable backend
 //! (Redis/Postgres) can slot in later WITHOUT touching the MCP wire layer; v1
-//! ships the in-memory [`InMemoryStore`]. HA / durability of the single replica is
-//! the open question recorded in agentctl RFC 0011 §3.2 / §10 — a coordination
-//! loss collapses the serializing point for every fleet that depends on it.
+//! ships the in-memory [`InMemoryStore`]. HA / durability of the single replica
+//! remains an open question — a coordination loss collapses the serializing point
+//! for every fleet that depends on it.
 //!
 //! Time is tracked with [`Instant`] (monotonic) — never wall-clock — so a clock
 //! step can never resurrect or prematurely expire a lease.
@@ -53,8 +53,8 @@ pub fn is_holder_mismatch(err: &str) -> bool {
     err.starts_with(HOLDER_MISMATCH_PREFIX)
 }
 
-/// Outcome of a `work.claim` round-trip — the atomic grant decision (agentd RFC
-/// 0019 §3.3). Exactly one of these is returned under the store mutex.
+/// Outcome of a `work.claim` round-trip — the atomic grant decision. Exactly one
+/// of these is returned under the store mutex.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimResult {
     /// The caller owns the item until the lease expires (or is acked/released).
@@ -69,12 +69,12 @@ pub enum ClaimResult {
     /// acked. Never re-granted (DEDUPE; the wire reports `held_by:"<acked>"`).
     Deduped,
     /// The `claim_key` was dead-lettered (redelivered past its `max_attempts`
-    /// without a terminal ack — RFC 0022 §7). Never re-granted; the wire reports
+    /// without a terminal ack). Never re-granted; the wire reports
     /// `held_by:"<deadletter>"`. An admin re-offers it via `work.deadletter`.
     Deadlettered,
 }
 
-/// Outcome of `work.submit` — enqueueing into the backlog (the P9 scale-from-zero
+/// Outcome of `work.submit` — enqueueing into the backlog (the scale-from-zero
 /// signal). Only [`SubmitOutcome::Enqueued`] grows `pending`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitOutcome {
@@ -86,12 +86,12 @@ pub enum SubmitOutcome {
     AlreadyPending,
     /// Currently held under a live lease.
     AlreadyClaimed,
-    /// `claim_key` is in the dead-letter queue — not re-enqueued (RFC 0022 §7).
+    /// `claim_key` is in the dead-letter queue — not re-enqueued.
     Deadlettered,
 }
 
-/// A snapshot of queue depth (agentd RFC 0011 §3.2 / agentctl RFC 0011 §5.3): the
-/// off-pod backlog the external scaler reads to scale from zero.
+/// A snapshot of queue depth: the off-pod backlog the external scaler reads to
+/// scale from zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     /// Items enqueued and not yet claimed.
@@ -102,12 +102,12 @@ pub struct Stats {
     /// backlog-staleness signal.
     pub oldest_age_ms: u64,
     /// Items dead-lettered (redelivered past `max_attempts`) — awaiting an admin
-    /// requeue/drop (RFC 0022 §7).
+    /// requeue/drop.
     pub deadletter: usize,
 }
 
 /// The lifecycle state of a work unit, keyed by its `claim_key` — the answer to a
-/// `work.result` lookup (RFC 0022 §7).
+/// `work.result` lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkState {
     /// Enqueued, not yet claimed.
@@ -136,7 +136,7 @@ impl WorkState {
 }
 
 /// The outcome of a `work.result` lookup: the unit's [`WorkState`] and, when
-/// terminally acked, the `result` the worker recorded on ack (RFC 0022 §7).
+/// terminally acked, the `result` the worker recorded on ack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkStatus {
     pub state: WorkState,
@@ -154,15 +154,15 @@ pub struct DeadItem {
 
 /// The pluggable coordination backend. The MCP wire layer ([`crate::mcp`]) only
 /// ever sees this trait, so a durable backend (Redis/Postgres) drops in without a
-/// wire change (agentctl RFC 0011 §3.2: the server is pluggable).
+/// wire change: the server is pluggable.
 ///
 /// Every method is its own atomic transaction. Implementations MUST serialize
 /// `claim` so exactly one of N concurrent racers for the same item is granted.
 pub trait ClaimStore: Send + Sync {
     /// Enqueue `item` into the backlog. Skipped if `claim_key` is already done or
-    /// dead-lettered. `max_attempts` (from the fleet `workPolicy`, RFC 0022 §7)
-    /// bounds redelivery: after that many deliveries without a terminal ack the
-    /// item is dead-lettered instead of re-offered. `None` ⇒ unbounded (today).
+    /// dead-lettered. `max_attempts` (from the fleet `workPolicy`) bounds
+    /// redelivery: after that many deliveries without a terminal ack the item is
+    /// dead-lettered instead of re-offered. `None` ⇒ unbounded.
     fn submit(
         &self,
         item: &str,
@@ -172,9 +172,9 @@ pub trait ClaimStore: Send + Sync {
     /// Atomically claim `item` for `holder` under `claim_key`, for `ttl_ms`.
     fn claim(&self, item: &str, ttl_ms: u64, claim_key: &str, holder: &str) -> ClaimResult;
     /// Extend a live, owned lease. `Err` for an unknown or stale (expired) lease —
-    /// renew NEVER resurrects an expired lease (agentd RFC 0019 §3.6).
+    /// renew NEVER resurrects an expired lease.
     ///
-    /// `expected_holder` is the attested-identity gate (RFC 0015): `None` ⇒ no
+    /// `expected_holder` is the attested-identity gate: `None` ⇒ no
     /// constraint (attest mode off, back-compat); `Some(h)` ⇒ the op is allowed
     /// ONLY when the lease's recorded holder equals `h`, else it returns the
     /// [`holder_mismatch_error`] (a tenant cannot renew another tenant's lease).
@@ -215,12 +215,12 @@ pub trait ClaimStore: Send + Sync {
     ) -> Result<(), String>;
     /// Move every expired lease back to `pending`; returns how many were swept.
     fn sweep_expired(&self) -> usize;
-    /// Current queue depth (P9 backlog snapshot).
+    /// Current queue depth (backlog snapshot).
     fn stats(&self) -> Stats;
     /// The current pending items (for the `work://pending` resource read).
     fn pending_items(&self) -> Vec<String>;
     /// Look up a work unit's state (and its `result`, if terminally acked) by
-    /// `claim_key` — the `work.result` correlation read (RFC 0022 §7).
+    /// `claim_key` — the `work.result` correlation read.
     fn result_of(&self, claim_key: &str) -> WorkStatus;
     /// The current dead-lettered items (for `dlq://items` / `work.deadletter list`).
     fn dead_items(&self) -> Vec<DeadItem>;
@@ -247,7 +247,7 @@ struct Lease {
     /// Monotonic expiry. `<= now` ⇒ expired (re-claimable / sweepable).
     expires_at: Instant,
     /// Deliveries so far (incremented on each grant). Redelivery past
-    /// `max_attempts` dead-letters the unit (RFC 0022 §7).
+    /// `max_attempts` dead-letters the unit.
     attempts: u32,
     /// Redelivery bound from `work.submit` (the fleet `workPolicy`). `None` ⇒
     /// unbounded (never dead-lettered).
@@ -281,7 +281,7 @@ struct Dead {
 /// evicted could be re-granted — acceptable because (a) the cap is large
 /// (default 100k) so the eviction horizon is far past any realistic
 /// in-flight/redelivery window, and (b) the downstream side effect is itself
-/// `claim_key`-idempotent (agentd RFC 0019 §3.5), so a re-grant past the horizon
+/// `claim_key`-idempotent, so a re-grant past the horizon
 /// re-collapses to one effect. This keeps the map from growing unbounded. A result
 /// recorded on ack is retrievable via `work.result` until its key is evicted.
 #[derive(Debug)]
@@ -353,7 +353,7 @@ struct Inner {
 
 impl Inner {
     /// Return an expired lease's unit to `pending`, OR dead-letter it when it has
-    /// been delivered past its `max_attempts` (RFC 0022 §7). Shared by
+    /// been delivered past its `max_attempts`. Shared by
     /// `sweep_expired`, the lazy-reclaim branch of `claim`, and `release`. Returns
     /// `true` if the unit was dead-lettered.
     fn retire_or_requeue(
@@ -584,7 +584,7 @@ impl ClaimStore for InMemoryStore {
             return Ok(());
         }
         // The lease is gone. If this key is already done, the item was acked —
-        // idempotent no-op (agentd RFC 0019 §3.5); a late `result` on the re-ack is
+        // idempotent no-op; a late `result` on the re-ack is
         // recorded only if none was stored. Otherwise it's an unknown lease: error,
         // and crucially we do NOT fabricate done state from a bare ack (that would
         // let a stray call dedupe-block a legitimate future claim).
@@ -775,9 +775,8 @@ impl ClaimStore for InMemoryStore {
     }
 }
 
-/// FNV-1a/64 — the same stable hash family the contract uses for sharding
-/// (agentd RFC 0019 §4.1). Here it only spices the lease id; uniqueness is the
-/// monotonic `seq`, not the hash.
+/// FNV-1a/64 — the same stable hash family the contract uses for sharding. Here it
+/// only spices the lease id; uniqueness is the monotonic `seq`, not the hash.
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -965,7 +964,7 @@ mod tests {
         assert_eq!(store.stats().pending, 0);
     }
 
-    // (9) Attested-holder predicate (RFC 0015): a lifecycle op gated with an
+    // (9) Attested-holder predicate: a lifecycle op gated with an
     //     `expected_holder` succeeds ONLY when it equals the lease's recorded
     //     holder. A wrong holder is rejected with the holder-mismatch error and the
     //     lease is left untouched (a tenant cannot settle/steal another's lease);
@@ -1034,9 +1033,8 @@ mod tests {
 
     // (11) Canonical cross-backend semantics: the unit of exclusivity is the
     //      claim_key, NOT the item URI. Two DIFFERENT keys on the SAME item URI are
-    //      two independent work units — both grant. (Historically the in-memory
-    //      store keyed contention by item and would have wrongly contended the
-    //      second; the durable Postgres store keys by claim_key. Both now agree.)
+    //      two independent work units — both grant. Contention is keyed by
+    //      claim_key (as the durable Postgres store keys it), not by the item URI.
     #[test]
     fn distinct_keys_same_item_are_independent_units() {
         let store = InMemoryStore::new(4096);
@@ -1131,7 +1129,7 @@ mod tests {
         assert_eq!(store.stats().pending, 0, "no phantom re-enqueue");
     }
 
-    // (15) RFC 0022 §7: ack records a result; work.result retrieves it. The state
+    // (15) ack records a result; work.result retrieves it. The state
     //      machine reports pending → claimed → done across the lifecycle.
     #[test]
     fn ack_result_is_recorded_and_retrievable() {

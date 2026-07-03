@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! agentctl admission plane (RFC 0007) — the admission webhooks.
+//! agentctl admission plane — the admission webhooks.
 //!
 //! The CRDs carry declarative CEL invariants enforced by the apiserver. This
 //! server adds the two admission concerns CEL can't own:
@@ -10,25 +10,25 @@
 //!    gate** (exec + egress + secrets together require an explicit opt-in
 //!    annotation). These checks cover **both** `Agent` (at `spec.*`) and
 //!    `AgentFleet` (at `spec.template.*`, an `AgentSpec`) so a fleet cannot smuggle
-//!    a disallowed image or an ungated trifecta past the gate (the bypass this
-//!    server closes). It also validates the per-agent **`spec.access.oidc`** A2A
-//!    caller-identity policy (issuer is a non-empty `https://` URL, `audiences`
-//!    is non-empty, any `jwksUri` override is `https://`) so a malformed OIDC
-//!    gate is rejected at admission rather than failing opaquely at the gateway.
+//!    a disallowed image or an ungated trifecta past the gate. It also validates the
+//!    per-agent **`spec.access.oidc`** A2A caller-identity policy (issuer is a
+//!    non-empty `https://` URL, `audiences` is non-empty, any `jwksUri` override is
+//!    `https://`) so a malformed OIDC gate is rejected at admission rather than
+//!    failing opaquely at the gateway.
 //! 2. **Defaulting** (`POST /mutate`): a mutating webhook that returns a base64
 //!    JSONPatch of **secure defaults** — the standard `app.kubernetes.io/*` labels,
 //!    a conservative `mode`, and a minimal-exposure `surfaces` set. It deliberately
 //!    does **not** hard-default `substrate`: the secure default is tenancy-derived
-//!    (RFC 0002 §5 — `kata-hybrid` for hostile, `stock-unix` for single) and the
-//!    most-isolated tier needs a Kata `RuntimeClass` absent on most stock clusters
-//!    (RFC 0002 §9), so forcing one cluster-wide would either break stock clusters
-//!    or be insecure. Leaving `substrate` absent lets the operator/renderer resolve
-//!    it from the `AgentClass`/tenancy (RFC 0007 B3) — the documented secure path.
+//!    (`kata-hybrid` for hostile tenancy, `stock-unix` for single) and the
+//!    most-isolated tier needs a Kata `RuntimeClass` absent on most stock clusters,
+//!    so forcing one cluster-wide would either break stock clusters or be insecure.
+//!    Leaving `substrate` absent lets the operator/renderer resolve it from the
+//!    `AgentClass`/tenancy — the secure path.
 //!
 //! `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` point the
 //! kube-apiserver at `POST /validate` and `POST /mutate` over HTTPS (mutating runs
 //! first — k8s sequences mutating admission before validating). Hand-rolled in Rust
-//! (axum + rustls/ring; agentctl is Rust-only). The serving cert is mounted at
+//! (axum + rustls/ring). The serving cert is mounted at
 //! `/etc/agentctl-admission/tls`.
 
 use std::io::BufReader;
@@ -73,8 +73,8 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    // fmt layer (honoring RUST_LOG, default info) + OTLP export when
-    // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise byte-identical to before.
+    // fmt layer (honoring RUST_LOG, default info) plus OTLP export when
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set.
     agentctl_telemetry::init("agentctl-admission");
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -87,7 +87,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(healthz))
-        // `/metrics` rides the EXISTING :8443 HTTPS server. Admission's TLS uses
+        // `/metrics` rides the same :8443 HTTPS server. Admission's TLS uses
         // `with_no_client_auth`, so Prometheus can scrape it (scheme https,
         // insecureSkipVerify) without a client cert — no new plaintext port.
         .route("/metrics", get(serve_metrics))
@@ -184,7 +184,7 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-/// `GET /metrics` — the Prometheus exposition (node-agent text format).
+/// `GET /metrics` — the Prometheus text exposition format (version 0.0.4).
 async fn serve_metrics(
     State(state): State<AppState>,
 ) -> ([(header::HeaderName, &'static str); 1], String) {
@@ -218,8 +218,8 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     let spec = object.get("spec").unwrap_or(&empty);
     let kind = reviewed_kind(request, object);
     // The same image/exec/egress/secrets/modelPool checks apply to an Agent's spec
-    // and to an AgentFleet's `spec.template` (itself an AgentSpec) — the latter is
-    // the bypass this closes.
+    // and to an AgentFleet's `spec.template` (itself an AgentSpec), so a fleet
+    // template is held to the same policy as a standalone agent.
     let view = agent_spec_view(&kind, spec, &empty);
 
     let empty_map = Map::new();
@@ -227,11 +227,10 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
         .as_object()
         .unwrap_or(&empty_map);
 
-    // An AgentFleet's `spec.coordinator.template` (RFC 0022) is ALSO an AgentSpec —
-    // a normal conformant agent subject to the SAME policy. Check it too, so a
-    // coordinator cannot smuggle a disallowed image or ungated trifecta past the
-    // gate the worker template is checked at. `None` for a non-fleet or a
-    // coordinatorless fleet.
+    // An AgentFleet's `spec.coordinator.template` is ALSO an AgentSpec — a normal
+    // conformant agent subject to the SAME policy. Check it too, so a coordinator
+    // cannot smuggle a disallowed image or ungated trifecta past the gate the worker
+    // template is checked at. `None` for a non-fleet or a coordinatorless fleet.
     let coordinator_view = coordinator_spec_view(&kind, spec);
 
     // Evaluate every AgentSpec view under review (worker template always; the
@@ -302,7 +301,7 @@ fn agent_spec_view<'a>(kind: &str, spec: &'a Value, empty: &'a Value) -> &'a Val
 }
 
 /// The coordinator's `AgentSpec` view (`spec.coordinator.template`), if the
-/// reviewed object is an `AgentFleet` that declares a coordinator (RFC 0022).
+/// reviewed object is an `AgentFleet` that declares a coordinator.
 /// `None` for a plain `Agent`, or a fleet without a coordinator — nothing extra to
 /// check. When `Some`, `validate` runs the SAME policy against it as the worker
 /// template, so a coordinator cannot smuggle a disallowed image or ungated trifecta.
@@ -514,32 +513,31 @@ fn kind_app_name(kind: &str) -> &'static str {
     }
 }
 
-/// Escape a string for use as a single JSON Pointer (RFC 6901) reference token:
+/// Escape a string for use as a single JSON Pointer reference token:
 /// `~` ⇒ `~0`, `/` ⇒ `~1` (order matters — `~` first).
 fn escape_pointer_token(s: &str) -> String {
     s.replace('~', "~0").replace('/', "~1")
 }
 
-/// Build the RFC 6902 JSONPatch of **secure defaults** for an `Agent`/`AgentFleet`.
+/// Build the JSON Patch of **secure defaults** for an `Agent`/`AgentFleet`.
 /// Every op is conditional on the field being **absent** — defaulting never
 /// clobbers an author's explicit value (and is auditable in the patch). Defaults:
 ///
 /// 1. **Standard `app.kubernetes.io/*` labels** (`managed-by`/`part-of`/`name`) —
 ///    pure metadata, always safe. Adds the whole `metadata.labels` object if none
 ///    exists, else only the missing keys.
-/// 2. **`mode`** ⇒ `"once"` — the conservative run-once shape and the documented
-///    enum default; only added when absent (it is a required field, so defaulting
-///    it pre-empts a structural rejection with the safest run shape).
+/// 2. **`mode`** ⇒ `"once"` — the conservative run-once shape and the enum default;
+///    only added when absent (it is a required field, so defaulting it pre-empts a
+///    structural rejection with the safest run shape).
 /// 3. **`surfaces`** ⇒ all-`false` — minimal control-plane exposure; an author opts
-///    a surface on explicitly. `a2a` in particular is a network/contract-unsupported
-///    (RFC 0007 B6 / P2) surface that must never default on.
+///    a surface on explicitly. `a2a` in particular is a network-exposed surface that
+///    must never default on.
 ///
 /// Deliberately **not** defaulted: `substrate`. Its secure default is
-/// tenancy-derived (RFC 0002 §5) and the most-isolated tier (`kata-hybrid`) needs a
-/// Kata `RuntimeClass` absent on most stock clusters (RFC 0002 §9); hard-defaulting
-/// here would either break stock clusters or be insecure, so the field is left
-/// absent for the operator/renderer to resolve from `AgentClass`/tenancy
-/// (RFC 0007 B3).
+/// tenancy-derived and the most-isolated tier (`kata-hybrid`) needs a Kata
+/// `RuntimeClass` absent on most stock clusters; hard-defaulting here would either
+/// break stock clusters or be insecure, so the field is left absent for the
+/// operator/renderer to resolve from `AgentClass`/tenancy.
 ///
 /// The `AgentSpec`-shaped defaults target `spec.*` for an `Agent` and
 /// `spec.template.*` for an `AgentFleet`, and are emitted only when the parent
@@ -918,7 +916,7 @@ mod tests {
         assert_eq!(ok["response"]["allowed"], true);
     }
 
-    // --- AgentFleet coverage (the closed bypass) ---------------------------
+    // --- AgentFleet coverage -----------------------------------------------
 
     #[test]
     fn agent_view_is_the_spec_itself() {
@@ -946,8 +944,8 @@ mod tests {
 
     #[test]
     fn agentfleet_trifecta_denied_via_template() {
-        // The same lethal trifecta in a fleet's template must be gated — this is
-        // the bypass the fix closes (the webhook used to only see `agents`).
+        // The same lethal trifecta in a fleet's template must be gated, since the
+        // fleet view is `spec.template`, an AgentSpec.
         let spec = json!({
             "template": { "mode": "loop", "exec": true, "egress": true, "secrets": ["db"] },
             "scaling": { "mode": "claim" }
@@ -1086,7 +1084,7 @@ mod tests {
         assert!(
             !ops.iter()
                 .any(|o| o["path"].as_str().is_some_and(|p| p.contains("substrate"))),
-            "substrate must be left to the operator/renderer (RFC 0002 §5 / RFC 0007 B3)"
+            "substrate must be left to the operator/renderer"
         );
     }
 

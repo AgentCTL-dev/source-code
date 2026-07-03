@@ -64,7 +64,7 @@ pub struct Identity {
 
 impl Identity {
     /// Inject this verified identity as `X-Auth-*` headers onto the forwarded
-    /// request to the node-agent/agent. Only the `email`/`groups` headers that
+    /// request to the agent. Only the `email`/`groups` headers that
     /// have values are added; `X-Auth-Subject` is always set. Client-supplied
     /// `X-Auth-*` headers are NOT propagated (we build a fresh request), so the
     /// agent can trust these to be gateway-verified.
@@ -372,7 +372,8 @@ fn extract_identity(claims: &Value) -> Identity {
 /// Build the HTTPS client used for JWKS discovery/fetch: rustls with the **ring**
 /// provider and the bundled Mozilla (`webpki-roots`) trust anchors — public OIDC
 /// issuers are reached over the open internet, so we trust public CAs (NOT the
-/// internal node-agent CA used by the mTLS control hop). Pure Rust, no C toolchain.
+/// internal control-plane CA used by the mTLS hop that dials agents directly).
+/// Pure Rust, no C toolchain.
 pub fn jwks_http_client() -> reqwest::Client {
     try_build_client().expect("build JWKS https client")
 }

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Prometheus `/metrics` exposition for the aggregated apiserver.
 //!
-//! Hand-rolled in the node-agent's style (RFC 0010): no client library, the body
-//! is `text/plain; version=0.0.4`, each metric emits its `# HELP`/`# TYPE` once
+//! Hand-rolled: no client library, the body is
+//! `text/plain; version=0.0.4`, each metric emits its `# HELP`/`# TYPE` once
 //! followed by the sample. Counters live behind atomics in the shared app state.
 //!
 //! `/metrics` is served on the EXISTING `:6443` HTTPS surface (it does NOT open a
@@ -23,9 +23,9 @@ pub struct Metrics {
     authorized: AtomicU64,
     /// Verb requests denied by the SubjectAccessReview.
     denied: AtomicU64,
-    /// Verbs successfully forwarded to the node-agent.
+    /// Verbs successfully forwarded to the agent pod (mTLS `POST /mcp` on :8443).
     forwarded: AtomicU64,
-    /// Verb requests that errored (SAR failure or node-agent forward failure).
+    /// Verb requests that errored (SAR failure or agent-pod forward failure).
     errors: AtomicU64,
 }
 
@@ -57,12 +57,12 @@ impl Metrics {
         self.denied.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The verb was forwarded to the node-agent.
+    /// The verb was forwarded to the agent pod.
     pub fn inc_forwarded(&self) {
         self.forwarded.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The verb errored (SAR failure or node-agent forward failure).
+    /// The verb errored (SAR failure or agent-pod forward failure).
     pub fn inc_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
@@ -97,13 +97,13 @@ impl Metrics {
         counter(
             &mut out,
             "agentctl_apiserver_verb_forwarded_total",
-            "Connect-verbs forwarded to the node-agent.",
+            "Connect-verbs forwarded to the agent pod.",
             self.forwarded.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
             "agentctl_apiserver_verb_errors_total",
-            "Connect-verb requests that errored (SAR or node-agent forward).",
+            "Connect-verb requests that errored (SAR or agent-pod forward).",
             self.errors.load(Ordering::Relaxed),
         );
         out
@@ -124,7 +124,7 @@ fn unix_now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Emit one `counter` metric (HELP + TYPE + sample), node-agent style.
+/// Emit one `counter` metric (HELP + TYPE + sample).
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     out.push_str(&format!(
         "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"

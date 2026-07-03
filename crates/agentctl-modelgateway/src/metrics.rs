@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Prometheus `/metrics` exposition for the ModelGateway.
 //!
-//! Hand-rolled in the node-agent's style (RFC 0010): no client library, the body
-//! is `text/plain; version=0.0.4`, each metric emits its `# HELP`/`# TYPE` once
-//! followed by the sample. Counters live behind atomics in the shared app state.
+//! Hand-rolled: no client library, the body is `text/plain; version=0.0.4`,
+//! each metric emits its `# HELP`/`# TYPE` once followed by the sample.
+//! Counters live behind atomics in the shared app state.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,12 +23,12 @@ pub struct Metrics {
     tokens: AtomicU64,
     /// Requests rejected (401) by the bearer-token access gate.
     auth_rejected: AtomicU64,
-    /// Requests whose identity was attested from the source IP (RFC 0015).
+    /// Requests whose identity was attested from the source IP.
     identity_attested: AtomicU64,
     /// Requests where the `X-Agent-Namespace` header disagreed with the
     /// attested namespace (a spoof attempt; the attested one is used).
     identity_spoof: AtomicU64,
-    /// Requests whose identity was attested via the trusted node-agent forwarder
+    /// Requests whose identity was attested via a trusted forwarder
     /// (the real caller asserted in `X-Agent-Pod-Uid`).
     identity_forwarded: AtomicU64,
 }
@@ -80,7 +80,7 @@ impl Metrics {
         self.identity_spoof.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A request's identity was attested via the trusted node-agent forwarder
+    /// A request's identity was attested via a trusted forwarder
     /// (the real caller resolved from `X-Agent-Pod-Uid`).
     pub fn inc_identity_forwarded(&self) {
         self.identity_forwarded.fetch_add(1, Ordering::Relaxed);
@@ -167,7 +167,7 @@ fn unix_now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Emit one `counter` metric (HELP + TYPE + sample), node-agent style.
+/// Emit one `counter` metric (HELP + TYPE + sample).
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     out.push_str(&format!(
         "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"

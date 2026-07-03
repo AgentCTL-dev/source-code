@@ -2,8 +2,8 @@
 //! Emit the agentctl CRDs as apply-able YAML under `deploy/crds/`.
 //!
 //! Run from the workspace root: `cargo run -p agentctl-crdgen`. The output is
-//! the ground truth installed by the Helm/Kustomize bundle (agentctl RFC 0001
-//! §5). Per RFC 0005, exactly one served version (`v1alpha1`) is emitted today.
+//! the ground truth installed by the Helm/Kustomize bundle. Exactly one served
+//! version (`v1alpha1`) is emitted today.
 
 use std::fs;
 use std::path::Path;

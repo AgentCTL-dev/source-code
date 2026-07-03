@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Workload PKI: the operator-ensured serving identity + trust distribution
-//! behind the v2 render (contract 2.0 — identity is the boundary).
+//! that the render mounts — a workload's identity is its security boundary.
 //!
 //! For every reconciled `Agent`/`AgentFleet` the operator ensures, in the
 //! workload's namespace:

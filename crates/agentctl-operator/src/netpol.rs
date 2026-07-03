@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! Per-tenant-namespace agent NetworkPolicies, reconciled by the operator
-//! (RFC 0015 — defence-in-depth isolation; the "networkless agent" made real).
+//! Per-tenant-namespace agent NetworkPolicies, reconciled by the operator for
+//! defence-in-depth tenant isolation.
 //!
 //! The chart ships the SAME three data-plane policies, but only for the
 //! *statically* enumerated `networkPolicies.agentNamespaces` — so a tenant
 //! namespace created after install (the normal case for a multi-tenant control
-//! plane) gets NO isolation until someone re-renders the chart. This closes that
-//! gap: on every `Agent`/`AgentFleet` reconcile the operator ensures, in the
+//! plane) gets NO isolation until someone re-renders the chart. To cover that
+//! case, on every `Agent`/`AgentFleet` reconcile the operator ensures, in the
 //! workload's OWN namespace, the three policies that make the tenancy boundary
 //! real for agent pods (label `app.kubernetes.io/name: agent`):
 //!

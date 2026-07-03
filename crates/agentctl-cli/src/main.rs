@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! # agentctl
 //!
-//! The agentctl CLI (RFC 0016): read-only `get` / `describe` over the Kubernetes
-//! API for [`Agent`] resources. Management/lifecycle verbs (`tree`, `drain`, …)
-//! travel the node-agent path (RFC 0008) and are layered on later.
+//! The agentctl CLI: read-only `get` / `describe` over the Kubernetes API for
+//! [`Agent`] resources. Management/lifecycle verbs (`tree`, `drain`, …) reach an
+//! agent by dialing its pod directly over mTLS as the Management origin and are
+//! not part of this read-only surface.
 //!
 //! The binary is named `agentctl`. Installed via Krew as `kubectl-agent` /
 //! `kubectl-agents` it serves `kubectl agent[s] …`; a second `[[bin]]` or an

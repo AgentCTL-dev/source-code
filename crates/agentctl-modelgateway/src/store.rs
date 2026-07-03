@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The durable token-usage meter (RFC 0012, the intelligence plane).
+//! The durable token-usage meter (the intelligence plane).
 //!
 //! Every `/v1/infer` call records the tokens it consumed against its
 //! `(namespace, pool)` so the gateway can enforce the `ModelPool` budget
 //! pre-request and report consumption. Backed by a shared Postgres so the
 //! gateway stays a replicated, stateless front end — the meter lives in the
-//! store, not the pod. Plain `NoTls` in-cluster (the hop is NetworkPolicy-scoped;
-//! TLS to the DB is later hardening).
+//! store, not the pod. Plain `NoTls` in-cluster by default (the hop is
+//! NetworkPolicy-scoped); TLS to the DB is opt-in hardening.
 //!
 //! **Budget enforcement is atomic (no check-then-act race).** A naive "read the
 //! SUM, then charge after the call" lets N concurrent requests all pass the
@@ -76,7 +76,7 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
 /// Reservations older than [`RESERVATION_TTL_SECS`] are excluded (leaked by a
 /// crashed request) and swept opportunistically inside the same transaction.
 ///
-/// Enforces up to TWO caps atomically (RFC 0012 / RFC 0022 §9): the pool-wide
+/// Enforces up to TWO caps atomically: the pool-wide
 /// `pool_budget` (scope `(ns, pool)`), and — when the caller is a fleet with its own
 /// cap — the per-fleet `fleet_budget` (scope `(ns, pool, agent)`, isolating one
 /// fleet's spend from others sharing the pool). The single reservation row carries

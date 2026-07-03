@@ -2,8 +2,8 @@
 //! Optional bearer-token access gate for the A2A data surface.
 //!
 //! The token is read from `AGENTCTL_API_TOKEN` at startup:
-//!   * **unset / empty** → the gate is OFF; every route behaves exactly as before
-//!     (back-compat — the in-cluster default).
+//!   * **unset / empty** → the gate is OFF; every route is served without
+//!     authentication (the in-cluster default).
 //!   * **set** → the gate is ON: the A2A surface (`POST /agents/{ns}/{name}`, the
 //!     registry `GET /agents`, the agent/fleet card endpoints) requires
 //!     `Authorization: Bearer <AGENTCTL_API_TOKEN>` and returns `401` (no body)
@@ -33,7 +33,7 @@ const EXEMPT: &[&str] = &["/healthz", "/readyz", "/metrics", "/.well-known/jwks.
 #[derive(Clone)]
 pub struct Auth {
     /// `Some` when `AGENTCTL_API_TOKEN` is set & non-empty → enforce. `None` →
-    /// the gate is disabled (back-compat).
+    /// the gate is disabled.
     token: Option<Arc<[u8]>>,
     metrics: Arc<Metrics>,
 }
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn authorize_passes_when_gate_disabled() {
-        // No token configured → the inline fallback always allows (back-compat).
+        // No token configured → the inline fallback always allows.
         let auth = auth_with(None);
         assert!(auth.authorize(&HeaderMap::new()));
     }

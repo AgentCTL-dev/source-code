@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Prometheus `/metrics` exposition for the admission webhook.
 //!
-//! Hand-rolled in the node-agent's style (RFC 0010): no client library, the body
+//! Hand-rolled: no client library, the body
 //! is `text/plain; version=0.0.4`, and each metric emits its `# HELP`/`# TYPE`
 //! once followed by the sample. Counters live behind atomics in the shared app
 //! state so handlers can bump them lock-free; [`Metrics::render`] snapshots them
@@ -113,7 +113,7 @@ fn unix_now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Emit one `counter` metric (HELP + TYPE + sample), node-agent style.
+/// Emit one `counter` metric (HELP + TYPE + sample).
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     out.push_str(&format!(
         "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"

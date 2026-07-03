@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! `e2e` — the agentctl functional scenario runner (Phase 4).
+//! `e2e` — the agentctl functional scenario runner.
 //!
 //! ~25 discrete, asserted scenarios across every plane: provisioning, management
 //! (aggregated APIServer + RBAC), intelligence (secretless infer + budgets),
@@ -249,12 +249,11 @@ fn scrape(ctx: &Ctx, svc: &str, port: u16, scheme: &str) -> Result<prom::Metrics
     prom::scrape_proxy(&ctx.cfg.system_ns, svc, port, scheme, "/metrics")
 }
 
-/// Build an agentd-backed `Agent` CR in the scenario namespace. Contract 2.0: the
-/// operator ALWAYS renders `AGENT_INTELLIGENCE=https://<modelgateway>…` keyless and
-/// mounts the per-namespace CA — there is no routed-infer annotation and no node-agent
-/// socket. agentd validates the intelligence endpoint at boot in every mode (`once`
-/// infers immediately; a reactive/shard daemon dials it only when it does work), so a
-/// bound `modelPool` is enough. See `crates/agentctl-operator/src/render.rs`.
+/// Build an agentd-backed `Agent` CR in the scenario namespace. The operator always
+/// renders a keyless `AGENT_INTELLIGENCE=https://<modelgateway>…` endpoint and mounts
+/// the per-namespace CA. agentd validates the intelligence endpoint at boot in every
+/// mode (`once` infers immediately; a reactive/shard daemon dials it only when it does
+/// work), so a bound `modelPool` is enough.
 fn agentd_agent(ctx: &Ctx, name: &str, mode: Mode, instruction: &str) -> Agent {
     let mut a = Agent::new(
         name,
@@ -543,10 +542,10 @@ async fn mgmt_rbac_403(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// pause + resume via the aggregated APIServer subresources. Contract 2.0: these are
-/// real aggregated verbs (the apiserver discovery adds `agents/pause` + `agents/resume`),
-/// SAR-gated and forwarded DIRECT to the agent pod as `a2a.Pause`/`a2a.Resume` over
-/// mTLS — the v1 node-agent bridge is retired. Same round-trip as drain/lame-duck/cancel.
+/// pause + resume via the aggregated APIServer subresources. These are real aggregated
+/// verbs (the apiserver discovery adds `agents/pause` + `agents/resume`), SAR-gated and
+/// forwarded DIRECT to the agent pod as `a2a.Pause`/`a2a.Resume` over mTLS. Same
+/// round-trip as drain/lame-duck/cancel.
 async fn mgmt_pause_resume(ctx: &Ctx) -> Result<Outcome> {
     let pause = run_mgmt_verb(ctx, "pause").await?;
     if matches!(pause, Outcome::Skipped(_)) {
@@ -605,7 +604,7 @@ async fn intel_once_infer(ctx: &Ctx) -> Result<Outcome> {
 /// budget with a budget 429.
 ///
 /// Driven from an IN-CLUSTER probe pod, not a harness port-forward: with
-/// ModelGateway attest ON (the e2e base — contract 2.0), the gateway derives the
+/// ModelGateway attest ON (the e2e base), the gateway derives the
 /// caller's identity from its SOURCE IP (a kube pod lookup), and a port-forwarded
 /// request owns no pod so it fails closed. A curl pod in `ns` has a real pod IP, so
 /// it attests as `Direct(ns)`; it loops `/v1/infer` POSTs (selecting the pool via
@@ -986,7 +985,7 @@ async fn shard_k_of_n(ctx: &Ctx) -> Result<Outcome> {
         None => skip(format!(
             "StatefulSet reached {shards}/{shards} ready (shard-mode rendering verified), but \
              agentd advertises no shard identity: the operator does not inject AGENTD_SHARD=K/N \
-             from the StatefulSet ordinal yet (operator gap, RFC 0019 §4.2)"
+             from the StatefulSet ordinal yet (operator gap)"
         )),
     };
 
@@ -1050,7 +1049,7 @@ async fn a2a_card_jws(ctx: &Ctx) -> Result<Outcome> {
 }
 
 /// `SendMessage` round-trips a JSON-RPC call through the gateway to the agent.
-/// Contract 2.0: bare PascalCase method + proto3-JSON message; the result is the
+/// The call uses a bare PascalCase method + proto3-JSON message; the result is the
 /// `SendMessageResponse` `{"task": …}` envelope (the gateway normalizes it).
 async fn a2a_message_send(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-a2a-send";
@@ -1180,7 +1179,7 @@ async fn conf_metrics_registry(ctx: &Ctx) -> Result<Outcome> {
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
-    // Scrape the agent's own /metrics. Contract 2.0: the operator renders
+    // Scrape the agent's own /metrics. The operator renders
     // `AGENT_METRICS_ADDR=0.0.0.0:9090` + the container port unconditionally (the
     // /readyz + direct-scrape listener — the pod is network-attached, no proxy), so
     // the agent serves :9090 and this scrape SUCCEEDS. (A skip remains as a
@@ -1288,8 +1287,8 @@ async fn sec_trusted_proxy(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// ModelGateway attest anti-spoof (contract 2.0): identity is the caller's SOURCE
-/// IP, never a header. A caller whose source IP owns no pod (and who self-asserts an
+/// ModelGateway attest anti-spoof: identity is the caller's SOURCE IP, never a header.
+/// A caller whose source IP owns no pod (and who self-asserts an
 /// identity header anyway) is counted as a spoof and rejected — the header does not
 /// help.
 async fn sec_mg_attest(ctx: &Ctx) -> Result<Outcome> {

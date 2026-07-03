@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Shared tracing/telemetry init for the agentctl control-plane binaries
-//! (operator, apiserver, gateway, modelgateway, admission, node-agent).
+//! (operator, apiserver, gateway, modelgateway, coordination, scaler, admission).
 //!
 //! Every binary calls [`init`] once, early in `main` (inside the tokio runtime).
-//! By default it installs the same `tracing_subscriber` fmt layer the services
-//! used before — honoring `RUST_LOG`, defaulting to `info` — so the behaviour is
-//! byte-identical to a plain
+//! By default it installs a standard `tracing_subscriber` fmt layer — honoring
+//! `RUST_LOG`, defaulting to `info` — so the behaviour matches a plain
 //! `tracing_subscriber::fmt().with_env_filter(..).init()`.
 //!
 //! When **`OTEL_EXPORTER_OTLP_ENDPOINT` is set** it additionally:
@@ -13,8 +12,8 @@
 //!   * installs the **W3C `traceparent`** propagator,
 //!
 //! so traces flow across process hops. The apiserver injects the context into
-//! its HTTP request to the node-agent ([`inject_context`]); the node-agent
-//! continues the trace from the incoming headers ([`set_parent`]). Both helpers
+//! its mTLS HTTPS request to an agent pod's `/mcp` ([`inject_context`]); the
+//! agent continues the trace from the incoming headers ([`set_parent`]). Both helpers
 //! are no-ops when OTLP is off (no propagator installed ⇒ nothing is written and
 //! no remote parent is attached), keeping the default path unchanged.
 
@@ -40,8 +39,7 @@ pub fn init(service_name: &str) {
     let fmt_layer = tracing_subscriber::fmt::layer();
 
     // The OTLP layer is wired only when the endpoint env var is set; otherwise it
-    // is `None`, which `Layer` treats as a no-op, so the fmt-only path is exactly
-    // what the services produced before.
+    // is `None`, which `Layer` treats as a no-op, leaving the fmt-only path intact.
     let otlp_layer = if std::env::var_os(OTLP_ENV).is_some() {
         match build_tracer(service_name) {
             Ok(tracer) => {
@@ -150,7 +148,7 @@ mod tests {
     #[test]
     fn inject_is_noop_without_a_propagator() {
         // With no propagator installed (the default, OTLP off), injection must not
-        // add any header — the downstream request is byte-identical to before.
+        // add any header — the downstream request carries no trace context.
         let mut headers = http::HeaderMap::new();
         inject_context(&mut headers);
         assert!(headers.is_empty());

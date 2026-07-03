@@ -27,7 +27,7 @@
 //! caller logs a warning) so a missing mount never silently drops to plaintext.
 //!
 //! Built on rustls 0.23 with the **ring** provider (no aws-lc-rs, no C toolchain
-//! — matches the node-agent mTLS client in `na_client.rs`).
+//! — matches the mTLS client that dials agent pods in `na_client.rs`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

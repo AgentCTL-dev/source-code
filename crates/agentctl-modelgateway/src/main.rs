@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! agentctl ModelGateway (RFC 0012) — the intelligence plane's inference proxy.
+//! agentctl ModelGateway — the intelligence plane's inference proxy.
 //!
-//! Conformant agents are **networkless and hold NO provider secrets** (P0). They
-//! cannot reach a model provider on their own; instead their intelligence request
-//! reaches this gateway carrying only their *identity* in headers (in production
-//! the on-node bridge asserts these after attestation, RFC 0015; for now they are
-//! passed in). The gateway:
+//! Conformant agents **hold NO provider secrets** and cannot reach a model
+//! provider on their own; instead they dial this gateway keyless and their
+//! intelligence request carries only their *identity*. That identity is attested
+//! from the connection's source IP (resolved to the caller's pod), or by default
+//! taken as-is from the `X-Agent-*` headers. The gateway:
 //!   1. selects the agent's `ModelPool` (CRD, `agents.x-k8s.io/v1alpha1`),
 //!   2. enforces the pool's token **budget** pre-request,
 //!   3. **injects** the pool's provider credential (read from the referenced
@@ -14,7 +14,7 @@
 //!   5. **meters** the tokens consumed into a durable Postgres store.
 //!
 //! Hand-rolled in Rust (axum); agentctl is Rust-only and depends on the
-//! contract/wire, never on a specific agent or provider SDK (P0).
+//! contract/wire, never on a specific agent or provider SDK.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -45,9 +45,10 @@ const H_NAMESPACE: &str = "X-Agent-Namespace";
 const H_AGENT: &str = "X-Agent-Name";
 /// Routing header: which `ModelPool` to use (optional; defaults to the first in ns).
 const H_POOL: &str = "X-Model-Pool";
-/// Forwarder header: the real caller's pod UID, asserted by the node-agent after
-/// it SO_PEERCRED-attested that caller. Trusted ONLY when the source IP resolves
-/// to a node-agent pod; ignored from any other (direct) caller.
+/// Forwarder header: the real caller's pod UID, asserted by the trusted
+/// forwarder. Trusted ONLY when the source IP resolves to the forwarder pod (the
+/// `agentctl-node-agent` ServiceAccount in the control-plane namespace); ignored
+/// from any other (direct) caller.
 const H_POD_UID: &str = "X-Agent-Pod-Uid";
 
 #[derive(Clone)]
@@ -59,10 +60,10 @@ struct AppState {
     /// When `true`, the caller's identity is **attested** from its source IP
     /// (resolved to the real pod via the kube API) and the spoofable
     /// `X-Agent-Namespace` header is never trusted for the tenant. When `false`
-    /// (default), the header carries the identity (back-compat).
+    /// (default), the header carries the identity.
     attest: bool,
     /// The ModelGateway's own (control-plane) namespace, read from `POD_NAMESPACE`
-    /// at startup. It anchors the trusted node-agent **forwarder**: only a pod in
+    /// at startup. It anchors the trusted **forwarder**: only a pod in
     /// THIS namespace running the `agentctl-node-agent` ServiceAccount is trusted
     /// to forward another tenant's identity — an anchor a tenant cannot forge.
     /// **Fail closed:** empty (`POD_NAMESPACE` unset/empty) ⇒ NO forwarder is
@@ -108,11 +109,10 @@ async fn main() {
     // Shared metrics surface (also feeds the access gate's rejection counter).
     let metrics = Arc::new(metrics::Metrics::new());
 
-    // Identity attestation gate (RFC 0015). OFF (default) → the agent's
-    // identity is read from the spoofable X-Agent-* headers, exactly as before.
-    // ON → the identity is derived from the kernel-set source IP, resolved to
-    // the real pod via the kube API; the header can no longer impersonate a
-    // tenant.
+    // Identity attestation gate. OFF (default) → the agent's identity is read
+    // from the spoofable X-Agent-* headers. ON → the identity is derived from
+    // the kernel-set source IP, resolved to the real pod via the kube API; the
+    // header can no longer impersonate a tenant.
     let attest = attest::attest_enabled_from_env();
     if attest {
         tracing::info!(
@@ -125,7 +125,7 @@ async fn main() {
     }
 
     // The control-plane (own) namespace, from the downward-API POD_NAMESPACE. It
-    // anchors the trusted node-agent forwarder to a pod in THIS namespace running
+    // anchors the trusted forwarder to a pod in THIS namespace running
     // the agentctl-node-agent ServiceAccount — unforgeable by a tenant. Empty
     // (unset) ⇒ fail closed: NO forwarder is trusted (warn once below); direct
     // source-IP attestation still works.
@@ -174,7 +174,7 @@ async fn main() {
         // `AGENT_INTELLIGENCE` endpoint as an OpenAI provider POSTs the default
         // path `/v1/chat/completions`. The gateway is provider-neutral on the
         // wire, so this aliases to the SAME identity/pool/budget/credential-inject
-        // path as `/v1/infer` — the routed-infer agent loop reaches the gateway
+        // path as `/v1/infer` — the agent's inference loop reaches the gateway
         // without the agent knowing the gateway's native path.
         .route("/v1/chat/completions", post(infer))
         .route("/v1/usage", get(usage))
@@ -292,7 +292,7 @@ async fn shutdown_signal() {
     tracing::info!("shutting down: draining in-flight requests");
 }
 
-/// `GET /metrics` — the Prometheus exposition (node-agent text format).
+/// `GET /metrics` — the Prometheus text-format exposition.
 async fn serve_metrics(
     State(state): State<AppState>,
 ) -> ([(header::HeaderName, &'static str); 1], String) {
@@ -317,16 +317,15 @@ async fn infer(
     Json(mut body): Json<Value>,
 ) -> Response {
     state.metrics.inc_request();
-    // a. identity — attested from the source IP (RFC 0015) or, by default, from
-    //    the X-Agent-* headers (back-compat).
+    // a. identity — attested from the source IP or, by default, from the
+    //    X-Agent-* headers.
     let (ns, agent) = match resolve_identity(&state, peer.ip(), &headers).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
     // The X-Model-Pool header is an explicit override; otherwise honor the pool the
     // attested agent's CR declares (spec.modelPool). The operator renders no header,
-    // so this is how an agent's declared intelligence choice actually takes effect
-    // (previously the gateway ignored it and used the first pool in the namespace).
+    // so this is how an agent's declared intelligence choice actually takes effect.
     let want_pool = match header_str(&headers, H_POOL) {
         Some(p) => Some(p),
         None => declared_pool(&state.client, &ns, &agent).await,
@@ -340,18 +339,18 @@ async fn infer(
         Err(e) => return internal(&format!("select ModelPool: {e}")),
     };
     let budget = spec.budget.as_ref().map(|b| b.max_tokens);
-    // Per-fleet cap (RFC 0022 §9): when the caller is an AgentFleet with its own
-    // budget, enforce it alongside the pool cap so one fleet cannot drain a shared
+    // Per-fleet cap: when the caller is an AgentFleet with its own budget,
+    // enforce it alongside the pool cap so one fleet cannot drain a shared
     // pool. `None` for a plain Agent or a fleet without a budget.
     let fleet_budget = fleet_budget(&state.client, &ns, &agent).await;
 
-    // c. budget — atomic reservation (race-free; RFC 0012 / RFC 0022 §9). When the
-    //    pool AND/OR the fleet declares a cap, reserve a conservative upper-bound
-    //    estimate BEFORE the provider call: concurrent requests serialize per-pool
-    //    and every present cap holds under load (a bare pre-request SUM check let a
-    //    whole fleet overshoot). No cap ⇒ no reservation. The reservation is
-    //    reconciled to the actual spend after the call, or released on any early
-    //    return below.
+    // c. budget — atomic, race-free reservation. When the pool AND/OR the fleet
+    //    declares a cap, reserve a conservative upper-bound estimate BEFORE the
+    //    provider call: concurrent requests serialize per-pool so every present
+    //    cap holds under load. A bare pre-request SUM check would let a whole
+    //    fleet overshoot, since concurrent callers each read the same pre-spend
+    //    total. No cap ⇒ no reservation. The reservation is reconciled to the
+    //    actual spend after the call, or released on any early return below.
     let reservation: Option<(i64, i64)> = if budget.is_some() || fleet_budget.is_some() {
         let est = estimate_reservation(&body, state.default_reserve);
         match store::reserve(
@@ -522,7 +521,7 @@ async fn usage(
 /// Resolve the caller's `(namespace, agent)` for a request.
 ///
 /// In **header mode** (`attest` off, the default) this is purely the
-/// `X-Agent-Namespace`/`X-Agent-Name` headers, unchanged from before.
+/// `X-Agent-Namespace`/`X-Agent-Name` headers.
 ///
 /// In **attested mode** (`attest` on) the identity is derived from the
 /// kernel-set source IP — resolved to the real pod via the kube API — and the
@@ -552,7 +551,7 @@ async fn resolve_identity(
         Some(id) => attest::SourcePod::Direct(id),
         None => match resolve_ip_to_source(&state.client, peer_ip, &state.control_plane_ns).await {
             Ok(src) => {
-                // Cache ONLY a direct agent's identity. The node-agent forwarder
+                // Cache ONLY a direct agent's identity. The forwarder
                 // serves many agents from one IP and its caller varies per request
                 // (the `X-Agent-Pod-Uid` header), so its IP must never be cached.
                 if let attest::SourcePod::Direct(id) = &src {
@@ -564,11 +563,10 @@ async fn resolve_identity(
         },
     };
 
-    // The trusted node-agent forwarder asserts the real caller's pod UID in
-    // `X-Agent-Pod-Uid` (it has already SO_PEERCRED-attested that caller). Resolve
-    // that UID to the real agent. For ANY other source the header is IGNORED —
-    // only the node-agent is trusted to forward identity, so a random pod cannot
-    // bill/route as another tenant by setting `X-Agent-Pod-Uid`.
+    // The trusted forwarder asserts the real caller's pod UID in
+    // `X-Agent-Pod-Uid`. Resolve that UID to the real agent. For ANY other source
+    // the header is IGNORED — only the forwarder is trusted to forward identity, so
+    // a random pod cannot bill/route as another tenant by setting `X-Agent-Pod-Uid`.
     let is_forwarder = matches!(source, attest::SourcePod::Forwarder);
     let forwarded = if is_forwarder {
         match header_str(headers, H_POD_UID) {
@@ -582,7 +580,7 @@ async fn resolve_identity(
         None
     };
 
-    // Pure policy: attest (direct) / forward (node-agent) / flag-spoof / reject.
+    // Pure policy: attest (direct) / forward (forwarder) / flag-spoof / reject.
     match attest::decide(source, forwarded, header_ns.as_deref()) {
         attest::Decision::Use { identity, spoofed } => {
             state.metrics.inc_identity_attested();
@@ -627,7 +625,7 @@ async fn resolve_identity(
 /// Resolve a source IP to its pod, classified for attestation. Lists pods
 /// cluster-wide with a `status.podIP` field selector to narrow, then re-verifies
 /// the match locally (the selector is advisory) and classifies the pod: a genuine
-/// node-agent — a pod in `control_plane_ns` running the `agentctl-node-agent`
+/// forwarder — a pod in `control_plane_ns` running the `agentctl-node-agent`
 /// ServiceAccount (an anchor a tenant cannot forge) → [`attest::SourcePod::Forwarder`]
 /// (trusted to forward another agent's identity); any other pod →
 /// [`attest::SourcePod::Direct`] with its own namespace + `agentctl.dev/agent`
@@ -673,7 +671,7 @@ async fn resolve_ip_to_source(
     Ok(attest::SourcePod::Unresolved)
 }
 
-/// Resolve a node-agent-asserted pod UID to the real agent's attested identity.
+/// Resolve a forwarder-asserted pod UID to the real agent's attested identity.
 /// Mirrors [`resolve_ip_to_source`] but matches on `metadata.uid` — which is not
 /// a kube field selector, so we list pods cluster-wide and match locally — then
 /// derives the identity from the matched pod. `Ok(None)` ⇒ no pod has that UID
@@ -751,7 +749,7 @@ async fn declared_pool(client: &Client, ns: &str, agent: &str) -> Option<String>
         .and_then(|f| f.spec.template.model_pool)
 }
 
-/// The per-fleet token cap (`AgentFleet.spec.budget.maxTokens`, RFC 0022 §9) for the
+/// The per-fleet token cap (`AgentFleet.spec.budget.maxTokens`) for the
 /// caller, when the attested identity names an `AgentFleet` that declares one. `None`
 /// for a plain `Agent`, a fleet without a budget, or an absent CR — in which case
 /// only the pool cap (if any) applies.

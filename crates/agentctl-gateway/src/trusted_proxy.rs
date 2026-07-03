@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! TRUSTED-PROXY mode for the A2A gateway (front-proxy trust over mTLS).
 //!
-//! Mirrors the aggregated apiserver's front-proxy pattern (RFC 0009) and the
-//! node-agent's dual listener (RFC 0015). A fronting HTTP/API gateway (e.g.
-//! APISIX) terminates edge auth and asserts the caller identity; agentctl trusts
-//! that assertion ONLY over an authenticated mTLS channel.
+//! Mirrors the aggregated apiserver's front-proxy pattern, serving a dual
+//! (plaintext + mTLS) listener. A fronting HTTP/API gateway (e.g. APISIX) terminates edge auth
+//! and asserts the caller identity; agentctl trusts that assertion ONLY over an
+//! authenticated mTLS channel.
 //!
-//! Gated on `TRUSTED_PROXY_ENABLED` (default OFF; off ⇒ today's behaviour). When
-//! ON the gateway serves a SECOND listener:
+//! Gated on `TRUSTED_PROXY_ENABLED` (default OFF; when off the gateway serves only
+//! the plaintext listener). When ON the gateway serves a SECOND listener:
 //!
-//! * **`:8080` plaintext** — the existing surface. UNTRUSTED: every inbound
+//! * **`:8080` plaintext** — the plaintext surface. UNTRUSTED: every inbound
 //!   trusted-proxy identity header (the configured `<prefix>-subject/-email/-groups`,
 //!   default prefix `x-agentctl`, plus the legacy `X-Forwarded-*` set) is STRIPPED
 //!   before handling, so an in-cluster caller can never self-assert identity
@@ -24,7 +24,7 @@
 //!
 //! ring only (no openssl/aws-lc) — the process installs the ring provider in
 //! `main`, so [`build_tls_config`] uses the plain `ServerConfig`/`WebPkiClientVerifier`
-//! builders like the apiserver/node-agent.
+//! builders like the apiserver.
 
 use std::future::Future;
 use std::io::{self, BufReader};
@@ -129,7 +129,7 @@ impl Default for IdentityHeaders {
 /// Trusted-proxy configuration, parsed once at startup.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// `TRUSTED_PROXY_ENABLED` — OFF by default (today's behaviour unchanged).
+    /// `TRUSTED_PROXY_ENABLED` — OFF by default.
     pub enabled: bool,
     /// `AGENTCTL_GATEWAY_TLS_ADDR` — the mTLS listener bind.
     pub tls_addr: String,
@@ -223,12 +223,12 @@ pub struct MtlsCtx {
     pub metrics: Arc<Metrics>,
 }
 
-// --- TLS server config (mirrors node-agent/apiserver) -----------------------
+// --- TLS server config (mirrors apiserver) ----------------------------------
 
 /// rustls server config for the mTLS front-proxy listener: present the gateway's
 /// serving cert AND **require** a client cert chained to the trusted-proxy CA (so
 /// only the fronting proxy can reach this listener). Relies on the process-default
-/// ring provider installed in `main` (like the apiserver/node-agent).
+/// ring provider installed in `main` (like the apiserver).
 pub fn build_tls_config(tls_dir: &Path, ca_path: &Path) -> Result<ServerConfig, String> {
     let certs = load_certs(&tls_dir.join("tls.crt"))?;
     let key = load_key(&tls_dir.join("tls.key"))?;

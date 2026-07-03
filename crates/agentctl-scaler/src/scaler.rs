@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The `ExternalScaler` gRPC service (agentctl RFC 0011 §5.2) + its pure decision
-//! logic.
+//! The `ExternalScaler` gRPC service + its pure decision logic.
 //!
 //! The scaler reads the reference coordination MCP server's **off-pod backlog**
-//! (`work.stats` → `pending`, contract ask P9) over MCP JSON-RPC/HTTP and maps it
-//! onto KEDA's four RPCs:
+//! (`work.stats` → `pending`) over MCP JSON-RPC/HTTP and maps it onto KEDA's four
+//! RPCs:
 //!
 //!   * `GetMetricSpec` → metric `agentctl-backlog`, `targetSize = threshold`
 //!     (KEDA's HPA then drives replicas toward `ceil(pending / threshold)`).
@@ -165,7 +164,7 @@ pub struct Scaler {
     poll_interval: Duration,
     /// Optional bearer token presented to the coordination server (read from
     /// `AGENTCTL_API_TOKEN` at startup). `Some` ⇒ add `Authorization: Bearer <token>`
-    /// to every `work.stats` request; `None` (env unset/empty) ⇒ no header (back-compat).
+    /// to every `work.stats` request; `None` (env unset/empty) ⇒ no header.
     auth_token: Option<Arc<String>>,
 }
 
@@ -202,7 +201,7 @@ impl Scaler {
         });
         let mut request = self.http.post(&cfg.coordination_url).json(&body);
         // Present the bearer token when the operator/chart set AGENTCTL_API_TOKEN;
-        // when unset, no header (back-compat with an unauthenticated coordinator).
+        // when unset, no header (for an unauthenticated coordinator).
         if let Some(token) = &self.auth_token {
             request = request.bearer_auth(token);
         }
@@ -289,9 +288,9 @@ impl ExternalScaler for Scaler {
         Pin<Box<dyn Stream<Item = Result<IsActiveResponse, Status>> + Send + 'static>>;
 
     /// Poll `work.stats` on an interval and push an `IsActiveResponse` on each
-    /// `0 ↔ >0` transition (and an initial value on the first tick). Poll-based is
-    /// fine for v1 (agentctl RFC 0011 §5.2). On a read failure the last emitted
-    /// value is held (no transition is reported), so the fleet never flaps to 0.
+    /// `0 ↔ >0` transition (and an initial value on the first tick). On a read
+    /// failure the last emitted value is held (no transition is reported), so the
+    /// fleet never flaps to 0.
     #[tracing::instrument(skip_all, fields(ns = %request.get_ref().namespace, name = %request.get_ref().name))]
     async fn stream_is_active(
         &self,

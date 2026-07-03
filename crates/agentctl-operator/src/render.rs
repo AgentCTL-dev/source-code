@@ -2,13 +2,12 @@
 //! Pure workload rendering: an [`Agent`]/[`AgentFleet`] → the Kubernetes
 //! workload that runs it.
 //!
-//! This is the deterministic, side-effect-free core the reconcile loop (RFC
-//! 0006) calls. Keeping it pure makes the mode→workload mapping (RFC 0003 §5),
-//! the scaling regime (RFC 0011), and the serve wiring all unit-testable
-//! without a cluster.
+//! This is the deterministic, side-effect-free core the reconcile loop calls.
+//! Keeping it pure makes the mode→workload mapping, the scaling regime, and the
+//! serve wiring all unit-testable without a cluster.
 //!
-//! **contract_version 2.0 (agentd v2 HTTPS-everywhere pivot): the network is
-//! the substrate; identity is the boundary.** Every rendered pod SERVES its
+//! **Contract version 2.0: the network is the substrate; identity is the
+//! boundary.** Every rendered pod SERVES its
 //! management/A2A surface over mTLS-gated HTTPS (`--serve-mcp
 //! https://0.0.0.0:8443`) with a cert-manager-issued serving identity, trusts
 //! the cluster CA for callers (`--serve-client-ca`) and for its own keyless
@@ -76,12 +75,12 @@ pub struct RenderConfig {
     /// absolute (trailing-dot) FQDN so no DNS search list can capture it.
     pub modelgateway_url: String,
     /// The MCPGateway base URL each bound MCP server is rendered against
-    /// (`--mcp <name>=<url>/s/<name>`, RFC 0019). Same constraints as the
-    /// ModelGateway URL; the agent dials it keyless (identity = source IP).
+    /// (`--mcp <name>=<url>/s/<name>`). Same constraints as the ModelGateway
+    /// URL; the agent dials it keyless (identity = source IP).
     pub mcpgateway_url: String,
     /// The A2A gateway base URL a coordinator's `--a2a-peer worker=…/fleets/<ns>/<name>`
-    /// is rendered against for `distribution: a2a` (RFC 0022 §5/§6). Unused for the
-    /// default `queue` distribution.
+    /// is rendered against for `distribution: a2a`. Unused for the default
+    /// `queue` distribution.
     pub gateway_url: String,
 }
 
@@ -203,7 +202,7 @@ pub fn inject_workflow(rendered: &mut Rendered, configmap: &str, key: &str) {
 /// its trifecta tags (`--mcp-tags <name>=<comma-list>`). The agent dials the
 /// gateway keyless (trusting the cluster CA via the already-rendered `--tls-ca`);
 /// the gateway attests it, scopes it to these servers, and injects each server's
-/// credential off-pod (RFC 0019). Idempotent per server name.
+/// credential off-pod. Idempotent per server name.
 pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &[McpBinding]) {
     if servers.is_empty() {
         return;
@@ -246,8 +245,7 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
 /// Writable scratch dir mounted over the read-only root filesystem. With
 /// `readOnlyRootFilesystem: true` (see `container_security_context`) the
 /// container cannot write to `/`, so the agent's temp scratch needs an explicit
-/// writable `emptyDir` here. The management socket dir (`SOCKET_MOUNT`) is a
-/// separate mounted volume and stays writable on its own.
+/// writable `emptyDir` here.
 const TMP_MOUNT: &str = "/tmp";
 const TMP_VOLUME: &str = "tmp";
 
@@ -263,11 +261,11 @@ pub const API_TOKEN_ENV: &str = "AGENTCTL_API_TOKEN";
 pub enum Rendered {
     /// `once`/`workflow` mode → a batch Job.
     Job(Box<Job>),
-    /// `schedule` mode → a CronJob firing the Job on its cron (RFC 0003 §5).
+    /// `schedule` mode → a CronJob firing the Job on its cron.
     CronJob(Box<CronJob>),
     /// `loop`/`reactive` Agent, or a claim-mode AgentFleet → a Deployment.
     Deployment(Box<Deployment>),
-    /// A shard-mode AgentFleet → a StatefulSet (stable shard identity, RFC 0011).
+    /// A shard-mode AgentFleet → a StatefulSet (stable shard identity).
     StatefulSet(Box<StatefulSet>),
 }
 
@@ -278,7 +276,7 @@ pub enum RenderError {
     /// The resource has no `.metadata.name`.
     MissingName,
     /// No image to run: a classless `Agent`/fleet template must set `image` (a
-    /// classRef is resolved upstream, before rendering — RFC 0004).
+    /// classRef is resolved upstream, before rendering).
     MissingImage,
     /// A shard-mode fleet did not set `scaling.shards` (the partition count `N`).
     MissingShards,
@@ -308,7 +306,7 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
-/// Render an `Agent` to its workload (mode→workload, RFC 0003 §5).
+/// Render an `Agent` to its workload (mode→workload mapping).
 pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, RenderError> {
     let name = agent
         .metadata
@@ -331,7 +329,6 @@ pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, Rende
         // `workflow` is a supervised one-shot like `once` (→ Job): drive the graph
         // to a terminal status, then exit. (`reactive` + a workflow stays a
         // Deployment — the daemon arm below.)
-        // `workflow` is a supervised one-shot like `once` (→ Job).
         Mode::Once | Mode::Workflow => Ok(Rendered::Job(Box::new(Job {
             metadata: meta,
             spec: Some(JobSpec {
@@ -341,9 +338,8 @@ pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, Rende
             }),
             ..Default::default()
         }))),
-        // `schedule` → a real CronJob firing the Job on its cron. Previously this
-        // rendered a plain one-shot Job, so a scheduled agent ran exactly ONCE and
-        // never on cadence. CEL guarantees `spec.schedule` is set for this mode.
+        // `schedule` → a CronJob firing the Job on its cron. CEL guarantees
+        // `spec.schedule` is set for this mode.
         Mode::Schedule => {
             let sched = agent.spec.schedule.clone().unwrap_or_default();
             Ok(Rendered::CronJob(Box::new(CronJob {
@@ -381,7 +377,7 @@ pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, Rende
     }
 }
 
-/// Render an `AgentFleet` to its workload (scaling regime, RFC 0011): claim mode
+/// Render an `AgentFleet` to its workload (scaling regime): claim mode
 /// → a Deployment with **`replicas` omitted** (KEDA's HPA owns it); shard mode →
 /// a StatefulSet whose replica count is the fixed partition count `N`.
 pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, RenderError> {
@@ -414,7 +410,7 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
         ScaleMode::Claim => Ok(Rendered::Deployment(Box::new(Deployment {
             metadata: meta,
             spec: Some(DeploymentSpec {
-                // replicas OMITTED: KEDA's HPA is the sole owner (RFC 0011).
+                // replicas OMITTED: KEDA's HPA is the sole owner.
                 replicas: None,
                 selector: label_selector(&labels),
                 template: pod,
@@ -428,7 +424,7 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
                 .scaling
                 .shards
                 .ok_or(RenderError::MissingShards)?;
-            // Shard identity (RFC 0003 §9.1 P3): inject only `N` (identical across
+            // Shard identity: inject only `N` (identical across
             // every StatefulSet pod, as a shared template requires); the agent
             // derives its own `K` from the ordinal in `AGENT_POD_NAME`
             // (`<sts>-<ordinal>`). `--shard auto/N` is the contract spelling of that.
@@ -450,8 +446,8 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
     }
 }
 
-/// Inject `--shard auto/N` into a shard StatefulSet pod's agent container (RFC 0003
-/// §9.1 P3). Only `N` is templated — it is identical across all ordinals, which a
+/// Inject `--shard auto/N` into a shard StatefulSet pod's agent container.
+/// Only `N` is templated — it is identical across all ordinals, which a
 /// shared pod template requires; the agent self-derives its `K` from the ordinal in
 /// `AGENT_POD_NAME`. Idempotent (no-op if a `--shard` flag is already present).
 fn inject_shard_identity(pod: &mut PodTemplateSpec, shards: u32) {
@@ -466,9 +462,9 @@ fn inject_shard_identity(pod: &mut PodTemplateSpec, shards: u32) {
     args.push(format!("auto/{shards}"));
 }
 
-/// The label distinguishing a fleet's coordinator workload from its worker pool
-/// (RFC 0022 §5). Worker pods keep only the existing `agentctl.dev/agent=<fleet>`
-/// label; the coordinator carries its own name label PLUS these two.
+/// The label distinguishing a fleet's coordinator workload from its worker pool.
+/// Worker pods keep only the `agentctl.dev/agent=<fleet>` label; the coordinator
+/// carries its own name label PLUS these two.
 pub const FLEET_ROLE_LABEL: &str = "agentctl.dev/fleet-role";
 /// The label tying a coordinator back to its fleet (for cross-member discovery).
 pub const FLEET_LABEL: &str = "agentctl.dev/fleet";
@@ -481,7 +477,7 @@ pub fn coordinator_name(fleet: &str) -> String {
     format!("{fleet}-coordinator")
 }
 
-/// Render an `AgentFleet`'s **coordinator** ("main agent", RFC 0022 §3) when one is
+/// Render an `AgentFleet`'s **coordinator** ("main agent") when one is
 /// declared; `None` for a coordinatorless fleet. The coordinator is a long-lived
 /// reactive front door rendered as its own Deployment `<fleet>-coordinator`,
 /// labeled `fleet-role: coordinator`, replicas `coordinator.replicas` (default 1),
@@ -508,7 +504,7 @@ fn render_coordinator_inner(
     let name = coordinator_name(&fleet_name);
     // The coordinator is a long-lived A2A front door: coerce to reactive so a
     // run-to-exit mode does not CrashLoop under the Deployment (admission already
-    // forbids `once`). A workflow-driving coordinator is a future extension.
+    // forbids `once`). Driving a workflow from a coordinator is not supported.
     let mut template = coord.template.clone();
     template.mode = Mode::Reactive;
     let spec = &template;
@@ -546,7 +542,7 @@ fn render_coordinator_inner(
     })))
 }
 
-/// Wire the coordinator's work fan-out into its pod (RFC 0022 §5). `queue` (the
+/// Wire the coordinator's work fan-out into its pod. `queue` (the
 /// default): inject `AGENT_FLEET_WORKSOURCE` (the fleet `workSource`) as a config
 /// hint so a conformant coordinator knows where to `work.submit`/`work.result`.
 /// `a2a`: append `--a2a-peer worker=<gateway>/fleets/<ns>/<fleet>` so the
@@ -639,7 +635,7 @@ pub fn inject_api_token(rendered: &mut Rendered) {
 
 /// Default in-cluster address of the agentctl KEDA external scaler (gRPC). The
 /// operator overrides this from `SCALER_ADDRESS`; KEDA dials it for the external
-/// trigger (RFC 0011).
+/// trigger.
 pub const DEFAULT_SCALER_ADDRESS: &str = "agentctl-scaler.agentctl-system:9100";
 /// Default in-cluster coordination-server base URL the scaler reads the claim
 /// backlog (`work.stats`) from. Overridden from `COORDINATION_URL`, or per-fleet
@@ -650,7 +646,7 @@ pub const DEFAULT_COORDINATION_URL: &str = "http://agentctl-coordination.agentct
 const DEFAULT_SCALE_THRESHOLD: &str = "5";
 
 /// Render the KEDA `ScaledObject` that autoscales a **claim-mode** fleet's
-/// Deployment off the coordination backlog (RFC 0011), or `None` for shard mode
+/// Deployment off the coordination backlog, or `None` for shard mode
 /// (a StatefulSet with a fixed partition count `N` is NOT KEDA-driven, so the
 /// caller emits no ScaledObject for it).
 ///
@@ -744,7 +740,7 @@ fn require_stock_unix(substrate: Option<Substrate>) -> Result<(), RenderError> {
     match substrate.unwrap_or(Substrate::StockUnix) {
         Substrate::StockUnix => Ok(()),
         // Kata-hybrid swaps the volume source only; sidecar adds a sibling
-        // container. Both reuse the rest of this shape (RFC 0002) — not yet wired.
+        // container. Both reuse the rest of this shape; neither is wired yet.
         other => Err(RenderError::UnsupportedSubstrate(other)),
     }
 }
@@ -927,7 +923,7 @@ fn pod_template(
             }),
             ..Default::default()
         }),
-        // Confine the tenant container (hostile multi-tenancy P0).
+        // Confine the tenant container (hostile multi-tenancy).
         security_context: Some(container_security_context()),
         volume_mounts: Some(volume_mounts),
         ..Default::default()
@@ -941,7 +937,7 @@ fn pod_template(
         spec: Some(PodSpec {
             containers: vec![container],
             restart_policy,
-            // Pod-level hardening (hostile multi-tenancy P0).
+            // Pod-level hardening (hostile multi-tenancy).
             security_context: Some(pod_security_context()),
             // The pod holds NO borrowed credential — and no ambient one either:
             // never auto-mount the namespace default ServiceAccount token.
@@ -979,12 +975,11 @@ fn serve_args() -> Vec<String> {
     ]
 }
 
-/// Container-level confinement for the tenant agent (hostile multi-tenancy P0):
+/// Container-level confinement for the tenant agent (hostile multi-tenancy):
 /// **nonroot enforced**, no privilege escalation, all Linux capabilities
 /// dropped, read-only root filesystem (writable paths are explicit volumes —
-/// `/tmp`). With no hostPath socket to bind (the v2 pivot removed it), the
-/// reference image's native `USER 65532` runs unchanged and the whole render
-/// satisfies the `restricted` Pod Security Standard.
+/// `/tmp`). The reference image's native `USER 65532` runs unchanged and the
+/// whole render satisfies the `restricted` Pod Security Standard.
 fn container_security_context() -> SecurityContext {
     SecurityContext {
         run_as_non_root: Some(true),
@@ -1010,10 +1005,9 @@ fn pod_security_context() -> PodSecurityContext {
     }
 }
 
-/// The downward-API instance-identity env (contract `env-convention`, RFC
-/// 0014 §6.4). Emitted with the `AGENT_*` spelling the reference agent reads
-/// (contract `env-convention` / README map). The serve instruction is NOT env
-/// anymore — it is the `--serve-mcp https://…` argv ([`serve_args`]).
+/// The downward-API instance-identity env, emitted with the `AGENT_*` spelling
+/// the reference agent reads. The serve instruction is not an env var; it is
+/// the `--serve-mcp https://…` argv ([`serve_args`]).
 fn downward_env() -> Vec<EnvVar> {
     let field = |name: &str, path: &str| EnvVar {
         name: name.to_string(),
@@ -1035,8 +1029,8 @@ fn downward_env() -> Vec<EnvVar> {
 }
 
 /// Container args derived from the spec (mode + instruction + model +
-/// subscriptions). A later step renders the full config via a ConfigMap (RFC
-/// 0017); args keep the render self-contained and testable.
+/// subscriptions). A later step renders the full config via a ConfigMap; args
+/// keep the render self-contained and testable.
 fn agent_args(spec: &AgentSpec) -> Vec<String> {
     let mut args = vec!["--mode".to_string(), mode_str(spec.mode).to_string()];
     if let Some(instruction) = &spec.instruction {
@@ -1051,12 +1045,11 @@ fn agent_args(spec: &AgentSpec) -> Vec<String> {
         args.push("--subscribe".to_string());
         args.push(sub.clone());
     }
-    // Deliver the declared bounding box to the agent (RFC 0003 §4.1). Without this
-    // the operator silently dropped `spec.limits`, so subagent-tree/step/token caps
-    // set on the CR never reached agentd (which consumes these flags). `max_tokens`
-    // / `max_depth` / `max_steps` map to agentd flags; `tree_token_budget` has no
-    // agentd flag yet (hardcoded Caps default — an agentd P-cap follow-up), so it is
-    // deliberately not emitted rather than passed to an unknown flag.
+    // Deliver the declared bounding box to the agent, so subagent-tree/step/token
+    // caps set on the CR reach agentd (which consumes these flags). `max_tokens` /
+    // `max_depth` / `max_steps` map to agentd flags; `tree_token_budget` has no
+    // agentd flag yet, so it is deliberately not emitted rather than passed to an
+    // unknown flag.
     if let Some(limits) = &spec.limits {
         if let Some(v) = limits.max_tokens {
             args.push("--max-tokens".to_string());
@@ -1333,8 +1326,8 @@ mod tests {
         assert_eq!(podspec.automount_service_account_token, Some(false));
         assert_eq!(podspec.share_process_namespace, Some(true));
 
-        // Container-level: NONROOT (restricted PSS — no hostPath socket to bind
-        // anymore), no priv-esc, drop ALL caps, read-only root fs.
+        // Container-level: NONROOT (restricted PSS), no priv-esc, drop ALL caps,
+        // read-only root fs.
         let c = container_of(&pod);
         let sc = c
             .security_context
@@ -1622,8 +1615,7 @@ mod tests {
 
     #[test]
     fn agent_args_render_declared_limits() {
-        // The bounding box (spec.limits) must reach agentd; the operator used to
-        // drop it silently.
+        // The bounding box (spec.limits) must reach agentd.
         let mut a = agent(Mode::Reactive);
         a.spec.limits = Some(agent_api::Limits {
             max_tokens: Some(500_000),
@@ -1723,7 +1715,7 @@ mod tests {
         assert_eq!(md["scalerAddress"], "scaler:9100");
     }
 
-    // ── RFC 0022: coordinator ("main agent") rendering ──────────────────────
+    // ── Coordinator ("main agent") rendering ──────────────────────
 
     fn coord_template() -> AgentSpec {
         AgentSpec {
@@ -1736,8 +1728,8 @@ mod tests {
 
     #[test]
     fn shard_fleet_injects_shard_identity() {
-        // RFC 0003 §9.1 P3: a shard StatefulSet pod carries `--shard auto/N` (N only,
-        // identical across ordinals); the agent derives K from AGENT_POD_NAME.
+        // A shard StatefulSet pod carries `--shard auto/N` (N only, identical
+        // across ordinals); the agent derives K from AGENT_POD_NAME.
         let f = fleet(ScaleMode::Shard, Some(4));
         let r = render_fleet(&f, &cfg()).unwrap();
         let Rendered::StatefulSet(sts) = r else {

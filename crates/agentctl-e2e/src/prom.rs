@@ -2,11 +2,11 @@
 //! Prometheus text-exposition (format 0.0.4) scraping + parsing.
 //!
 //! Every control-plane component serves `GET /metrics` in the hand-rendered text
-//! format (agentctl RFC 0010). This module turns that into queryable samples so a
+//! format. This module turns that into queryable samples so a
 //! scenario can assert an oracle like "`agentctl_modelgateway_tokens_total` rose by
 //! 100" or "`agentctl_apiserver_verb_denied_total{} == 1`".
 //!
-//! Two scrape paths (the plan's "via the kube apiserver proxy OR a port-forward"):
+//! Two scrape paths — via the kube apiserver proxy or a port-forward:
 //!   * [`scrape_proxy`] — `kubectl get --raw` of the apiserver Service proxy path
 //!     (no extra port to open; works through the same kubeconfig as everything else).
 //!   * [`scrape_url`]   — a direct `reqwest` GET of a `kubectl port-forward`ed URL.
@@ -86,8 +86,8 @@ impl Metrics {
         self.samples.iter().map(|s| s.name.clone()).collect()
     }
 
-    /// Flatten to the `HashMap<canonical-key, value>` the plan calls for, keyed by a
-    /// stable `name{k="v",…}` string (labels key-sorted).
+    /// Flatten to a `HashMap<canonical-key, value>`, keyed by a stable
+    /// `name{k="v",…}` string (labels key-sorted).
     pub fn to_map(&self) -> HashMap<String, f64> {
         self.samples
             .iter()

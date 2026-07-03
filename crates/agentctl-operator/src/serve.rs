@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! The operator's health + metrics HTTP surface.
 //!
-//! A small plaintext axum server (the same stack the node-agent serves
-//! `/healthz` + `/metrics` with, RFC 0008/0010 — no second HTTP/metrics stack):
+//! A small plaintext axum server that serves `/healthz` + `/metrics` off a
+//! single HTTP stack (no second HTTP/metrics stack):
 //!
 //! * `GET /healthz` — 200 while the process is alive (liveness). Served by every
 //!   replica, leader or standby, so the kubelet never kills a healthy standby.
@@ -65,7 +65,8 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Readiness: 200 once the manager is up AND this replica is the leader.
+/// Readiness: 200 once the manager is up and participating in leader election
+/// (not gated on holding leadership — standbys are Ready too).
 async fn readyz(State(metrics): State<Arc<Metrics>>) -> impl IntoResponse {
     if metrics.is_ready() {
         (StatusCode::OK, "ok")
@@ -74,7 +75,7 @@ async fn readyz(State(metrics): State<Arc<Metrics>>) -> impl IntoResponse {
     }
 }
 
-/// Prometheus exposition (same content type the node-agent serves).
+/// Prometheus exposition in the standard `text/plain; version=0.0.4` format.
 async fn metrics_handler(
     State(metrics): State<Arc<Metrics>>,
 ) -> ([(header::HeaderName, &'static str); 1], String) {

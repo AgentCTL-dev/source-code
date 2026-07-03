@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `agentctl install` / `agentctl uninstall` — a thin, opinionated wrapper around
-//! the agentctl Helm chart (LANE D).
+//! the agentctl Helm chart.
 //!
 //! Helm owns the actual rollout; this wrapper only does the two things Helm can't
 //! reliably do for the agentctl chart:
@@ -8,8 +8,8 @@
 //!      cert-manager is installed (its CRDs are a hard prerequisite for every
 //!      serving/mTLS cert the chart issues).
 //!   2. **Own the namespace** — Helm can't reliably own the namespace it installs
-//!      into, and the node-agent needs a *privileged* PodSecurity level
-//!      (`hostPath` + `hostPID`), so we create + label the namespace ourselves.
+//!      into, and the chart's control-plane workloads need a *privileged*
+//!      PodSecurity level, so we create + label the namespace ourselves.
 //!
 //! Then it shells out to `helm upgrade --install …`, inheriting stdio and
 //! propagating Helm's exit status.
@@ -170,8 +170,9 @@ async fn cert_manager_present() -> Result<bool> {
 // ===========================================================================
 
 /// Ensure the install namespace exists and carries the privileged PodSecurity
-/// labels the node-agent requires. Creates it when `create` is set; otherwise
-/// errors if it is absent. Existing namespaces are patched to (re)apply labels.
+/// labels the chart's control-plane workloads require. Creates it when `create`
+/// is set; otherwise errors if it is absent. Existing namespaces are patched to
+/// (re)apply labels.
 async fn ensure_namespace(ns: &str, create: bool) -> Result<()> {
     let client = Client::try_default()
         .await
@@ -220,8 +221,8 @@ async fn ensure_namespace(ns: &str, create: bool) -> Result<()> {
 // Pure helpers (no clock, no network — unit-tested below).
 // ===========================================================================
 
-/// The privileged PodSecurity labels the node-agent's `hostPath`/`hostPID` use
-/// requires on the install namespace.
+/// The privileged PodSecurity labels the chart's control-plane workloads require
+/// on the install namespace.
 fn pss_labels() -> BTreeMap<String, String> {
     [
         ("pod-security.kubernetes.io/enforce", "privileged"),

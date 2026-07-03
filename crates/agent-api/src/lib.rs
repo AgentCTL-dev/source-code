@@ -1,26 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 //! # agent-api
 //!
-//! The agentctl custom-resource types — `Agent` and `AgentFleet` — per agentctl
-//! RFC 0003. These are **contract-shaped**: a CR describes contract-level intent
-//! (mode, surfaces to expose, intelligence/MCP bindings, substrate), not any
-//! agent's internals (principle P0). `agentd` (the reference agent binary; repo
-//! `agentd-dev`) is the reference implementation; these types never reference it.
+//! The agentctl custom-resource types — `Agent` and `AgentFleet`. These are
+//! **contract-shaped**: a CR describes contract-level intent (mode, surfaces to
+//! expose, intelligence/MCP bindings, substrate), not any agent's internals. The
+//! reference agent binary is one implementation; these types never reference it.
 //!
 //! Generated as kube-rs [`kube::CustomResource`]s. CRD YAML is produced via
-//! [`kube::CustomResourceExt::crd`] (see the `agentctl-crdgen` path / tests).
+//! [`kube::CustomResourceExt::crd`].
 //!
-//! Versioning per RFC 0005: a single served version (`v1alpha1`) at a time, with
-//! conversion handled out of band — the CRD `apiVersion` clock is decoupled from
-//! the agent `contract_version` clock.
+//! A single version (`v1alpha1`) is served at a time, with conversion handled out
+//! of band — the CRD `apiVersion` clock is decoupled from the agent
+//! `contract_version` clock.
 
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Group for all agentctl CRDs. Provisional (RFC 0003 open question): the final
-/// string (`agents.x-k8s.io` vs `agentctl.dev`) is undecided; the shapes here
-/// are group-string-independent.
+/// Group for all agentctl CRDs. The final group string is not yet settled; the
+/// type shapes here are independent of the group string.
 pub const GROUP: &str = "agents.x-k8s.io";
 
 // ===========================================================================
@@ -28,8 +26,7 @@ pub const GROUP: &str = "agents.x-k8s.io";
 // ===========================================================================
 
 /// One logical agent: an instruction + bindings rendered to a workload whose
-/// shape follows `mode` (RFC 0003 §5: once→Job, schedule→CronJob,
-/// loop/reactive→Deployment).
+/// shape follows `mode` (once→Job, schedule→CronJob, loop/reactive→Deployment).
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[kube(
     group = "agents.x-k8s.io",
@@ -61,12 +58,12 @@ pub struct AgentSpec {
     pub mode: Mode,
 
     /// The conformant-agent image to run. **Required iff `classRef` is unset;
-    /// forbidden when `classRef` is set** (enforced by CEL/admission, RFC 0003
-    /// §7 / RFC 0007). A classless `Agent` names its own image here.
+    /// forbidden when `classRef` is set** (enforced by CEL/admission). A classless
+    /// `Agent` names its own image here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Reference to an `AgentClass` (RFC 0004) supplying the ops profile +
-    /// image. Mutually exclusive with `image`.
+    /// Reference to an `AgentClass` supplying the ops profile + image. Mutually
+    /// exclusive with `image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_ref: Option<LocalRef>,
 
@@ -79,22 +76,22 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
 
-    /// Reference to an `IntelligenceService`/ModelPool (RFC 0004/0012).
+    /// Reference to an `IntelligenceService`/`ModelPool`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intelligence_ref: Option<LocalRef>,
 
-    /// Reusable MCP server bundles (RFC 0004 `MCPServerSet`).
+    /// Reusable MCP server bundles (`MCPServerSet`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_server_set_refs: Vec<LocalRef>,
 
-    /// Substrate selection (RFC 0002). Absent ⇒ inherited from the `AgentClass`
-    /// / cluster default (hostile tenancy forces `kata-hybrid`).
+    /// Substrate selection. Absent ⇒ inherited from the `AgentClass` / cluster
+    /// default (hostile tenancy forces `kata-hybrid`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub substrate: Option<Substrate>,
 
-    /// Which control-plane surfaces to expose (RFC 0003 §3). The operator drives
-    /// only what the agent actually advertises in its manifest (graceful
-    /// degradation), intersected with this desired set.
+    /// Which control-plane surfaces to expose. The operator drives only what the
+    /// agent actually advertises in its manifest (graceful degradation),
+    /// intersected with this desired set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surfaces: Option<DesiredSurfaces>,
 
@@ -108,10 +105,10 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
 
-    /// The workflow graph to drive (agentd v2 `--mode workflow`). Required when
-    /// `mode: workflow`; also valid alongside `mode: reactive` (a suspend/resume
-    /// daemon graph). Source is inline JSON or a ConfigMap key; the operator
-    /// materializes it to a mounted file passed as `--workflow <path>`.
+    /// The workflow graph to drive. Required when `mode: workflow`; also valid
+    /// alongside `mode: reactive` (a suspend/resume daemon graph). Source is
+    /// inline JSON or a ConfigMap key; the operator materializes it to a mounted
+    /// file passed as `--workflow <path>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<WorkflowSource>,
 
@@ -119,32 +116,32 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
 
-    /// **Declared capability** (RFC 0007): the agent requests in-sandbox command
-    /// execution. The admission webhook gates this — it is a privileged
-    /// capability and one leg of the lethal trifecta, never granted implicitly.
+    /// **Declared capability**: the agent requests in-sandbox command execution.
+    /// The admission webhook gates this — it is a privileged capability and one
+    /// leg of the lethal trifecta, never granted implicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<bool>,
 
-    /// **Declared capability** (RFC 0007): the agent requests outbound network
-    /// egress. The admission webhook gates this — combined with `exec` and
-    /// `secrets` it forms the lethal trifecta and triggers the override gate.
+    /// **Declared capability**: the agent requests outbound network egress. The
+    /// admission webhook gates this — combined with `exec` and `secrets` it forms
+    /// the lethal trifecta and triggers the override gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<bool>,
 
-    /// **Declared capability** (RFC 0007): the names of namespace-local `Secret`s
-    /// the agent may read. The admission webhook validates each requested name
-    /// against policy; access to untrusted private data is a trifecta leg.
+    /// **Declared capability**: the names of namespace-local `Secret`s the agent
+    /// may read. The admission webhook validates each requested name against
+    /// policy; access to untrusted private data is a trifecta leg.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<Vec<String>>,
 
-    /// **Declared capability** (RFC 0007): the `ModelPool` (RFC 0012) this agent
-    /// binds for model access. The admission webhook validates the binding (the
-    /// pool exists / is permitted for this tenant).
+    /// **Declared capability**: the `ModelPool` this agent binds for model access.
+    /// The admission webhook validates the binding (the pool exists / is permitted
+    /// for this tenant).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_pool: Option<String>,
 
-    /// Declarative per-agent access policy (authn/authz at the A2A gateway). In
-    /// v1 `public` is documentation-only; `oidc` configures JWT verification and
+    /// Declarative per-agent access policy (authn/authz at the A2A gateway).
+    /// `public` is documentation-only; `oidc` configures JWT verification and
     /// claim-based authorization for inbound A2A calls.
     #[serde(rename = "access", default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
@@ -154,8 +151,8 @@ pub struct AgentSpec {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Access {
-    /// Whether this agent is served publicly via the A2A gateway. **Doc-only in
-    /// v1** (no enforcement yet); records intent.
+    /// Whether this agent is served publicly via the A2A gateway. Documentation-
+    /// only (no enforcement yet); records intent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public: Option<bool>,
     /// OIDC/JWT authentication + authorization for inbound A2A calls.
@@ -203,7 +200,7 @@ pub struct ClaimRequirement {
     pub any_of: Vec<String>,
 }
 
-/// The run shape (RFC 0003 §5 / agentd RFC 0008).
+/// The run shape.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -217,27 +214,27 @@ pub enum Mode {
     /// Internal cron (→ CronJob). Production cron prefers an external scheduler.
     Schedule,
     /// Drive a declarative **workflow** graph instead of a single instruction
-    /// (agentd v2 `--mode workflow --workflow <file>`). Supervised like `once`
-    /// (→ Job): same exit-code table, the result carries the workflow outcome.
-    /// Requires `spec.workflow`. A `reactive` daemon may ALSO carry a workflow
-    /// (a suspend/resume graph) — that is `mode: reactive` + `spec.workflow`,
-    /// not this mode.
+    /// (`--mode workflow --workflow <file>`). Supervised like `once` (→ Job): same
+    /// exit-code table, the result carries the workflow outcome. Requires
+    /// `spec.workflow`. A `reactive` daemon may ALSO carry a workflow (a
+    /// suspend/resume graph) — that is `mode: reactive` + `spec.workflow`, not
+    /// this mode.
     Workflow,
 }
 
-/// Substrate tier (RFC 0002). Names are the canonical tier ids.
+/// Substrate tier. Names are the canonical tier ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Substrate {
-    /// unix-socket-over-hostPath → host DaemonSet (dev / single-tenant).
+    /// Stock Kubernetes pods (dev / single-tenant).
     StockUnix,
-    /// vsock on Kata hybrid (hardened; default for hostile multi-tenant prod).
+    /// Kata Containers isolation (hardened; default for hostile multi-tenant prod).
     KataHybrid,
-    /// per-pod sidecar over emptyDir (most portable; weakest isolation).
+    /// Per-pod sidecar (most portable; weakest isolation).
     SidecarEmptydir,
 }
 
-/// Which control-plane surfaces an `Agent` wants exposed (RFC 0003 §3).
+/// Which control-plane surfaces an `Agent` wants exposed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DesiredSurfaces {
@@ -269,9 +266,9 @@ pub struct Schedule {
     pub timezone: Option<String>,
 }
 
-/// Where an agent's workflow graph comes from (agentd v2 `--mode workflow`).
-/// Exactly one of `inline` / `configMapKeyRef` is set (CEL). The operator
-/// materializes it to a file mounted into the pod and passed as `--workflow`.
+/// Where an agent's workflow graph comes from. Exactly one of `inline` /
+/// `configMapKeyRef` is set (CEL). The operator materializes it to a file mounted
+/// into the pod and passed as `--workflow`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(extend("x-kubernetes-validations" = [{
@@ -319,15 +316,15 @@ pub struct LocalRef {
 }
 
 /// `Agent.status` — a curated projection of the live capabilities manifest +
-/// health (RFC 0003 §6), never a raw manifest dump.
+/// health, never a raw manifest dump.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
-    /// The conditions taxonomy (RFC 0003 §6.2): `Validated`, `Rendered`,
-    /// `Ready`, `Draining`, `Degraded`, plus advisory `TrifectaUnionObserved`.
+    /// The conditions taxonomy: `Validated`, `Rendered`, `Ready`, `Draining`,
+    /// `Degraded`, plus advisory `TrifectaUnionObserved`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
-    /// The `.metadata.generation` this status reflects (hot-loop guard, RFC 0006).
+    /// The `.metadata.generation` this status reflects (hot-loop guard).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     /// A coarse human-facing phase.
@@ -370,7 +367,7 @@ pub struct ServedSurfaces {
     pub events: bool,
 }
 
-/// A status condition (RFC 0003 §6.2). Mirrors `metav1.Condition` shape.
+/// A status condition. Mirrors `metav1.Condition` shape.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
@@ -382,7 +379,7 @@ pub struct Condition {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// RFC 3339 timestamp.
+    /// An ISO 8601 / UTC timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_transition_time: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -393,9 +390,9 @@ pub struct Condition {
 // AgentFleet
 // ===========================================================================
 
-/// A replicated, autoscaled set of agents (RFC 0003 §4 / RFC 0011). Renders to a
-/// StatefulSet (shard mode) or Deployment (claim mode); **KEDA owns
-/// `.spec.replicas`**, so the rendered workload omits it.
+/// A replicated, autoscaled set of agents. Renders to a StatefulSet (shard mode)
+/// or Deployment (claim mode); **KEDA owns `.spec.replicas`**, so the rendered
+/// workload omits it.
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[kube(
     group = "agents.x-k8s.io",
@@ -423,8 +420,7 @@ pub struct Condition {
     },
     {
         // A coordinator ("main agent") is a long-lived front door — a `once`
-        // coordinator would exit and never serve. Constrains ONLY the new field,
-        // so it is additive (RFC 0022 §4 / RFC 0005 §2.3).
+        // coordinator would exit and never serve.
         "rule": "!has(self.coordinator) || self.coordinator.template.mode != 'once'",
         "message": "coordinator.template.mode must not be 'once' (the coordinator must be long-lived)"
     }
@@ -439,36 +435,34 @@ pub struct AgentFleetSpec {
     pub work_source: Option<String>,
     /// Claim-mode **worker** replica count, the target of the `scale` subresource
     /// so `kubectl scale agentfleet` and an HPA can drive it. **KEDA owns this in
-    /// steady state** (RFC 0011); the rendered workload omits it. Optional so
-    /// claim mode may scale to 0 / defer to KEDA when unset.
+    /// steady state**; the rendered workload omits it. Optional so claim mode may
+    /// scale to 0 / defer to KEDA when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
 
-    /// The fleet's **coordinator** ("main agent", RFC 0022 §3). When set, the
-    /// operator renders an additional single-role Deployment (label
+    /// The fleet's **coordinator** ("main agent"). When set, the operator renders
+    /// an additional single-role Deployment (label
     /// `agentctl.dev/fleet-role: coordinator`) and wires it as the fleet's A2A
-    /// front door + work producer. Absent ⇒ a headless worker pool (today's
-    /// behaviour), load-balanced directly by the A2A gateway.
+    /// front door + work producer. Absent ⇒ a headless worker pool, load-balanced
+    /// directly by the A2A gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<Coordinator>,
 
     /// Per-fleet model budget, enforced by the ModelGateway IN ADDITION to the
-    /// `ModelPool` budget (RFC 0012 / RFC 0022 §9). Isolates one fleet's spend
-    /// from another's even when they share a pool. Absent ⇒ only the pool cap
-    /// applies.
+    /// `ModelPool` budget. Isolates one fleet's spend from another's even when
+    /// they share a pool. Absent ⇒ only the pool cap applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<FleetBudget>,
 
-    /// Work-fabric policy for this fleet's items (RFC 0022 §7): dead-letter
-    /// threshold and the default lease TTL. Absent ⇒ unbounded redelivery +
-    /// server-default TTL (today's behaviour).
+    /// Work-fabric policy for this fleet's items: dead-letter threshold and the
+    /// default lease TTL. Absent ⇒ unbounded redelivery + server-default TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_policy: Option<WorkPolicy>,
 }
 
-/// The fleet's coordinator ("main agent", RFC 0022 §3). A normal conformant
-/// agent, distinguished only by its role label and by the operator wiring it as a
-/// work **producer** + A2A front door rather than a **consumer**.
+/// The fleet's coordinator ("main agent"). A normal conformant agent,
+/// distinguished only by its role label and by the operator wiring it as a work
+/// **producer** + A2A front door rather than a **consumer**.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Coordinator {
@@ -484,16 +478,16 @@ pub struct Coordinator {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<u32>,
 
-    /// How the coordinator reaches the workers (RFC 0022 §5). `queue` (default):
-    /// the operator wires it as a producer on the fleet `workSource`; workers
-    /// claim (load-balanced, elastic). `a2a`: the operator injects an
+    /// How the coordinator reaches the workers. `queue` (default): the operator
+    /// wires it as a producer on the fleet `workSource`; workers claim
+    /// (load-balanced, elastic). `a2a`: the operator injects an
     /// `--a2a-peer worker=<gateway>/fleets/<ns>/<name>` so it delegates
-    /// point-to-point through the gateway PEP (RFC 0013).
+    /// point-to-point through the gateway PEP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<Distribution>,
 }
 
-/// How a coordinator fans work out to its workers (RFC 0022 §5).
+/// How a coordinator fans work out to its workers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Distribution {
@@ -505,25 +499,25 @@ pub enum Distribution {
     A2a,
 }
 
-/// Per-fleet model budget (RFC 0012, the intelligence plane; RFC 0022 §9).
+/// Per-fleet model budget (the intelligence plane).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FleetBudget {
     /// Total tokens this fleet may consume against its `ModelPool`, across all
-    /// members. Enforced by the ModelGateway reservation path (RFC 0012) keyed by
+    /// members. Enforced by the ModelGateway reservation path keyed by
     /// `(namespace, pool, fleet)`, IN ADDITION to the pool-wide cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<i64>,
 }
 
-/// Work-fabric policy for a fleet's items (RFC 0011 / RFC 0022 §7).
+/// Work-fabric policy for a fleet's items.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkPolicy {
     /// Dead-letter an item after it has been redelivered this many times without
-    /// a terminal `ack`. Absent ⇒ unbounded redelivery (today). A poison item is
-    /// moved to the `deadletter` state (surfaced at `dlq://items`) instead of
-    /// cycling forever.
+    /// a terminal `ack`. Absent ⇒ unbounded redelivery. A poison item is moved to
+    /// the `deadletter` state (surfaced at `dlq://items`) instead of cycling
+    /// forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
 
@@ -533,7 +527,7 @@ pub struct WorkPolicy {
     pub claim_ttl_ms: Option<u64>,
 }
 
-/// The scaling regime (RFC 0011).
+/// The scaling regime.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Scaling {
@@ -606,10 +600,10 @@ pub struct AgentFleetStatus {
 // ModelPool
 // ===========================================================================
 
-/// A pool of model access (RFC 0012, the intelligence plane). Agents are
-/// **networkless and hold NO provider secrets**; the control plane supplies
-/// model access through a credential-injecting, metering, budget-enforcing
-/// proxy (the `ModelGateway`) configured by this CRD. The pool names the
+/// A pool of model access (the intelligence plane). Agents hold **NO provider
+/// secrets**; they dial the control plane keyless, and the control plane supplies
+/// model access through a credential-injecting, metering, budget-enforcing proxy
+/// (the `ModelGateway`) configured by this CRD. The pool names the
 /// provider, its endpoint, the `Secret` holding the provider API key, the
 /// allowed models, and an optional total token budget.
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
@@ -693,8 +687,8 @@ pub struct ModelPoolStatus {
 // ===========================================================================
 
 /// A reusable, namespaced bundle of MCP tool servers an `Agent`/`AgentFleet`
-/// binds via `spec.mcpServerSetRefs` (RFC 0004 §5 / RFC 0019). Agents are
-/// **networkless-of-credentials**: they never hold a tool server's token. The
+/// binds via `spec.mcpServerSetRefs`. Agents hold **NO tool-server
+/// credentials**: they never hold a tool server's token. The
 /// control plane brokers every remote MCP server through a credential-injecting,
 /// attesting, policy-enforcing proxy (the `MCPGateway`, the tool-plane analog of
 /// the `ModelGateway`) configured by this CRD. Each server names its remote
@@ -735,8 +729,8 @@ pub struct McpServer {
     /// segment (`/s/<name>`). Unique within the resolved `Agent` union.
     pub name: String,
 
-    /// The remote MCP server URL (Streamable HTTP, RFC 0004 transport). The
-    /// AGENT never dials this — it dials the gateway, which dials this.
+    /// The remote MCP server URL (Streamable HTTP transport). The AGENT never
+    /// dials this — it dials the gateway, which dials this.
     pub endpoint: String,
 
     /// How the gateway authenticates to the remote server. The credential lives
@@ -744,8 +738,8 @@ pub struct McpServer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<McpAuth>,
 
-    /// Per-tool trifecta capability tags (RFC 0012 §3.1) the operator declares
-    /// for the Rule-of-Two check. A bare list is shorthand for the `*` glob.
+    /// Per-tool trifecta capability tags the operator declares for the
+    /// Rule-of-Two check. A bare list is shorthand for the `*` glob.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 
@@ -754,9 +748,9 @@ pub struct McpServer {
     pub budget: Option<Budget>,
 }
 
-/// How the MCPGateway authenticates to a remote MCP server. v1 ships the
-/// `staticToken` bearer (a long-lived credential held off-pod at the gateway);
-/// the OAuth client-credentials / EMA tiers (RFC 0019 §6/§7) extend this enum.
+/// How the MCPGateway authenticates to a remote MCP server. The `staticToken`
+/// bearer (a long-lived credential held off-pod at the gateway) is currently
+/// supported; OAuth client-credentials / EMA tiers extend this enum.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAuth {
@@ -796,7 +790,7 @@ pub struct MCPServerSetStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_count: Option<i64>,
     /// The union of trifecta tags across all servers (informational; the
-    /// Agent-level union is the gate — RFC 0004 §5.3).
+    /// Agent-level union is the gate).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tag_union: Vec<String>,
 }

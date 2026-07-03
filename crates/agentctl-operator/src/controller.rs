@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The level-triggered reconcile loop (agentctl RFC 0006).
+//! The level-triggered reconcile loop.
 //!
 //! A [`kube::runtime::Controller`] watches [`Agent`] objects and the workloads
 //! they own, and drives the cluster toward the rendered desired state:
 //!
 //! 1. render the `Agent` to its workload via the pure [`render_agent`] core;
 //! 2. server-side-apply that workload (it carries an owner reference, so GC
-//!    reclaims it when the `Agent` is deleted — RFC 0003 §5);
-//! 3. patch `Agent.status` with the conditions taxonomy (RFC 0003 §6.2) +
+//!    reclaims it when the `Agent` is deleted);
+//! 3. patch `Agent.status` with the conditions taxonomy +
 //!    `observedGeneration` + a curated contract projection.
 //!
 //! A [`RenderError`] is surfaced as a `Validated=False` condition rather than
@@ -42,7 +42,7 @@ use crate::{
     DEFAULT_SCALER_ADDRESS,
 };
 
-/// Finalizer key gating `Agent` deletion until cleanup runs (RFC 0006).
+/// Finalizer key gating `Agent` deletion until cleanup runs.
 const FINALIZER: &str = "agentctl.dev/cleanup";
 /// Field-manager identity for server-side apply of owned workloads.
 const FIELD_MANAGER: &str = "agentctl-operator";
@@ -58,9 +58,9 @@ const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 pub struct Ctx {
     pub client: Client,
     pub metrics: Arc<Metrics>,
-    /// Publishes Kubernetes Events on reconcile outcomes (RFC 0010).
+    /// Publishes Kubernetes Events on reconcile outcomes.
     pub recorder: Recorder,
-    /// KEDA scaler wiring for claim-mode fleets (RFC 0011).
+    /// KEDA scaler wiring for claim-mode fleets.
     pub scaler: ScalerConfig,
     /// Optional in-cluster bearer-token injection into rendered agent pods
     /// (chart `apiToken.enabled`).
@@ -94,8 +94,8 @@ pub struct Ctx {
 /// that cannot start (the Secret is absent there). So injection is gated on the
 /// agent being in the control-plane namespace ([`should_inject`](Self::should_inject));
 /// for agents elsewhere the operator does NOT inject — the Secret must be
-/// replicated into their namespace and wired by other means (documented in
-/// docs/security.md). This keeps default + cross-namespace installs from breaking.
+/// replicated into their namespace and wired by other means. This keeps default
+/// and cross-namespace installs from breaking.
 #[derive(Clone, Debug, Default)]
 pub struct ApiTokenConfig {
     /// Inject the token into agent pods. `API_TOKEN_ENABLED`, default `false`.
@@ -126,7 +126,7 @@ impl ApiTokenConfig {
     }
 }
 
-/// Operator-side KEDA scaler wiring for claim-mode fleets (RFC 0011). Read once
+/// Operator-side KEDA scaler wiring for claim-mode fleets. Read once
 /// from the environment at startup ([`ScalerConfig::from_env`]) and carried on
 /// [`Ctx`]. The defaults point a stock install at the in-cluster scaler +
 /// coordination Services; `enabled=false` (env `SCALER_ENABLED`) lets a non-KEDA
@@ -232,7 +232,7 @@ pub async fn reconcile(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Error
     result
 }
 
-/// Publish a Kubernetes Event against `obj` (RFC 0010). Best-effort: a failed
+/// Publish a Kubernetes Event against `obj`. Best-effort: a failed
 /// publish is logged, never fatal to the reconcile. Generic over the CR type so
 /// both `Agent` and `AgentFleet` share one path.
 async fn publish_event<K>(
@@ -299,7 +299,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             }
             // Bind MCP tool servers: resolve the agent's MCPServerSet refs and
             // render `--mcp <name>=<gateway>/s/<name>` so it dials the MCPGateway
-            // keyless (RFC 0019). Best-effort — a dangling ref is logged, not
+            // keyless. Best-effort — a dangling ref is logged, not
             // fatal (surfaces as a missing tool, not a failed reconcile).
             let bindings = resolve_mcp_bindings(&ctx.client, ns, &agent.spec).await;
             inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
@@ -315,7 +315,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             if ctx.pki.enabled() {
                 crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
             }
-            // Tenant network isolation (RFC 0015): ensure the agent NetworkPolicies
+            // Tenant network isolation: ensure the agent NetworkPolicies
             // in THIS namespace, so a dynamically-created tenant namespace is
             // isolated without a chart re-render. No-op unless enabled.
             if ctx.netpol.active() {
@@ -372,7 +372,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
         }
     };
 
-    // DeepEqual guard (RFC 0006 §2.6): only write status if it actually changed,
+    // DeepEqual guard: only write status if it actually changed,
     // so we don't churn the Agent (and re-trigger our own watch) every reconcile.
     let desired = desired_status(&condition, observed, phase, &contract)?;
     if status_changed(agent.status.as_ref(), &desired)? {
@@ -396,7 +396,7 @@ fn cleanup(agent: &Agent) -> Action {
 
 /// Server-side-apply the rendered workload into `ns` under our field manager.
 /// Materialize an agent/fleet-template's workflow source (if any) and inject the
-/// `--workflow <file>` mount into the rendered pod (RFC 0006 / agentd v2). For an
+/// `--workflow <file>` mount into the rendered pod. For an
 /// inline graph the operator server-side-applies a generated ConfigMap
 /// (`<workload>-workflow`, owner-ref'd so GC reclaims it); a `configMapKeyRef` is
 /// mounted directly. No-op when the spec carries no workflow. Errors bubble to
@@ -447,8 +447,8 @@ async fn ensure_and_inject_workflow(
 }
 
 /// Resolve an agent/fleet-template's `mcpServerSetRefs` into the flat list of
-/// bound MCP servers (name + trifecta tags) the renderer wires to the MCPGateway
-/// (RFC 0019). Reads each referenced `MCPServerSet` in the workload's namespace.
+/// bound MCP servers (name + trifecta tags) the renderer wires to the MCPGateway.
+/// Reads each referenced `MCPServerSet` in the workload's namespace.
 /// Best-effort: a missing/dangling ref is logged and skipped (a config error
 /// surfaces as a missing tool, never a failed reconcile). Duplicate server names
 /// across sets collapse to the first seen (admission owns collision rejection).
@@ -564,7 +564,7 @@ pub fn ready_condition(observed_generation: Option<i64>, rendered_kind: &str) ->
 }
 
 /// Read back the applied workload's OBSERVED readiness so `Ready` reflects reality
-/// rather than "the object was server-side-applied" (RFC 0003 §6.2). The
+/// rather than "the object was server-side-applied". The
 /// `.owns(Deployment/StatefulSet)` watches re-trigger reconcile when the workload's
 /// status changes, so this converges: applied → `0/N` (Unavailable) → `k/N`
 /// (Progressing) → `N/N` (Ready). Returns `(ready, desired)` for the long-lived
@@ -654,7 +654,7 @@ pub fn readiness_condition(
     }
 }
 
-/// The failure condition for a spec the renderer rejects (RFC 0003 §6.2).
+/// The failure condition for a spec the renderer rejects.
 pub fn validated_failed_condition(message: &str) -> Condition {
     Condition {
         type_: "Validated".to_string(),
@@ -683,7 +683,7 @@ pub fn error_policy(_agent: Arc<Agent>, err: &Error, _ctx: Arc<Ctx>) -> Action {
 }
 
 // ---------------------------------------------------------------------------
-// AgentFleet reconcile (scaling plane, RFC 0011)
+// AgentFleet reconcile (scaling plane)
 // ---------------------------------------------------------------------------
 
 /// Reconcile one `AgentFleet`, recording reconcile metrics around the work in
@@ -773,13 +773,13 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             if ctx.pki.enabled() {
                 crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &name, &owner).await?;
             }
-            // Tenant network isolation (RFC 0015): same per-namespace agent
+            // Tenant network isolation: same per-namespace agent
             // NetworkPolicies as the single-Agent path — a fleet's pods carry the
             // same `app.kubernetes.io/name: agent` label the policies select.
             if ctx.netpol.active() {
                 crate::netpol::ensure_agent_netpols(&ctx.client, &ctx.netpol, ns).await?;
             }
-            // Guarded shard resize (RFC 0022 §8): when a shard fleet's N changed,
+            // Guarded shard resize: when a shard fleet's N changed,
             // drive a stop-the-world rebalance (quiesce the old-N pods to 0, then
             // flip N and scale up) instead of the naive rolling update Kubernetes
             // would do — which runs mixed moduli and double-owns / orphans keys
@@ -803,19 +803,19 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 format!("{kind} workload applied"),
             )
             .await;
-            // The coordinator ("main agent", RFC 0022 §3) — a second owned workload
+            // The coordinator ("main agent") — a second owned workload
             // when spec.coordinator is set. `None` ⇒ headless worker pool (unchanged);
             // `Some(ready)` folds into the fleet readiness below (the fleet is Ready
             // only when BOTH the worker pool and the coordinator are ready).
             let coordinator_ready = reconcile_coordinator(ctx.as_ref(), ns, &fleet, &name).await?;
-            // KEDA autoscaling for claim-mode fleets (RFC 0011). Gated +
+            // KEDA autoscaling for claim-mode fleets. Gated +
             // best-effort: never hard-fails the Deployment reconcile (e.g. when
             // the KEDA CRDs are absent) — it only surfaces a condition.
             let scaler_condition = reconcile_scaled_object(ctx.as_ref(), ns, &fleet).await;
             // Ready reflects the fleet's OBSERVED replica readiness (Deployment /
             // StatefulSet), not merely "applied": an all-CrashLoop fleet is NOT Ready,
             // and a claim fleet scaled to zero is Ready-but-idle. Populates the
-            // long-declared status.readyReplicas / desiredReplicas.
+            // status.readyReplicas / desiredReplicas fields.
             let scale_target = fleet_replica_count(&fleet, &rendered);
             let worker_condition =
                 match workload_readiness(&ctx.client, ns, &name, kind, scale_target).await {
@@ -882,7 +882,7 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     Ok(Action::requeue(requeue_after()))
 }
 
-/// Render + apply the fleet's **coordinator** workload (RFC 0022 §3) when one is
+/// Render + apply the fleet's **coordinator** workload when one is
 /// declared. Runs the SAME pre-apply pipeline as an agent (api-token, MCP tool
 /// bindings from the coordinator template, workload PKI), owns it by the fleet, and
 /// reads back its readiness. Returns `None` for a coordinatorless fleet, else
@@ -964,7 +964,7 @@ fn coordinator_progressing_condition(observed_generation: Option<i64>) -> Condit
 /// quiesce→flip→converge choreography advances promptly across reconciles.
 const SHARD_RESIZE_POLL: Duration = Duration::from_secs(5);
 
-/// The next step of a guarded shard **resize** (RFC 0022 §8), decided purely from
+/// The next step of a guarded shard **resize**, decided purely from
 /// the live StatefulSet's applied shard count vs the desired one, plus its replica
 /// state. Pure so the state machine is unit-testable without a cluster.
 ///
@@ -1015,7 +1015,7 @@ fn plan_shard_resize(
 
 /// Parse the shard modulus `N` a live StatefulSet's agent container was rendered
 /// with — the value after `--shard` (spelled `auto/N`, and tolerant of a `K/N`
-/// form). `None` when the flag is absent (a pre-RFC-0022 StatefulSet) or unparsable.
+/// form). `None` when the flag is absent (an older StatefulSet) or unparsable.
 fn applied_shard_count(sts: &StatefulSet) -> Option<u32> {
     let args = sts
         .spec
@@ -1033,7 +1033,7 @@ fn applied_shard_count(sts: &StatefulSet) -> Option<u32> {
     value.rsplit('/').next()?.parse::<u32>().ok()
 }
 
-/// Drive the guarded shard resize (RFC 0022 §8). Returns `Ok(Some(action))` when a
+/// Drive the guarded shard resize. Returns `Ok(Some(action))` when a
 /// rebalance is IN FLIGHT — the StatefulSet has been quiesced (scaled to 0) or
 /// flipped (new-`N` applied) and the fleet status carries a `Resizing` condition,
 /// so the caller returns that requeue and SKIPS the normal apply. Returns `Ok(None)`
@@ -1045,8 +1045,8 @@ fn applied_shard_count(sts: &StatefulSet) -> Option<u32> {
 /// closed (no drain-confirms-quiesced handshake required — standard pod termination
 /// SIGTERM + grace lets the agent finish in flight). The residual gap is that a
 /// crash-restart of the operator mid-flip, or an agent that ignores SIGTERM, could
-/// still briefly overlap; a per-item ownership *epoch* (a data-plane / contract
-/// change) would close that, and is tracked as a follow-up (RFC 0022 §8/§10).
+/// still briefly overlap; fully closing that would require a per-item ownership
+/// *epoch* (a data-plane / contract change).
 async fn drive_shard_resize(
     ctx: &Ctx,
     ns: &str,
@@ -1166,7 +1166,7 @@ async fn patch_resizing_status(
 }
 
 /// Best-effort: render + server-side-apply the KEDA `ScaledObject` for a
-/// **claim-mode** fleet (RFC 0011), returning a `ScaledObject=False` condition to
+/// **claim-mode** fleet, returning a `ScaledObject=False` condition to
 /// surface on the fleet status when the apply failed (typically the KEDA CRDs are
 /// not installed). Returns `None` — i.e. nothing to surface — when the scaler is
 /// disabled, the fleet is shard mode (no ScaledObject), or the apply succeeded.
@@ -1249,7 +1249,7 @@ pub fn scaled_object_failed_condition(message: &str) -> Condition {
 ///   drives), defaulting to 0 when unset (scaled-to-zero / deferred to KEDA).
 ///
 /// Never reads or writes the rendered Deployment's `.spec.replicas` — that field
-/// stays unset and KEDA-owned (the KEDA-safe invariant, RFC 0011).
+/// stays unset and KEDA-owned (the KEDA-safe invariant).
 fn fleet_replica_count(fleet: &AgentFleet, rendered: &Rendered) -> u32 {
     match rendered {
         Rendered::StatefulSet(sts) => sts
@@ -1294,8 +1294,7 @@ fn desired_fleet_status(
     if let Some(selector) = selector {
         status["selector"] = serde_json::to_value(selector)?;
     }
-    // The long-declared, formerly-blank kubectl columns (Desired/Ready), now driven
-    // by the observed workload readback.
+    // The kubectl columns (Desired/Ready), driven by the observed workload readback.
     if let Some(ready) = ready_replicas {
         status["readyReplicas"] = serde_json::to_value(ready)?;
     }
@@ -1538,7 +1537,7 @@ mod tests {
         assert_eq!(fleet_replica_count(&claim, &rendered), 0);
     }
 
-    // ── RFC 0022 §8: guarded shard resize state machine ─────────────────────
+    // ── guarded shard resize state machine ──────────────────────────────────
 
     #[test]
     fn plan_shard_resize_covers_the_choreography() {
@@ -1603,7 +1602,7 @@ mod tests {
             applied_shard_count(&sts(Some(vec!["--shard", "2/8"]))),
             Some(8)
         );
-        // No --shard flag (pre-RFC-0022 StatefulSet) → None.
+        // No --shard flag (an older StatefulSet) → None.
         assert_eq!(
             applied_shard_count(&sts(Some(vec!["--mode", "reactive"]))),
             None
@@ -1749,8 +1748,8 @@ mod tests {
             (c.status.as_str(), c.reason.as_deref()),
             ("False", Some("Progressing"))
         );
-        // Zero ready with a desired → Unavailable (the CrashLoop case that used to
-        // falsely report Ready=WorkloadApplied).
+        // Zero ready with a desired → Unavailable (a CrashLooping workload must
+        // not report Ready).
         let c = readiness_condition(Some(1), "StatefulSet", 0, 3);
         assert_eq!(
             (c.status.as_str(), c.reason.as_deref()),

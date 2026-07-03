@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The `agentctl-operator` binary: run the reconcile [`Controller`] (RFC 0006)
-//! as a leader-elected, observable singleton.
+//! The `agentctl-operator` binary: run the reconcile [`Controller`] as a
+//! leader-elected, observable singleton.
 //!
 //! Watches `Agent`/`AgentFleet` objects and the workloads they own, reconciling
 //! each via [`agentctl_operator::controller`]. On top of that this binary adds
@@ -54,7 +54,7 @@ async fn main() -> Result<(), kube::Error> {
     metrics.set_manager_up(true);
     info!(%addr, "serving /healthz, /readyz, /metrics");
 
-    // Leader election (RFC 0006 — operator HA). Identity is the pod name (downward
+    // Leader election for operator HA. Identity is the pod name (downward
     // API); the lease lives in the operator's own namespace.
     let identity = std::env::var("POD_NAME")
         .ok()
@@ -77,8 +77,8 @@ async fn main() -> Result<(), kube::Error> {
 
     // Won the lease: run the controllers (set_leader is handled inside lease::run +
     // the renewer; manager_up was already set above so /readyz was 200 while standby).
-    // Kubernetes Events recorder (RFC 0010): the operator already holds events
-    // RBAC; `reporter.controller` is the controller name and `instance` the pod so
+    // Kubernetes Events recorder: the operator already holds events RBAC;
+    // `reporter.controller` is the controller name and `instance` the pod so
     // events are attributable per-replica.
     let recorder = Recorder::new(
         client.clone(),
@@ -88,7 +88,7 @@ async fn main() -> Result<(), kube::Error> {
         },
     );
 
-    // KEDA scaler wiring for claim-mode fleets (RFC 0011), read from the operator
+    // KEDA scaler wiring for claim-mode fleets, read from the operator
     // env (SCALER_ENABLED / SCALER_ADDRESS / COORDINATION_URL). Defaults point at
     // the in-cluster scaler + coordination Services; disable on a non-KEDA cluster.
     let scaler = ScalerConfig::from_env();

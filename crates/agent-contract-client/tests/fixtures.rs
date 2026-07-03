@@ -51,8 +51,7 @@ fn default_capture_has_surfaces_off() {
     assert!(!m.surfaces.metrics.is_served());
     // Contract 2.0: `surfaces.a2a` advertises the compiled A2A capability
     // (methods the build can serve) independent of whether a listener is bound —
-    // so a once-mode, no-serve build still advertises it. (v1 tied a2a to the
-    // management listener; the pivot decoupled them.)
+    // so a once-mode, no-serve build still advertises it.
     assert!(m.surfaces.a2a.is_served());
     assert_eq!(m.surfaces.shard, None);
     assert_eq!(m.intelligence.healthy, Health::Unknown);
@@ -78,7 +77,7 @@ fn default_capture_has_surfaces_off() {
 #[test]
 fn full_features_capture_has_surfaces_on() {
     // Real v2 capture: a reactive, fully-featured build serving mTLS HTTPS with
-    // every surface on. Management is now an `https://` address (no vsock).
+    // every surface on. Management is served at an `https://` address on port 8443.
     let m = load("full-features.json");
     assert_eq!(m.surfaces.management.addr(), Some("https://0.0.0.0:8443"));
     assert_eq!(m.surfaces.metrics.addr(), Some("0.0.0.0:9090"));
@@ -92,7 +91,7 @@ fn full_features_capture_has_surfaces_on() {
     assert!(a2a.methods.iter().any(|x| x == "SendMessage"));
 
     assert_eq!(m.identity.namespace.as_deref(), Some("agents"));
-    // exec was REMOVED in contract 2.0 — no build advertises it.
+    // Contract 2.0 has no exec surface — no build advertises it.
     assert!(!m.exec_enabled);
     assert!(m.allow_trifecta);
     assert_eq!(m.mcp_servers.first().map(|s| s.name.as_str()), Some("fs"));
@@ -125,8 +124,8 @@ fn refuses_unknown_major_but_parses() {
         })
     ));
 
-    // And the legacy contract 1.x is now equally unsupported (the pivot moved
-    // the major forward — a v1 agent no longer negotiates).
+    // Contract 1.x is likewise unsupported: the supported major is 2, so a
+    // 1.x agent does not negotiate.
     let mut v = load_value("default.json");
     v["contract_version"] = serde_json::json!("1.0");
     let m: Manifest = serde_json::from_value(v).unwrap();

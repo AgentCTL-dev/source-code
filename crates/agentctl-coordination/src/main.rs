@@ -1,30 +1,28 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! agentctl reference coordination MCP server (agentctl RFC 0011 §3.2) — the
-//! claim-mode **correctness backbone**: the single serializing point that makes
-//! exactly-one-owner hold across replicas.
+//! agentctl reference coordination MCP server — the claim-mode **correctness
+//! backbone**: the single serializing point that makes exactly-one-owner hold
+//! across replicas.
 //!
-//! It serves the FROZEN `work.*` contract (agentd RFC 0015 §5.6) over MCP
-//! JSON-RPC — the server side of what the conformant agent
-//! (`agentd crates/agentd/src/cluster/claim.rs`) calls: an atomic `work.claim`,
-//! the lease lifecycle (`renew`/`ack`/`release` + TTL expiry), transactional
-//! dedupe on `claim_key`, and the off-pod backlog count (`work.stats` /
-//! `work://pending`, contract ask P9) the future KEDA external scaler reads to
-//! scale a fleet **from zero**.
+//! It serves the stable `work.*` contract over MCP JSON-RPC — the server side of
+//! what a conformant agent calls: an atomic `work.claim`, the lease lifecycle
+//! (`renew`/`ack`/`release` + TTL expiry), transactional dedupe on `claim_key`,
+//! and the off-pod backlog count (`work.stats` / `work://pending`) a KEDA external
+//! scaler reads to scale a fleet **from zero**.
 //!
 //! Surface:
 //!   * `POST /` and `POST /mcp` — MCP JSON-RPC 2.0.
 //!   * `GET /healthz` — liveness (always 200 while serving).
 //!   * `GET /readyz`  — 200 once the lease-sweep loop is up.
-//!   * `GET /metrics` — Prometheus exposition (agentctl RFC 0010 text format).
+//!   * `GET /metrics` — Prometheus exposition (text format).
 //!
-//! Plain HTTP is fine for v1 — it sits behind the cluster network / egress proxy
-//! (agentctl RFC 0011 §3.4). Hand-rolled in Rust (axum); agentctl is Rust-only.
+//! Plain HTTP is fine for v1 — it sits behind the cluster network / egress proxy.
+//! Hand-rolled in Rust (axum).
 //!
-//! **Open question (agentctl RFC 0011 §3.2 / §10):** HA, durability, and
-//! per-fleet vs cluster-shared sharding of this single replica. The store sits
-//! behind the [`store::ClaimStore`] trait so a Redis/Postgres backend slots in
-//! without touching the wire layer; v1 ships the in-memory store and documents
-//! that a coordination loss collapses the serializing point for dependent fleets.
+//! HA, durability, and per-fleet vs cluster-shared sharding of this replica remain
+//! open design questions. The store sits behind the [`store::ClaimStore`] trait so a
+//! Redis/Postgres backend slots in without touching the wire layer; the in-memory
+//! store is the default, and a coordination loss collapses the serializing point for
+//! dependent fleets.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,16 +71,17 @@ struct AppState {
     ready: Arc<AtomicBool>,
     /// Optional bearer token gating the data endpoints (`POST /`, `POST /mcp`).
     /// `Some` ⇒ enforce `Authorization: Bearer <token>`; `None` (env unset/empty)
-    /// ⇒ no auth (back-compat). Read once from `AGENTCTL_API_TOKEN` at startup.
+    /// ⇒ no auth. Read once from `AGENTCTL_API_TOKEN` at startup.
     auth_token: Option<Arc<String>>,
-    /// OPT-IN attested-identity gate (RFC 0015), `COORDINATION_ATTEST_IDENTITY`.
-    /// When `true`, the claim lifecycle is bound to / verified against the caller's
+    /// OPT-IN attested-identity gate, `COORDINATION_ATTEST_IDENTITY`. When `true`,
+    /// the claim lifecycle is bound to / verified against the caller's
     /// kernel-attested source-IP identity (the lease HOLDER), not the spoofable
-    /// self-asserted `_meta`. When `false` (default), behaviour is unchanged.
+    /// self-asserted `_meta`. When `false` (the default), the holder is the
+    /// self-asserted `_meta` agent.
     attest: bool,
     /// In-cluster kube client used ONLY in attested mode to resolve a source IP to
     /// its pod. `None` when attestation is off (the server then does NO cluster
-    /// reads, exactly as before).
+    /// reads).
     client: Option<Client>,
     /// TTL cache of `source IP → attested identity`, so a burst of claim calls from
     /// one pod does not hammer the kube API. Unused when `attest` is `false`.
@@ -98,12 +97,12 @@ async fn main() {
     let dedupe_cap = env_usize("COORDINATION_DEDUPE_CAP", DEFAULT_DEDUPE_CAP);
     let sweep_ms = env_u64("COORDINATION_SWEEP_INTERVAL_MS", DEFAULT_SWEEP_INTERVAL_MS);
 
-    // BACKEND SELECTION (agentctl RFC 0011 §3.2 / §10): a durable, HA-capable
-    // Postgres store when COORDINATION_DATABASE_URL (or DATABASE_URL) is set —
-    // the serializing point becomes a shared DB row, so grant-one holds across
-    // >1 replica and survives a restart. Absent, the in-memory store is the
-    // (single-replica, non-durable) default. Both sit behind the SAME ClaimStore
-    // trait, so the MCP wire layer is untouched either way.
+    // BACKEND SELECTION: a durable, HA-capable Postgres store when
+    // COORDINATION_DATABASE_URL (or DATABASE_URL) is set — the serializing point
+    // becomes a shared DB row, so grant-one holds across >1 replica and survives a
+    // restart. Absent, the in-memory store is the (single-replica, non-durable)
+    // default. Both sit behind the SAME ClaimStore trait, so the MCP wire layer is
+    // untouched either way.
     let store: Arc<dyn ClaimStore> = match coordination_database_url() {
         Some(url) => {
             tracing::info!(
@@ -127,7 +126,7 @@ async fn main() {
     let ready = Arc::new(AtomicBool::new(false));
 
     // Background sweeper: return expired leases to pending so a dead claimer's
-    // item is re-offered to the fleet (agentd RFC 0019 §3.2). Marks ready once up.
+    // item is re-offered to the fleet. Marks ready once up.
     {
         let store = store.clone();
         let metrics = metrics.clone();
@@ -147,8 +146,8 @@ async fn main() {
         });
     }
 
-    // Bearer-token gate (agentctl RFC 0011 §3.4 hardening): read AGENTCTL_API_TOKEN
-    // once. Unset/empty ⇒ no auth (back-compat); set ⇒ enforce on the data routes.
+    // Bearer-token gate: read AGENTCTL_API_TOKEN once. Unset/empty ⇒ no auth; set ⇒
+    // enforce on the data routes.
     let auth_token = std::env::var("AGENTCTL_API_TOKEN")
         .ok()
         .filter(|t| !t.is_empty())
@@ -163,12 +162,12 @@ async fn main() {
         );
     }
 
-    // OPT-IN attested-identity gate (RFC 0015), COORDINATION_ATTEST_IDENTITY. OFF
-    // (default) ⇒ the lease holder is the self-asserted `_meta` agent, exactly as
-    // before, and the server does NO cluster reads. ON ⇒ the holder is derived from
-    // the kernel-set source IP (resolved to the real pod via the kube API), so a
-    // tenant can neither bill a claim to another identity nor ack/renew/release
-    // (settle or steal) another tenant's lease.
+    // OPT-IN attested-identity gate, COORDINATION_ATTEST_IDENTITY. OFF (default) ⇒
+    // the lease holder is the self-asserted `_meta` agent and the server does NO
+    // cluster reads. ON ⇒ the holder is derived from the kernel-set source IP
+    // (resolved to the real pod via the kube API), so a tenant can neither bill a
+    // claim to another identity nor ack/renew/release (settle or steal) another
+    // tenant's lease.
     let attest = attest::attest_enabled_from_env();
     // The own (control-plane) namespace, from the downward-API POD_NAMESPACE. Read
     // and logged at startup for parity with the modelgateway; direct source-IP
@@ -222,11 +221,11 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
 
-    // OPTIONAL mTLS listener (COORDINATION_MTLS_ADDR, RFC 0015). UNSET ⇒ OFF: the
-    // plaintext path below is byte-identical to before (no second listener, no crypto
-    // provider install, no extra cluster work). SET ⇒ a SECOND mTLS listener runs
-    // alongside :8080, where a verified + allow-listed client cert authenticates the
-    // caller (the scaler) in place of the coarse AGENTCTL_API_TOKEN.
+    // OPTIONAL mTLS listener (COORDINATION_MTLS_ADDR). UNSET ⇒ OFF: only the
+    // plaintext path below runs (no second listener, no crypto provider install, no
+    // extra cluster work). SET ⇒ a SECOND mTLS listener runs alongside :8080, where a
+    // verified + allow-listed client cert authenticates the caller (the scaler) in
+    // place of the coarse AGENTCTL_API_TOKEN.
     let Some(mtls_cfg) = mtls::Config::from_env() else {
         tracing::info!(%addr, dedupe_cap, sweep_ms, attest, "agentctl coordination MCP server: serving the work.* claim surface");
         // Graceful shutdown on SIGTERM/SIGINT — drain in-flight requests (matches the
@@ -249,7 +248,7 @@ async fn main() {
     // mTLS enabled: install the process-default ring provider (ignore an
     // already-installed error — the kube client may install one in attested mode),
     // then build the rustls server config that REQUIRES a CA-signed client cert.
-    // Missing/invalid material panics at startup (like the gateway/node-agent).
+    // Missing/invalid material panics at startup (like the gateway).
     let _ = rustls::crypto::ring::default_provider().install_default();
     let tls_addr: SocketAddr = mtls_cfg
         .addr
@@ -277,7 +276,7 @@ async fn main() {
         "agentctl coordination MCP server: plaintext :8080 (token-gated) + OPTIONAL mTLS listener (client-cert authenticated, token skipped)"
     );
 
-    // Both listeners run concurrently (tokio::join!, mirroring the node-agent). A
+    // Both listeners run concurrently via `tokio::join!`. A
     // shared axum_server Handle wires SIGTERM/SIGINT to the mTLS listener's graceful
     // drain so the join completes and the process exits cleanly on a pod stop.
     let handle = axum_server::Handle::new();
@@ -309,7 +308,7 @@ async fn main() {
 }
 
 /// Bearer-token gate for the data endpoints. When `state.auth_token` is `None`
-/// (env unset/empty) every request passes through unchanged (back-compat). When
+/// (env unset/empty) every request passes through unchanged. When
 /// `Some`, the request MUST carry `Authorization: Bearer <token>` with a token
 /// that matches in constant time; otherwise it is rejected with a bare 401 (no
 /// body, no detail leak) and counted in `agentctl_coordination_auth_rejected_total`.
@@ -386,7 +385,7 @@ async fn rpc(
     }
 }
 
-/// Resolve the caller's attested identity from its source IP (RFC 0015).
+/// Resolve the caller's attested identity from its source IP.
 ///
 /// Non-attested mode (the default) ⇒ [`CallerIdentity::Disabled`] (no cluster
 /// read). Attested mode ⇒ a cache-first kube lookup: the source IP is resolved to
@@ -498,7 +497,7 @@ fn port_from_env() -> u16 {
 
 /// The coordination Postgres DSN, if configured. Prefers the coordination-specific
 /// `COORDINATION_DATABASE_URL`, then the shared `DATABASE_URL`. An unset OR empty
-/// value selects the in-memory backend (back-compat default).
+/// value selects the in-memory backend (the default).
 fn coordination_database_url() -> Option<String> {
     for key in ["COORDINATION_DATABASE_URL", "DATABASE_URL"] {
         if let Ok(v) = std::env::var(key) {

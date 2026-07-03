@@ -3,15 +3,15 @@
 //!
 //! The typed client for the **Agent Control Contract (ACC)** — the
 //! language-neutral contract that agentctl consumes and that *any* conformant
-//! agent implements (see `contract/` and agentctl RFC 0018).
+//! agent implements (see `contract/`).
 //!
-//! **Principle P0:** agentctl depends on the *contract*, never on a specific
+//! **Design principle:** agentctl depends on the *contract*, never on a specific
 //! agent. `agentd` is the reference implementation only. This crate therefore
 //! models the contract's wire shapes — it does not import any agent's types.
 //!
 //! Most of the manifest is plain serde. The load-bearing exceptions are the
-//! `surfaces{}` **sum types** that codegen cannot derive (agentctl RFC 0018
-//! §3.3); these carry hand-written [`Deserialize`] impls here:
+//! `surfaces{}` **sum types** that codegen cannot derive; these carry
+//! hand-written [`Deserialize`] impls here:
 //!
 //! | field | shape | type |
 //! |---|---|---|
@@ -36,12 +36,11 @@ use serde::{Deserialize, Deserializer};
 /// `contract_version` major differs is refused ([`Manifest::negotiate`]); a
 /// differing minor is tolerated (additive-by-minor).
 ///
-/// **Contract 2.0** (agentd v2 HTTPS-everywhere pivot): the reference agent
-/// removed all non-HTTP transports (unix/vsock/stdio + exec). The manifest's
-/// `contract_version` is now `"2.0"`, MCP servers are remote `https://`
-/// endpoints, the A2A methods are the bare PascalCase spec-§9 binding, and the
-/// serving surface is mTLS HTTPS. The `surfaces{}` sum types below are
-/// transport-agnostic, so they parse both eras; the major gate is what moved.
+/// Under contract major 2 the reference agent serves exclusively over HTTP:
+/// MCP servers are remote `https://` endpoints, the A2A methods use the bare
+/// PascalCase binding, and the serving surface is mTLS HTTPS. The `surfaces{}`
+/// sum types below are transport-agnostic, so they remain valid regardless of
+/// transport; the major version is the compatibility gate.
 pub const SUPPORTED_MAJOR: u32 = 2;
 
 // ---------------------------------------------------------------------------
@@ -127,8 +126,8 @@ impl Manifest {
     }
 }
 
-/// Downward-API instance identity (agentd RFC 0014 §6.4 / contract
-/// `env-convention`). All optional — descriptive, not load-bearing.
+/// Downward-API instance identity (contract `env-convention`). All optional —
+/// descriptive, not load-bearing.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {
     #[serde(default)]
@@ -241,8 +240,9 @@ pub struct Surfaces {
 pub enum SurfaceAddr {
     /// The surface is not served.
     Off,
-    /// The surface is served at this address (transport-specific, e.g.
-    /// `"vsock:7000"` or `"127.0.0.1:9090"`).
+    /// The surface is served at this address (e.g. the mTLS HTTPS management
+    /// address `"https://0.0.0.0:8443"` or the metrics scrape address
+    /// `"127.0.0.1:9090"`).
     At(String),
 }
 

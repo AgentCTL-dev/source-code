@@ -2,8 +2,8 @@
 //! Optional bearer-token access gate for the data endpoints.
 //!
 //! The token is read from `AGENTCTL_API_TOKEN` at startup:
-//!   * **unset / empty** → the gate is OFF; every route behaves exactly as before
-//!     (back-compat — the in-cluster default).
+//!   * **unset / empty** → the gate is OFF; every route is served without
+//!     authentication (the in-cluster default).
 //!   * **set** → the gate is ON: data routes require
 //!     `Authorization: Bearer <AGENTCTL_API_TOKEN>` and return `401` (no body) on
 //!     a missing/mismatched header. The compare is **constant-time**
@@ -31,7 +31,7 @@ const EXEMPT: &[&str] = &["/healthz", "/readyz", "/metrics"];
 #[derive(Clone)]
 pub struct Auth {
     /// `Some` when `AGENTCTL_API_TOKEN` is set & non-empty → enforce. `None` →
-    /// the gate is disabled (back-compat).
+    /// the gate is disabled.
     token: Option<Arc<[u8]>>,
     metrics: Arc<Metrics>,
 }

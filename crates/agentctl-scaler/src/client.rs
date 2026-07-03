@@ -5,9 +5,9 @@
 //! HTTP. How it authenticates that hop is gated on whether a client-cert directory
 //! is configured:
 //!
-//!   * **`COORDINATION_CLIENT_CERT_DIR` UNSET/empty (default)** — today's behaviour
-//!     is unchanged: a plain `reqwest::Client` over plaintext http, with the
-//!     optional `AGENTCTL_API_TOKEN` bearer applied per-request by [`crate::scaler`].
+//!   * **`COORDINATION_CLIENT_CERT_DIR` UNSET/empty (default)** — a plain
+//!     `reqwest::Client` over plaintext http, with the optional `AGENTCTL_API_TOKEN`
+//!     bearer applied per-request by [`crate::scaler`].
 //!   * **`COORDINATION_CLIENT_CERT_DIR` set** — the scaler presents a CLIENT
 //!     certificate (mTLS). It loads `<dir>/tls.crt` + `<dir>/tls.key` as its
 //!     identity and verifies the coordination SERVER cert against the CA in
@@ -20,9 +20,8 @@
 //! `rustls-tls-manual-roots-no-provider` feature (no default crypto provider is
 //! pulled); we hand it a fully-built ring `ClientConfig` through
 //! `use_preconfigured_tls`. Server-name verification is left ON: the coordination
-//! server has a stable in-cluster service DNS name (unlike the node-agent's
-//! churning pod IP), so the standard webpki verifier against the configured CA is
-//! the right, safer choice.
+//! server has a stable in-cluster service DNS name, so the standard webpki verifier
+//! against the configured CA is the right, safer choice.
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -33,7 +32,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::RootCertStore;
 
 /// Env: directory holding the scaler's client identity (`tls.crt`, `tls.key`),
-/// e.g. `/etc/agentctl-scaler-mtls`. UNSET/empty ⇒ plaintext (today's behaviour).
+/// e.g. `/etc/agentctl-scaler-mtls`. UNSET/empty ⇒ plaintext.
 pub const ENV_CLIENT_CERT_DIR: &str = "COORDINATION_CLIENT_CERT_DIR";
 /// Env: CA file used to verify the coordination SERVER cert. Defaults to
 /// `<cert_dir>/ca.crt` when unset (only consulted when `ENV_CLIENT_CERT_DIR` set).
@@ -232,7 +231,7 @@ mod tests {
         // reqwest's rustls backend resolves the process-default provider when
         // building any client; install ring (idempotent — main() does the same).
         let _ = ring::default_provider().install_default();
-        // The default (off) path always builds — today's behaviour.
+        // The default (plaintext) path always builds.
         assert!(build_client(&ClientMode::Plaintext).is_ok());
     }
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! Agent Card signing (JWS / EdDSA) + JWKS publication (RFC 0013).
+//! Agent Card signing (JWS / EdDSA) + JWKS publication.
 //!
 //! The gateway signs every projected Agent Card with an Ed25519 key so A2A
 //! clients can verify card authenticity, and publishes the public key as a JWKS
@@ -7,8 +7,8 @@
 //! shape: a JWS-style `{protected, signature}` over `protected . payload`, where
 //! `payload` is base64url of the card serialized *without* its `signatures` field.
 //!
-//! Pure Rust (`ed25519-dalek`, `base64`) — no C toolchain (keep the image
-//! dependency-free of a C compiler; agentctl P0 keep-it-pure).
+//! Pure Rust (`ed25519-dalek`, `base64`) — no C toolchain, keeping the image
+//! free of any C-compiler dependency.
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;

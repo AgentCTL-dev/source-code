@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Prometheus `/metrics` exposition for the A2A gateway.
 //!
-//! Hand-rolled in the node-agent's style (RFC 0010): no client library, the body
-//! is `text/plain; version=0.0.4`, each metric emits its `# HELP`/`# TYPE` once
-//! followed by the sample. Counters live behind atomics in the shared app state.
+//! Hand-rolled without a client library: the body is `text/plain; version=0.0.4`,
+//! each metric emits its `# HELP`/`# TYPE` once followed by the sample. Counters
+//! live behind atomics in the shared app state.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +21,8 @@ pub struct Metrics {
     card_requests: AtomicU64,
     /// Tasks persisted to the durable store (`message/send`).
     tasks: AtomicU64,
-    /// Requests that failed at the node-agent/upstream hop.
+    /// Requests that failed at the upstream hop — dialing the agent pod's
+    /// mTLS `/mcp` directly at `https://<pod-ip>:8443`.
     upstream_errors: AtomicU64,
     /// Requests rejected (401) by the bearer-token access gate.
     auth_rejected: AtomicU64,
@@ -75,7 +76,7 @@ impl Metrics {
         self.tasks.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// An upstream (node-agent) hop failed.
+    /// An upstream hop to an agent pod's mTLS `/mcp` failed.
     pub fn inc_upstream_error(&self) {
         self.upstream_errors.fetch_add(1, Ordering::Relaxed);
     }
@@ -142,7 +143,7 @@ impl Metrics {
         counter(
             &mut out,
             "agentctl_gateway_upstream_errors_total",
-            "Requests that failed at the node-agent/upstream hop.",
+            "Requests that failed at the agent/upstream hop.",
             self.upstream_errors.load(Ordering::Relaxed),
         );
         counter(
@@ -193,7 +194,7 @@ fn unix_now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Emit one `counter` metric (HELP + TYPE + sample), node-agent style.
+/// Emit one `counter` metric (HELP + TYPE + sample).
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     out.push_str(&format!(
         "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! agentctl aggregated APIServer (RFC 0009) — the human management access path.
+//! agentctl aggregated APIServer — the human management access path.
 //!
 //! Registered via an `APIService` for `management.agents.x-k8s.io`; the
 //! kube-aggregator proxies requests here.
 //!
-//! **Stage 1:** TLS + discovery + health → `APIService Available=True`.
-//! **Stage 2 (this file):** the `agents/<name>/{drain,lame-duck,cancel}` connect
-//! verbs with the front-proxy trust model — rustls **requires** a client cert
-//! verified against the `requestheader-client-ca` (so only the kube-apiserver can
-//! reach the API surface), the handler trusts `X-Remote-User`/`-Group`, and a
-//! `SubjectAccessReview` authorizes the verb before acting. (Forwarding to the
-//! node-agent is Stage 2b — here an authorized verb returns Success.)
+//! Serves TLS, discovery, and health so the `APIService` reports
+//! `Available=True`, and exposes the `agents/<name>/{drain,lame-duck,cancel}`
+//! connect verbs under the front-proxy trust model: rustls **requires** a client
+//! cert verified against the `requestheader-client-ca` (so only the
+//! kube-apiserver can reach the API surface), the handler trusts
+//! `X-Remote-User`/`-Group`, and a `SubjectAccessReview` authorizes the verb
+//! before forwarding it to the agent.
 //!
 //! Hand-rolled in Rust (axum + rustls/ring; agentctl is Rust-only). Probes are
 //! `tcpSocket` so the kubelet need not present a client cert.
@@ -46,7 +46,7 @@ const TLS_DIR: &str = "/etc/agentctl-apiserver/tls";
 #[derive(Clone)]
 struct AppState {
     client: Client,
-    /// mTLS client for the node-agent control hop (RFC 0015). Built once.
+    /// mTLS client for the control hop to agent pods. Built once.
     na: reqwest::Client,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
@@ -55,7 +55,7 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     // fmt layer (honoring RUST_LOG, default info) + OTLP export when
-    // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise byte-identical to before.
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set.
     agentctl_telemetry::init("agentctl-apiserver");
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -289,10 +289,10 @@ async fn handle_verb(
 }
 
 /// A management connect verb on an **AgentFleet** — fanned out to ALL Running
-/// replicas (RFC 0021 §4.4). Unlike the per-`Agent` path, a fleet drain/pause/cancel
-/// must reach every member; the old behavior hit one arbitrary pod and reported
-/// Success while N−1 kept running. Returns a partial-success Status (207 when some
-/// replicas failed).
+/// replicas. Unlike the per-`Agent` path, a fleet drain/pause/cancel must reach
+/// every member: hitting one arbitrary pod would leave N−1 replicas running while
+/// reporting Success. Returns a partial-success Status (207 when some replicas
+/// failed).
 #[tracing::instrument(skip_all, fields(ns = %ns, fleet = %name, verb = %verb))]
 async fn handle_fleet_verb(
     State(state): State<AppState>,
@@ -427,17 +427,13 @@ async fn authorize(
     Ok(resp.status.map(|s| s.allowed).unwrap_or(false))
 }
 
-/// Resolve the Agent to its pod, find the node-agent on that pod's node, and
-/// POST the verb to it. Routing: Agent --(label)--> pod (uid, node) --> the
-/// node-agent DaemonSet pod on `node` --> `POST /v1/agents/<pod_uid>/<verb>`.
-/// Deliver a management verb DIRECTLY to the agent pod as a contract-2.0 A2A
+/// Deliver a management verb directly to the agent pod as a contract-2.0 A2A
 /// admin JSON-RPC (`a2a.Drain`/`a2a.LameDuck`/`a2a.Pause`/`a2a.Resume`/
 /// `a2a.Cancel` on `POST /mcp`). The agent serves mTLS-gated HTTPS on :8443
 /// (rendered by the operator); our client certificate chains to the cluster CA
 /// the agent was given as `--serve-client-ca`, which mints the `Management`
-/// origin these verbs require. There is no node-agent hop anymore: the pod IS
-/// the endpoint, addressed by pod IP (the CA — not DNS — is the trust anchor;
-/// see `na_client::CaServerVerifier`).
+/// origin these verbs require. The pod itself is the endpoint, addressed by pod
+/// IP (the CA — not DNS — is the trust anchor; see `na_client::CaServerVerifier`).
 async fn call_agent_admin(
     client: &Client,
     http: &reqwest::Client,
@@ -562,8 +558,8 @@ async fn ok() -> &'static str {
     "ok"
 }
 
-/// `GET /metrics` — the Prometheus exposition (node-agent text format), served on
-/// the existing mTLS surface.
+/// `GET /metrics` — the Prometheus exposition (`text/plain; version=0.0.4`),
+/// served on the existing front-proxy mTLS surface.
 async fn serve_metrics(
     State(state): State<AppState>,
 ) -> ([(header::HeaderName, &'static str); 1], String) {

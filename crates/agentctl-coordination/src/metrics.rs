@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Prometheus `/metrics` exposition for the coordination MCP server.
 //!
-//! Hand-rolled in the node-agent / gateway style (agentctl RFC 0010): no client
-//! library, body is `text/plain; version=0.0.4`, each metric emits its
+//! Hand-rolled: no client library, body is
+//! `text/plain; version=0.0.4`, each metric emits its
 //! `# HELP`/`# TYPE` once then the sample. Counters live behind atomics; the
 //! `pending`/`claimed` gauges are read live from the store at scrape time and
 //! passed into [`Metrics::render`] (they are store truth, not a mirrored counter).
@@ -94,7 +94,7 @@ impl Metrics {
         self.auth_rejected.fetch_add(1, Ordering::Relaxed);
     }
     /// A claim-lifecycle call's caller was successfully attested (source IP resolved
-    /// to a pod identity) and allowed to proceed (RFC 0015 attested mode).
+    /// to a pod identity) and allowed to proceed in attested mode.
     pub fn inc_attest_ok(&self) {
         self.attest_ok.fetch_add(1, Ordering::Relaxed);
     }
@@ -188,7 +188,7 @@ impl Metrics {
         counter(
             &mut out,
             "agentctl_coordination_attest_ok_total",
-            "Claim-lifecycle calls whose caller was attested and allowed (RFC 0015).",
+            "Claim-lifecycle calls whose caller was attested and allowed.",
             self.attest_ok.load(Ordering::Relaxed),
         );
         counter(
@@ -245,7 +245,7 @@ fn unix_now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Emit one `counter` metric (HELP + TYPE + sample), node-agent style.
+/// Emit one `counter` metric (HELP + TYPE + sample).
 fn counter(out: &mut String, name: &str, help: &str, value: u64) {
     out.push_str(&format!(
         "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"

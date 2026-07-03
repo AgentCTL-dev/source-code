@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The MCP JSON-RPC 2.0 wire layer — the server side of the FROZEN `work.*`
-//! contract (agentd RFC 0015 §5.6, the names + `_meta` keys; the conformant agent
-//! is `agentd crates/agentd/src/cluster/claim.rs`).
+//! The MCP JSON-RPC 2.0 wire layer — the server side of the stable `work.*`
+//! contract (the method names and `_meta` keys the conformant agent claim client
+//! depends on).
 //!
 //! Methods: `initialize`, `tools/list`, `tools/call` (`{name, arguments, _meta}`),
 //! `resources/list`, `resources/read`. A `tools/call` result returns BOTH
@@ -18,20 +18,20 @@ use crate::attest::{self, CallerIdentity, HolderCheck};
 use crate::metrics::Metrics;
 use crate::store::{is_holder_mismatch, ClaimResult, ClaimStore, SubmitOutcome};
 
-/// The MCP protocol version this server advertises (matches the agentd self-server
-/// target, agentd RFC 0004/0005; interop is by capability, not strict version).
+/// The MCP protocol version this server advertises. Interop is negotiated by
+/// capability rather than strict version matching.
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// The countable backlog resource — the scale-from-zero signal (P9) the future
-/// KEDA external scaler reads. Known at ZERO pods because it lives on the server.
+/// The countable backlog resource — the scale-from-zero signal an external
+/// autoscaler reads. Observable even at zero pods because it lives on the server.
 pub const PENDING_URI: &str = "work://pending";
 
 /// The dead-letter queue resource — items redelivered past `max_attempts`, awaiting
-/// an admin requeue/drop (RFC 0022 §7).
+/// an admin requeue/drop.
 pub const DLQ_URI: &str = "dlq://items";
 
-/// The frozen `_meta` key carrying the item-derived dedupe key (agentd RFC 0015
-/// §5.6). Present on `work.claim` and `work.ack`.
+/// The stable `_meta` key carrying the item-derived dedupe key. Present on
+/// `work.claim` and `work.ack`.
 const META_CLAIM_KEY: &str = "agent/claim_key";
 
 /// Dispatch one JSON-RPC message. `Some(response)` for a request; `None` for a
@@ -39,10 +39,10 @@ const META_CLAIM_KEY: &str = "agent/claim_key";
 /// body. The store is the serializing point; this layer only translates wire ⇄
 /// store and counts metrics.
 ///
-/// `caller` is the source-IP-attested identity computed by the axum layer (RFC
-/// 0015). [`CallerIdentity::Disabled`] (attest mode off, the default) keeps today's
-/// self-asserted `_meta`-holder behaviour; otherwise the claim lifecycle is bound
-/// to / verified against the attested holder.
+/// `caller` is the source-IP-attested identity computed by the axum layer.
+/// [`CallerIdentity::Disabled`] (attest mode off, the default) uses the
+/// self-asserted `_meta` holder; otherwise the claim lifecycle is bound to and
+/// verified against the attested holder.
 pub fn handle_rpc(
     req: &Value,
     store: &dyn ClaimStore,
@@ -85,7 +85,7 @@ fn initialize_result() -> Value {
             "name": "agentctl-coordination",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": "Reference coordination MCP server (agentctl RFC 0011 §3.2). \
+        "instructions": "Reference coordination MCP server. \
             Call work.claim before processing an item; work.renew at ttl/3; \
             work.ack on success (terminal, dedupes the claim_key); work.release on \
             wind-down. Read work://pending or call work.stats for the backlog.",
@@ -227,7 +227,7 @@ fn tool_claim(
             )
         }
     };
-    // Holder binding (RFC 0015): in attested mode the lease HOLDER is the
+    // Holder binding: in attested mode the lease HOLDER is the
     // source-IP-attested identity (authoritative — it overrides the self-asserted
     // `_meta` agent so a tenant cannot bill the lease to another). An unattestable
     // caller fails closed (the claim is rejected). Attest off ⇒ the self-asserted
@@ -320,7 +320,7 @@ fn tool_renew(
 
 /// `work.ack` — terminal settle + record the `claim_key` as done (dedupe set).
 /// arguments `{lease_id, result?}`, `_meta {agent/claim_key}`. Idempotent. The
-/// optional `result` (any JSON value, RFC 0022 §7) is recorded atomically with the
+/// optional `result` (any JSON value) is recorded atomically with the
 /// settle and returned by a later `work.result` — how a coordinator collects what a
 /// worker produced.
 fn tool_ack(
@@ -407,7 +407,7 @@ fn tool_release(
 /// `work.submit` — enqueue an item into the backlog (producer side). arguments
 /// `{item, claim_key?, max_attempts?}`. Skips if `claim_key` is already done or
 /// dead-lettered. Returns the `work_id` (the effective `claim_key`) so a producer
-/// can later correlate the outcome via `work.result` (RFC 0022 §7). `max_attempts`
+/// can later correlate the outcome via `work.result`. `max_attempts`
 /// bounds redelivery (from the fleet `workPolicy`); absent ⇒ unbounded.
 ///
 /// Producers may be EXTERNAL (not pod-attestable), so submit is NOT hard-blocked by
@@ -464,7 +464,7 @@ fn tool_submit(
     }
 }
 
-/// `work.stats` — the off-pod backlog snapshot (P9). The scaler reads this and may
+/// `work.stats` — the off-pod backlog snapshot. The scaler reads this and may
 /// not be pod-attestable, so it is NOT hard-blocked by attestation (token-gated);
 /// we attest-if-resolvable only to LOG the caller.
 fn tool_stats(store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) {
@@ -481,7 +481,7 @@ fn tool_stats(store: &dyn ClaimStore, caller: &CallerIdentity) -> (Value, bool) 
     )
 }
 
-/// `work.result` — correlate a submitted work unit to its outcome (RFC 0022 §7).
+/// `work.result` — correlate a submitted work unit to its outcome.
 /// arguments `{work_id}` (the effective `claim_key` returned by `work.submit`).
 /// Result: `{state, result?}` where `state` ∈ pending|claimed|done|deadletter|unknown
 /// and `result` is the JSON the worker recorded on `work.ack` (only for `done`).
@@ -513,7 +513,7 @@ fn tool_work_result(
     )
 }
 
-/// `work.deadletter` — inspect and manage the dead-letter queue (RFC 0022 §7).
+/// `work.deadletter` — inspect and manage the dead-letter queue.
 /// arguments `{action, work_id?}`: `list` → `{items:[{work_id,item,attempts}]}`;
 /// `requeue`/`drop` require `work_id` → `{ok, found}`. Token-gated (an operator/admin
 /// tool, not a per-lease holder op).
@@ -564,9 +564,9 @@ fn log_attested_caller(op: &str, caller: &CallerIdentity) {
     }
 }
 
-/// `resources/read` — only `work://pending` is served: the pending count + items,
-/// the from-zero scale signal. The body JSON rides the `text` field (which the
-/// agent's resource reader concatenates).
+/// `resources/read` — serves `work://pending` (the pending count + items, the
+/// from-zero scale signal) and `dlq://items` (the dead-letter contents). The body
+/// JSON rides the `text` field, which the agent's resource reader concatenates.
 fn resources_read(id: Value, params: &Value, store: &dyn ClaimStore) -> Value {
     let uri = params
         .get("uri")
@@ -605,7 +605,7 @@ fn resources_read(id: Value, params: &Value, store: &dyn ClaimStore) -> Value {
 }
 
 /// The advertised tools (`tools/list`). The agent validates a coordination server
-/// by requiring BOTH `work.claim` and `work.ack` here (agentd RFC 0019 §3.6).
+/// by requiring BOTH `work.claim` and `work.ack` here.
 fn tool_defs() -> Vec<Value> {
     vec![
         tool_def(
@@ -664,7 +664,7 @@ fn tool_defs() -> Vec<Value> {
                 "properties": {
                     "item": { "type": "string" },
                     "claim_key": { "type": "string" },
-                    "max_attempts": { "type": "integer", "minimum": 1, "description": "Dead-letter after this many redeliveries (RFC 0022 §7); absent ⇒ unbounded." }
+                    "max_attempts": { "type": "integer", "minimum": 1, "description": "Dead-letter after this many redeliveries; absent ⇒ unbounded." }
                 },
                 "required": ["item"]
             }),
@@ -715,14 +715,14 @@ fn resource_defs() -> Vec<Value> {
         json!({
             "uri": DLQ_URI,
             "name": "deadletter",
-            "description": "Dead-lettered items (redelivered past max_attempts) awaiting requeue/drop (RFC 0022 §7).",
+            "description": "Dead-lettered items (redelivered past max_attempts) awaiting requeue/drop.",
             "mimeType": "application/json",
         }),
     ]
 }
 
-/// Holder identity for `held_by`: prefer the frozen `agent/instance`, then
-/// `agent/run_id` (agentd RFC 0015 §5.6); else `anonymous`.
+/// Holder identity for `held_by`: prefer the stable `agent/instance`, then
+/// `agent/run_id`; else `anonymous`.
 fn holder_of(meta: &Value) -> String {
     for key in ["agent/instance", "agent/run_id"] {
         if let Some(s) = meta.get(key).and_then(Value::as_str) {
@@ -798,8 +798,8 @@ mod tests {
         CallerIdentity::Attested(format!("{ns}/{agent}"))
     }
 
-    // (7) The JSON-RPC envelope + the EXACT work.claim result shape round-trip:
-    //     grant, contention, dedupe — structuredContent and the text fallback agree.
+    // The JSON-RPC envelope + the EXACT work.claim result shape round-trip:
+    // grant, contention, dedupe — structuredContent and the text fallback agree.
     #[test]
     fn claim_envelope_roundtrip_grant_contend_dedupe() {
         let (store, metrics) = ctx();
@@ -1030,7 +1030,7 @@ mod tests {
         assert_eq!(r["result"]["isError"], true);
     }
 
-    // --- attested mode (RFC 0015) -----------------------------------------
+    // --- attested mode ----------------------------------------------------
 
     // In attested mode the lease HOLDER is the source-IP-attested identity, NOT the
     // self-asserted `_meta` agent: a tenant cannot bill/route the lease to another.

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! The durable A2A task store (RFC 0013 / brainstorm D4).
+//! The durable A2A task store.
 //!
 //! The agent serves only *live* tasks; the gateway persists task records here so
 //! `tasks/get` survives the agent and `tasks/list` returns history. Backed by a
 //! shared Postgres (so the gateway stays a replicated, stateless front end —
-//! state lives in the store, not the pod). Plain `NoTls` in-cluster (the hop is
-//! NetworkPolicy-scoped; TLS to the DB is later hardening). Pure
-//! [`task_json`] is unit-tested; the DB ops need a live Postgres.
+//! state lives in the store, not the pod). The hop uses plain `NoTls` in-cluster
+//! by default, relying on NetworkPolicy scoping. Pure [`task_json`] is
+//! unit-tested; the DB ops need a live Postgres.
 
 use deadpool_postgres::Pool;
 use serde_json::{json, Value};
@@ -45,7 +45,7 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
             );
             -- Idempotent migration for stores created before the auth token landed.
             ALTER TABLE a2a_push_configs ADD COLUMN IF NOT EXISTS token text NOT NULL DEFAULT '';
-            -- RFC 0022 §6: which fleet member (pod IP) served the task, so a later
+            -- Which fleet member (pod IP) served the task, so a later
             -- live op routes back to it (task affinity). Additive.
             ALTER TABLE a2a_tasks ADD COLUMN IF NOT EXISTS owner_pod text",
         )
@@ -54,8 +54,8 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
 }
 
 /// Insert or update a task record for `(ns, agent, id)`. `owner_pod` (the member
-/// pod IP that served the task) is recorded/refreshed for fleet task affinity
-/// (RFC 0022 §6); `None` leaves any existing value untouched.
+/// pod IP that served the task) is recorded/refreshed for fleet task affinity;
+/// `None` leaves any existing value untouched.
 #[allow(clippy::too_many_arguments)] // a flat task row: (ns, agent, id, state, input, artifact, owner_pod)
 pub async fn upsert(
     pool: &Pool,
@@ -83,7 +83,7 @@ pub async fn upsert(
 }
 
 /// The member pod IP (`owner_pod`) that served task `(ns, agent, id)`, if recorded
-/// — used to route a later live op back to the same fleet member (RFC 0022 §6).
+/// — used to route a later live op back to the same fleet member.
 pub async fn owner_pod(
     pool: &Pool,
     ns: &str,

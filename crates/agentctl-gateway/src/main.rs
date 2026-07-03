@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! agentctl A2A gateway (RFC 0013) — the public A2A HTTP/JSON-RPC surface.
+//! agentctl A2A gateway — the public A2A HTTP/JSON-RPC surface.
 //!
 //! External A2A clients speak the spec slash-form over HTTP; the gateway:
 //!   1. projects an **Agent Card** at
 //!      `GET /agents/{ns}/{name}/.well-known/agent-card.json` from the agent's
-//!      capabilities manifest (fetched through the node-agent), and
+//!      capabilities manifest (fetched directly from the agent's pod over mTLS), and
 //!   2. bridges JSON-RPC calls at `POST /agents/{ns}/{name}` — translating the
 //!      spec method (`message/send`, …) to the **reference** method
 //!      (`a2a.SendMessage`, …) the agent dispatches, then forwarding to the
-//!      node-agent on the agent's node. The `message/stream` method takes the
-//!      streaming path: the node-agent's `…/a2a/stream` SSE byte-stream is piped
+//!      agent's pod at its mTLS `/mcp`. The `message/stream` method takes the
+//!      streaming path: the agent's `/mcp` SSE byte-stream is piped
 //!      straight back to the client as `text/event-stream` (transparent pipe;
 //!      the gateway never parses the SSE frames), and
 //!   3. serves a mesh discovery registry at `GET /agents` — the union of `Agent`
 //!      and `AgentFleet` CRs across all namespaces, each with its Agent Card URL.
 //!
-//! Routing ({ns,name}→pod→node-agent) mirrors the apiserver's
-//! `forward_to_node_agent` (RFC 0009). Hand-rolled in Rust (axum); agentctl is
-//! Rust-only and depends on the contract wire, never on a specific agent (P0).
+//! Routing ({ns,name}→pod IP) mirrors the apiserver's `forward_verb_to_ip`:
+//! the gateway resolves the target to a Running pod IP and dials it directly at
+//! its mTLS `/mcp`, presenting the control-plane client cert. Hand-rolled in Rust
+//! (axum); agentctl is Rust-only and depends on the contract wire, never on a
+//! specific agent.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -54,12 +56,12 @@ struct AppState {
     /// It mints the `Management` origin at an agent's `/mcp`, so the gateway is
     /// the only peer that may drive A2A on the agent (external callers are
     /// authenticated + authorized on the inbound side, then forwarded as
-    /// Management). Built once. (Field name is historical — it dialed the
-    /// node-agent pre-v2; the node-agent hop is retired.)
+    /// Management). Built once. Despite the `na` name, this dials the agent's
+    /// `/mcp` directly, not a separate node-agent.
     na: reqwest::Client,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
-    /// Per-agent OIDC/JWT verifier (RFC: native A2A authn/authz). Holds the
+    /// Per-agent OIDC/JWT verifier for native A2A authn/authz. Holds the
     /// per-issuer JWKS cache; built once.
     oidc: Arc<oidc::Verifier>,
     /// The coarse bearer-token gate, threaded in so the A2A RPC handler can apply
@@ -67,7 +69,7 @@ struct AppState {
     /// POST RPC route — see [`auth::gate`]).
     auth: auth::Auth,
     /// Round-robin cursor for load-balancing a fleet endpoint across its worker
-    /// replicas (RFC 0022 §6). Per-replica (each gateway replica has its own), which
+    /// replicas. Per-replica (each gateway replica has its own), which
     /// is fine for spreading load; strict global fairness is not required.
     round_robin: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -75,21 +77,21 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     // fmt layer (honoring RUST_LOG, default info) + OTLP export when
-    // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise byte-identical to before.
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set.
     agentctl_telemetry::init("agentctl-gateway");
-    // ring crypto provider as the process default (RFC 0015): no aws-lc-rs → no
+    // ring crypto provider as the process default: no aws-lc-rs → no
     // C toolchain. Required so reqwest's rustls backend (federation/push) and the
-    // node-agent mTLS client both resolve a provider.
+    // mTLS client that dials agent pods both resolve a provider.
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install ring crypto provider");
 
     let client = Client::try_default().await.expect("in-cluster kube client");
 
-    // The Agent Card signing key (RFC 0013) — required at startup.
+    // The Agent Card signing key — required at startup.
     let signer = Arc::new(signing::Signer::from_env().expect("GATEWAY_SIGNING_SEED"));
 
-    // The durable task store (RFC 0013). Retry the schema — the DB pod may start
+    // The durable task store. Retry the schema — the DB pod may start
     // after us.
     let pool = build_pool();
     for attempt in 1..=30u32 {
@@ -115,7 +117,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        // `/metrics` rides the EXISTING plaintext :8080 (the chart's `http` port),
+        // `/metrics` rides the plaintext :8080 (the chart's `http` port),
         // alongside /healthz — no new port; scraped scheme=http.
         .route("/metrics", get(serve_metrics))
         .route("/.well-known/jwks.json", get(jwks))
@@ -129,7 +131,7 @@ async fn main() {
             get(fleet_card),
         )
         .route("/agents/{ns}/{name}", post(a2a_rpc))
-        // The fleet as a single addressable A2A endpoint (RFC 0022 §6): the same
+        // The fleet as a single addressable A2A endpoint: the same
         // RPC surface as an agent, but member selection routes to the coordinator
         // (front door) or load-balances across worker replicas.
         .route("/fleets/{ns}/{name}", post(a2a_fleet_rpc))
@@ -152,8 +154,7 @@ async fn main() {
         });
 
     // TRUSTED-PROXY mode (front-proxy trust over mTLS). OFF by default — when off
-    // this whole block is skipped and the plaintext listener path below is
-    // byte-identical to before.
+    // this whole block is skipped and only the plaintext listener path below runs.
     let tp = Arc::new(trusted_proxy::Config::from_env());
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
@@ -164,7 +165,7 @@ async fn main() {
     // Graceful shutdown: on SIGTERM/SIGINT, stop accepting and drain in-flight
     // requests (hyper's `with_graceful_shutdown`). In-flight SSE streams
     // (`message/stream`) are short-lived — our agents complete synchronously, so
-    // the node-agent emits its terminal frame and the passthrough body ends,
+    // the agent emits its terminal frame and the passthrough body ends,
     // letting the connection close cleanly within the drain.
     if !tp.enabled {
         tracing::info!(%addr, "agentctl gateway serving the A2A HTTP surface");
@@ -176,7 +177,7 @@ async fn main() {
     }
 
     // Enabled: serve a SECOND mTLS listener (front-proxy trust) concurrently with
-    // the existing plaintext one — mirroring the node-agent's dual listener.
+    // the existing plaintext one.
     let tls_addr: SocketAddr = tp
         .tls_addr
         .parse()
@@ -251,7 +252,7 @@ async fn shutdown_signal() {
     tracing::info!("shutting down: draining in-flight requests and SSE streams");
 }
 
-/// `GET /metrics` — the Prometheus exposition (node-agent text format).
+/// `GET /metrics` — the Prometheus text exposition format.
 async fn serve_metrics(
     State(state): State<AppState>,
 ) -> ([(header::HeaderName, &'static str); 1], String) {
@@ -263,13 +264,13 @@ async fn serve_metrics(
 
 // --- handlers --------------------------------------------------------------
 
-/// Publish the JWKS that verifies signed Agent Cards (RFC 0013).
+/// Publish the JWKS that verifies signed Agent Cards.
 async fn jwks(State(state): State<AppState>) -> Json<Value> {
     Json(state.signer.jwks())
 }
 
 /// Project a **signed** A2A Agent Card from the agent's capabilities manifest,
-/// fetched from the node-agent on the agent's node. `kind` (when `Some`) is
+/// fetched directly from the agent's pod over its mTLS `/mcp`. `kind` (when `Some`) is
 /// attached as `x-agentctl-kind` — used to mark fleet cards. This is the shared
 /// path behind both [`agent_card`] and [`fleet_card`] (a fleet's pods are
 /// labelled the same way an agent's are, so [`resolve`] works for both).
@@ -281,7 +282,7 @@ async fn build_signed_card(
     kind: Option<&str>,
 ) -> Result<Value, String> {
     // A fleet card is projected from the COORDINATOR (the front door) when the fleet
-    // declares one, else from a worker replica (RFC 0022 §6). An agent projects from
+    // declares one, else from a worker replica. An agent projects from
     // its own pods.
     let manifest_source = if kind == Some("AgentFleet") {
         let fleets: Api<AgentFleet> = Api::namespaced(state.client.clone(), ns);
@@ -295,7 +296,7 @@ async fn build_signed_card(
     // Best-effort: read the RICH manifest from a live pod; fall back to a STATIC card
     // projected from the CR identity when no replica is Running, so the card is
     // servable at `replicas:0` (a claim fleet idles at zero — its card, discovery, and
-    // task-acceptance must NOT depend on a live pod; RFC 0014 §3.2). We never 502 a
+    // task-acceptance must NOT depend on a live pod). We never 502 a
     // card merely because the fleet is scaled down.
     let manifest = match resolve(&state.client, ns, &manifest_source).await {
         Ok(pod_ip) => fetch_capabilities(state, &pod_ip).await.ok(),
@@ -378,8 +379,8 @@ async fn fleet_card(
 /// Bridge a spec-form A2A JSON-RPC request to the agent's reference method.
 ///
 /// Non-streaming methods (`message/send`, `tasks/get`, …) forward a single
-/// JSON-RPC call and return the node-agent's response verbatim. `message/stream`
-/// takes the streaming path: it forwards to the node-agent's `…/a2a/stream` and
+/// JSON-RPC call and return the agent's response verbatim. `message/stream`
+/// takes the streaming path: it forwards to the agent's mTLS `/mcp` and
 /// pipes the resulting SSE byte-stream straight back to the client untouched.
 #[tracing::instrument(skip_all, fields(ns = %ns, agent = %name))]
 async fn a2a_rpc(
@@ -392,8 +393,8 @@ async fn a2a_rpc(
     handle_a2a(state, ns, name, false, decision, headers, req).await
 }
 
-/// `POST /fleets/{ns}/{name}` — the fleet as a single addressable A2A endpoint
-/// (RFC 0022 §6). Identical RPC surface + access enforcement to a single agent
+/// `POST /fleets/{ns}/{name}` — the fleet as a single addressable A2A endpoint.
+/// Identical RPC surface + access enforcement to a single agent
 /// (`enforce_access` already reads a fleet's `spec.template.access`); only member
 /// selection differs (coordinator front door / worker load-balancing).
 #[tracing::instrument(name = "gateway.fleet_rpc", skip_all, fields(ns = %ns, fleet = %name))]
@@ -454,14 +455,15 @@ async fn handle_a2a(
         };
     }
 
-    // Push-notification config (RFC 0013) is gateway-owned: our agents are
-    // networkless, so the gateway stores the webhook and delivers. Not forwarded.
+    // Push-notification config is gateway-owned: the gateway holds the durable task
+    // store and performs SSRF-guarded webhook delivery, so it stores the webhook and
+    // delivers. Not forwarded.
     if let Some(op) = spec.strip_prefix("tasks/pushNotificationConfig/") {
         return push_config(&state.pool, &ns, &name, op, &req, id).await;
     }
 
     // `tasks/resubscribe` is served by the GATEWAY: a one-shot SSE resume of the
-    // stored task. NOTE: live resume of an in-flight stream is future work — our
+    // stored task. Live resume of an in-flight stream is not supported — our
     // agents complete synchronously, so the stored task is already terminal and a
     // single replayed frame is the whole stream.
     if spec == "tasks/resubscribe" {
@@ -528,8 +530,8 @@ async fn handle_a2a(
     };
     // The agent serves A2A on its own mTLS `/mcp`; the gateway's client cert
     // mints Management. Non-streaming AND streaming ride the same endpoint (an
-    // SSE reply is negotiated by the streaming method + Accept), so there is one
-    // URL now, not a separate `/a2a/stream`.
+    // SSE reply is negotiated by the streaming method + Accept), so a single URL
+    // serves both.
     let url = format!("https://{pod_ip}:8443/mcp");
 
     if streaming {
@@ -584,7 +586,7 @@ async fn handle_a2a(
                 .unwrap_or_default();
             // Record which member served the task (owner_pod) so a later live op
             // (cancel/stream/get on a non-terminal task) routes back to it — task
-            // affinity across fleet members (RFC 0022 §6). Harmless for a single agent.
+            // affinity across fleet members. Harmless for a single agent.
             if let Err(e) = store::upsert(
                 &state.pool,
                 &ns,
@@ -601,7 +603,7 @@ async fn handle_a2a(
             } else {
                 state.metrics.inc_task();
             }
-            // Deliver a push notification if a webhook is registered (RFC 0013).
+            // Deliver a push notification if a webhook is registered.
             if let Ok(Some((url, token))) = store::push_get(&state.pool, &ns, &name, tid).await {
                 deliver_push(url, token, task.clone());
             }
@@ -622,7 +624,7 @@ async fn handle_a2a(
 
 /// Mesh discovery registry: the union of `Agent` and `AgentFleet` CRs across all
 /// namespaces, each carrying its projected Agent Card URL. Contract-shaped — the
-/// rows describe CR identity + mode, never any agent's internals (P0).
+/// rows describe CR identity + mode, never any agent's internals.
 async fn list_agents(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -709,8 +711,9 @@ async fn list_agents(
 }
 
 /// Serve the A2A `tasks/pushNotificationConfig/*` methods (set/get/list/delete)
-/// from the gateway-owned store. The agent is networkless, so the gateway holds
-/// the webhook config and performs delivery — these are never forwarded.
+/// from the gateway-owned store. The gateway holds the durable task store and
+/// performs webhook delivery, so it owns the webhook config — these are never
+/// forwarded.
 async fn push_config(
     pool: &Pool,
     ns: &str,
@@ -776,7 +779,7 @@ async fn push_config(
     }
 }
 
-/// SSRF/exfil guard for push webhooks (RFC 0013). The gateway POSTs a client-supplied
+/// SSRF/exfil guard for push webhooks. The gateway POSTs a client-supplied
 /// URL from INSIDE the cluster, so an unvalidated webhook is a server-side request
 /// forgery + data-exfiltration primitive: an attacker registers a URL pointing at
 /// cloud metadata (169.254.169.254), an in-cluster Service, or an RFC1918 host and the
@@ -875,7 +878,7 @@ mod webhook {
     }
 }
 
-/// Fire-and-forget delivery of a task to a registered push webhook (RFC 0013).
+/// Fire-and-forget delivery of a task to a registered push webhook.
 /// Retries up to 3 attempts (200ms backoff) until a 2xx; a non-empty `token` is
 /// sent as `Authorization: Bearer <token>`. The webhook is RE-validated + the
 /// connection PINNED to a validated public IP at delivery time (anti-DNS-rebinding).
@@ -935,7 +938,7 @@ fn deliver_push(url: String, token: String, task: Value) {
 // --- pure helpers (unit-tested) --------------------------------------------
 
 /// Translate an A2A spec slash-form method to the **bare PascalCase** method the
-/// agent serves (A2A spec §9 JSON-RPC binding; agentd v2.1). agentd still accepts
+/// agent serves (the A2A spec's JSON-RPC binding; agentd v2.1). agentd still accepts
 /// the legacy `a2a.`-prefixed spellings, but bare is the conformant wire, so we
 /// emit it. `None` ⇒ unsupported (→ JSON-RPC -32601).
 fn translate_method(spec: &str) -> Option<&'static str> {
@@ -1002,7 +1005,7 @@ fn registry_row(kind: &str, ns: &str, name: &str, mode: Option<&str>, base_url: 
 /// Project a minimal A2A Agent Card. With a live capabilities `manifest` the card
 /// carries the real version + advertised streaming; WITHOUT one (a fleet idling at
 /// `replicas:0`) it projects a valid STATIC card from the CR identity — the card
-/// must be servable at rest (RFC 0014 §3.2). `kind` selects the endpoint path
+/// must be servable at rest. `kind` selects the endpoint path
 /// (`/fleets/...` for a fleet, `/agents/...` otherwise) and is echoed as
 /// `x-agentctl-kind` so a consumer routes follow-up RPC to the right surface.
 fn project_card(
@@ -1018,8 +1021,7 @@ fn project_card(
         .unwrap_or("unknown");
     // Advertise streaming from the live manifest when present; at rest the gateway
     // still proxies message/stream, so default TRUE — never under-advertise a
-    // capability the endpoint actually offers (the old stub hardcoded false, which
-    // contradicted both the agent's manifest and the gateway).
+    // capability the endpoint actually offers.
     let streaming = manifest
         .and_then(|m| m.pointer("/surfaces/a2a/streaming"))
         .and_then(Value::as_bool)
@@ -1219,8 +1221,9 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
-/// Build the forwarded node-agent request, injecting the verified caller identity
-/// as `X-Auth-*` headers when `forward_identity` is enabled for an OIDC agent.
+/// Build the forwarded request to the agent's pod, injecting the verified caller
+/// identity as `X-Auth-*` headers when `forward_identity` is enabled for an OIDC
+/// agent.
 fn forward_request(
     state: &AppState,
     url: &str,
@@ -1240,7 +1243,7 @@ fn forward_request(
 /// Resolve `{ns,name}` → the agent's **Running pod IP** (contract 2.0). The agent
 /// serves its A2A + capabilities surface mTLS-gated on its own `:8443/mcp`; the
 /// gateway holds the control-plane client cert that mints the `Management` origin
-/// those methods require, so it reaches the pod directly — no node-agent hop.
+/// those methods require, so it reaches the pod directly.
 /// (A fleet's pods are labelled the same way, so this resolves a fleet member
 /// too; picking the first Running replica is the current fan-out policy.)
 async fn resolve(client: &Client, ns: &str, name: &str) -> Result<String, String> {
@@ -1284,7 +1287,7 @@ async fn resolve_all(client: &Client, ns: &str, name: &str) -> Result<Vec<String
 }
 
 /// Select the target pod IP for an A2A request. An agent resolves to its single
-/// pod (unchanged). A **fleet** (RFC 0022 §6) routes to a member:
+/// pod. A **fleet** routes to a member:
 ///   1. **task affinity** — a live op (cancel/stream/get) on an existing task goes
 ///      back to the member that served it (`owner_pod`), if still reachable;
 ///   2. else the **coordinator** (front door), when the fleet declares one;
@@ -1350,7 +1353,7 @@ mod tests {
 
     #[test]
     fn translate_method_maps_the_mvp_set() {
-        // Bare PascalCase (A2A spec §9 / agentd v2.1), not the legacy a2a.* prefix.
+        // Bare PascalCase (A2A spec JSON-RPC binding / agentd v2.1), not the legacy a2a.* prefix.
         assert_eq!(translate_method("message/send"), Some("SendMessage"));
         assert_eq!(
             translate_method("message/stream"),
@@ -1406,7 +1409,7 @@ mod tests {
         assert_eq!(card["name"], "team-a/echo");
         assert_eq!(card["url"], "https://gw.example/agents/team-a/echo");
         assert_eq!(card["version"], "2.1.0");
-        // Streaming is read from the manifest (the old stub hardcoded false).
+        // Streaming is read from the manifest.
         assert_eq!(card["capabilities"]["streaming"], true);
         assert_eq!(card["defaultInputModes"], json!(["text/plain"]));
         assert_eq!(card["skills"], json!([]));

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! # agentctl-e2e
 //!
-//! Shared library for the agentctl end-to-end + scale-benchmark harness (Phase 4).
+//! Shared library for the agentctl end-to-end + scale-benchmark harness.
 //! The two binaries — `e2e` (functional scenarios) and `bench` (scale/resource
 //! sweeps) — both build a [`Ctx`] from the ambient environment and then lean on the
 //! helpers here:
@@ -16,8 +16,8 @@
 //! * [`contract`] — load the frozen contract schemas as assertion oracles.
 //!
 //! It reuses `agent-api` (the typed `Agent`/`AgentFleet`/`ModelPool` CRs) and
-//! `agent-contract-client` (capabilities-manifest validation) — principle P0: the
-//! harness drives the *contract*, never a specific agent's internals.
+//! `agent-contract-client` (capabilities-manifest validation): the harness drives
+//! the *contract*, never a specific agent's internals.
 
 use std::path::PathBuf;
 
@@ -36,8 +36,8 @@ pub mod shell;
 /// `kind load`s, and that every `e2e/manifests/*` hard-codes. It is a
 /// contract-2.0 build that **serves mTLS HTTPS `/mcp`** and dials the gateways
 /// keyless (`build_features`: serve-mcp, serve-https, a2a, shard/cluster, cron,
-/// metrics, …). No tagged `ghcr.io/agentd-dev/agentd:2.x` is published yet
-/// (RFC 0021 §14), so the e2e builds it from `/root/agentd-dev`. Override
+/// metrics, …). No tagged `ghcr.io/agentd-dev/agentd:2.x` is published, so the
+/// e2e builds it from `/root/agentd-dev`. Override
 /// `AGENTD_IMAGE` to a registry-qualified ref for a real cluster.
 pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:2.x";
 /// Default control-plane (Helm release) namespace.

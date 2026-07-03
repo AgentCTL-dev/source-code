@@ -3,8 +3,8 @@
 //! the poll/wait oracles (pod Running, Agent `.status.phase`, a metric reaching a
 //! threshold) every scenario leans on.
 //!
-//! Typed CRs reuse the `agent-api` `Agent`/`AgentFleet`/`ModelPool` derives (P0:
-//! agentctl drives the *contract* shapes, never an agent's internals).
+//! Typed CRs reuse the `agent-api` `Agent`/`AgentFleet`/`ModelPool` derives:
+//! agentctl drives the *contract* shapes, never an agent's internals.
 
 use std::fmt::Debug;
 use std::future::Future;
@@ -69,7 +69,7 @@ where
 }
 
 /// Delete a typed CR by name and poll until it (and its garbage-collected children)
-/// are gone, so the scenario "leaves the cluster clean" per the plan.
+/// are gone, so the scenario leaves the cluster clean.
 pub async fn delete_and_wait<K>(
     client: &Client,
     ns: &str,

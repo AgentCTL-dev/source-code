@@ -2,14 +2,13 @@
 //! Operator self-observability: reconcile counters, a reconcile-duration
 //! histogram, and a leadership gauge, rendered as a Prometheus text exposition.
 //!
-//! This mirrors the node-agent's metrics approach (RFC 0010): no external
-//! metrics framework, just a small hand-rolled exposition served as
+//! No external metrics framework: just a small hand-rolled exposition served as
 //! `text/plain; version=0.0.4`. The counters live in lock-free atomics so the
 //! reconcile hot path and the `/metrics` scrape never contend.
 //!
-//! All series carry the `agentctl_operator_` prefix (the node-agent uses
-//! `agentctl_node_agent_`), so a single Prometheus job can scrape every control
-//! plane component without name collisions.
+//! All series carry the `agentctl_operator_` prefix — each control-plane
+//! component namespaces its own metrics this way — so a single Prometheus job
+//! can scrape every component without name collisions.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;

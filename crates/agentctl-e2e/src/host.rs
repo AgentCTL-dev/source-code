@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Host-profile capture — the header every benchmark run stamps so a number is
-//! never read without its (single-node, host-bound) context. The plan makes this
-//! caveat load-bearing: a kind density ceiling is a *trend*, not a capacity claim.
+//! never read without its (single-node, host-bound) context. This caveat is
+//! load-bearing: a kind density ceiling is a *trend*, not a capacity claim.
 
 use serde::{Deserialize, Serialize};
 

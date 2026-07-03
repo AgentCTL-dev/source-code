@@ -78,7 +78,7 @@ impl ResultsDir {
 }
 
 /// Render one CSV record, quoting fields that contain a comma, quote, or newline
-/// (RFC 4180: a `"` inside a quoted field is doubled).
+/// (per the CSV convention, a `"` inside a quoted field is doubled).
 fn csv_row(fields: &[String]) -> String {
     fields
         .iter()

@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! OPTIONAL mTLS listener for the coordination MCP server (RFC 0015 hardening).
+//! OPTIONAL mTLS listener for the coordination MCP server.
 //!
 //! Internal callers (the KEDA scaler reading `work.stats`) authenticate with a
 //! CA-signed CLIENT CERTIFICATE instead of the coarse, shared `AGENTCTL_API_TOKEN`.
-//! Mirrors the gateway's trusted-proxy listener and the node-agent's dual listener:
-//! a rustls server that REQUIRES a client cert chained to a configured CA, with an
-//! additional CN/SAN allow-list on top of chain verification.
+//! Mirrors the gateway's trusted-proxy listener: a rustls server that REQUIRES a
+//! client cert chained to a configured CA, with an additional CN/SAN allow-list on
+//! top of chain verification.
 //!
-//! Gated on `COORDINATION_MTLS_ADDR` being set (default UNSET ⇒ OFF; off ⇒ today's
-//! behaviour byte-identical — no second listener, no cluster reads, no crypto
-//! provider install). When set the server serves a SECOND listener ALONGSIDE the
-//! existing plaintext `:8080` (`tokio::join!`):
+//! Gated on `COORDINATION_MTLS_ADDR` being set (default UNSET ⇒ OFF; off ⇒ no
+//! second listener, no cluster reads, no crypto provider install). When set the
+//! server serves a SECOND listener ALONGSIDE the plaintext `:8080` (`tokio::join!`):
 //!
-//! * **`:8080` plaintext** — the existing surface, unchanged. The
-//!   `AGENTCTL_API_TOKEN` bearer gate applies exactly as before.
+//! * **`:8080` plaintext** — the primary surface. The `AGENTCTL_API_TOKEN` bearer
+//!   gate applies here.
 //! * **`COORDINATION_MTLS_ADDR` (e.g. `0.0.0.0:8443`) mTLS** — rustls presents the
 //!   serving cert/key from `COORDINATION_MTLS_DIR` (default
 //!   `/etc/agentctl-coordination-mtls`)`/{tls.crt,tls.key}` and **requires** a
@@ -28,7 +27,7 @@
 //!
 //! ring only (no openssl/aws-lc): when enabled the binary installs the process
 //! default ring provider, so [`build_tls_config`] uses the plain
-//! `ServerConfig`/`WebPkiClientVerifier` builders (like the gateway/node-agent).
+//! `ServerConfig`/`WebPkiClientVerifier` builders (like the gateway).
 //! Missing/invalid material ⇒ panic at startup (caller `expect`s [`build_tls_config`]).
 
 use std::future::Future;
@@ -80,8 +79,7 @@ pub struct Config {
 
 impl Config {
     /// Parse the mTLS config from the environment. Returns `None` when
-    /// `COORDINATION_MTLS_ADDR` is unset/empty (the feature is OFF — today's
-    /// behaviour byte-identical).
+    /// `COORDINATION_MTLS_ADDR` is unset/empty (the feature is OFF).
     pub fn from_env() -> Option<Self> {
         let addr = std::env::var("COORDINATION_MTLS_ADDR")
             .ok()
@@ -128,7 +126,7 @@ pub struct MtlsCtx {
     pub metrics: Arc<Metrics>,
 }
 
-// --- TLS server config (mirrors node-agent/gateway) -------------------------
+// --- TLS server config (mirrors the gateway) --------------------------------
 
 /// rustls server config for the mTLS listener: present the coordination server's
 /// serving cert AND **require** a client cert chained to the configured CA (so only

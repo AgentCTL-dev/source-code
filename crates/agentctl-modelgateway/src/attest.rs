@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Source-IP → pod identity **attestation** for the ModelGateway.
 //!
-//! A conformant agent is networkless and asserts only its *identity* to the
-//! gateway. In the default (back-compat) mode that identity is carried in the
+//! A conformant agent dials the gateway keyless and asserts its *identity* to
+//! it. In the default mode that identity is carried in the
 //! `X-Agent-Namespace`/`X-Agent-Name` headers — which the agent itself sets, and
 //! can therefore **spoof** to bill/route as another tenant.
 //!
@@ -15,15 +15,16 @@
 //! with the attested namespace, the attested one **always wins** and the
 //! disagreement is recorded as a spoof attempt.
 //!
-//! A conformant agent is networkless and cannot itself reach the gateway: its
-//! request is carried by the on-node bridge (the **node-agent**), which has
-//! already SO_PEERCRED-attested the real caller. Attested mode therefore treats
-//! the node-agent as a **trusted forwarder**: when the source IP resolves to a
-//! node-agent pod, the real caller's identity is taken from the node-agent-asserted
-//! `X-Agent-Pod-Uid` (resolved to the owning pod) rather than from the source IP —
-//! which is the node-agent's, not the agent's. Only the node-agent is trusted this
-//! way: a direct agent pod that sets `X-Agent-Pod-Uid` is ignored (it cannot
-//! impersonate another tenant), and its own source IP remains authoritative.
+//! Most agents dial the gateway directly, so the source IP is the agent's own. A
+//! **trusted forwarder** may instead carry a request on another caller's behalf,
+//! having already authenticated that caller. Attested mode treats such a forwarder
+//! specially: when the source IP resolves to a forwarder pod (the pod running as
+//! the `agentctl-node-agent` ServiceAccount — see [`is_node_agent_pod`]), the real
+//! caller's identity is taken from the forwarder-asserted `X-Agent-Pod-Uid`
+//! (resolved to the owning pod) rather than from the source IP — which is the
+//! forwarder's, not the agent's. Only the forwarder is trusted this way: a direct
+//! agent pod that sets `X-Agent-Pod-Uid` is ignored (it cannot impersonate another
+//! tenant), and its own source IP remains authoritative.
 //!
 //! Under **hostile multi-tenancy** the forwarder anchor must be **unforgeable**.
 //! A self-settable label (`app.kubernetes.io/name`) is *not* enough — a tenant
@@ -34,7 +35,7 @@
 //! as that SA). The label check is kept as defense-in-depth; all three must hold.
 //!
 //! This module holds the **pure** logic — env gate, pod→identity derivation,
-//! IP/UID→pod matching, node-agent detection, the source-pod classification + its
+//! IP/UID→pod matching, forwarder detection, the source-pod classification + its
 //! decision, the TTL cache, and the attested-vs-header reconciliation — so it is
 //! unit-testable without a cluster. The kube lookups live in `main.rs` as I/O
 //! glue.
@@ -52,16 +53,16 @@ pub const AGENT_LABEL: &str = "agentctl.dev/agent";
 /// The standard `app.kubernetes.io/name` label key.
 pub const APP_NAME_LABEL: &str = "app.kubernetes.io/name";
 
-/// The `app.kubernetes.io/name` value worn by the on-node bridge (node-agent)
-/// pods. Kept as **defense-in-depth** in the forwarder check — it is necessary but
-/// NOT sufficient on its own, because a tenant can set this label on its own pod.
+/// The `app.kubernetes.io/name` value worn by the trusted forwarder pods. Kept as
+/// **defense-in-depth** in the forwarder check — it is necessary but NOT sufficient
+/// on its own, because a tenant can set this label on its own pod.
 pub const NODE_AGENT_APP_NAME: &str = "agentctl-node-agent";
 
-/// The ServiceAccount the on-node bridge (node-agent) pods run as. Together with
-/// the **control-plane namespace**, this is the **unforgeable** anchor of the
-/// trusted forwarder (RFC 0015): a tenant cannot create a pod in the control-plane
-/// namespace, nor run a pod as this ServiceAccount, so it cannot impersonate the
-/// node-agent and forward another tenant's identity in `X-Agent-Pod-Uid`.
+/// The ServiceAccount the trusted forwarder pods run as. Together with the
+/// **control-plane namespace**, this is the **unforgeable** anchor of the trusted
+/// forwarder: a tenant cannot create a pod in the control-plane namespace, nor run
+/// a pod as this ServiceAccount, so it cannot impersonate the forwarder and forward
+/// another tenant's identity in `X-Agent-Pod-Uid`.
 pub const NODE_AGENT_SA: &str = "agentctl-node-agent";
 
 /// Default TTL for cached `ip → identity` resolutions: short, so a pod that is
@@ -82,7 +83,7 @@ pub struct Identity {
 ///
 /// Enabled when either `IDENTITY_ATTEST` or `ATTEST_IDENTITY` is set to a truthy
 /// value (`1`/`true`/`on`/`yes`, case-insensitive). Unset/empty/anything else →
-/// disabled (the default; pure header behaviour, back-compat).
+/// disabled (the default; pure header behaviour).
 pub fn attest_enabled_from_env() -> bool {
     ["IDENTITY_ATTEST", "ATTEST_IDENTITY"]
         .iter()
@@ -116,10 +117,10 @@ pub fn identity_from_pod(pod: &Pod) -> Option<Identity> {
     Some(Identity { namespace, agent })
 }
 
-/// Whether a pod is the **trusted agentctl node-agent forwarder** (the on-node
-/// bridge). The node-agent is the only pod trusted to forward another agent's
-/// identity (via the `X-Agent-Pod-Uid` header) to the gateway; every other pod is
-/// a direct caller whose identity is its own source IP.
+/// Whether a pod is the **trusted agentctl forwarder** — the pod running as the
+/// `agentctl-node-agent` ServiceAccount. It is the only pod trusted to forward
+/// another agent's identity (via the `X-Agent-Pod-Uid` header) to the gateway;
+/// every other pod is a direct caller whose identity is its own source IP.
 ///
 /// Under hostile multi-tenancy the anchor must be **unforgeable** by a tenant, so
 /// ALL of the following must hold:
@@ -177,7 +178,7 @@ pub fn pod_matches_ip(pod: &Pod, ip: &str) -> bool {
 }
 
 /// Whether a pod's `metadata.uid` equals `uid`. Used to resolve the
-/// node-agent-asserted `X-Agent-Pod-Uid` back to the real agent pod — the uid is
+/// forwarder-asserted `X-Agent-Pod-Uid` back to the real agent pod — the uid is
 /// not a kube field selector, so the match is performed locally over a pod list.
 pub fn pod_matches_uid(pod: &Pod, uid: &str) -> bool {
     pod.metadata.uid.as_deref() == Some(uid)
@@ -212,17 +213,16 @@ pub fn reconcile(attested_ns: &str, header_ns: Option<&str>) -> Reconciled {
 ///
 /// The source IP is unforgeable by the agent, so this classification is the root
 /// of trust: a request either comes straight from an agent pod (its own
-/// identity), from the trusted node-agent forwarder (the real caller's identity
-/// asserted out of band in `X-Agent-Pod-Uid`), or from an IP that owns no
-/// attestable pod.
+/// identity), from the trusted forwarder (the real caller's identity asserted out
+/// of band in `X-Agent-Pod-Uid`), or from an IP that owns no attestable pod.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourcePod {
     /// No pod owns the source IP (or it has no namespace) — cannot attest.
     Unresolved,
     /// A direct agent pod with an attestable identity — use it (source-IP attested).
     Direct(Identity),
-    /// The trusted node-agent forwarder. The real caller's identity is NOT this
-    /// pod's; it is asserted in `X-Agent-Pod-Uid` and resolved separately.
+    /// The trusted forwarder. The real caller's identity is NOT this pod's; it is
+    /// asserted in `X-Agent-Pod-Uid` and resolved separately.
     Forwarder,
 }
 
@@ -236,8 +236,8 @@ pub enum Decision {
     /// `(namespace, agent)`. `spoofed` is `true` when a header namespace
     /// disagreed (bump the spoof counter + warn).
     Use { identity: Identity, spoofed: bool },
-    /// Identity attested **via the trusted node-agent forwarder** — the real
-    /// caller's `(namespace, agent)`, resolved from the forwarder-asserted
+    /// Identity attested **via the trusted forwarder** — the real caller's
+    /// `(namespace, agent)`, resolved from the forwarder-asserted
     /// `X-Agent-Pod-Uid`. Bump the forwarded counter.
     Forwarded { identity: Identity },
     /// Reject (`403`): the source IP owns no pod, or the trusted forwarder did
@@ -252,8 +252,8 @@ pub enum Decision {
 /// - [`SourcePod::Unresolved`] ⇒ [`Decision::Reject`].
 /// - [`SourcePod::Direct`] ⇒ [`Decision::Use`] with the pod's own source-IP
 ///   identity and a `spoofed` flag from [`reconcile`]. `forwarded` is **ignored**
-///   here: only the node-agent is a trusted forwarder, so a direct pod can never
-///   substitute another identity via `X-Agent-Pod-Uid`.
+///   here: only the forwarder is trusted, so a direct pod can never substitute
+///   another identity via `X-Agent-Pod-Uid`.
 /// - [`SourcePod::Forwarder`] ⇒ [`Decision::Forwarded`] with `forwarded` when it
 ///   resolved to a pod, else [`Decision::Reject`] (the forwarder must attest a
 ///   resolvable caller).

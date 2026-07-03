@@ -65,7 +65,7 @@ impl Identity {
 ///
 /// Enabled when `COORDINATION_ATTEST_IDENTITY` is set to a truthy value
 /// (`1`/`true`/`on`/`yes`, case-insensitive). Unset/empty/anything else → disabled
-/// (the default; today's token/`_meta` behaviour unchanged, back-compat).
+/// (the default: the self-asserted `_meta` holder is authoritative).
 pub fn attest_enabled_from_env() -> bool {
     std::env::var("COORDINATION_ATTEST_IDENTITY")
         .map(|v| is_truthy(&v))
@@ -119,8 +119,8 @@ pub fn pod_matches_ip(pod: &Pod, ip: &str) -> bool {
 /// `main.rs` and threaded into the pure wire layer ([`crate::mcp`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallerIdentity {
-    /// Attestation is OFF (default). Back-compat: the self-asserted `_meta` holder
-    /// is authoritative and lifecycle calls are not identity-verified.
+    /// Attestation is OFF (default): the self-asserted `_meta` holder is
+    /// authoritative and lifecycle calls are not identity-verified.
     Disabled,
     /// Attestation is ON and the caller's source IP resolved to this holder string
     /// (`namespace/agent`).
@@ -141,7 +141,7 @@ impl CallerIdentity {
 /// lease to this holder; `None` ⇒ reject the claim (fail closed: attested mode
 /// could not attest the caller).
 ///
-/// - [`CallerIdentity::Disabled`] ⇒ the self-asserted holder (back-compat).
+/// - [`CallerIdentity::Disabled`] ⇒ the self-asserted holder.
 /// - [`CallerIdentity::Attested`] ⇒ the ATTESTED identity (authoritative; it
 ///   overrides the self-asserted `_meta` agent so a tenant cannot bill the lease to
 ///   someone else).
@@ -158,7 +158,7 @@ pub fn claim_holder(caller: &CallerIdentity, self_asserted: &str) -> Option<Stri
 /// (`work.ack`/`work.renew`/`work.release`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HolderCheck {
-    /// No constraint (attest disabled) — back-compat, the store enforces nothing.
+    /// No constraint (attest disabled) — the store enforces nothing.
     Unconstrained,
     /// Constrain the op to this attested holder (the store enforces `holder == h`
     /// atomically — a tenant cannot settle or steal another tenant's lease).

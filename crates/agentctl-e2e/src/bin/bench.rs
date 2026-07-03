@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! `bench` — the agentctl scale/resource benchmark sweeps + report renderer (Phase 4).
+//! `bench` — the agentctl scale/resource benchmark sweeps + report renderer.
 //!
-//! Sweeps (the plan's full set):
+//! Sweeps:
 //!   * **(a) density ceiling** — sweep N idle agentd pods until `Pending` and record
 //!     max-Running + the binding resource (host-bound: a *trend*, not a capacity claim).
 //!   * **(b) per-agent overhead** — agentd pod mem/CPU and the marginal
-//!     control-plane Δ per agent (contract 2.0 retired the node-agent DaemonSet).
+//!     control-plane Δ per agent (the only two per-agent cost components).
 //!   * **(c) CP scaling trends** — operator reconcile p50/p95 from the histogram +
 //!     control-plane CPU/mem vs N.
 //!   * **(d) coordination throughput** — a concurrent tokio load-gen on `/mcp`
@@ -230,9 +230,8 @@ async fn sweep_overhead(ctx: &Ctx, rd: &results::ResultsDir) -> Result<Value> {
     let agent_cpu = mean(pods.iter().map(|p| p.cpu_millicores));
     let agent_mem = mean(pods.iter().map(|p| p.mem_mib));
 
-    // Contract 2.0 retired the node-agent DaemonSet, so there is no per-node
-    // constant cost — the only per-agent footprint is the agentd pod itself plus
-    // the marginal control-plane delta.
+    // The per-agent footprint is fully captured by two terms: the agentd pod
+    // itself plus the marginal control-plane delta.
 
     let n = probe_n.max(1) as f64;
     let cp_cpu_delta = (cpn.0 - cp0.0).max(0.0) / n;
@@ -584,7 +583,7 @@ async fn sweep_latency(ctx: &Ctx, rd: &results::ResultsDir, max_n: u32) -> Resul
 /// mode + trigger. So a plain `kubectl create deployment --image agentd` pod
 /// crash-loops and never reaches Running — bogus density/overhead numbers. We
 /// instead render a Deployment running `agentd --mode reactive` with a dummy
-/// (never-dialed, since idle) unix intelligence endpoint and a trigger; the pod
+/// (never-dialed, since idle) HTTPS intelligence endpoint and a trigger; the pod
 /// arms its reactor and idles, which is exactly the per-agent footprint the sweep
 /// measures. `imagePullPolicy: IfNotPresent` keeps it on the kind-loaded image.
 fn scale_idle(ctx: &Ctx, name: &str, replicas: u32) -> Result<()> {

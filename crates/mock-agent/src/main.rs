@@ -3,13 +3,13 @@
 //! conformance, at **contract 2.0**.
 //!
 //! It is NOT a real agent (no agentic loop, no intelligence): it serves the
-//! contract **management + A2A profile** (the self-MCP, RFC 0005/0015/0021) over
+//! contract **management + A2A profile** (the self-MCP) over
 //! **mTLS HTTPS `POST /mcp`** — `initialize`, `tools/list`, `resources/read
 //! agent://capabilities|inventory|metrics`, `tools/call`, the bare A2A methods,
 //! and the `a2a.*` admin verbs — plus a **plaintext `/readyz` + `/metrics`**
 //! listener for probes/scrape. That is exactly the surface the agentctl APIServer
 //! (management verbs) and A2A gateway drive, so it lets the keystone path be
-//! exercised end-to-end without the real runtime — and demonstrates P0: agentctl
+//! exercised end-to-end without the real runtime — demonstrating that agentctl
 //! manages *any* conformant agent.
 //!
 //! **Contract 2.0 — the network is the substrate.** The agent *serves* mTLS HTTPS
@@ -17,11 +17,11 @@
 //! verified against the pinned client CA (`--serve-client-ca`) is
 //! `PeerOrigin::Management`; the listener **requires** a client cert, so every
 //! request reaching `/mcp` is Management. The A2A methods are the bare PascalCase
-//! spec-§9 names (the legacy `a2a.`-prefixed spelling is also accepted); streaming
+//! spec names (the legacy `a2a.`-prefixed spelling is also accepted); streaming
 //! is an SSE `text/event-stream` terminated by the terminal task state (no `final`
 //! flag).
 //!
-//! CLI (the flags the operator renders — RFC 0021 §5): `--serve-mcp
+//! CLI (the flags the operator renders): `--serve-mcp
 //! https://0.0.0.0:8443 --serve-cert <p> --serve-key <p> --serve-client-ca <p>`;
 //! `--tls-ca`/`--mode`/`--mcp`/… are accepted and ignored (the mock dials
 //! nothing). The metrics/readiness listener address comes from `AGENT_METRICS_ADDR`.
@@ -56,7 +56,7 @@ agent_tokens_total{direction=\"output\"} 340
 agent_tool_calls_total 17
 ";
 
-/// The serving-TLS material the operator mounts (RFC 0021 §5).
+/// The serving-TLS material the operator mounts.
 struct Serve {
     addr: SocketAddr,
     cert: String,
@@ -391,7 +391,7 @@ fn manifest() -> Value {
             "a2a": {
                 "version": "1.0",
                 "streaming": true,
-                // Contract 2.0: bare PascalCase spec-§9 A2A method names.
+                // Contract 2.0: bare PascalCase A2A method names.
                 "methods": ["SendMessage", "SendStreamingMessage", "GetTask", "CancelTask", "ListTasks", "SubscribeToTask"]
             },
             "events": false,

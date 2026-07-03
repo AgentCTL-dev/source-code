@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! # agentctl-mcpgateway
 //!
-//! The tool-plane broker (RFC 0019): the ModelGateway pattern applied to MCP.
+//! The tool-plane broker: the ModelGateway pattern applied to MCP.
 //! A networkless agent holds **no** tool-server credential; it dials this
 //! gateway keyless (`--mcp <name>=https://…/s/<name>`), and the gateway:
 //!
 //! 1. **attests** the calling agent by its (unforgeable) source IP → `(ns,
 //!    agent)`, exactly as the ModelGateway does;
 //! 2. **scopes** it to only the servers of the `MCPServerSet`s its `Agent` CR
-//!    binds (`spec.mcpServerSetRefs`) — the RFC 0019 §5 peer→Agent→allowed-servers
+//!    binds (`spec.mcpServerSetRefs`) — the peer→Agent→allowed-servers
 //!    authorization, so one tenant cannot reach another's tool server;
 //! 3. **injects** the server's credential (read from a `Secret`, held off-pod)
 //!    onto the upstream hop;
@@ -18,7 +18,7 @@
 //!
 //! Server-auth-only TLS (the agent trusts our cert via `--tls-ca`; the agent's
 //! identity is the source IP, not a client cert). v1 auth is `staticToken` (an
-//! off-pod bearer); the OAuth/EMA tiers (RFC 0019 §6/§7) extend `McpAuthMode`.
+//! off-pod bearer); the OAuth/EMA tiers extend `McpAuthMode`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -184,8 +184,7 @@ async fn proxy(
     // 4. Forward to the upstream MCP server (transparent + credential-injected).
     // Absolutize an in-cluster Service FQDN (trailing dot) so a node-inherited
     // wildcard search domain under ndots:5 cannot capture the 4-dot name and
-    // leak the call to a foreign host (the DNS-search-list trap the node-agent
-    // infer proxy also defends against).
+    // leak the call to a foreign host.
     let mut url = absolutize_endpoint(&server.endpoint);
     if let Some(rest) = rest {
         if !url.ends_with('/') {
@@ -228,7 +227,7 @@ async fn proxy(
 
 /// Resolve a source IP → `(namespace, agent)` by the pod's `agentctl.dev/agent`
 /// label. Retries briefly (the cold-start `status.podIP` propagation race — a
-/// source IP that reached us over TCP is a real pod; see the ModelGateway).
+/// source IP that reached us over TCP is a real pod).
 async fn identity_for_ip(client: &Client, ip: IpAddr) -> Option<(String, String)> {
     let pods: Api<Pod> = Api::all(client.clone());
     let ip_s = ip.to_string();

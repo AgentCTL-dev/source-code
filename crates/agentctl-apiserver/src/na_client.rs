@@ -37,8 +37,8 @@ use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 /// Where the apiserver's mounted **client** identity + trust anchor live.
 const CLIENT_TLS_DIR: &str = "/etc/agentctl-client/tls";
 
-/// A `ServerCertVerifier` that verifies the node-agent's cert chains to our CA
-/// but does NOT check the server name (the node-agent is reached by dynamic pod
+/// A `ServerCertVerifier` that verifies the agent pod's cert chains to our CA
+/// but does NOT check the server name (the agent pod is reached by dynamic pod
 /// IP). Signature verification reuses ring's algorithms.
 #[derive(Debug)]
 struct CaServerVerifier {
@@ -57,7 +57,7 @@ impl ServerCertVerifier for CaServerVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let cert = ParsedCertificate::try_from(end_entity)?;
         // Chain-to-CA only — intentionally skip `verify_server_name`: the
-        // node-agent has no stable DNS name, only a churning pod IP. mTLS + this
+        // agent pod has no stable DNS name, only a churning pod IP. mTLS + this
         // CA still prove the peer's identity.
         verify_server_cert_signed_by_trust_anchor(
             &cert,
@@ -92,11 +92,11 @@ impl ServerCertVerifier for CaServerVerifier {
     }
 }
 
-/// Build the mTLS reqwest client for the node-agent hop. Built once and shared
+/// Build the mTLS reqwest client for the agent-pod hop. Built once and shared
 /// (it's an `Arc` internally). Panics at startup if the mounted cert material is
 /// missing or malformed — there is no safe degraded mode for the control hop.
 pub fn node_agent_client() -> reqwest::Client {
-    try_build().expect("build node-agent mTLS client")
+    try_build().expect("build agent mTLS client")
 }
 
 fn try_build() -> Result<reqwest::Client, String> {
