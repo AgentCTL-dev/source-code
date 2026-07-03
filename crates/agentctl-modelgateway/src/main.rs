@@ -71,7 +71,18 @@ struct AppState {
     /// TTL cache of `source IP → attested identity`, so a burst from one pod
     /// does not hammer the kube API. Unused when `attest` is `false`.
     ip_cache: Arc<attest::IpIdentityCache>,
+    /// Tokens to reserve for a budgeted request that declares no output cap
+    /// (`max_tokens` etc.). It stands in as the upper-bound estimate so an uncapped
+    /// request still reserves a meaningful amount against the pool budget, keeping
+    /// the cap hard under concurrency. From `MODELGATEWAY_DEFAULT_RESERVE_TOKENS`
+    /// (default [`DEFAULT_RESERVE_TOKENS`]).
+    default_reserve: i64,
 }
+
+/// Fallback per-request reservation when a budgeted request declares no output cap.
+/// Conservative but not so large it needlessly rejects; overridable via
+/// `MODELGATEWAY_DEFAULT_RESERVE_TOKENS`.
+const DEFAULT_RESERVE_TOKENS: i64 = 8192;
 
 #[tokio::main]
 async fn main() {
@@ -141,6 +152,12 @@ async fn main() {
         }
     }
     let ip_cache = Arc::new(attest::IpIdentityCache::new(attest::DEFAULT_TTL));
+    // Fallback reservation for budgeted requests that pin no output cap.
+    let default_reserve = std::env::var("MODELGATEWAY_DEFAULT_RESERVE_TOKENS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_RESERVE_TOKENS);
     // Optional bearer-token access gate (AGENTCTL_API_TOKEN). Unset → no-op; set
     // → enforced on the data routes, with /healthz /readyz /metrics exempt. The
     // middleware itself short-circuits the exempt paths, so it can wrap the whole
@@ -169,6 +186,7 @@ async fn main() {
             attest,
             control_plane_ns,
             ip_cache,
+            default_reserve,
         });
 
     // Optional TLS listener (contract 2.0): agents dial their rendered
@@ -323,39 +341,59 @@ async fn infer(
     };
     let budget = spec.budget.as_ref().map(|b| b.max_tokens);
 
-    // c. budget — pre-request check.
-    if budget.is_some() {
-        match store::pool_tokens(&state.pool, &ns, &pool_name).await {
-            Ok(used) if over_budget(used, budget) => {
-                state.metrics.inc_budget_rejection();
-                return (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(json!({
-                        "error": "budget exceeded",
-                        "namespace": ns,
-                        "pool": pool_name,
-                        "usedTokens": used,
-                        "budget": budget,
-                    })),
-                )
-                    .into_response();
+    // c. budget — atomic reservation (race-free; RFC 0012). When the pool declares
+    //    a cap, reserve a conservative upper-bound estimate BEFORE the provider
+    //    call: concurrent requests serialize per-pool and the cap holds under load
+    //    (a bare pre-request SUM check let a whole fleet overshoot). `None` ⇒
+    //    uncapped pool, no reservation. The reservation is reconciled to the actual
+    //    spend after the call, or released on any early return below.
+    let reservation: Option<(i64, i64)> = match budget {
+        Some(cap) => {
+            let est = estimate_reservation(&body, state.default_reserve);
+            match store::reserve(&state.pool, &ns, &pool_name, &agent, est, cap).await {
+                Ok(Some(id)) => Some((id, est)),
+                Ok(None) => {
+                    state.metrics.inc_budget_rejection();
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({
+                            "error": "budget exceeded",
+                            "namespace": ns,
+                            "pool": pool_name,
+                            "budget": cap,
+                            "requestedTokens": est,
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => return internal(&format!("budget reserve: {e}")),
             }
-            Ok(_) => {}
-            Err(e) => return internal(&format!("budget check: {e}")),
         }
-    }
+        None => None,
+    };
 
-    // d. read the credential the gateway will inject (never the agent's own).
+    // d. read the credential the gateway will inject (never the agent's own). Any
+    //    early return past this point must first release the reservation so a failed
+    //    request never permanently consumes budget.
     let secrets: Api<Secret> = Api::namespaced(state.client.clone(), &ns);
     let secret_name = &spec.credential_secret_ref.name;
     let secret = match secrets.get_opt(secret_name).await {
         Ok(Some(s)) => s,
-        Ok(None) => return not_found(&format!("Secret {secret_name} not found"), &ns),
-        Err(e) => return internal(&format!("get Secret {secret_name}: {e}")),
+        Ok(None) => {
+            release_reservation(&state, &reservation).await;
+            return not_found(&format!("Secret {secret_name} not found"), &ns);
+        }
+        Err(e) => {
+            release_reservation(&state, &reservation).await;
+            return internal(&format!("get Secret {secret_name}: {e}"));
+        }
     };
     let key = match read_secret_key(&secret, &spec.credential_secret_ref.key) {
         Ok(k) => k,
-        Err(e) => return internal(&e),
+        Err(e) => {
+            release_reservation(&state, &reservation).await;
+            return internal(&e);
+        }
     };
 
     // e. inject the default model when the body pins none, then forward with the
@@ -372,11 +410,13 @@ async fn infer(
         Ok(r) => r,
         Err(e) => {
             state.metrics.inc_error();
+            release_reservation(&state, &reservation).await;
             return bad_gateway(&format!("provider POST {url}: {e}"));
         }
     };
     if !resp.status().is_success() {
         state.metrics.inc_error();
+        release_reservation(&state, &reservation).await;
         let code = resp.status().as_u16();
         let detail = resp.text().await.unwrap_or_default();
         return (
@@ -389,6 +429,7 @@ async fn infer(
         Ok(b) => b,
         Err(e) => {
             state.metrics.inc_error();
+            release_reservation(&state, &reservation).await;
             return bad_gateway(&format!("decode provider response: {e}"));
         }
     };
@@ -410,8 +451,22 @@ async fn infer(
         }
     };
     state.metrics.add_tokens(total);
-    if let Err(e) = store::record_usage(&state.pool, &ns, &pool_name, &agent, total).await {
-        tracing::warn!(%ns, pool = %pool_name, error = %e, "record usage failed");
+    // Reconcile: a budgeted request commits its reservation to the ACTUAL spend (so
+    // the committed total never exceeds the budget the reservation was admitted
+    // under); an uncapped request just appends to the audit ledger.
+    match &reservation {
+        Some((id, _est)) => {
+            if let Err(e) =
+                store::commit_reservation(&state.pool, &ns, &pool_name, &agent, *id, total).await
+            {
+                tracing::warn!(%ns, pool = %pool_name, error = %e, "commit reservation failed");
+            }
+        }
+        None => {
+            if let Err(e) = store::record_usage(&state.pool, &ns, &pool_name, &agent, total).await {
+                tracing::warn!(%ns, pool = %pool_name, error = %e, "record usage failed");
+            }
+        }
     }
     if let Some(obj) = provider_body.as_object_mut() {
         obj.insert(
@@ -697,13 +752,6 @@ fn read_secret_key(secret: &Secret, key: &str) -> Result<String, String> {
 
 // --- pure helpers (unit-tested) --------------------------------------------
 
-/// Whether `used` tokens have reached/exceeded the pool's `budget`. No budget
-/// (`None`) ⇒ never over budget. The check is `>=` so the request that would
-/// cross the line is the one rejected (pre-request, conservative).
-fn over_budget(used: i64, budget: Option<i64>) -> bool {
-    matches!(budget, Some(b) if used >= b)
-}
-
 /// Inject `default_model` into the request body when it pins no (non-empty)
 /// model. No-op when there is no default, the body is not a JSON object, or the
 /// body already carries a non-empty `model`. The agent stays provider-neutral;
@@ -859,6 +907,34 @@ fn estimate_tokens_from_size(body: &Value) -> i64 {
     ((chars / 4) as i64).max(1)
 }
 
+/// A conservative UPPER-BOUND estimate of what an infer REQUEST may cost, used to
+/// reserve budget BEFORE the provider call (the race-free cap; see [`store::reserve`]).
+/// Sums an input estimate from the request body size (~4 chars/token) with the
+/// request's declared output cap — `max_tokens` / `max_output_tokens` /
+/// `max_completion_tokens`, whichever is present and positive. With no declared cap
+/// the configured `default_reserve` stands in, so an uncapped request still reserves
+/// a meaningful amount. Floored at 1.
+fn estimate_reservation(body: &Value, default_reserve: i64) -> i64 {
+    let input_est = estimate_tokens_from_size(body);
+    let output_cap = ["max_tokens", "max_output_tokens", "max_completion_tokens"]
+        .iter()
+        .find_map(|k| body.get(*k).and_then(Value::as_i64))
+        .filter(|n| *n > 0)
+        .unwrap_or(default_reserve);
+    input_est.saturating_add(output_cap).max(1)
+}
+
+/// Release a held budget reservation (if any) on an early-return / error path, so a
+/// request that never reaches the provider frees the headroom it reserved. Best
+/// effort: a failed release self-heals via the reservation TTL, so we only warn.
+async fn release_reservation(state: &AppState, reservation: &Option<(i64, i64)>) {
+    if let Some((id, _est)) = reservation {
+        if let Err(e) = store::release_reservation(&state.pool, *id).await {
+            tracing::warn!(reservation_id = id, error = %e, "release reservation failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,21 +967,33 @@ mod tests {
     }
 
     #[test]
-    fn over_budget_none_is_never_over() {
-        assert!(!over_budget(0, None));
-        assert!(!over_budget(i64::MAX, None));
+    fn reservation_uses_declared_output_cap_plus_input() {
+        // A declared cap (max_tokens/max_output_tokens/max_completion_tokens) is a
+        // real upper bound → reserve it plus the input-size estimate, NOT the default.
+        for cap_key in ["max_tokens", "max_output_tokens", "max_completion_tokens"] {
+            let body = json!({ cap_key: 500, "messages": [] });
+            let est = estimate_reservation(&body, 8192);
+            assert!(
+                est >= 500 && est < 8192,
+                "{cap_key}: est {est} should be ~cap+input, not the default"
+            );
+        }
     }
 
     #[test]
-    fn over_budget_is_inclusive_at_the_limit() {
-        assert!(!over_budget(99, Some(100)));
-        assert!(over_budget(100, Some(100)));
-        assert!(over_budget(101, Some(100)));
+    fn reservation_falls_back_to_default_without_cap() {
+        // No declared cap → the default reservation stands in (plus input estimate),
+        // so an uncapped request still reserves a meaningful amount.
+        let body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        let est = estimate_reservation(&body, 8192);
+        assert!(est > 8192, "no cap ⇒ default + input estimate: got {est}");
     }
 
     #[test]
-    fn over_budget_zero_budget_blocks_everything() {
-        assert!(over_budget(0, Some(0)));
+    fn reservation_ignores_nonpositive_cap() {
+        // A zero/negative cap is not a real bound → fall back to the default.
+        let body = json!({ "max_tokens": 0 });
+        assert!(estimate_reservation(&body, 8192) > 8192);
     }
 
     #[test]
