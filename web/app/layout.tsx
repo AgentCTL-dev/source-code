@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { Metadata } from "next";
 import { RootProvider } from "fumadocs-ui/provider";
 import { searchOptions } from "@/lib/search-client";
+import Script from "next/script";
 
 export const metadata: Metadata = {
   title: {
@@ -22,6 +23,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="flex min-h-screen flex-col font-sans antialiased">
+        <Script defer strategy="afterInteractive" data-domain="agentctl.dev" src="https://analytics.tsok.org/js/script.js" />
         <RootProvider
           theme={{
             defaultTheme: "dark",
