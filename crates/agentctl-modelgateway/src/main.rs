@@ -1009,7 +1009,7 @@ mod tests {
             let body = json!({ cap_key: 500, "messages": [] });
             let est = estimate_reservation(&body, 8192);
             assert!(
-                est >= 500 && est < 8192,
+                (500..8192).contains(&est),
                 "{cap_key}: est {est} should be ~cap+input, not the default"
             );
         }
