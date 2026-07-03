@@ -45,15 +45,17 @@ mod signing;
 mod store;
 mod trusted_proxy;
 
-/// Namespace the node-agent DaemonSet runs in (same as the apiserver assumes).
-const NODE_AGENT_NS: &str = "agentctl-system";
-
 #[derive(Clone)]
 struct AppState {
     client: Client,
     pool: Pool,
     signer: Arc<signing::Signer>,
-    /// mTLS client for the node-agent control hop (RFC 0015). Built once.
+    /// mTLS client presenting the control-plane client cert (agentctl-client-tls).
+    /// It mints the `Management` origin at an agent's `/mcp`, so the gateway is
+    /// the only peer that may drive A2A on the agent (external callers are
+    /// authenticated + authorized on the inbound side, then forwarded as
+    /// Management). Built once. (Field name is historical — it dialed the
+    /// node-agent pre-v2; the node-agent hop is retired.)
     na: reqwest::Client,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
@@ -269,18 +271,35 @@ async fn build_signed_card(
     base_url: &str,
     kind: Option<&str>,
 ) -> Result<Value, String> {
-    let (uid, na_ip) = resolve(&state.client, ns, name).await?;
-    // mTLS control hop (RFC 0015): https on :8443, client-cert required.
-    let url = format!("https://{na_ip}:8443/v1/agents/{uid}/capabilities");
-    let manifest = state
+    let pod_ip = resolve(&state.client, ns, name).await?;
+    // The agent serves its manifest as the `agent://capabilities` MCP resource
+    // (contract 2.0); read it over the agent's mTLS `/mcp` (our client cert
+    // mints Management). `resources/read` returns `contents[0].text` = the
+    // manifest JSON.
+    let url = format!("https://{pod_ip}:8443/mcp");
+    let read = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "resources/read",
+        "params": { "uri": "agent://capabilities" }
+    });
+    let resp = state
         .na
-        .get(&url)
+        .post(&url)
+        .json(&read)
         .send()
         .await
-        .map_err(|e| format!("node-agent GET {url}: {e}"))?
+        .map_err(|e| format!("agent POST {url}: {e}"))?
         .json::<Value>()
         .await
         .map_err(|e| format!("decode capabilities: {e}"))?;
+    if let Some(err) = resp.get("error") {
+        return Err(format!("agent resources/read error: {err}"));
+    }
+    let text = resp
+        .pointer("/result/contents/0/text")
+        .and_then(Value::as_str)
+        .ok_or("capabilities resource has no contents[0].text")?;
+    let manifest: Value =
+        serde_json::from_str(text).map_err(|e| format!("parse capabilities manifest: {e}"))?;
     let mut card = project_card(&manifest, ns, name, base_url);
     if let Some(k) = kind {
         card["x-agentctl-kind"] = json!(k);
@@ -438,21 +457,26 @@ async fn a2a_rpc(
         obj.insert("method".to_string(), json!(reference));
     }
 
-    let (uid, na_ip) = match resolve(&state.client, &ns, &name).await {
-        Ok(loc) => loc,
+    let pod_ip = match resolve(&state.client, &ns, &name).await {
+        Ok(ip) => ip,
         Err(e) => {
             state.metrics.inc_upstream_error();
             tracing::warn!(%ns, agent = %name, error = %e, "rpc resolve failed");
             return Json(rpc_error(id, -32603, &e)).into_response();
         }
     };
+    // The agent serves A2A on its own mTLS `/mcp`; the gateway's client cert
+    // mints Management. Non-streaming AND streaming ride the same endpoint (an
+    // SSE reply is negotiated by the streaming method + Accept), so there is one
+    // URL now, not a separate `/a2a/stream`.
+    let url = format!("https://{pod_ip}:8443/mcp");
 
     if streaming {
-        // Streaming path: forward to the node-agent's SSE endpoint and pipe the
-        // raw `text/event-stream` body straight through — do NOT parse the SSE
-        // frames (transparent byte pipe; the node-agent already framed them).
+        // Streaming path: forward and pipe the raw `text/event-stream` body
+        // straight through — do NOT parse the SSE frames (transparent byte
+        // pipe). v2.1 frames carry no `final`; terminality is the terminal task
+        // state + stream close, which the client observes directly.
         state.metrics.inc_stream();
-        let url = format!("https://{na_ip}:8443/v1/agents/{uid}/a2a/stream");
         let forwarded = forward_request(&state, &url, &req, &identity, forward_identity);
         return match forwarded.send().await {
             Ok(resp) => (
@@ -462,47 +486,38 @@ async fn a2a_rpc(
                 .into_response(),
             Err(e) => {
                 state.metrics.inc_upstream_error();
-                Json(rpc_error(
-                    id,
-                    -32603,
-                    &format!("node-agent POST {url}: {e}"),
-                ))
-                .into_response()
+                Json(rpc_error(id, -32603, &format!("agent POST {url}: {e}"))).into_response()
             }
         };
     }
 
-    let url = format!("https://{na_ip}:8443/v1/agents/{uid}/a2a");
     let forwarded = forward_request(&state, &url, &req, &identity, forward_identity);
     let body = match forwarded.send().await {
         Ok(resp) => match resp.json::<Value>().await {
             Ok(b) => b,
             Err(e) => {
                 state.metrics.inc_upstream_error();
-                return Json(rpc_error(id, -32603, &format!("decode node-agent: {e}")))
-                    .into_response();
+                return Json(rpc_error(id, -32603, &format!("decode agent: {e}"))).into_response();
             }
         },
         Err(e) => {
             state.metrics.inc_upstream_error();
-            return Json(rpc_error(
-                id,
-                -32603,
-                &format!("node-agent POST {url}: {e}"),
-            ))
-            .into_response();
+            return Json(rpc_error(id, -32603, &format!("agent POST {url}: {e}"))).into_response();
         }
     };
 
-    // Persist task state into the durable store.
+    // Persist task state into the durable store. v2.1 `SendMessage` returns the
+    // `SendMessageResponse` envelope `{"task": <Task>}`; `GetTask`/`CancelTask`
+    // return a bare Task. `task_of` normalizes both so persistence + push read
+    // the Task regardless of shape.
     if spec == "message/send" {
-        if let Some(result) = body.get("result") {
-            let tid = result.get("id").and_then(Value::as_str).unwrap_or("task-1");
-            let st = result
+        if let Some(task) = body.get("result").and_then(task_of) {
+            let tid = task.get("id").and_then(Value::as_str).unwrap_or("task-1");
+            let st = task
                 .pointer("/status/state")
                 .and_then(Value::as_str)
                 .unwrap_or("completed");
-            let artifact = result
+            let artifact = task
                 .pointer("/artifacts/0/parts/0/text")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
@@ -514,11 +529,16 @@ async fn a2a_rpc(
             }
             // Deliver a push notification if a webhook is registered (RFC 0013).
             if let Ok(Some((url, token))) = store::push_get(&state.pool, &ns, &name, tid).await {
-                deliver_push(url, token, result.clone());
+                deliver_push(url, token, task.clone());
             }
         }
     } else if spec == "tasks/cancel" {
-        if let Some(tid) = body.pointer("/result/id").and_then(Value::as_str) {
+        if let Some(tid) = body
+            .get("result")
+            .and_then(task_of)
+            .and_then(|t| t.get("id"))
+            .and_then(Value::as_str)
+        {
             let _ = store::set_state(&state.pool, &ns, &name, tid, "canceled").await;
         }
     }
@@ -709,16 +729,29 @@ fn deliver_push(url: String, token: String, task: Value) {
 
 // --- pure helpers (unit-tested) --------------------------------------------
 
-/// Translate an A2A spec slash-form method to the reference method the agent
-/// dispatches over the substrate. `None` ⇒ unsupported (→ JSON-RPC -32601).
+/// Translate an A2A spec slash-form method to the **bare PascalCase** method the
+/// agent serves (A2A spec §9 JSON-RPC binding; agentd v2.1). agentd still accepts
+/// the legacy `a2a.`-prefixed spellings, but bare is the conformant wire, so we
+/// emit it. `None` ⇒ unsupported (→ JSON-RPC -32601).
 fn translate_method(spec: &str) -> Option<&'static str> {
     match spec {
-        "message/send" => Some("a2a.SendMessage"),
-        "message/stream" => Some("a2a.SendStreamingMessage"),
-        "tasks/get" => Some("a2a.GetTask"),
-        "tasks/cancel" => Some("a2a.CancelTask"),
+        "message/send" => Some("SendMessage"),
+        "message/stream" => Some("SendStreamingMessage"),
+        "tasks/get" => Some("GetTask"),
+        "tasks/cancel" => Some("CancelTask"),
         _ => None,
     }
+}
+
+/// Normalize an A2A method `result` to its Task object. v2.1 `SendMessage`
+/// returns the `SendMessageResponse` oneof `{"task": <Task>}`; `GetTask` /
+/// `CancelTask` return a bare `<Task>`. A Task is identified by carrying an
+/// `id`, so a `result.task` is unwrapped and a bare Task is returned as-is.
+fn task_of(result: &Value) -> Option<&Value> {
+    if let Some(task) = result.get("task") {
+        return Some(task);
+    }
+    result.get("id").map(|_| result)
 }
 
 /// Build the `pushNotificationConfig` object echoed back to clients: always the
@@ -964,42 +997,25 @@ fn forward_request(
 
 // --- routing (kube; needs a cluster to run, not to compile/test) -----------
 
-/// Resolve `{ns,name}` → `(pod_uid, node_agent_ip)`, exactly as the apiserver's
-/// `forward_to_node_agent`: the agent's Running pod (labelled
-/// `agentctl.dev/agent=<name>`) gives the uid + node; the Running node-agent on
-/// that node gives the IP to reach.
-async fn resolve(client: &Client, ns: &str, name: &str) -> Result<(String, String), String> {
+/// Resolve `{ns,name}` → the agent's **Running pod IP** (contract 2.0). The agent
+/// serves its A2A + capabilities surface mTLS-gated on its own `:8443/mcp`; the
+/// gateway holds the control-plane client cert that mints the `Management` origin
+/// those methods require, so it reaches the pod directly — no node-agent hop.
+/// (A fleet's pods are labelled the same way, so this resolves a fleet member
+/// too; picking the first Running replica is the current fan-out policy.)
+async fn resolve(client: &Client, ns: &str, name: &str) -> Result<String, String> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
     let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
-    let pod = pods
-        .list(&lp)
+    pods.list(&lp)
         .await
         .map_err(|e| format!("list agent pods: {e}"))?
         .items
         .into_iter()
         .find(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
-        .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?;
-    let pod_uid = pod.metadata.uid.ok_or("agent pod has no uid")?;
-    let node = pod
-        .spec
-        .and_then(|s| s.node_name)
-        .ok_or("agent pod has no nodeName")?;
-
-    let na: Api<Pod> = Api::namespaced(client.clone(), NODE_AGENT_NS);
-    let na_lp = ListParams::default()
-        .labels("app.kubernetes.io/name=agentctl-node-agent")
-        .fields(&format!("spec.nodeName={node}"));
-    let na_ip = na
-        .list(&na_lp)
-        .await
-        .map_err(|e| format!("list node-agents: {e}"))?
-        .items
-        .into_iter()
-        .filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
-        .find_map(|p| p.status.and_then(|s| s.pod_ip))
-        .ok_or_else(|| format!("no running node-agent on node {node}"))?;
-
-    Ok((pod_uid, na_ip))
+        .ok_or_else(|| format!("no running pod for agent {ns}/{name}"))?
+        .status
+        .and_then(|s| s.pod_ip)
+        .ok_or_else(|| format!("agent pod for {ns}/{name} has no podIP"))
 }
 
 #[cfg(test)]
@@ -1008,13 +1024,26 @@ mod tests {
 
     #[test]
     fn translate_method_maps_the_mvp_set() {
-        assert_eq!(translate_method("message/send"), Some("a2a.SendMessage"));
+        // Bare PascalCase (A2A spec §9 / agentd v2.1), not the legacy a2a.* prefix.
+        assert_eq!(translate_method("message/send"), Some("SendMessage"));
         assert_eq!(
             translate_method("message/stream"),
-            Some("a2a.SendStreamingMessage")
+            Some("SendStreamingMessage")
         );
-        assert_eq!(translate_method("tasks/get"), Some("a2a.GetTask"));
-        assert_eq!(translate_method("tasks/cancel"), Some("a2a.CancelTask"));
+        assert_eq!(translate_method("tasks/get"), Some("GetTask"));
+        assert_eq!(translate_method("tasks/cancel"), Some("CancelTask"));
+    }
+
+    #[test]
+    fn task_of_normalizes_both_a2a_result_shapes() {
+        // v2.1 SendMessage: the SendMessageResponse envelope {"task": <Task>}.
+        let envelope = json!({ "task": { "id": "t1", "status": { "state": "completed" } } });
+        assert_eq!(task_of(&envelope).unwrap()["id"], "t1");
+        // GetTask/CancelTask: a bare Task (identified by carrying `id`).
+        let bare = json!({ "id": "t2", "status": { "state": "working" } });
+        assert_eq!(task_of(&bare).unwrap()["id"], "t2");
+        // Neither shape ⇒ None (nothing to persist).
+        assert!(task_of(&json!({ "unrelated": true })).is_none());
     }
 
     #[test]
