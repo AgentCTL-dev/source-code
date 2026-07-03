@@ -340,36 +340,41 @@ async fn infer(
         Err(e) => return internal(&format!("select ModelPool: {e}")),
     };
     let budget = spec.budget.as_ref().map(|b| b.max_tokens);
+    // Per-fleet cap (RFC 0022 §9): when the caller is an AgentFleet with its own
+    // budget, enforce it alongside the pool cap so one fleet cannot drain a shared
+    // pool. `None` for a plain Agent or a fleet without a budget.
+    let fleet_budget = fleet_budget(&state.client, &ns, &agent).await;
 
-    // c. budget — atomic reservation (race-free; RFC 0012). When the pool declares
-    //    a cap, reserve a conservative upper-bound estimate BEFORE the provider
-    //    call: concurrent requests serialize per-pool and the cap holds under load
-    //    (a bare pre-request SUM check let a whole fleet overshoot). `None` ⇒
-    //    uncapped pool, no reservation. The reservation is reconciled to the actual
-    //    spend after the call, or released on any early return below.
-    let reservation: Option<(i64, i64)> = match budget {
-        Some(cap) => {
-            let est = estimate_reservation(&body, state.default_reserve);
-            match store::reserve(&state.pool, &ns, &pool_name, &agent, est, cap).await {
-                Ok(Some(id)) => Some((id, est)),
-                Ok(None) => {
-                    state.metrics.inc_budget_rejection();
-                    return (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        Json(json!({
-                            "error": "budget exceeded",
-                            "namespace": ns,
-                            "pool": pool_name,
-                            "budget": cap,
-                            "requestedTokens": est,
-                        })),
-                    )
-                        .into_response();
-                }
-                Err(e) => return internal(&format!("budget reserve: {e}")),
+    // c. budget — atomic reservation (race-free; RFC 0012 / RFC 0022 §9). When the
+    //    pool AND/OR the fleet declares a cap, reserve a conservative upper-bound
+    //    estimate BEFORE the provider call: concurrent requests serialize per-pool
+    //    and every present cap holds under load (a bare pre-request SUM check let a
+    //    whole fleet overshoot). No cap ⇒ no reservation. The reservation is
+    //    reconciled to the actual spend after the call, or released on any early
+    //    return below.
+    let reservation: Option<(i64, i64)> = if budget.is_some() || fleet_budget.is_some() {
+        let est = estimate_reservation(&body, state.default_reserve);
+        match store::reserve(&state.pool, &ns, &pool_name, &agent, est, budget, fleet_budget).await {
+            Ok(Some(id)) => Some((id, est)),
+            Ok(None) => {
+                state.metrics.inc_budget_rejection();
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({
+                        "error": "budget exceeded",
+                        "namespace": ns,
+                        "pool": pool_name,
+                        "poolBudget": budget,
+                        "fleetBudget": fleet_budget,
+                        "requestedTokens": est,
+                    })),
+                )
+                    .into_response();
             }
+            Err(e) => return internal(&format!("budget reserve: {e}")),
         }
-        None => None,
+    } else {
+        None
     };
 
     // d. read the credential the gateway will inject (never the agent's own). Any
@@ -734,6 +739,21 @@ async fn declared_pool(client: &Client, ns: &str, agent: &str) -> Option<String>
         .await
         .ok()
         .and_then(|f| f.spec.template.model_pool)
+}
+
+/// The per-fleet token cap (`AgentFleet.spec.budget.maxTokens`, RFC 0022 §9) for the
+/// caller, when the attested identity names an `AgentFleet` that declares one. `None`
+/// for a plain `Agent`, a fleet without a budget, or an absent CR — in which case
+/// only the pool cap (if any) applies.
+async fn fleet_budget(client: &Client, ns: &str, agent: &str) -> Option<i64> {
+    let fleets: Api<AgentFleet> = Api::namespaced(client.clone(), ns);
+    fleets
+        .get_opt(agent)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|f| f.spec.budget)
+        .and_then(|b| b.max_tokens)
 }
 
 /// Read and UTF-8-decode the named key from a `Secret`. The typed kube client

@@ -398,7 +398,7 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
         &labels,
         owner_ref("AgentFleet", &name, uid_of(&fleet.metadata.uid)),
     );
-    let pod = pod_template(spec, &image, &labels, &name, cfg);
+    let mut pod = pod_template(spec, &image, &labels, &name, cfg);
 
     match fleet.spec.scaling.mode {
         ScaleMode::Claim => Ok(Rendered::Deployment(Box::new(Deployment {
@@ -418,6 +418,11 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
                 .scaling
                 .shards
                 .ok_or(RenderError::MissingShards)?;
+            // Shard identity (RFC 0003 §9.1 P3): inject only `N` (identical across
+            // every StatefulSet pod, as a shared template requires); the agent
+            // derives its own `K` from the ordinal in `AGENT_POD_NAME`
+            // (`<sts>-<ordinal>`). `--shard auto/N` is the contract spelling of that.
+            inject_shard_identity(&mut pod, shards);
             Ok(Rendered::StatefulSet(Box::new(StatefulSet {
                 metadata: meta,
                 spec: Some(StatefulSetSpec {
@@ -433,6 +438,22 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
             })))
         }
     }
+}
+
+/// Inject `--shard auto/N` into a shard StatefulSet pod's agent container (RFC 0003
+/// §9.1 P3). Only `N` is templated — it is identical across all ordinals, which a
+/// shared pod template requires; the agent self-derives its `K` from the ordinal in
+/// `AGENT_POD_NAME`. Idempotent (no-op if a `--shard` flag is already present).
+fn inject_shard_identity(pod: &mut PodTemplateSpec, shards: u32) {
+    let Some(container) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) else {
+        return;
+    };
+    let args = container.args.get_or_insert_with(Vec::new);
+    if args.iter().any(|a| a == "--shard") {
+        return;
+    }
+    args.push("--shard".to_string());
+    args.push(format!("auto/{shards}"));
 }
 
 /// The label distinguishing a fleet's coordinator workload from its worker pool
@@ -1687,6 +1708,28 @@ mod tests {
             instruction: Some("decompose and delegate".into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn shard_fleet_injects_shard_identity() {
+        // RFC 0003 §9.1 P3: a shard StatefulSet pod carries `--shard auto/N` (N only,
+        // identical across ordinals); the agent derives K from AGENT_POD_NAME.
+        let f = fleet(ScaleMode::Shard, Some(4));
+        let r = render_fleet(&f, &cfg()).unwrap();
+        let Rendered::StatefulSet(sts) = r else {
+            panic!("shard mode renders a StatefulSet");
+        };
+        let pod = sts.spec.unwrap().template;
+        assert!(has_arg_pair(container_of(&pod), "--shard", "auto/4"));
+    }
+
+    #[test]
+    fn claim_fleet_has_no_shard_flag() {
+        let f = fleet(ScaleMode::Claim, None);
+        let r = render_fleet(&f, &cfg()).unwrap();
+        let Rendered::Deployment(dep) = r else { unreachable!() };
+        let c = container_of(&dep.spec.as_ref().unwrap().template);
+        assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--shard"));
     }
 
     #[test]

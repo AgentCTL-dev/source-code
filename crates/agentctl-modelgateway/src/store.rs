@@ -75,18 +75,28 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
 /// other's committed reservations and cannot collectively exceed the budget.
 /// Reservations older than [`RESERVATION_TTL_SECS`] are excluded (leaked by a
 /// crashed request) and swept opportunistically inside the same transaction.
+///
+/// Enforces up to TWO caps atomically (RFC 0012 / RFC 0022 §9): the pool-wide
+/// `pool_budget` (scope `(ns, pool)`), and — when the caller is a fleet with its own
+/// cap — the per-fleet `fleet_budget` (scope `(ns, pool, agent)`, isolating one
+/// fleet's spend from others sharing the pool). The single reservation row carries
+/// `agent`, so it counts toward BOTH sums; one advisory lock on the pool scope (a
+/// superset of the fleet scope) serializes both checks. A request is admitted only
+/// when EVERY present cap has headroom.
 pub async fn reserve(
     pool_ref: &Pool,
     ns: &str,
     pool: &str,
     agent: &str,
     est: i64,
-    budget: i64,
+    pool_budget: Option<i64>,
+    fleet_budget: Option<i64>,
 ) -> Result<Option<i64>, String> {
     let mut client = pool_ref.get().await.map_err(|e| e.to_string())?;
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
     // Serialize this pool for the duration of the transaction. The lock auto-releases
     // on commit/rollback; a bigint key derived from (ns/pool) keeps pools independent.
+    // The fleet scope is a subset of the pool scope, so this one lock covers both.
     let lock_key = format!("{ns}/{pool}");
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -104,29 +114,56 @@ pub async fn reserve(
     )
     .await
     .map_err(|e| e.to_string())?;
-    // committed + still-outstanding reserved, under the lock (fresh snapshot).
-    let committed: i64 = tx
-        .query_one(
-            "SELECT COALESCE(SUM(total_tokens), 0)::bigint FROM intelligence_usage
-             WHERE namespace = $1 AND pool = $2",
-            &[&ns, &pool],
-        )
-        .await
-        .map_err(|e| e.to_string())?
-        .get(0);
-    let reserved: i64 = tx
-        .query_one(
-            "SELECT COALESCE(SUM(est_tokens), 0)::bigint FROM intelligence_reservation
-             WHERE namespace = $1 AND pool = $2",
-            &[&ns, &pool],
-        )
-        .await
-        .map_err(|e| e.to_string())?
-        .get(0);
-    if committed.saturating_add(reserved).saturating_add(est) > budget {
-        // Would exceed the cap — do NOT insert; let the lock release on rollback.
-        tx.rollback().await.map_err(|e| e.to_string())?;
-        return Ok(None);
+    // committed + still-outstanding reserved, under the lock (fresh snapshot). The
+    // pool scope sums over all agents; the fleet scope adds `agent = $3`. Every
+    // present cap must have headroom for `est`, else roll back (releasing the lock).
+    if let Some(cap) = pool_budget {
+        let committed: i64 = tx
+            .query_one(
+                "SELECT COALESCE(SUM(total_tokens),0)::bigint FROM intelligence_usage
+                  WHERE namespace=$1 AND pool=$2",
+                &[&ns, &pool],
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .get(0);
+        let reserved: i64 = tx
+            .query_one(
+                "SELECT COALESCE(SUM(est_tokens),0)::bigint FROM intelligence_reservation
+                  WHERE namespace=$1 AND pool=$2",
+                &[&ns, &pool],
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .get(0);
+        if committed.saturating_add(reserved).saturating_add(est) > cap {
+            tx.rollback().await.map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
+    }
+    if let Some(cap) = fleet_budget {
+        let committed: i64 = tx
+            .query_one(
+                "SELECT COALESCE(SUM(total_tokens),0)::bigint FROM intelligence_usage
+                  WHERE namespace=$1 AND pool=$2 AND agent=$3",
+                &[&ns, &pool, &agent],
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .get(0);
+        let reserved: i64 = tx
+            .query_one(
+                "SELECT COALESCE(SUM(est_tokens),0)::bigint FROM intelligence_reservation
+                  WHERE namespace=$1 AND pool=$2 AND agent=$3",
+                &[&ns, &pool, &agent],
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .get(0);
+        if committed.saturating_add(reserved).saturating_add(est) > cap {
+            tx.rollback().await.map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
     }
     let id: i64 = tx
         .query_one(
