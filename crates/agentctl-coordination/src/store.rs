@@ -2,10 +2,22 @@
 //! The claim store — the **single serializing point** (agentctl RFC 0011 §3.2).
 //!
 //! Everything that makes exactly-one-owner hold lives here, behind ONE `Mutex`:
-//! the atomic `work.claim` (exactly one of N concurrent racers for an item wins),
-//! the lease lifecycle (`renew`/`ack`/`release` + TTL expiry), and the
-//! transactional dedupe on `claim_key` (a redelivered-but-already-acked item is a
+//! the atomic `work.claim` (exactly one of N concurrent racers for a work unit
+//! wins), the lease lifecycle (`renew`/`ack`/`release` + TTL expiry), and the
+//! transactional dedupe on `claim_key` (a redelivered-but-already-acked unit is a
 //! no-op — the at-least-once safety net, agentd RFC 0019 §3.5).
+//!
+//! **The unit of exclusivity is the `claim_key`, not the `item` URI.** The
+//! `claim_key` is the stable identity of a piece of work; the `item` is the payload
+//! (a URI) carried alongside it and reported back in `pending_items`. Grant-one,
+//! contention, and the acked-tombstone dedupe are ALL keyed by `claim_key` — the
+//! same column the durable [`crate::pg_store::PgClaimStore`] uses as its PRIMARY
+//! KEY. This keeps the two backends semantically identical: swapping the in-memory
+//! store for Postgres never changes who wins a race. (When `submit` is called
+//! without a `claim_key`, the `item` URI is its own key — matching the durable
+//! store's `claim_key.unwrap_or(item)`.) In normal claim-mode use each `item` has
+//! one stable `claim_key`, so the distinction is invisible; it matters only under
+//! contention with reused keys, where both backends now agree.
 //!
 //! The store sits behind the [`ClaimStore`] trait so a durable backend
 //! (Redis/Postgres) can slot in later WITHOUT touching the MCP wire layer; v1
@@ -145,16 +157,29 @@ pub trait ClaimStore: Send + Sync {
     fn pending_items(&self) -> Vec<String>;
 }
 
-/// A live lease over one item.
+/// A live lease over one work unit (keyed by its `claim_key`).
 #[derive(Debug, Clone)]
 struct Lease {
     lease_id: String,
     /// Reported as `held_by` to a contending claimer.
     holder: String,
-    /// The dedupe key recorded into the done set on a terminal `ack`.
+    /// The dedupe key recorded into the done set on a terminal `ack`. Equals the
+    /// `claimed`/`pending` map key.
     claim_key: String,
+    /// The payload URI the work unit carries — reported back by `pending_items`
+    /// when the unit returns to `pending` (release / lease expiry).
+    item: String,
     /// Monotonic expiry. `<= now` ⇒ expired (re-claimable / sweepable).
     expires_at: Instant,
+}
+
+/// A pending (enqueued-but-unclaimed) work unit: its payload URI plus the instant
+/// it entered `pending` (drives `oldest_age_ms` and the oldest-first
+/// `pending_items` ordering, matching the durable store's `updated_at`).
+#[derive(Debug, Clone)]
+struct Pending {
+    item: String,
+    since: Instant,
 }
 
 /// A bounded FIFO dedupe set of `claim_key`s (the "done" set).
@@ -203,14 +228,16 @@ impl DoneSet {
     }
 }
 
-/// Everything guarded by the single store mutex.
+/// Everything guarded by the single store mutex. Every map is keyed by
+/// `claim_key` — the unit of exclusivity (see the module docs) — so grant-one,
+/// contention, and dedupe all serialize on the same key the durable store uses.
 #[derive(Debug)]
 struct Inner {
-    /// Enqueued-but-unclaimed items → their enqueue instant (for `oldest_age_ms`).
-    pending: HashMap<String, Instant>,
-    /// item → its live lease.
+    /// claim_key → its enqueued-but-unclaimed work unit (payload + enqueue instant).
+    pending: HashMap<String, Pending>,
+    /// claim_key → its live lease.
     claimed: HashMap<String, Lease>,
-    /// lease_id → item (reverse lookup for renew/ack/release).
+    /// lease_id → claim_key (reverse lookup for renew/ack/release).
     lease_index: HashMap<String, String>,
     /// The bounded dedupe set of acked `claim_key`s.
     done: DoneSet,
@@ -244,20 +271,30 @@ impl ClaimStore for InMemoryStore {
     fn submit(&self, item: &str, claim_key: Option<&str>) -> SubmitOutcome {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         let now = Instant::now();
-        if let Some(key) = claim_key {
-            if g.done.contains(key) {
-                return SubmitOutcome::Deduped;
-            }
+        // The claim_key is the work identity; when absent the item URI is its own
+        // key (matches the durable store's `claim_key.unwrap_or(item)`).
+        let key = claim_key.unwrap_or(item);
+        // Classify against the existing state in the same precedence the durable
+        // store uses (acked tombstone → claimed → pending). A claimed entry reports
+        // AlreadyClaimed whether or not its lease has expired: an expired-but-unswept
+        // lease is reclaimed lazily by the next `claim` (or the sweeper), so a
+        // producer re-submit is a transient no-op, never a second enqueue.
+        if g.done.contains(key) {
+            return SubmitOutcome::Deduped;
         }
-        if let Some(lease) = g.claimed.get(item) {
-            if lease.expires_at > now {
-                return SubmitOutcome::AlreadyClaimed;
-            }
+        if g.claimed.contains_key(key) {
+            return SubmitOutcome::AlreadyClaimed;
         }
-        if g.pending.contains_key(item) {
+        if g.pending.contains_key(key) {
             return SubmitOutcome::AlreadyPending;
         }
-        g.pending.insert(item.to_string(), now);
+        g.pending.insert(
+            key.to_string(),
+            Pending {
+                item: item.to_string(),
+                since: now,
+            },
+        );
         SubmitOutcome::Enqueued
     }
 
@@ -270,16 +307,16 @@ impl ClaimStore for InMemoryStore {
             return ClaimResult::Deduped;
         }
 
-        // A live lease for this item ⇒ contention. (An expired lease falls
-        // through and is superseded below — lazy reclaim, correct between sweeps.)
-        if let Some(lease) = g.claimed.get(item) {
+        // A live lease for this key ⇒ contention. (An expired lease falls through
+        // and is superseded below — lazy reclaim, correct between sweeps.)
+        if let Some(lease) = g.claimed.get(claim_key) {
             if lease.expires_at > now {
                 return ClaimResult::Contended {
                     held_by: Some(lease.holder.clone()),
                 };
             }
         }
-        if let Some(old) = g.claimed.remove(item) {
+        if let Some(old) = g.claimed.remove(claim_key) {
             g.lease_index.remove(&old.lease_id);
         }
 
@@ -291,11 +328,12 @@ impl ClaimStore for InMemoryStore {
             lease_id: lease_id.clone(),
             holder: holder.to_string(),
             claim_key: claim_key.to_string(),
+            item: item.to_string(),
             expires_at: now + Duration::from_millis(ttl_ms),
         };
-        g.claimed.insert(item.to_string(), lease);
-        g.lease_index.insert(lease_id.clone(), item.to_string());
-        g.pending.remove(item);
+        g.claimed.insert(claim_key.to_string(), lease);
+        g.lease_index.insert(lease_id.clone(), claim_key.to_string());
+        g.pending.remove(claim_key);
         ClaimResult::Granted {
             lease_id,
             expires_in_ms: ttl_ms,
@@ -310,14 +348,14 @@ impl ClaimStore for InMemoryStore {
     ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         let now = Instant::now();
-        let item = g
+        let key = g
             .lease_index
             .get(lease_id)
             .cloned()
             .ok_or_else(|| format!("unknown lease_id: {lease_id}"))?;
         let lease = g
             .claimed
-            .get_mut(&item)
+            .get_mut(&key)
             .ok_or_else(|| format!("lease not active: {lease_id}"))?;
         // Attested-identity gate: a tenant may renew ONLY its own lease.
         if let Some(expected) = expected_holder {
@@ -340,23 +378,24 @@ impl ClaimStore for InMemoryStore {
         expected_holder: Option<&str>,
     ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
-        if let Some(item) = g.lease_index.get(lease_id).cloned() {
+        if let Some(key) = g.lease_index.get(lease_id).cloned() {
             // Attested-identity gate: a tenant may settle ONLY its own lease.
             if let Some(expected) = expected_holder {
-                if let Some(lease) = g.claimed.get(&item) {
+                if let Some(lease) = g.claimed.get(&key) {
                     if lease.holder != expected {
                         return Err(holder_mismatch_error(lease_id));
                     }
                 }
             }
             g.lease_index.remove(lease_id);
-            // Record the lease's OWN claim_key (authoritative — what claim used).
-            if let Some(lease) = g.claimed.remove(&item) {
+            // Record the lease's OWN claim_key (authoritative — what claim used; it
+            // equals `key`). Falls back to the passed key if the entry vanished.
+            if let Some(lease) = g.claimed.remove(&key) {
                 g.done.insert(lease.claim_key);
             } else {
                 g.done.insert(claim_key.to_string());
             }
-            g.pending.remove(&item);
+            g.pending.remove(&key);
             return Ok(());
         }
         // The lease is gone. If this key is already done, the item was acked —
@@ -376,38 +415,56 @@ impl ClaimStore for InMemoryStore {
         expected_holder: Option<&str>,
     ) -> Result<(), String> {
         let mut g = self.inner.lock().expect("store mutex poisoned");
-        let item = g
+        let key = g
             .lease_index
             .get(lease_id)
             .cloned()
             .ok_or_else(|| format!("unknown lease_id: {lease_id}"))?;
         // Attested-identity gate: a tenant may release ONLY its own lease.
         if let Some(expected) = expected_holder {
-            if let Some(lease) = g.claimed.get(&item) {
+            if let Some(lease) = g.claimed.get(&key) {
                 if lease.holder != expected {
                     return Err(holder_mismatch_error(lease_id));
                 }
             }
         }
         g.lease_index.remove(lease_id);
-        g.claimed.remove(&item);
-        g.pending.insert(item, Instant::now());
+        // Return the unit to pending under its key, carrying its payload URI so
+        // `pending_items` still reports the item (not the key).
+        let item = g
+            .claimed
+            .remove(&key)
+            .map(|lease| lease.item)
+            .unwrap_or_else(|| key.clone());
+        g.pending.insert(
+            key,
+            Pending {
+                item,
+                since: Instant::now(),
+            },
+        );
         Ok(())
     }
 
     fn sweep_expired(&self) -> usize {
         let mut g = self.inner.lock().expect("store mutex poisoned");
         let now = Instant::now();
-        let expired: Vec<(String, String)> = g
+        let expired: Vec<(String, String, String)> = g
             .claimed
             .iter()
             .filter(|(_, lease)| lease.expires_at <= now)
-            .map(|(item, lease)| (item.clone(), lease.lease_id.clone()))
+            .map(|(key, lease)| (key.clone(), lease.lease_id.clone(), lease.item.clone()))
             .collect();
-        for (item, lease_id) in &expired {
-            g.claimed.remove(item);
+        for (key, lease_id, item) in &expired {
+            g.claimed.remove(key);
             g.lease_index.remove(lease_id);
-            g.pending.insert(item.clone(), now);
+            g.pending.insert(
+                key.clone(),
+                Pending {
+                    item: item.clone(),
+                    since: now,
+                },
+            );
         }
         expired.len()
     }
@@ -424,7 +481,7 @@ impl ClaimStore for InMemoryStore {
         let oldest_age_ms = g
             .pending
             .values()
-            .map(|t| now.saturating_duration_since(*t).as_millis() as u64)
+            .map(|p| now.saturating_duration_since(p.since).as_millis() as u64)
             .max()
             .unwrap_or(0);
         Stats {
@@ -436,7 +493,11 @@ impl ClaimStore for InMemoryStore {
 
     fn pending_items(&self) -> Vec<String> {
         let g = self.inner.lock().expect("store mutex poisoned");
-        g.pending.keys().cloned().collect()
+        // Oldest-first, matching the durable store's `ORDER BY updated_at ASC`, so
+        // the `work://pending` resource reads identically on both backends.
+        let mut entries: Vec<&Pending> = g.pending.values().collect();
+        entries.sort_by_key(|p| p.since);
+        entries.into_iter().map(|p| p.item.clone()).collect()
     }
 }
 
@@ -684,6 +745,100 @@ mod tests {
         assert!(holder_mismatch_error("lease-x").contains("lease-x"));
         assert!(!is_holder_mismatch("unknown lease_id: lease-x"));
         assert!(!is_holder_mismatch("lease expired: lease-x"));
+    }
+
+    // (11) Canonical cross-backend semantics: the unit of exclusivity is the
+    //      claim_key, NOT the item URI. Two DIFFERENT keys on the SAME item URI are
+    //      two independent work units — both grant. (Historically the in-memory
+    //      store keyed contention by item and would have wrongly contended the
+    //      second; the durable Postgres store keys by claim_key. Both now agree.)
+    #[test]
+    fn distinct_keys_same_item_are_independent_units() {
+        let store = InMemoryStore::new(4096);
+        assert!(matches!(
+            store.claim("file:///x", 60_000, "k1", "h1"),
+            ClaimResult::Granted { .. }
+        ));
+        assert!(
+            matches!(
+                store.claim("file:///x", 60_000, "k2", "h2"),
+                ClaimResult::Granted { .. }
+            ),
+            "a distinct claim_key is a distinct work unit even on the same item URI"
+        );
+    }
+
+    // (12) The converse: the SAME claim_key is ONE work unit regardless of the item
+    //      URI presented — exactly one of N concurrent racers wins, the rest are
+    //      contended. This is the grant-one invariant the durable store enforces via
+    //      its `claim_key` PRIMARY KEY, mirrored here.
+    #[test]
+    fn same_key_distinct_items_grant_exactly_one() {
+        let store: Arc<InMemoryStore> = Arc::new(InMemoryStore::new(4096));
+        let barrier = Arc::new(Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|h| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    // Same key, four different item URIs, four holders.
+                    store.claim(&format!("file:///item-{h}"), 60_000, "shared-key", &format!("h{h}"))
+                })
+            })
+            .collect();
+        let results: Vec<ClaimResult> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let granted = results
+            .iter()
+            .filter(|r| matches!(r, ClaimResult::Granted { .. }))
+            .count();
+        assert_eq!(granted, 1, "exactly one racer wins the shared claim_key");
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, ClaimResult::Contended { .. }))
+                .count(),
+            3,
+            "the other three see the shared key as contended"
+        );
+    }
+
+    // (13) pending_items reports the ITEM payload (URI), not the claim_key, and
+    //      oldest-first — matching the durable store's `SELECT item ... ORDER BY
+    //      updated_at ASC`. Submit two units (distinct key/item), assert order + payload.
+    #[test]
+    fn pending_items_reports_item_payload_oldest_first() {
+        let store = InMemoryStore::new(4096);
+        assert_eq!(
+            store.submit("file:///a", Some("k-a")),
+            SubmitOutcome::Enqueued
+        );
+        // Distinct enqueue instants so the ordering is deterministic.
+        thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            store.submit("file:///b", Some("k-b")),
+            SubmitOutcome::Enqueued
+        );
+        assert_eq!(
+            store.pending_items(),
+            vec!["file:///a".to_string(), "file:///b".to_string()],
+            "items (not keys), oldest first"
+        );
+    }
+
+    // (14) submit reports AlreadyClaimed for an item under a live OR expired-unswept
+    //      lease (matching the durable store, which does not check expiry in submit —
+    //      the next claim / the sweeper reclaims it). No second enqueue either way.
+    #[test]
+    fn submit_of_claimed_key_is_already_claimed_even_if_expired() {
+        let store = InMemoryStore::new(4096);
+        let _ = store.claim("file:///c", 5, "k-c", "h1");
+        thread::sleep(Duration::from_millis(40)); // lease now expired, not swept
+        assert_eq!(
+            store.submit("file:///c", Some("k-c")),
+            SubmitOutcome::AlreadyClaimed
+        );
+        assert_eq!(store.stats().pending, 0, "no phantom re-enqueue");
     }
 
     // (8) Extra: the dedupe set honours its FIFO bound (no unbounded growth).
