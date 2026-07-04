@@ -64,7 +64,7 @@ export function Ul({ children }: { children: ReactNode }) {
 
 export function C({ children }: { children: ReactNode }) {
   return (
-    <code className="bg-muted/60 rounded px-1 py-0.5 font-mono text-[0.85em]">{children}</code>
+    <code className="bg-muted/60 rounded px-1 py-0.5 font-mono text-[0.85em] break-words">{children}</code>
   );
 }
 
