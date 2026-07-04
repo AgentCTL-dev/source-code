@@ -15,9 +15,9 @@ four other plane Deployments via OLM's `deployment` install strategy.
 ```
 bundle/
   manifests/
-    agents.agents.x-k8s.io.yaml            # Agent CRD       (copied from charts/agentctl/crds)
-    agentfleets.agents.x-k8s.io.yaml       # AgentFleet CRD
-    modelpools.agents.x-k8s.io.yaml        # ModelPool CRD
+    agents.agentctl.dev.yaml            # Agent CRD       (copied from charts/agentctl/crds)
+    agentfleets.agentctl.dev.yaml       # AgentFleet CRD
+    modelpools.agentctl.dev.yaml        # ModelPool CRD
     agentctl.clusterserviceversion.yaml    # the CSV (agentctl.v1.0.0)
   metadata/
     annotations.yaml                       # bundle annotations (package/channels/dirs)
@@ -70,7 +70,7 @@ do not fit that mold, so the following are **NOT installed by this CSV**:
 | Component / resource | Why it's out of scope | How to install it |
 | --- | --- | --- |
 | **MCPServerSet CRD + tools/scaling planes** (mcpgateway, coordination, scaler) | The bundle ships the three core CRDs and five Deployments only; the tools and scaling planes are not modeled in this preview CSV. | Helm chart, which installs every CRD, plane, and the KEDA wiring. |
-| **Aggregated APIService** `v1alpha1.management.agents.x-k8s.io` | Modeling it as an `owned` apiservicedefinition forces OLM-managed serving certs and conflicts with the cert-manager flow used here. | Apply the `APIService` separately (Helm `templates/apiserver.yaml`). |
+| **Aggregated APIService** `v1alpha1.management.agentctl.dev` | Modeling it as an `owned` apiservicedefinition forces OLM-managed serving certs and conflicts with the cert-manager flow used here. | Apply the `APIService` separately (Helm `templates/apiserver.yaml`). |
 | **ValidatingWebhookConfiguration** | The admission **Deployment** is installed, but its webhook registration (with cert-manager `caBundle` injection) is not. Until it's applied, the lethal-trifecta gate does not run. | Apply separately (Helm `templates/admission.yaml`). |
 | **cert-manager Certificates / Issuers** | The apiserver, admission webhook, and gateway client mount TLS Secrets (`agentctl-apiserver-tls`, `agentctl-client-tls`, `agentctl-admission-tls`). | **cert-manager ≥ 1.13 is a hard runtime prerequisite.** Install cert-manager, then apply the Certificates (Helm `templates/certificates.yaml`). Until the Secrets exist, those pods stay `Pending`. |
 | **Postgres + gateway signing Secret** | The gateway/modelgateway need `DATABASE_URL` (Secret `agentctl-postgres`) and the gateway needs `agentctl-gateway-signing`. | Bundled Postgres + signing Secret come from the Helm chart, or point at an external DSN. |

@@ -21,7 +21,7 @@ metadata:
     alm-examples: |-
       [
         {
-          "apiVersion": "agents.x-k8s.io/v1alpha1",
+          "apiVersion": "agentctl.dev/v1alpha1",
           "kind": "Agent",
           "metadata": { "name": "summarizer", "namespace": "default" },
           "spec": {
@@ -33,7 +33,7 @@ metadata:
           }
         },
         {
-          "apiVersion": "agents.x-k8s.io/v1alpha1",
+          "apiVersion": "agentctl.dev/v1alpha1",
           "kind": "AgentFleet",
           "metadata": { "name": "workers", "namespace": "default" },
           "spec": {
@@ -52,7 +52,7 @@ metadata:
           }
         },
         {
-          "apiVersion": "agents.x-k8s.io/v1alpha1",
+          "apiVersion": "agentctl.dev/v1alpha1",
           "kind": "ModelPool",
           "metadata": { "name": "mockpool", "namespace": "default" },
           "spec": {
@@ -99,7 +99,7 @@ spec:
 
     - **operator** — reconciles `Agent`/`AgentFleet` CRs into Jobs, CronJobs,
       Deployments, and StatefulSets.
-    - **apiserver** — an aggregated API (`management.agents.x-k8s.io`) for live
+    - **apiserver** — an aggregated API (`management.agentctl.dev`) for live
       management verbs, proxied to the per-pod agents.
     - **gateway** — a stateless A2A (agent-to-agent) HTTP gateway with signed
       Agent Cards and mesh federation.
@@ -121,7 +121,7 @@ spec:
     therefore **NOT installed by this CSV** and must be applied separately — the
     Helm chart at `charts/agentctl` installs all of them:
 
-    - **Aggregated APIService** (`v1alpha1.management.agents.x-k8s.io`) — not
+    - **Aggregated APIService** (`v1alpha1.management.agentctl.dev`) — not
       expressible as a CSV `owned` apiservicedefinition without OLM-managed
       serving certs; apply it separately.
     - **ValidatingWebhookConfiguration** for the admission webhook — apply
@@ -155,7 +155,7 @@ spec:
       supported: true
   customresourcedefinitions:
     owned:
-      - name: agents.agents.x-k8s.io
+      - name: agents.agentctl.dev
         version: v1alpha1
         kind: Agent
         displayName: Agent
@@ -164,7 +164,7 @@ spec:
           whose shape follows `mode` (once→Job, schedule→CronJob,
           loop/reactive→Deployment). Declared capabilities (exec/egress/secrets)
           are gated by the admission webhook.
-      - name: agentfleets.agents.x-k8s.io
+      - name: agentfleets.agentctl.dev
         version: v1alpha1
         kind: AgentFleet
         displayName: AgentFleet
@@ -172,7 +172,7 @@ spec:
           A replicated, autoscaled set of agents. Renders to a
           StatefulSet (shard mode) or Deployment (claim mode); KEDA owns the
           replica count for elastic claim pools.
-      - name: modelpools.agents.x-k8s.io
+      - name: modelpools.agentctl.dev
         version: v1alpha1
         kind: ModelPool
         displayName: ModelPool
@@ -190,13 +190,13 @@ spec:
         # --- operator: reconcile CRs into workloads ---
         - serviceAccountName: agentctl-operator
           rules:
-            - apiGroups: ["agents.x-k8s.io"]
+            - apiGroups: ["agentctl.dev"]
               resources: ["agents", "agentfleets"]
               verbs: ["get", "list", "watch", "update", "patch"]
-            - apiGroups: ["agents.x-k8s.io"]
+            - apiGroups: ["agentctl.dev"]
               resources: ["agents/status", "agentfleets/status"]
               verbs: ["get", "update", "patch"]
-            - apiGroups: ["agents.x-k8s.io"]
+            - apiGroups: ["agentctl.dev"]
               resources: ["agents/finalizers", "agentfleets/finalizers"]
               verbs: ["update"]
             - apiGroups: ["batch"]
@@ -231,16 +231,16 @@ spec:
             - apiGroups: [""]
               resources: ["pods"]
               verbs: ["get", "list"]
-            - apiGroups: ["agents.x-k8s.io"]
+            - apiGroups: ["agentctl.dev"]
               resources: ["agents", "agentfleets"]
               verbs: ["get", "list"]
         # --- modelgateway: read ModelPools + their credential Secrets ---
         - serviceAccountName: agentctl-modelgateway
           rules:
-            - apiGroups: ["agents.x-k8s.io"]
+            - apiGroups: ["agentctl.dev"]
               resources: ["modelpools"]
               verbs: ["get", "list", "watch"]
-            - apiGroups: ["agents.x-k8s.io"]
+            - apiGroups: ["agentctl.dev"]
               resources: ["modelpools/status"]
               verbs: ["get", "update", "patch"]
             - apiGroups: [""]
@@ -249,7 +249,7 @@ spec:
         # --- admission: cross-object "referenced ModelPool exists" check ---
         - serviceAccountName: agentctl-admission
           rules:
-            - apiGroups: ["agents.x-k8s.io"]
+            - apiGroups: ["agentctl.dev"]
               resources: ["modelpools"]
               verbs: ["get", "list"]
       deployments:

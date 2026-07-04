@@ -198,7 +198,7 @@ mod tests {
 
     fn owner() -> OwnerReference {
         OwnerReference {
-            api_version: "agents.x-k8s.io/v1alpha1".into(),
+            api_version: "agentctl.dev/v1alpha1".into(),
             kind: "Agent".into(),
             name: "demo".into(),
             uid: "uid-1".into(),

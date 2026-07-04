@@ -51,4 +51,4 @@ echo "==> registering APIService (caBundle = serving CA)"
 CABUNDLE="$(base64 -w0 < "$DIR/ca.crt")"
 sed "s|CABUNDLE_PLACEHOLDER|${CABUNDLE}|" deploy/apiserver/apiservice.yaml | kubectl apply -f -
 
-echo "==> done. check: kubectl get apiservices v1alpha1.management.agents.x-k8s.io"
+echo "==> done. check: kubectl get apiservices v1alpha1.management.agentctl.dev"

@@ -1,6 +1,6 @@
 # A minimal once-mode Agent: the operator renders it to a Job, issues its serving
 # certificate, and projects the agent's live capabilities into Agent.status.
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: demo

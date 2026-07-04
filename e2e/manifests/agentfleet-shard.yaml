@@ -5,7 +5,7 @@
 # StatefulSet ordinal. Each agentd replica then owns shard K of N via its
 # FNV-1a/64 hash gate and SKIPS out-of-shard work. Scenario: assert each pod gets
 # its K/N identity and out-of-shard items are skipped.
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata:
   name: shardfleet

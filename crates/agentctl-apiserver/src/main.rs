@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! agentctl aggregated APIServer — the human management access path.
 //!
-//! Registered via an `APIService` for `management.agents.x-k8s.io`; the
+//! Registered via an `APIService` for `management.agentctl.dev`; the
 //! kube-aggregator proxies requests here.
 //!
 //! Serves TLS, discovery, and health so the `APIService` reports
@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 mod metrics;
 mod na_client;
 
-const GROUP: &str = "management.agents.x-k8s.io";
+const GROUP: &str = "management.agentctl.dev";
 const VERSION: &str = "v1alpha1";
 const TLS_DIR: &str = "/etc/agentctl-apiserver/tls";
 
@@ -82,17 +82,14 @@ async fn main() {
         // TLS). The chart's ServiceMonitor scrapes it scheme=https.
         .route("/metrics", get(serve_metrics))
         .route("/apis", get(api_group_list))
-        .route("/apis/management.agents.x-k8s.io", get(api_group))
+        .route("/apis/management.agentctl.dev", get(api_group))
+        .route("/apis/management.agentctl.dev/v1alpha1", get(api_resources))
         .route(
-            "/apis/management.agents.x-k8s.io/v1alpha1",
-            get(api_resources),
-        )
-        .route(
-            "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{ns}/agents/{name}/{verb}",
+            "/apis/management.agentctl.dev/v1alpha1/namespaces/{ns}/agents/{name}/{verb}",
             post(handle_verb),
         )
         .route(
-            "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{ns}/agentfleets/{name}/{verb}",
+            "/apis/management.agentctl.dev/v1alpha1/namespaces/{ns}/agentfleets/{name}/{verb}",
             post(handle_fleet_verb),
         )
         .with_state(AppState {

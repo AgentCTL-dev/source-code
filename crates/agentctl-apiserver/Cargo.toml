@@ -1,7 +1,7 @@
 [package]
 name = "agentctl-apiserver"
 version = "1.0.0"
-description = "agentctl aggregated APIServer: the management access path. Serves management.agents.x-k8s.io connect verbs with per-verb RBAC, dialing agent pods directly over mTLS. Rust (axum + rustls)."
+description = "agentctl aggregated APIServer: the management access path. Serves management.agentctl.dev connect verbs with per-verb RBAC, dialing agent pods directly over mTLS. Rust (axum + rustls)."
 edition.workspace = true
 rust-version.workspace = true
 license = "BUSL-1.1"  # control plane — source-available (see LICENSE-BUSL)

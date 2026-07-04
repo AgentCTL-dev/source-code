@@ -1,15 +1,15 @@
 # Registers the aggregated apiserver with the kube-aggregator. caBundle is filled
 # in by install.sh (the generated serving CA). The aggregator proxies
-# management.agents.x-k8s.io/v1alpha1 requests to the agentctl-apiserver Service.
+# management.agentctl.dev/v1alpha1 requests to the agentctl-apiserver Service.
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
-  name: v1alpha1.management.agents.x-k8s.io
+  name: v1alpha1.management.agentctl.dev
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     app.kubernetes.io/managed-by: agentctl
 spec:
-  group: management.agents.x-k8s.io
+  group: management.agentctl.dev
   version: v1alpha1
   groupPriorityMinimum: 1000
   versionPriority: 15

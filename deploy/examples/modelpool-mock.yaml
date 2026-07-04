@@ -13,7 +13,7 @@ type: Opaque
 stringData:
   api-key: sk-mock-provider-secret-do-not-ship
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata:
   name: mockpool

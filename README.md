@@ -75,7 +75,7 @@ flowchart TB
 | Component | Role |
 |---|---|
 | **operator** | Reconciles `Agent`/`AgentFleet` into workloads; leader-elected for HA; issues per-workload serving certificates and distributes the cluster CA; reconciles per-namespace agent NetworkPolicies; wires the KEDA `ScaledObject` for claim fleets; projects status; drives the guarded shard-resize choreography. |
-| **apiserver** | A Kubernetes aggregated API that serves management verbs (drain, lame-duck, cancel, pause, resume) under `management.agents.x-k8s.io`; authorizes each via `SubjectAccessReview`; dials the target agent pod(s) over mTLS. Fleet verbs fan out to all replicas. |
+| **apiserver** | A Kubernetes aggregated API that serves management verbs (drain, lame-duck, cancel, pause, resume) under `management.agentctl.dev`; authorizes each via `SubjectAccessReview`; dials the target agent pod(s) over mTLS. Fleet verbs fan out to all replicas. |
 | **admission** | A validating webhook (image-registry allow-list, lethal-trifecta gate, `ModelPool` existence, OIDC-policy well-formedness) and a mutating webhook (secure defaults: labels, mode, minimal surfaces). |
 | **gateway** | The public A2A surface: projects and signs each agent's/fleet's Agent Card, serves `message/send` and `message/stream` (SSE), persists tasks, delivers SSRF-guarded push webhooks, and enforces inbound auth. Reaches agents by dialing the pod over mTLS as the **Management** origin. |
 | **modelgateway** | The intelligence broker: attests the caller, selects the `ModelPool`, injects the pool's provider credential, forwards to the provider, meters tokens, and enforces budgets with an atomic reserve→reconcile. |
@@ -101,7 +101,7 @@ Each capability is a *plane* built on the components above.
 
 ## Custom Resources
 
-All CRDs live in the API group `agents.x-k8s.io/v1alpha1`.
+All CRDs live in the API group `agentctl.dev/v1alpha1`.
 
 | Kind | Short names | Purpose |
 |---|---|---|
@@ -210,7 +210,7 @@ Verify:
 ```console
 kubectl -n agentctl-system get pods                        # all components Running
 kubectl -n agentctl-system get certificate                 # all READY=True
-kubectl get apiservice v1alpha1.management.agents.x-k8s.io  # AVAILABLE=True
+kubectl get apiservice v1alpha1.management.agentctl.dev  # AVAILABLE=True
 ```
 
 A default install brings up the **core** control plane (no dependency beyond
@@ -239,7 +239,7 @@ kubectl apply -f deploy/examples/modelpool-mock.yaml   # ModelPool + provider Se
 
 ```console
 kubectl apply -f - <<'EOF'
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: summarizer
@@ -265,7 +265,7 @@ A claim-mode fleet is an elastic worker pool that pulls from a work source:
 
 ```console
 kubectl apply -f - <<'EOF'
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata:
   name: workers

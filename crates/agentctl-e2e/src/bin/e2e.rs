@@ -474,7 +474,7 @@ async fn run_mgmt_verb(ctx: &Ctx, verb: &str) -> Result<Outcome> {
         .ok();
 
     let path = format!(
-        "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{}/agents/{}/{}",
+        "/apis/management.agentctl.dev/v1alpha1/namespaces/{}/agents/{}/{}",
         ctx.cfg.ns, name, verb
     );
     let out = shell::kubectl(&["create", "--raw", &path, "-f", "/dev/null"])
@@ -514,7 +514,7 @@ async fn mgmt_rbac_403(ctx: &Ctx) -> Result<Outcome> {
 
     let as_user = format!("system:serviceaccount:{}:{sa}", ctx.cfg.ns);
     let path = format!(
-        "/apis/management.agents.x-k8s.io/v1alpha1/namespaces/{}/agents/{}/drain",
+        "/apis/management.agentctl.dev/v1alpha1/namespaces/{}/agents/{}/drain",
         ctx.cfg.ns, name
     );
     let res = shell::kubectl(&[

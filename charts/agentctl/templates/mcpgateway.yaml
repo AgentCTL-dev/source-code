@@ -28,7 +28,7 @@ rules:
   # agents + agentfleets: the attested caller is a singleton Agent OR a fleet member
   # (fleet pods carry the FLEET name in agentctl.dev/agent and have no per-member
   # Agent CR), so tool authz resolves mcpServerSetRefs from either kind.
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets", "mcpserversets"]
     verbs: ["get", "list", "watch"]
   # Source-IP identity attestation: look up the calling pod by its source IP to

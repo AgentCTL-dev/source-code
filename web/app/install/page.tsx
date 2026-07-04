@@ -54,7 +54,7 @@ helm install agentctl ./charts/agentctl -n agentctl-system
 
 kubectl -n agentctl-system get pods         # all Running
 kubectl -n agentctl-system get certificate  # all READY=True
-kubectl get apiservice v1alpha1.management.agents.x-k8s.io  # AVAILABLE`}
+kubectl get apiservice v1alpha1.management.agentctl.dev  # AVAILABLE`}
       />
       <Note>
         On upgrade use <C>helm upgrade --reset-then-reuse-values</C> — plain <C>--reuse-values</C>{" "}
@@ -69,7 +69,7 @@ kubectl get apiservice v1alpha1.management.agents.x-k8s.io  # AVAILABLE`}
       </P>
       <CodeBlock
         lang="agent.yaml"
-        code={`apiVersion: agents.x-k8s.io/v1alpha1
+        code={`apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata: { name: hello, namespace: team-a }
 spec:

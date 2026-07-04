@@ -121,7 +121,7 @@ function Hero() {
           <CodeBlock
             className="w-full shadow-sm"
             lang="agent.yaml — one CR, an mTLS-served agent"
-            code={`apiVersion: ${"agents.x-k8s.io/v1alpha1"}
+            code={`apiVersion: ${"agentctl.dev/v1alpha1"}
 kind: Agent
 metadata: { name: researcher, namespace: team-a }
 spec:
@@ -274,7 +274,7 @@ kubectl -n agentctl-system get certificate  # all READY`}
         <CodeBlock
           lang="2 · run an agent"
           code={`kubectl apply -f - <<'EOF'
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata: { name: hello, namespace: team-a }
 spec:

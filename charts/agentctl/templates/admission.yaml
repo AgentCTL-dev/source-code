@@ -29,7 +29,7 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
 rules:
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["modelpools"]
     verbs: ["get", "list"]
 ---
@@ -184,7 +184,7 @@ webhooks:
         path: /validate
         port: 443
     rules:
-      - apiGroups: ["agents.x-k8s.io"]
+      - apiGroups: ["agentctl.dev"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["agents", "agentfleets"]
@@ -227,7 +227,7 @@ webhooks:
         path: /mutate
         port: 443
     rules:
-      - apiGroups: ["agents.x-k8s.io"]
+      - apiGroups: ["agentctl.dev"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["agents", "agentfleets"]

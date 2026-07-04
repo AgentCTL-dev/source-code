@@ -6,7 +6,7 @@
 //! intelligence request carries only their *identity*. That identity is attested
 //! from the connection's source IP (resolved to the caller's pod), or by default
 //! taken as-is from the `X-Agent-*` headers. The gateway:
-//!   1. selects the agent's `ModelPool` (CRD, `agents.x-k8s.io/v1alpha1`),
+//!   1. selects the agent's `ModelPool` (CRD, `agentctl.dev/v1alpha1`),
 //!   2. enforces the pool's token **budget** pre-request,
 //!   3. **injects** the pool's provider credential (read from the referenced
 //!      `Secret`) — the agent's own credential, if any, is NEVER used,

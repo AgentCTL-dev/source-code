@@ -19,7 +19,7 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list"]
   # The mesh discovery registry (GET /agents) lists the CRDs.
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets"]
     verbs: ["get", "list"]
 ---

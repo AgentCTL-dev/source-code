@@ -23,7 +23,7 @@ webhooks:
         port: 443
       caBundle: CA_BUNDLE_PLACEHOLDER
     rules:
-      - apiGroups: ["agents.x-k8s.io"]
+      - apiGroups: ["agentctl.dev"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["agents"]

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// Group for all agentctl CRDs. The final group string is not yet settled; the
 /// type shapes here are independent of the group string.
-pub const GROUP: &str = "agents.x-k8s.io";
+pub const GROUP: &str = "agentctl.dev";
 
 // ===========================================================================
 // Agent
@@ -29,7 +29,7 @@ pub const GROUP: &str = "agents.x-k8s.io";
 /// shape follows `mode` (once→Job, schedule→CronJob, loop/reactive→Deployment).
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[kube(
-    group = "agents.x-k8s.io",
+    group = "agentctl.dev",
     version = "v1alpha1",
     kind = "Agent",
     namespaced,
@@ -395,7 +395,7 @@ pub struct Condition {
 /// workload omits it.
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[kube(
-    group = "agents.x-k8s.io",
+    group = "agentctl.dev",
     version = "v1alpha1",
     kind = "AgentFleet",
     namespaced,
@@ -608,7 +608,7 @@ pub struct AgentFleetStatus {
 /// allowed models, and an optional total token budget.
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[kube(
-    group = "agents.x-k8s.io",
+    group = "agentctl.dev",
     version = "v1alpha1",
     kind = "ModelPool",
     namespaced,
@@ -696,7 +696,7 @@ pub struct ModelPoolStatus {
 /// pod), its per-tool trifecta tags, and an optional call budget.
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[kube(
-    group = "agents.x-k8s.io",
+    group = "agentctl.dev",
     version = "v1alpha1",
     kind = "MCPServerSet",
     namespaced,
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn agent_crd_generates() {
         let crd = Agent::crd();
-        assert_eq!(crd.spec.group, "agents.x-k8s.io");
+        assert_eq!(crd.spec.group, "agentctl.dev");
         assert_eq!(crd.spec.names.kind, "Agent");
         assert!(crd
             .spec
@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn modelpool_crd_generates() {
         let crd = ModelPool::crd();
-        assert_eq!(crd.spec.group, "agents.x-k8s.io");
+        assert_eq!(crd.spec.group, "agentctl.dev");
         assert_eq!(crd.spec.names.kind, "ModelPool");
         assert!(crd
             .spec
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn mcpserverset_crd_generates() {
         let crd = MCPServerSet::crd();
-        assert_eq!(crd.spec.group, "agents.x-k8s.io");
+        assert_eq!(crd.spec.group, "agentctl.dev");
         assert_eq!(crd.spec.names.kind, "MCPServerSet");
         assert!(crd
             .spec

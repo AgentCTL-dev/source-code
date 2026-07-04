@@ -95,7 +95,7 @@ paths.
 
 ## The custom resources
 
-All four CRDs are served under the API group `agents.x-k8s.io`, version
+All four CRDs are served under the API group `agentctl.dev`, version
 `v1alpha1`. Each carries CEL validation rules, a status subresource, and printer
 columns. The manifests live under [`deploy/crds/`](../deploy/crds) and
 [`charts/agentctl/crds/`](../charts/agentctl/crds); worked examples are in
@@ -298,7 +298,7 @@ seam.
 ### apiserver
 
 The aggregated apiserver ([`crates/agentctl-apiserver`](../crates/agentctl-apiserver))
-registers as an `APIService` for `management.agents.x-k8s.io` and serves the
+registers as an `APIService` for `management.agentctl.dev` and serves the
 management connect verbs `drain`, `lame-duck`, `cancel`, `pause`, `resume` on
 both `agents` and `agentfleets`. It sits behind the kube-aggregator's front-proxy
 trust: rustls **requires** a client cert verified against the

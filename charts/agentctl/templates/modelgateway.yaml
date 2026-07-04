@@ -35,16 +35,16 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
 rules:
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["modelpools"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["modelpools/status"]
     verbs: ["get", "update", "patch"]
   # agents + agentfleets: resolve the attested caller's declared spec.modelPool so an
   # agent CHOOSES its intelligence source (the operator renders no X-Model-Pool
   # header). The caller is a singleton Agent or a fleet member (fleet name), so both.
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets"]
     verbs: ["get", "list", "watch"]
   # Source-IP identity attestation (modelgateway.attestIdentity): the gateway looks

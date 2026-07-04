@@ -198,11 +198,11 @@ spec:
 ---
 # Registers the aggregated apiserver with the kube-aggregator. The serving CA is
 # injected into caBundle by cert-manager (cert-manager.io/inject-ca-from). The
-# aggregator proxies management.agents.x-k8s.io/v1alpha1 requests to the Service.
+# aggregator proxies management.agentctl.dev/v1alpha1 requests to the Service.
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
-  name: v1alpha1.management.agents.x-k8s.io
+  name: v1alpha1.management.agentctl.dev
   labels:
     app.kubernetes.io/name: agentctl-apiserver
     {{- include "agentctl.labels" . | nindent 4 }}
@@ -212,7 +212,7 @@ metadata:
   annotations:
     cert-manager.io/inject-ca-from: "{{ $ns }}/agentctl-apiserver"
 spec:
-  group: management.agents.x-k8s.io
+  group: management.agentctl.dev
   version: v1alpha1
   groupPriorityMinimum: 1000
   versionPriority: 15

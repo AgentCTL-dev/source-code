@@ -26,13 +26,13 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
 rules:
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets"]
     verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents/status", "agentfleets/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents/finalizers", "agentfleets/finalizers"]
     verbs: ["update"]
   - apiGroups: ["batch"]
@@ -69,7 +69,7 @@ rules:
 {{- end }}
   # Bound MCP tool servers: the operator reads the MCPServerSets an
   # Agent binds to render its --mcp gateway URLs + trifecta tags.
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["mcpserversets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]

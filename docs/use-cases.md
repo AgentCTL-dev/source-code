@@ -61,7 +61,7 @@ type: Opaque
 stringData:
   token: xoxb-your-notify-token-here
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata:
   name: home-pool
@@ -77,7 +77,7 @@ spec:
   budget:
     maxTokens: 500000
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata:
   name: home-tools
@@ -98,7 +98,7 @@ spec:
       budget:
         maxTokens: 100000
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: triage
@@ -117,7 +117,7 @@ spec:
   limits:
     maxTokens: 20000
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: research
@@ -182,7 +182,7 @@ type: Opaque
 stringData:
   token: REPLACE-with-your-zendesk-api-token
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata:
   name: support-llm
@@ -198,7 +198,7 @@ spec:
   budget:
     maxTokens: 50000000   # total cumulative cap; modelgateway 429s when spent. Raise/reset via kubectl.
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata:
   name: helpdesk-tools
@@ -219,7 +219,7 @@ spec:
         mode: none
       tags: ["egress"]
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata:
   name: ticket-triage
@@ -278,7 +278,7 @@ I want every pull request across our org reviewed automatically: read the diff, 
 3. Each worker (mode `reactive`, subscribed to `queue://pr-review`) reviews the claimed diff, calls the git/code-search MCP server through the mcpgateway — which attests the pod by source IP, scopes it to only the `code-tools` MCPServerSet, and injects the git token off-pod — then records findings via `work.ack`/`work.result`.
 4. Model calls go keyless to the modelgateway, which resolves `review-pool`, injects the provider key from the referenced Secret, meters tokens, and enforces both the per-fleet `budget.maxTokens` and the pool cap (a 429 when either is exhausted); per-worker `limits` cap a single review's spend and steps.
 5. A poison PR that fails `workPolicy.maxAttempts` times is dead-lettered (surfaced at `dlq://items`) instead of looping forever, so you can requeue or drop it.
-6. During a deploy, `kubectl create --raw /apis/management.agents.x-k8s.io/v1alpha1/namespaces/ci/agentfleets/pr-reviewers/drain -f /dev/null` fans the drain verb to every replica over mTLS: workers stop claiming new items and finish in-flight reviews, so you can `kubectl apply` the new fleet spec (or bump the image) without cutting a review mid-flight.
+6. During a deploy, `kubectl create --raw /apis/management.agentctl.dev/v1alpha1/namespaces/ci/agentfleets/pr-reviewers/drain -f /dev/null` fans the drain verb to every replica over mTLS: workers stop claiming new items and finish in-flight reviews, so you can `kubectl apply` the new fleet spec (or bump the image) without cutting a review mid-flight.
 7. Because `surfaces.a2a` is on, the gateway projects and JWS-signs a fleet Agent Card, so other systems (a release bot, an IDE) can call the fleet with `message/send` and get delegated review work — the fleet is one addressable A2A endpoint.
 
 **Sample deployment**
@@ -293,7 +293,7 @@ type: Opaque
 stringData:
   api-key: sk-REDACTED
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata:
   name: review-pool
@@ -318,7 +318,7 @@ type: Opaque
 stringData:
   token: ghp-REDACTED
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata:
   name: code-tools
@@ -337,7 +337,7 @@ spec:
       budget:
         maxTokens: 2000000
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata:
   name: pr-reviewers
@@ -422,7 +422,7 @@ stringData:
   cms-token: cms-mcp-token
   crm-token: crm-mcp-token
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata:
   name: content-llm
@@ -438,7 +438,7 @@ spec:
   budget:
     maxTokens: 20000000   # hard cumulative cap (no auto-reset); 429 past this. Raise/reset via kubectl.
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata:
   name: content-tools
@@ -456,7 +456,7 @@ spec:
         mode: staticToken
         tokenSecretRef: { name: cms-crm-tokens, key: crm-token }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: seo-drafts
@@ -470,7 +470,7 @@ spec:
   mcpServerSetRefs: [{ name: content-tools }]
   limits: { maxTokens: 2000000, maxSteps: 60 }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: crm-enrich
@@ -528,7 +528,7 @@ metadata: { name: warehouse-token, namespace: data }
 type: Opaque
 stringData: { token: whse-REPLACE }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata: { name: enrich-pool, namespace: data }
 spec:
@@ -539,7 +539,7 @@ spec:
   defaultModel: gpt-4o-mini
   budget: { maxTokens: 500000000 }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata: { name: datastore-tools, namespace: data }
 spec:
@@ -553,7 +553,7 @@ spec:
       budget: { maxTokens: 200000000 }
 ---
 # BACKFILL — elastic claim fleet, scales from zero on the backlog
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata: { name: enrich-backfill, namespace: data }
 spec:
@@ -576,7 +576,7 @@ spec:
   budget: { maxTokens: 400000000 }
 ---
 # STEADY STATE — 8 keyed shards, deterministic one-owner monitoring
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata: { name: source-monitor, namespace: data }
 spec:
@@ -638,7 +638,7 @@ type: Opaque
 stringData: { token: REPLACE-ME }   # read only by the mcpgateway, never on a pod
 ---
 # One pool = one token ceiling for every stage of the process.
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata: { name: process-brain, namespace: revops }
 spec:
@@ -649,7 +649,7 @@ spec:
   defaultModel: gpt-strong
   budget: { maxTokens: 5000000 }   # hard ceiling across ALL stages
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata: { name: research-tools, namespace: revops }
 spec:
@@ -658,14 +658,14 @@ spec:
       endpoint: https://crm.internal/mcp
       auth: { mode: staticToken, tokenSecretRef: { name: crm-token, key: token } }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata: { name: drafting-tools, namespace: revops }
 spec:
   servers:
     - { name: doc-store, endpoint: https://docs.internal/mcp, auth: { mode: none } }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata: { name: compliance-tools, namespace: revops }
 spec:
@@ -674,7 +674,7 @@ spec:
 ---
 # Stage 1 - intake: claim workers scale from ZERO on backlog, normalize each
 # case, and submit it onward to queue://research via the work fabric.
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata: { name: case-intake, namespace: revops }
 spec:
@@ -697,7 +697,7 @@ spec:
 ---
 # Stages 2-4 - specialists: each reactive, bound to ONLY its own tools,
 # chained by the work fabric (research -> drafting -> compliance).
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata: { name: research-specialist, namespace: revops }
 spec:
@@ -709,7 +709,7 @@ spec:
   mcpServerSetRefs: [{ name: research-tools }]
   surfaces: { a2a: true, metrics: true }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata: { name: draft-specialist, namespace: revops }
 spec:
@@ -721,7 +721,7 @@ spec:
   mcpServerSetRefs: [{ name: drafting-tools }]
   surfaces: { a2a: true, metrics: true }
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata: { name: compliance-specialist, namespace: revops }
 spec:
@@ -791,7 +791,7 @@ type: Opaque
 stringData:
   token: crm-bearer-acme           # only the mcpgateway ever reads this
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata:
   name: acme-pool
@@ -807,7 +807,7 @@ spec:
   budget:
     maxTokens: 2000000             # per-tenant cap; 429 on exhaustion
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: MCPServerSet
 metadata:
   name: acme-tools
@@ -822,7 +822,7 @@ spec:
           name: acme-crm-token
           key: token
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: acme-assistant

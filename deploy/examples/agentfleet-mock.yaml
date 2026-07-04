@@ -1,7 +1,7 @@
 # A claim-mode AgentFleet backed by the mock-agent image, so its pods serve the
 # management profile over their mTLS /mcp surface — enough for the gateway to
 # project (and JWS-sign) a fleet-level Agent Card.
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata:
   name: mockfleet

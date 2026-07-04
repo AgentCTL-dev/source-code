@@ -166,7 +166,7 @@ type: Opaque
 stringData:
   api-key: sk-...                     # only the ModelGateway ever reads this
 ---
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
 metadata:
   name: mockpool
@@ -373,7 +373,7 @@ by contrast, are reached over the internet using the bundled Mozilla trust ancho
 ## Management RBAC (SubjectAccessReview)
 
 Management verbs (drain, lame-duck, cancel, pause, resume, and status) are served
-by the aggregated apiserver under `management.agents.x-k8s.io`. Every request is
+by the aggregated apiserver under `management.agentctl.dev`. Every request is
 **doubly authorized**:
 
 1. **Kubernetes RBAC** admits the caller to the aggregated APIService (the

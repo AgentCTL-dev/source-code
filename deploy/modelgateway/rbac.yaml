@@ -17,10 +17,10 @@ metadata:
   labels:
     app.kubernetes.io/name: agentctl-modelgateway
 rules:
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["modelpools"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["modelpools/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: [""]

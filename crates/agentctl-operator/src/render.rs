@@ -31,7 +31,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, 
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 /// API group/version these resources are owned by (agent-api `GROUP`).
-const API_VERSION: &str = "agents.x-k8s.io/v1alpha1";
+const API_VERSION: &str = "agentctl.dev/v1alpha1";
 
 /// In-pod mount of the workload's own serving identity — the cert-manager
 /// `Certificate` Secret ([`serving_secret_name`], keys `tls.crt`/`tls.key`).

@@ -28,10 +28,10 @@ spec:
     the `kubectl-agent` name so it runs as `kubectl agent <subcommand>`.
 
     Requires the agentctl control plane installed in the cluster (see the agentctl
-    Helm chart) and a kubeconfig with access to the management.agents.x-k8s.io API.
+    Helm chart) and a kubeconfig with access to the management.agentctl.dev API.
   caveats: |
     This plugin talks to the agentctl aggregated APIServer
-    (management.agents.x-k8s.io). Install the agentctl control plane first, then:
+    (management.agentctl.dev). Install the agentctl control plane first, then:
       kubectl agent --help
   platforms:
     - selector:

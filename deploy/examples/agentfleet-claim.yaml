@@ -1,7 +1,7 @@
 # A claim-mode AgentFleet: an elastic reactive worker pool. The operator renders it
 # to a Deployment with .spec.replicas omitted — KEDA owns the replica count and
 # scales the pool from zero on the work backlog.
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agentctl.dev/v1alpha1
 kind: AgentFleet
 metadata:
   name: workers

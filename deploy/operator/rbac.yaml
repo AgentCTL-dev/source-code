@@ -18,15 +18,15 @@ metadata:
     app.kubernetes.io/managed-by: agentctl
 rules:
   # The CRDs the operator reconciles.
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets"]
     verbs: ["get", "list", "watch", "update", "patch"]
   # Status + finalizers subresources (the operator patches status; the finalizer
   # machinery edits .metadata.finalizers).
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents/status", "agentfleets/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["agents.x-k8s.io"]
+  - apiGroups: ["agentctl.dev"]
     resources: ["agents/finalizers", "agentfleets/finalizers"]
     verbs: ["update"]
   # The workloads the operator renders + owns (owner-ref GC reclaims them).

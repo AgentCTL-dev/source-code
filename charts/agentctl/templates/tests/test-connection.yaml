@@ -4,7 +4,7 @@ so it is created only by `helm test <release>` — never on install/upgrade. The
 exits non-zero (failing the test) if any enabled control-plane surface is
 unreachable:
   - the A2A gateway's /healthz (HTTP 200), and
-  - the aggregated APIService management.agents.x-k8s.io/v1alpha1 — queried through
+  - the aggregated APIService management.agentctl.dev/v1alpha1 — queried through
     the kube-apiserver's discovery, which only succeeds once the APIService is
     registered AND Available (the aggregator proxies to the agentctl apiserver).
 Uses curlimages/curl and the pod's own ServiceAccount token (discovery is granted
@@ -60,10 +60,10 @@ spec:
           fi
           {{- end }}
           {{- if .Values.apiserver.enabled }}
-          echo "[test] discovery management.agents.x-k8s.io/v1alpha1 via kube-apiserver"
+          echo "[test] discovery management.agentctl.dev/v1alpha1 via kube-apiserver"
           if curl -fsS --max-time 10 --cacert "$SA/ca.crt" \
                -H "Authorization: Bearer $(cat $SA/token)" \
-               "https://kubernetes.default.svc/apis/management.agents.x-k8s.io/v1alpha1" >/dev/null; then
+               "https://kubernetes.default.svc/apis/management.agentctl.dev/v1alpha1" >/dev/null; then
             echo "  OK APIService registered and Available"
           else
             echo "  FAIL APIService not registered/Available"; fail=1

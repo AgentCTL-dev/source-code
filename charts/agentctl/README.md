@@ -11,8 +11,8 @@ never depends on a specific agent binary. The reference agent is used only by th
 bundled examples.
 
 - Chart version / app version: **1.0.0**
-- API group for the CRDs: **`agents.x-k8s.io/v1alpha1`**
-- Management API group (aggregated API): **`management.agents.x-k8s.io/v1alpha1`**
+- API group for the CRDs: **`agentctl.dev/v1alpha1`**
+- Management API group (aggregated API): **`management.agentctl.dev/v1alpha1`**
 
 ---
 
@@ -44,7 +44,7 @@ All components are Deployments. The chart ships eight control-plane container im
 | Component | Purpose | Value block | Default |
 | --- | --- | --- | --- |
 | **operator** | Reconciles `Agent`/`AgentFleet` into workloads; leader-elected for HA; issues per-workload serving certs and distributes the cluster CA; reconciles per-namespace NetworkPolicies; wires the KEDA `ScaledObject` for claim fleets; projects status. | `operator` | Always installed |
-| **apiserver** | Aggregated API serving the management verbs (`drain`, `lame-duck`, `cancel`, `pause`, `resume`) under `management.agents.x-k8s.io`; authorizes each via `SubjectAccessReview` and dials the target agent pod(s) directly over mTLS. | `apiserver` | `enabled: true` |
+| **apiserver** | Aggregated API serving the management verbs (`drain`, `lame-duck`, `cancel`, `pause`, `resume`) under `management.agentctl.dev`; authorizes each via `SubjectAccessReview` and dials the target agent pod(s) directly over mTLS. | `apiserver` | `enabled: true` |
 | **admission** | Validating webhook (image-registry allow-list, lethal-trifecta gate, ModelPool existence, OIDC-policy shape) and mutating webhook (secure defaults). | `admission` | `enabled: true` |
 | **gateway** | The public agent-to-agent (A2A) surface: projects and signs Agent Cards, serves `message/send` and `message/stream` (SSE), persists tasks in Postgres, delivers SSRF-guarded push webhooks, and enforces inbound auth. | `gateway` | `enabled: true` |
 | **modelgateway** | Intelligence broker: attests the caller, selects the `ModelPool`, injects the provider credential off-pod, meters tokens, and enforces budgets. | `modelgateway` | `enabled: true` |
@@ -61,7 +61,7 @@ component; NetworkPolicies; and observability objects (see below).
 ### Custom Resource Definitions
 
 The CRDs live in `charts/agentctl/crds/` and are installed automatically on first
-`helm install`. All are namespaced and belong to `agents.x-k8s.io/v1alpha1`.
+`helm install`. All are namespaced and belong to `agentctl.dev/v1alpha1`.
 
 | Kind | Plural | Short names | Purpose |
 | --- | --- | --- | --- |
@@ -115,7 +115,7 @@ kubectl -n agentctl-system get pods
 kubectl -n agentctl-system rollout status deploy/agentctl-operator
 
 # The aggregated management API should report AVAILABLE=True:
-kubectl get apiservice v1alpha1.management.agents.x-k8s.io
+kubectl get apiservice v1alpha1.management.agentctl.dev
 ```
 
 Run the bundled connectivity test (created only by `helm test`, never on install):
@@ -289,10 +289,10 @@ slate:
 # CRDs (Helm never deletes crds/) — this also deletes all Agent/AgentFleet/
 # ModelPool/MCPServerSet objects in the cluster:
 kubectl delete crd \
-  agents.agents.x-k8s.io \
-  agentfleets.agents.x-k8s.io \
-  modelpools.agents.x-k8s.io \
-  mcpserversets.agents.x-k8s.io
+  agents.agentctl.dev \
+  agentfleets.agentctl.dev \
+  modelpools.agentctl.dev \
+  mcpserversets.agentctl.dev
 
 # The API token Secret is retained via a keep policy (only if apiToken was enabled):
 kubectl -n agentctl-system delete secret agentctl-api-token --ignore-not-found

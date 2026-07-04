@@ -74,7 +74,7 @@ Verify the rollout and the aggregated API:
 ```sh
 kubectl -n agentctl-system get pods
 kubectl -n agentctl-system rollout status deploy/agentctl-operator
-kubectl get apiservice v1alpha1.management.agents.x-k8s.io   # AVAILABLE should read True
+kubectl get apiservice v1alpha1.management.agentctl.dev   # AVAILABLE should read True
 ```
 
 ### `agentctl install` (thin Helm wrapper)
@@ -118,7 +118,7 @@ operator through OperatorHub tooling.
 
 The chart installs the four CRDs in [`charts/agentctl/crds/`](../charts/agentctl/crds) on
 first install — `agents`, `agentfleets`, `modelpools`, and `mcpserversets`, all in group
-`agents.x-k8s.io`, version `v1alpha1`. Helm intentionally never updates `crds/` on
+`agentctl.dev`, version `v1alpha1`. Helm intentionally never updates `crds/` on
 `helm upgrade`; see [Upgrades & CRDs](#6-upgrades--crds) for the upgrade procedure.
 
 ---
@@ -378,7 +378,7 @@ run joins the operator's trace when tracing is on.
 
 ### Management verbs
 
-The aggregated apiserver serves five lifecycle verbs under `management.agents.x-k8s.io` for
+The aggregated apiserver serves five lifecycle verbs under `management.agentctl.dev` for
 both `agents` and `agentfleets`:
 
 | Verb | Effect |
@@ -406,17 +406,17 @@ Invoke a verb with `kubectl create --raw` against the subresource path:
 ```sh
 # Drain a single Agent
 kubectl create --raw \
-  /apis/management.agents.x-k8s.io/v1alpha1/namespaces/default/agents/my-agent/drain \
+  /apis/management.agentctl.dev/v1alpha1/namespaces/default/agents/my-agent/drain \
   -f /dev/null
 
 # Pause an entire AgentFleet (fans out to all replicas)
 kubectl create --raw \
-  /apis/management.agents.x-k8s.io/v1alpha1/namespaces/default/agentfleets/workers/pause \
+  /apis/management.agentctl.dev/v1alpha1/namespaces/default/agentfleets/workers/pause \
   -f /dev/null
 ```
 
 Access is RBAC-gated. Grant a role the verb by allowing `create` on the subresource in the
-`management.agents.x-k8s.io` group:
+`management.agentctl.dev` group:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -424,7 +424,7 @@ kind: ClusterRole
 metadata:
   name: agent-operator
 rules:
-  - apiGroups: ["management.agents.x-k8s.io"]
+  - apiGroups: ["management.agentctl.dev"]
     resources:
       - agents/drain
       - agents/lame-duck
