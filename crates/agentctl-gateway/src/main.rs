@@ -1286,6 +1286,22 @@ async fn resolve_all(client: &Client, ns: &str, name: &str) -> Result<Vec<String
     Ok(ips)
 }
 
+/// The task id an A2A request targets, for fleet task affinity. Checks
+/// `params.id` (tasks/get|cancel|resubscribe — `TaskIdParams`), then
+/// `params.taskId` (push-config), then `params.message.taskId` (the
+/// SendMessage/SendStreamingMessage gate-reply continuation, which resumes a run
+/// paused at INPUT_REQUIRED). Returns `None` for a fresh request with no existing
+/// task to stick to.
+fn affinity_task_id(req: &Value) -> Option<&str> {
+    req.pointer("/params/id")
+        .and_then(Value::as_str)
+        .or_else(|| req.pointer("/params/taskId").and_then(Value::as_str))
+        .or_else(|| {
+            req.pointer("/params/message/taskId")
+                .and_then(Value::as_str)
+        })
+}
+
 /// Select the target pod IP for an A2A request. An agent resolves to its single
 /// pod. A **fleet** routes to a member:
 ///   1. **task affinity** — a live op (cancel/stream/get) on an existing task goes
@@ -1304,13 +1320,17 @@ async fn select_member(
         return resolve(&state.client, ns, name).await;
     }
 
-    // (1) Task affinity for live ops on an existing task.
-    if matches!(spec, "message/stream" | "tasks/cancel" | "tasks/get") {
-        if let Some(tid) = req
-            .pointer("/params/id")
-            .and_then(Value::as_str)
-            .or_else(|| req.pointer("/params/taskId").and_then(Value::as_str))
-        {
+    // (1) Task affinity for live ops on an existing task. `message/send` is
+    // included for the WORKFLOW GATE-REPLY continuation: a SendMessage that
+    // carries `message.taskId` resumes a run paused at INPUT_REQUIRED and MUST
+    // land on the member that owns that task — otherwise a fresh worker answers
+    // -32004 (no gate waiting). A fresh message/send has no taskId ⇒ no owner ⇒
+    // falls through to coordinator/round-robin.
+    if matches!(
+        spec,
+        "message/send" | "message/stream" | "tasks/cancel" | "tasks/get"
+    ) {
+        if let Some(tid) = affinity_task_id(req) {
             if let Ok(Some(owner)) = store::owner_pod(&state.pool, ns, name, tid).await {
                 // Only honour the affinity if that pod is still Running (else fall
                 // through to fresh selection — the member is gone).
@@ -1380,6 +1400,27 @@ mod tests {
         assert_eq!(translate_method("tasks/list"), None);
         assert_eq!(translate_method(""), None);
         assert_eq!(translate_method("a2a.SendMessage"), None);
+    }
+
+    #[test]
+    fn affinity_task_id_finds_the_gate_reply_continuation() {
+        // A FRESH message/send (no taskId) ⇒ no affinity ⇒ round-robins.
+        let fresh = json!({ "params": { "message": { "parts": [{ "text": "hi" }] } } });
+        assert_eq!(affinity_task_id(&fresh), None);
+
+        // A GATE-REPLY message/send carries message.taskId ⇒ sticks to the owner.
+        let reply = json!({
+            "params": { "message": { "taskId": "served.7", "parts": [{ "text": "yes" }] } }
+        });
+        assert_eq!(affinity_task_id(&reply), Some("served.7"));
+
+        // tasks/get|cancel|resubscribe use params.id (TaskIdParams).
+        let get = json!({ "params": { "id": "served.3" } });
+        assert_eq!(affinity_task_id(&get), Some("served.3"));
+
+        // params.taskId (push-config shape) is also honoured.
+        let push = json!({ "params": { "taskId": "served.9" } });
+        assert_eq!(affinity_task_id(&push), Some("served.9"));
     }
 
     #[test]

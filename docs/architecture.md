@@ -348,6 +348,9 @@ token** (`AGENTCTL_API_TOKEN`). A **fleet is one addressable endpoint**: for
 `/fleets/{ns}/{name}` the gateway routes to the coordinator (front door) when the
 fleet declares one, else load-balances round-robin across worker replicas, with
 **task affinity** — a live op on an existing task returns to the pod that owns it.
+This includes a **workflow gate-reply**: a `message/send` carrying `message.taskId`
+resumes a run paused at the non-terminal `INPUT_REQUIRED` state, and is routed back
+to the member that owns that task (rather than round-robined to a fresh worker).
 
 ### modelgateway (intelligence)
 

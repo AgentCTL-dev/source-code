@@ -55,7 +55,7 @@
       "additionalProperties": false,
       "properties": {
         "TASK_NOT_FOUND": { "const": -32001, "description": "GetTask/CancelTask/SubscribeToTask for an id not in the live registry." },
-        "UNSUPPORTED_OPERATION": { "const": -32004, "description": "A2A UnsupportedOperationError — e.g. CancelTask on an already-terminal task." },
+        "UNSUPPORTED_OPERATION": { "const": -32004, "description": "A2A UnsupportedOperationError — e.g. CancelTask on an already-terminal task, or a SendMessage carrying `message.taskId` (a workflow gate-reply continuation) when no gate is waiting on that task (surfaces.workflow.checkpoint builds)." },
         "METHOD_NOT_FOUND": { "const": -32601, "description": "Unsupported a2a method, or a Stdio-origin peer, or a gateway-owned method the agent does not serve." },
         "INVALID_PARAMS": { "const": -32602, "description": "e.g. SendMessage with no non-empty text part." },
         "INTERNAL_ERROR": { "const": -32603, "description": "spawn/dispatch failure." }
@@ -124,7 +124,7 @@
         "note": { "type": "string" }
       },
       "x-entries": [
-        { "reference_method": "a2a.SendMessage", "spec_method": "message/send", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/SendMessageParams" }, "result": { "$ref": "#/$defs/Task" }, "note": "configuration.returnImmediately defaults true ⇒ async WORKING Task to poll; false ⇒ block to terminal Task." },
+        { "reference_method": "a2a.SendMessage", "spec_method": "message/send", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/SendMessageParams" }, "result": { "$ref": "#/$defs/Task" }, "note": "configuration.returnImmediately defaults true ⇒ async WORKING Task to poll; false ⇒ block to terminal Task. GATE-REPLY CONTINUATION (surfaces.workflow.checkpoint): a SendMessage whose message carries `taskId` resumes a run paused at INPUT_REQUIRED — the gateway routes it to the member that owns that task (task affinity); -32004 if no gate is waiting on it." },
         { "reference_method": "a2a.GetTask", "spec_method": "tasks/get", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/GetTaskParams" }, "result": { "$ref": "#/$defs/Task" }, "note": "Unknown id ⇒ -32001. Completed run carries the distillate artifact (distillate-only invariant)." },
         { "reference_method": "a2a.CancelTask", "spec_method": "tasks/cancel", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/TaskIdParams" }, "result": { "$ref": "#/$defs/Task" }, "note": "Live run ⇒ CANCELED; already-terminal ⇒ its real terminal state (cancel-of-finished is a read). Unknown id ⇒ -32001." },
         { "reference_method": "a2a.ListTasks", "spec_method": "tasks/list", "served_by": "live", "streaming": false, "params": { "$ref": "#/$defs/ListTasksParams" }, "result": { "$ref": "#/$defs/ListTasksResult" }, "note": "LIVE instance-local registry only; durable cross-pod history is gateway-held. Pagination params accepted; nextPageToken omitted (the live registry is bounded)." },
@@ -139,7 +139,7 @@
     },
 
     "TaskState": {
-      "description": "A2A TaskState. Contract 1.0: the wire carries the proto-enum spelling in status.state (TASK_STATE_COMPLETED, TASK_STATE_WORKING, …); reference_state records that normative form and a2a_state records the lowercase A2A JSON-RPC binding for reference. The four terminal states are completed/failed/canceled/rejected; submitted/working are in-flight; input-required/auth-required/unknown(unspecified) are non-terminal interaction/unknown states a conformant agent never produces but a richer gateway peer might.",
+      "description": "A2A TaskState. Contract 1.0: the wire carries the proto-enum spelling in status.state (TASK_STATE_COMPLETED, TASK_STATE_WORKING, …); reference_state records that normative form and a2a_state records the lowercase A2A JSON-RPC binding for reference. The four terminal states are completed/failed/canceled/rejected; submitted/working are in-flight; input-required/auth-required/unknown(unspecified) are non-terminal interaction/unknown states. INPUT_REQUIRED: a base agent never produces it, but an agent advertising surfaces.workflow.checkpoint (dialect >= 2) DOES — a workflow run pauses at a gate emitting a non-terminal TASK_STATE_INPUT_REQUIRED and resumes when a SendMessage carrying message.taskId supplies the gate reply. A consumer MUST keep polling/streaming across it (NOT terminal) and MUST NOT treat it as completion.",
       "type": "object",
       "additionalProperties": false,
       "properties": {

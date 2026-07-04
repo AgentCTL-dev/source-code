@@ -301,6 +301,29 @@
               }
             }
           ]
+        },
+        "workflow": {
+          "description": "SUM TYPE (bool|object): the workflow-execution surface. OMITTED-when-absent (a build without a workflow engine leaves the key out; consumers MUST treat absence as unbuilt, not error). When an object, it advertises the workflow dialect version and whether checkpoint/resume is served. Additive, MINOR-bump — the top-level contract_version is unchanged; a consumer detects the resumable-workflow capability purely by inspecting this key. agentctl gates the resumable-workflow behaviour on `dialect >= 2 AND checkpoint == true`.",
+          "oneOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["dialect"],
+              "properties": {
+                "dialect": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Workflow-graph dialect version. dialect >= 2 introduces checkpoint/resume and the input-required gate (a run may pause mid-graph awaiting external input).",
+                  "examples": [2]
+                },
+                "checkpoint": {
+                  "type": "boolean",
+                  "description": "Whether workflow checkpoint/resume is served. When true, a run can PAUSE at a gate by emitting a non-terminal TASK_STATE_INPUT_REQUIRED, then RESUME when a SendMessage carrying `message.taskId` supplies the gate reply (-32004 UNSUPPORTED_OPERATION if no gate is waiting on that task). Also exposes the `--workflow-resume` / `--workflow-resume-force` CLI on the reference agent. A consumer MUST keep polling/streaming across INPUT_REQUIRED (it is NOT a terminal state)."
+                }
+              }
+            }
+          ]
         }
       }
     }

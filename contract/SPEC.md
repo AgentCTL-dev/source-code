@@ -318,7 +318,10 @@ same-id JSON-RPC reply frames over an SSE `text/event-stream`, each carrying a `
 (`statusUpdate` or `artifactUpdate`). A `SendStreamingMessage` run writes a WORKING `statusUpdate`,
 then (on completion) an `artifactUpdate` with the distillate, then a terminal-state `statusUpdate`, and
 closes the stream. **A consumer keys termination off the terminal task state plus stream close** — the
-reference emits no non-spec `final` flag.
+reference emits no non-spec `final` flag. `TASK_STATE_INPUT_REQUIRED` is **not** terminal: an agent
+advertising `surfaces.workflow.checkpoint` (dialect ≥ 2) pauses a workflow run at a gate in that state,
+and the consumer keeps polling/streaming until a real terminal state. The run resumes when a
+`SendMessage` carrying `message.taskId` (the gate reply) is delivered — `-32004` if no gate is waiting.
 
 ### 5.5 Wire types
 

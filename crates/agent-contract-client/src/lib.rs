@@ -203,6 +203,11 @@ pub struct Surfaces {
     /// Work-claim styles, if the claim surface is served.
     #[serde(default)]
     pub claim: Option<ClaimSurface>,
+    /// Workflow-execution surface (dialect + checkpoint/resume), if served.
+    /// Omitted-when-absent. Gate resumable-workflow behaviour on
+    /// [`WorkflowSurface::resumable`] (`dialect >= 2 && checkpoint`).
+    #[serde(default)]
+    pub workflow: Option<WorkflowSurface>,
     /// Shard identity `"K/N"`, or `null`.
     #[serde(default)]
     pub shard: Option<String>,
@@ -370,6 +375,70 @@ impl<'de> Deserialize<'de> for ClaimSurface {
     }
 }
 
+/// `bool | object` — the workflow-execution surface. Per the contract this is
+/// omitted-when-absent (a build without a workflow engine leaves the key out);
+/// a bare `true` is accepted as an object with `dialect == 1` and no checkpoint.
+/// The resumable-workflow capability (checkpoint/resume + the INPUT_REQUIRED
+/// gate + `--workflow-resume`) is advertised by `dialect >= 2 && checkpoint`;
+/// read it via [`WorkflowSurface::resumable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowSurface {
+    /// A workflow engine is not served.
+    Off,
+    /// A workflow engine is served with this dialect + checkpoint capability.
+    On {
+        /// Workflow-graph dialect version (>= 2 introduces checkpoint/resume).
+        dialect: u32,
+        /// Whether checkpoint/resume (INPUT_REQUIRED gate + gate-reply) is served.
+        checkpoint: bool,
+    },
+}
+
+impl WorkflowSurface {
+    /// Whether a workflow engine is served at all.
+    pub fn is_served(&self) -> bool {
+        matches!(self, WorkflowSurface::On { .. })
+    }
+    /// Whether the RESUMABLE workflow surface is served: `dialect >= 2` AND
+    /// `checkpoint`. This is the single gate a consumer keys the
+    /// checkpoint/resume + INPUT_REQUIRED-gate behaviour off.
+    pub fn resumable(&self) -> bool {
+        matches!(self, WorkflowSurface::On { dialect, checkpoint } if *dialect >= 2 && *checkpoint)
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkflowSurface {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wf {
+            #[serde(default = "one")]
+            dialect: u32,
+            #[serde(default)]
+            checkpoint: bool,
+        }
+        fn one() -> u32 {
+            1
+        }
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::Bool(false) => Ok(WorkflowSurface::Off),
+            serde_json::Value::Bool(true) => Ok(WorkflowSurface::On {
+                dialect: 1,
+                checkpoint: false,
+            }),
+            v @ serde_json::Value::Object(_) => {
+                let w: Wf = serde_json::from_value(v).map_err(D::Error::custom)?;
+                Ok(WorkflowSurface::On {
+                    dialect: w.dialect,
+                    checkpoint: w.checkpoint,
+                })
+            }
+            other => Err(D::Error::custom(format!(
+                "surfaces.workflow must be a bool or an object, got {other}"
+            ))),
+        }
+    }
+}
+
 /// `"unknown" | bool` — intelligence reachability, or unknown pre-connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Health {
@@ -500,5 +569,45 @@ mod unit {
             SurfaceAddr::At("https://0.0.0.0:8443".into())
         );
         assert!(serde_json::from_str::<SurfaceAddr>("true").is_err());
+    }
+
+    #[test]
+    fn workflow_surface_detects_the_resumable_capability() {
+        use WorkflowSurface as W;
+        // Absent ⇒ Off ⇒ not resumable (via the Surfaces default).
+        let s: Surfaces = serde_json::from_str("{}").unwrap();
+        assert!(s.workflow.is_none());
+
+        // A base dialect-1 engine: served, but NOT resumable.
+        let base: W = serde_json::from_str(r#"{"dialect":1}"#).unwrap();
+        assert!(base.is_served());
+        assert!(!base.resumable());
+
+        // dialect >= 2 alone is not enough — checkpoint must also be true.
+        let no_ckpt: W = serde_json::from_str(r#"{"dialect":2}"#).unwrap();
+        assert!(!no_ckpt.resumable(), "dialect>=2 without checkpoint");
+
+        // The full resumable surface.
+        let full: W = serde_json::from_str(r#"{"dialect":2,"checkpoint":true}"#).unwrap();
+        assert!(full.resumable());
+        assert_eq!(
+            full,
+            W::On {
+                dialect: 2,
+                checkpoint: true
+            }
+        );
+
+        // `false` ⇒ Off; bare `true` ⇒ served-but-dialect-1 (not resumable).
+        assert_eq!(serde_json::from_str::<W>("false").unwrap(), W::Off);
+        assert!(!serde_json::from_str::<W>("true").unwrap().resumable());
+
+        // Parsed off a full manifest surfaces block.
+        let m = parse_manifest(
+            r#"{"contract_version":"1.0",
+                "surfaces":{"workflow":{"dialect":2,"checkpoint":true}}}"#,
+        )
+        .unwrap();
+        assert!(m.surfaces.workflow.as_ref().unwrap().resumable());
     }
 }
