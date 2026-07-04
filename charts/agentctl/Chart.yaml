@@ -6,8 +6,8 @@ description: >-
   ModelGateway, tools MCPGateway, work-coordination server, and KEDA scaler.
   Installs the Agent Control Contract CRDs and wires all TLS via cert-manager.
 type: application
-version: 1.0.0            # chart version
-appVersion: "1.0.0"      # agentctl control-plane version
+version: 1.1.0            # chart version
+appVersion: "1.1.0"      # agentctl control-plane version
 keywords: [agents, ai, operator, control-plane, a2a, mcp]
 home: https://github.com/AgentCTL-dev/source-code
 sources:

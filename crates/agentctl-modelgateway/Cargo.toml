@@ -1,6 +1,6 @@
 [package]
 name = "agentctl-modelgateway"
-version = "1.0.0"
+version = "1.1.0"
 description = "agentctl ModelGateway: the credential-injecting, metering, budget-enforcing inference proxy for the intelligence plane. Agents hold no provider secrets; the gateway injects the ModelPool credential, meters tokens, and enforces the budget. Rust (axum)."
 edition.workspace = true
 rust-version.workspace = true

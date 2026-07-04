@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 [package]
 name = "agentctl-telemetry"
-version = "1.0.0"
+version = "1.1.0"
 description = "Shared tracing init for agentctl control-plane binaries: the fmt layer (byte-identical to before) plus an OTLP/gRPC span exporter + W3C propagation that turn on only when OTEL_EXPORTER_OTLP_ENDPOINT is set."
 edition.workspace = true
 rust-version.workspace = true

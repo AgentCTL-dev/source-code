@@ -3,12 +3,12 @@
 #   helm install agentctl oci://ghcr.io/agentctl-dev/charts/agentctl \
 #     -n agentctl-system --create-namespace -f values-ghcr.yaml
 #
-# This pulls ghcr.io/agentctl-dev/<comp>:1.0.0 for each control-plane component
+# This pulls ghcr.io/agentctl-dev/<comp>:1.1.0 for each control-plane component
 # (operator, apiserver, gateway, modelgateway, mcpgateway, admission,
 # coordination, scaler).
 image:
   registry: ghcr.io/agentctl-dev
-  tag: 1.0.0
+  tag: 1.1.0
   # For tamper-evident, reproducible installs, pin each component by digest below
   # (a digest entry wins over the tag). Fill in the published sha256 digests:
   #   digests:

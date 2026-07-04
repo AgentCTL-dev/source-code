@@ -5,7 +5,7 @@
 # The LABELs below MUST stay in sync with bundle/metadata/annotations.yaml.
 #
 # Build (context = this bundle/ directory):
-#   docker build -f bundle/bundle.Dockerfile -t ghcr.io/agentctl-dev/agentctl-bundle:1.0.0 bundle
+#   docker build -f bundle/bundle.Dockerfile -t ghcr.io/agentctl-dev/agentctl-bundle:1.1.0 bundle
 # Validate:
 #   operator-sdk bundle validate ./bundle
 FROM scratch
