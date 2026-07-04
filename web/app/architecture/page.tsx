@@ -39,7 +39,7 @@ export default function Page() {
         </li>
         <li>
           <strong className="text-foreground">Out of the agent (keyless).</strong> The agent dials{" "}
-          <C>AGENT_INTELLIGENCE</C> and each <C>--mcp</C> endpoint without any credential. The
+          <C>INTELLIGENCE</C> and each <C>--mcp</C> endpoint without any credential. The
           gateway attests the caller by source IP, injects the credential it holds off-pod, meters,
           and forwards.
         </li>

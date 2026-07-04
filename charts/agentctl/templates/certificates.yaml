@@ -92,7 +92,7 @@ spec:
 {{- if .Values.modelgateway.enabled }}
 ---
 # ModelGateway serving cert (contract 1.0): agents dial their rendered
-# AGENT_INTELLIGENCE=https://agentctl-modelgateway... keyless — this cert
+# INTELLIGENCE=https://agentctl-modelgateway... keyless — this cert
 # chains to the same cluster CA the agent trusts via --tls-ca.
 apiVersion: cert-manager.io/v1
 kind: Certificate

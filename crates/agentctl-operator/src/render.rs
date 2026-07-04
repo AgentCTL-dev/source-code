@@ -11,7 +11,7 @@
 //! management/A2A surface over mTLS-gated HTTPS (`--serve-mcp
 //! https://0.0.0.0:8443`) with a cert-manager-issued serving identity, trusts
 //! the cluster CA for callers (`--serve-client-ca`) and for its own keyless
-//! outbound dials (`--tls-ca`, `AGENT_INTELLIGENCE=https://<modelgateway>`),
+//! outbound dials (`--tls-ca`, `INTELLIGENCE=https://<modelgateway>`),
 //! and exposes `/readyz` on a separate metrics listener. No hostPath, no
 //! unix sockets, no pod-held credential: the ONLY key material in the pod is
 //! its OWN serving identity (cert-manager Secret, rotated live by the agent).
@@ -69,7 +69,7 @@ pub fn serving_secret_name(workload: &str) -> String {
 /// passes a literal.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
-    /// The ModelGateway base URL rendered into `AGENT_INTELLIGENCE` (keyless
+    /// The ModelGateway base URL rendered into `INTELLIGENCE` (keyless
     /// dial; identity = source-IP attestation at the gateway). MUST be an
     /// `https://` URL whose cert chains to the cluster CA, and SHOULD be an
     /// absolute (trailing-dot) FQDN so no DNS search list can capture it.
@@ -832,7 +832,7 @@ fn pod_template(
     // Keyless intelligence dial: the ModelGateway holds the provider credential
     // and attests the caller by source IP — NO token env is ever rendered.
     env.push(EnvVar {
-        name: "AGENT_INTELLIGENCE".to_string(),
+        name: "INTELLIGENCE".to_string(),
         value: Some(cfg.modelgateway_url.clone()),
         ..Default::default()
     });
@@ -1289,8 +1289,8 @@ mod tests {
         let env = c.env.as_ref().unwrap();
         let intel = env
             .iter()
-            .find(|e| e.name == "AGENT_INTELLIGENCE")
-            .expect("AGENT_INTELLIGENCE rendered");
+            .find(|e| e.name == "INTELLIGENCE")
+            .expect("INTELLIGENCE rendered");
         assert_eq!(
             intel.value.as_deref(),
             Some("https://mgw.cp.svc.cluster.local.")

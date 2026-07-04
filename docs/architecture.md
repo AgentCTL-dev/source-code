@@ -146,7 +146,7 @@ Every rendered pod is identical in its wiring, regardless of kind:
   (`--serve-mcp https://0.0.0.0:8443`), presenting its own cert-manager-issued
   serving identity (`--serve-cert`/`--serve-key`), and trusting cluster-CA client
   certs (`--serve-client-ca`) — holders of which are the **Management** origin.
-- **Dials** the model gateway keyless via `AGENT_INTELLIGENCE=https://…`, trusting
+- **Dials** the model gateway keyless via `INTELLIGENCE=https://…`, trusting
   the same cluster CA for the hop (`--tls-ca`). No provider token is ever
   rendered into the pod.
 - Exposes `/readyz` and `/metrics` on a separate listener (`:9090`,
@@ -465,7 +465,7 @@ sequenceDiagram
   participant SEC as ModelPool Secret
   participant P as provider
   participant DB as Postgres
-  Note over AG: secret-free — dials AGENT_INTELLIGENCE=https://…/v1/infer keyless
+  Note over AG: secret-free — dials INTELLIGENCE=https://…/v1/infer keyless
   AG->>MG: POST /v1/infer (identity = source IP)
   MG->>KW: resolve source IP → namespace / agent
   MG->>DB: reserve estimate under per-pool lock

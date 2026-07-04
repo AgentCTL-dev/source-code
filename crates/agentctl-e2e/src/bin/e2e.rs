@@ -250,7 +250,7 @@ fn scrape(ctx: &Ctx, svc: &str, port: u16, scheme: &str) -> Result<prom::Metrics
 }
 
 /// Build an agentd-backed `Agent` CR in the scenario namespace. The operator always
-/// renders a keyless `AGENT_INTELLIGENCE=https://<modelgateway>…` endpoint and mounts
+/// renders a keyless `INTELLIGENCE=https://<modelgateway>…` endpoint and mounts
 /// the per-namespace CA. agentd validates the intelligence endpoint at boot in every
 /// mode (`once` infers immediately; a reactive/shard daemon dials it only when it does
 /// work), so a bound `modelPool` is enough.

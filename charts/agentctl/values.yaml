@@ -135,7 +135,7 @@ postgres:
 operator:
   replicas: 1                  # leader-elected: safe to raise for HA (1 active + standbys)
   logLevel: info               # -> RUST_LOG
-  # Override the ModelGateway URL rendered into agent pods (AGENT_INTELLIGENCE,
+  # Override the ModelGateway URL rendered into agent pods (INTELLIGENCE,
   # keyless https dial). Empty => https://agentctl-modelgateway.<ns>.svc.cluster.local.
   modelgatewayUrl: ""
   # Override the MCPGateway URL rendered into agent --mcp flags.

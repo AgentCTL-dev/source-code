@@ -537,7 +537,7 @@ Credentials use **only** the `*_TOKEN[_FILE]` path — never the identity path, 
 | Identity | `AGENT_RUN_ID`, `AGENT_POD_NAME`, `AGENT_POD_UID`, `AGENT_POD_NAMESPACE`, `AGENT_NODE_NAME` | from the downward API; `AGENT_RUN_ID` is the one field never absent (a ULID is minted if unset, stable across a retried Job). |
 | Sharding | `AGENT_SHARD` (`"K/N"`, `0 ≤ K < N`, `N ≥ 1`), `AGENT_SHARD_TIMER` (`shard0 \| keyed`), `AGENT_STANDBY` | a malformed `AGENT_SHARD` (`N==0` / `K>=N`) fails as `EXIT_USAGE (2)`; maps to `surfaces.shard`/`surfaces.standby`. |
 | Credentials | `AGENT_INTELLIGENCE_TOKEN[_FILE]` (endpoint 1), `AGENT_INTELLIGENCE_TOKEN_{N}[_FILE]` (1-indexed) | per-endpoint; the `_FILE` variant is a mounted-secret path (rotation-friendly); never logged. |
-| Lifecycle | `AGENT_SERVE_MCP` (mTLS HTTPS management URL), `AGENT_INTELLIGENCE` (keyless HTTPS URL to the gateway), `AGENT_MODE`, `AGENT_MODEL`, `AGENT_DRAIN_TIMEOUT` | restart-only; `AGENT_SERVE_MCP` drives `surfaces.management`. |
+| Lifecycle | `AGENT_SERVE_MCP` (mTLS HTTPS management URL), `INTELLIGENCE` (keyless HTTPS URL to the gateway), `AGENT_MODE`, `AGENT_MODEL`, `AGENT_DRAIN_TIMEOUT` | restart-only; `AGENT_SERVE_MCP` drives `surfaces.management`. |
 
 The serving-TLS material (leaf cert, key, the client CA the agent verifies peers against, and the
 outbound trust anchor) is supplied as **filesystem paths to mounted certificates** via flags

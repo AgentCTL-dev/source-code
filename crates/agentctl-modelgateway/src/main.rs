@@ -171,7 +171,7 @@ async fn main() {
         .route("/metrics", get(serve_metrics))
         .route("/v1/infer", post(infer))
         // OpenAI-compatible alias: a conformant agent (e.g. agentd) dialing its
-        // `AGENT_INTELLIGENCE` endpoint as an OpenAI provider POSTs the default
+        // `INTELLIGENCE` endpoint as an OpenAI provider POSTs the default
         // path `/v1/chat/completions`. The gateway is provider-neutral on the
         // wire, so this aliases to the SAME identity/pool/budget/credential-inject
         // path as `/v1/infer` — the agent's inference loop reaches the gateway
@@ -190,7 +190,7 @@ async fn main() {
         });
 
     // Optional TLS listener (contract 1.0): agents dial their rendered
-    // `AGENT_INTELLIGENCE=https://…` keyless — the serving cert (cert-manager,
+    // `INTELLIGENCE=https://…` keyless — the serving cert (cert-manager,
     // chains to the cluster CA the agent trusts via `--tls-ca`) authenticates
     // US to the agent; the AGENT's identity stays source-IP attestation, so
     // this is server-auth-only TLS (no client certs). Enabled when both

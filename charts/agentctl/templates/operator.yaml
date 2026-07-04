@@ -207,7 +207,7 @@ spec:
             # Workload PKI + keyless intelligence wiring (contract 1.0). The
             # operator issues a per-workload serving Certificate (issuerRef
             # below), distributes the CA public cert per namespace (read from
-            # its own mount), and renders AGENT_INTELLIGENCE at the ModelGateway
+            # its own mount), and renders INTELLIGENCE at the ModelGateway
             # over https (absolute trailing-dot FQDN so no DNS search list can
             # capture it; keyless — identity is source-IP attestation there).
             {{- if .Values.certManager.enabled }}

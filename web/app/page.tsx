@@ -117,7 +117,7 @@ function Hero() {
             Rust control plane · BUSL-1.1 · the contract + SDK are Apache-2.0
           </p>
         </div>
-        <div className="flex items-center">
+        <div className="flex min-w-0 items-center">
           <CodeBlock
             className="w-full shadow-sm"
             lang="agent.yaml — one CR, an mTLS-served agent"
@@ -132,7 +132,7 @@ spec:
 
 # the operator renders a restricted-PSS pod that:
 #   serves  https://0.0.0.0:8443/mcp   (mTLS, per-workload cert)
-#   dials   AGENT_INTELLIGENCE=https://…   (keyless, source-IP attested)
+#   dials   INTELLIGENCE=https://…   (keyless, source-IP attested)
 #   holds   zero credentials · no hostPath · runAsNonRoot`}
           />
         </div>

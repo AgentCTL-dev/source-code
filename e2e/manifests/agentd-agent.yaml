@@ -5,7 +5,7 @@
 #     work; an idle reactive agent never infers. once-mode drives exactly the
 #     inference the ModelGateway meters/budgets.
 #   - Agents reach intelligence by dialing the ModelGateway directly over HTTPS.
-#     The operator ALWAYS renders AGENT_INTELLIGENCE=https://<modelgateway>… keyless
+#     The operator ALWAYS renders INTELLIGENCE=https://<modelgateway>… keyless
 #     and mounts the per-namespace CA; the ModelGateway attests the caller by
 #     SOURCE IP and injects the ModelPool credential (no key on the agent).
 #   - modelPool: mockpool — binds the ModelPool from modelpool-mock.yaml (apply that

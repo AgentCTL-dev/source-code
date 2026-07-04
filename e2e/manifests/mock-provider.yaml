@@ -5,7 +5,7 @@
 # sends one) and reports token usage so the gateway meters/budgets — but it
 # answers in the **OpenAI `chat/completions`** envelope (`choices[].message` +
 # `usage`). That matters for the intelligence scenarios driven by the REAL
-# agentd: agentd dials its `AGENT_INTELLIGENCE` endpoint as an OpenAI-compatible
+# agentd: agentd dials its `INTELLIGENCE` endpoint as an OpenAI-compatible
 # provider (it POSTs `/v1/chat/completions` and parses `choices[0].message`), so
 # a bare `{content,usage}` body (the deploy/examples mock) lets the gateway meter
 # but makes agentd's run fail to parse a result. This shape lets a once-mode
