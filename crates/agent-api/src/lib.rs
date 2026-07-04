@@ -17,8 +17,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Group for all agentctl CRDs. The final group string is not yet settled; the
-/// type shapes here are independent of the group string.
+/// Group for all agentctl CRDs.
 pub const GROUP: &str = "agentctl.dev";
 
 // ===========================================================================
@@ -57,20 +56,15 @@ pub struct AgentSpec {
     /// The run shape. Determines the rendered workload kind.
     pub mode: Mode,
 
-    /// The conformant-agent image to run. When omitted (and no `classRef`
-    /// supplies one), the operator falls back to its configured **default agent
-    /// image** (`operator.defaultAgentImage` / `AGENTCTL_DEFAULT_AGENT_IMAGE`);
-    /// an explicit value here always overrides that default. Mutually exclusive
-    /// with `classRef`.
+    /// The conformant-agent image to run. When omitted, the operator falls back
+    /// to its configured **default agent image** (`operator.defaultAgentImage` /
+    /// `AGENTCTL_DEFAULT_AGENT_IMAGE`); an explicit value here always overrides
+    /// that default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Reference to an `AgentClass` supplying the ops profile + image. Mutually
-    /// exclusive with `image`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class_ref: Option<LocalRef>,
 
-    /// The agent's declared model id (metadata; the real binding is via
-    /// intelligence). Surfaced as a printer column.
+    /// The agent's declared model id (metadata; the real binding is `modelPool`).
+    /// Surfaced as a printer column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
@@ -78,16 +72,14 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
 
-    /// Reference to an `IntelligenceService`/`ModelPool`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intelligence_ref: Option<LocalRef>,
-
-    /// Reusable MCP server bundles (`MCPServerSet`).
+    /// The reusable MCP tool-server bundles this agent binds, by `MCPServerSet`
+    /// name (same namespace). The MCPGateway scopes the agent to exactly these
+    /// servers and injects each one's credential off-pod.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mcp_server_set_refs: Vec<LocalRef>,
+    pub mcp_servers: Vec<String>,
 
-    /// Substrate selection. Absent ⇒ inherited from the `AgentClass` / cluster
-    /// default (hostile tenancy forces `kata-hybrid`).
+    /// Substrate selection. Absent ⇒ the cluster default (hostile tenancy forces
+    /// `kata-hybrid`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub substrate: Option<Substrate>,
 
@@ -307,14 +299,6 @@ pub struct Limits {
     pub max_depth: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree_token_budget: Option<u64>,
-}
-
-/// A name-only reference to a sibling resource in the same namespace.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-pub struct LocalRef {
-    pub name: String,
 }
 
 /// `Agent.status` — a curated projection of the live capabilities manifest +
@@ -689,7 +673,7 @@ pub struct ModelPoolStatus {
 // ===========================================================================
 
 /// A reusable, namespaced bundle of MCP tool servers an `Agent`/`AgentFleet`
-/// binds via `spec.mcpServerSetRefs`. Agents hold **NO tool-server
+/// binds via `spec.mcpServers`. Agents hold **NO tool-server
 /// credentials**: they never hold a tool server's token. The
 /// control plane brokers every remote MCP server through a credential-injecting,
 /// attesting, policy-enforcing proxy (the `MCPGateway`, the tool-plane analog of

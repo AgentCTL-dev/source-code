@@ -446,20 +446,20 @@ async fn ensure_and_inject_workflow(
     Ok(())
 }
 
-/// Resolve an agent/fleet-template's `mcpServerSetRefs` into the flat list of
+/// Resolve an agent/fleet-template's `mcpServers` into the flat list of
 /// bound MCP servers (name + trifecta tags) the renderer wires to the MCPGateway.
 /// Reads each referenced `MCPServerSet` in the workload's namespace.
 /// Best-effort: a missing/dangling ref is logged and skipped (a config error
 /// surfaces as a missing tool, never a failed reconcile). Duplicate server names
 /// across sets collapse to the first seen (admission owns collision rejection).
 async fn resolve_mcp_bindings(client: &Client, ns: &str, spec: &AgentSpec) -> Vec<McpBinding> {
-    if spec.mcp_server_set_refs.is_empty() {
+    if spec.mcp_servers.is_empty() {
         return Vec::new();
     }
     let sets: Api<MCPServerSet> = Api::namespaced(client.clone(), ns);
     let mut out: Vec<McpBinding> = Vec::new();
-    for r in &spec.mcp_server_set_refs {
-        match sets.get(&r.name).await {
+    for r in &spec.mcp_servers {
+        match sets.get(r).await {
             Ok(set) => {
                 for s in set.spec.servers {
                     if out.iter().any(|b| b.name == s.name) {
@@ -472,7 +472,7 @@ async fn resolve_mcp_bindings(client: &Client, ns: &str, spec: &AgentSpec) -> Ve
                 }
             }
             Err(e) => {
-                warn!(%ns, set = %r.name, error = %e, "bound MCPServerSet not found; skipping");
+                warn!(%ns, set = %r, error = %e, "bound MCPServerSet not found; skipping");
             }
         }
     }
@@ -752,7 +752,7 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 inject_api_token(&mut rendered);
             }
             // Bind MCP tool servers for the fleet template (same resolution as a
-            // singleton Agent; the fleet's template carries mcpServerSetRefs).
+            // singleton Agent; the fleet's template carries mcpServers).
             let bindings = resolve_mcp_bindings(&ctx.client, ns, &fleet.spec.template).await;
             inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
             let owner = fleet

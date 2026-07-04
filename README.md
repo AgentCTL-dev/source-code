@@ -118,11 +118,11 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 | `image` | The conformant-agent image to run. Optional when the operator has a default agent image configured (`operator.defaultAgentImage`); an explicit value overrides it. |
 | `instruction` | The agent's task instruction (required for non-reactive modes). |
 | `modelPool` | The `ModelPool` this agent binds for model access (admission-validated). |
-| `mcpServerSetRefs` | The `MCPServerSet`s whose tools the agent may call. |
+| `mcpServers` | The `MCPServerSet`s (by name) whose tools the agent may call. |
 | `subscribe` / `loop` / `schedule` / `workflow` | Mode-specific inputs (reactive subscriptions, loop cadence, cron, workflow graph). |
 | `surfaces` | Which control-plane surfaces to expose: `management`, `metrics`, `a2a`. |
 | `access` | A2A access policy: `public` (intent) and `oidc` (JWT verification + claim-based authz). |
-| `limits` | Per-agent budgets (`maxTokens`, `maxDepth`, `maxSteps`, `treeTokenBudget`). |
+| `limits` | Per-agent budgets (`maxTokens`, `maxDepth`, `maxSteps`). |
 | `exec` / `egress` / `secrets` | Declared privileged capabilities. Together they form the **lethal trifecta** the admission webhook gates. |
 
 **Rendered workload by mode:** `once` and `workflow` → **Job**; `schedule` →
@@ -390,6 +390,7 @@ default). OTLP tracing is emitted when configured.
 | [docs/security.md](docs/security.md) | Identity, isolation, the trifecta gate, and the PKI. |
 | [docs/operations.md](docs/operations.md) | Day-2 operations: management verbs, upgrades, tuning. |
 | [docs/benchmarks.md](docs/benchmarks.md) | Throughput, latency, and density measurements. |
+| [docs/api-design.md](docs/api-design.md) | CRD/API design notes: what the spec cleanup applied + open recommendations. |
 | [contract/README.md](contract/README.md) | The Agent Control Contract — how any agent conforms. |
 | [charts/agentctl/README.md](charts/agentctl/README.md) | Helm chart values, install options, and production notes. |
 

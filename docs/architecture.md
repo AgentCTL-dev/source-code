@@ -109,15 +109,15 @@ selects the rendered workload kind.
 | Field | Meaning |
 |---|---|
 | `mode` | `once` \| `loop` \| `reactive` \| `schedule` \| `workflow` — the run shape. |
-| `image` | The conformant-agent image. Required unless `classRef` is set. |
+| `image` | The conformant-agent image. Optional — falls back to `operator.defaultAgentImage` when omitted. |
 | `instruction` | The agent's inline instruction (required for non-reactive modes). |
 | `model` | Declared model id (metadata + printer column). |
 | `modelPool` | The `ModelPool` this agent binds for inference. |
-| `mcpServerSetRefs` | `MCPServerSet` bundles this agent binds for tools. |
+| `mcpServers` | `MCPServerSet`s (by name) this agent binds for tools. |
 | `subscribe` | Reactive-mode MCP resource URIs the agent wakes on. |
 | `schedule` | `{ cron, timezone }` for `mode: schedule`. |
 | `workflow` | The workflow graph (`inline` or `configMapKeyRef`) for `mode: workflow`. |
-| `limits` | `{ maxTokens, maxDepth, maxSteps, treeTokenBudget }` bounding box. |
+| `limits` | `{ maxTokens, maxDepth, maxSteps }` bounding box. |
 | `surfaces` | Which control-plane surfaces to expose (`management`/`metrics`/`a2a`). |
 | `access` | A2A caller policy: `oidc` (JWT verify + claim authz) and `public` (advisory). |
 | `exec` / `egress` / `secrets` | Declared privileged capabilities (the lethal-trifecta legs). |

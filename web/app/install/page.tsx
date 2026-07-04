@@ -76,7 +76,7 @@ spec:
   image: ${AGENTD_IMAGE}
   mode: reactive
   # modelPool: gpt          # keyless intelligence (ModelGateway holds the key)
-  # mcpServerSetRefs: [tools] # brokered tools (MCPGateway injects the credential)`}
+  # mcpServers: [tools] # brokered tools (MCPGateway injects the credential)`}
       />
       <CodeBlock lang="bash" code={`kubectl apply -f agent.yaml
 kubectl get agents -n team-a    # READY=True`} />

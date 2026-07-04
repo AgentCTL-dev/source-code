@@ -83,8 +83,8 @@ pub struct RenderConfig {
     /// `queue` distribution.
     pub gateway_url: String,
     /// Operator-configured **default agent image**. When an `Agent`/fleet
-    /// template omits `spec.image` (and no `classRef` supplied one upstream),
-    /// this image is used. A per-resource `spec.image` always overrides it.
+    /// template omits `spec.image`, this image is used. A per-resource
+    /// `spec.image` always overrides it.
     /// `None` (unset / empty `AGENTCTL_DEFAULT_AGENT_IMAGE`) ⇒ `spec.image` is
     /// required, as before.
     pub default_agent_image: Option<String>,
@@ -298,8 +298,8 @@ pub enum Rendered {
 pub enum RenderError {
     /// The resource has no `.metadata.name`.
     MissingName,
-    /// No image to run: neither `spec.image`, a `classRef` (resolved upstream),
-    /// nor the operator's default agent image is set.
+    /// No image to run: neither `spec.image` nor the operator's default agent
+    /// image is set.
     MissingImage,
     /// A shard-mode fleet did not set `scaling.shards` (the partition count `N`).
     MissingShards,
@@ -1072,11 +1072,9 @@ fn agent_args(spec: &AgentSpec) -> Vec<String> {
         args.push("--subscribe".to_string());
         args.push(sub.clone());
     }
-    // Deliver the declared bounding box to the agent, so subagent-tree/step/token
-    // caps set on the CR reach agentd (which consumes these flags). `max_tokens` /
-    // `max_depth` / `max_steps` map to agentd flags; `tree_token_budget` has no
-    // agentd flag yet, so it is deliberately not emitted rather than passed to an
-    // unknown flag.
+    // Deliver the declared bounding box to the agent, so subagent step/token caps
+    // set on the CR reach agentd (which consumes these flags): `max_tokens`,
+    // `max_depth`, and `max_steps` each map to an agentd flag.
     if let Some(limits) = &spec.limits {
         if let Some(v) = limits.max_tokens {
             args.push("--max-tokens".to_string());
@@ -1683,7 +1681,6 @@ mod tests {
             max_tokens: Some(500_000),
             max_depth: Some(3),
             max_steps: Some(40),
-            tree_token_budget: Some(2_000_000), // no agentd flag yet → not emitted
         });
         let r = render_agent(&a, &cfg()).unwrap();
         let Rendered::Deployment(dep) = r else {
@@ -1693,13 +1690,6 @@ mod tests {
         assert!(has_arg_pair(&c, "--max-tokens", "500000"));
         assert!(has_arg_pair(&c, "--max-depth", "3"));
         assert!(has_arg_pair(&c, "--max-steps", "40"));
-        // tree_token_budget has no agentd flag; it must NOT be passed to an unknown one.
-        assert!(!c
-            .args
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|a| a == "--tree-token-budget"));
     }
 
     #[test]

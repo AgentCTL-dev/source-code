@@ -282,9 +282,6 @@ fn describe_agent(agent: &Agent, now: Timestamp) -> String {
         "Image:       {}\n",
         spec.image.as_deref().unwrap_or("-")
     ));
-    if let Some(class_ref) = &spec.class_ref {
-        out.push_str(&format!("Class:       {}\n", class_ref.name));
-    }
     out.push_str(&format!(
         "Model:       {}\n",
         spec.model.as_deref().unwrap_or("-")

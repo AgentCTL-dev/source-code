@@ -144,17 +144,6 @@ spec:
                             nullable: true
                             type: boolean
                         type: object
-                      classRef:
-                        description: |-
-                          Reference to an `AgentClass` supplying the ops profile + image. Mutually
-                          exclusive with `image`.
-                        nullable: true
-                        properties:
-                          name:
-                            type: string
-                        required:
-                        - name
-                        type: object
                       egress:
                         description: |-
                           **Declared capability**: the agent requests outbound network egress. The
@@ -171,26 +160,16 @@ spec:
                         type: boolean
                       image:
                         description: |-
-                          The conformant-agent image to run. When omitted (and no `classRef`
-                          supplies one), the operator falls back to its configured **default agent
-                          image** (`operator.defaultAgentImage` / `AGENTCTL_DEFAULT_AGENT_IMAGE`);
-                          an explicit value here always overrides that default. Mutually exclusive
-                          with `classRef`.
+                          The conformant-agent image to run. When omitted, the operator falls back
+                          to its configured **default agent image** (`operator.defaultAgentImage` /
+                          `AGENTCTL_DEFAULT_AGENT_IMAGE`); an explicit value here always overrides
+                          that default.
                         nullable: true
                         type: string
                       instruction:
                         description: Inline instruction. Required for non-reactive modes (CEL/admission).
                         nullable: true
                         type: string
-                      intelligenceRef:
-                        description: Reference to an `IntelligenceService`/`ModelPool`.
-                        nullable: true
-                        properties:
-                          name:
-                            type: string
-                        required:
-                        - name
-                        type: object
                       limits:
                         description: Resolved limits/budgets (override the agent defaults).
                         nullable: true
@@ -210,11 +189,6 @@ spec:
                             minimum: 0.0
                             nullable: true
                             type: integer
-                          treeTokenBudget:
-                            format: uint64
-                            minimum: 0.0
-                            nullable: true
-                            type: integer
                         type: object
                       loop:
                         description: Loop-mode cadence. Used only for `loop`.
@@ -230,16 +204,13 @@ spec:
                         required:
                         - interval
                         type: object
-                      mcpServerSetRefs:
-                        description: Reusable MCP server bundles (`MCPServerSet`).
+                      mcpServers:
+                        description: |-
+                          The reusable MCP tool-server bundles this agent binds, by `MCPServerSet`
+                          name (same namespace). The MCPGateway scopes the agent to exactly these
+                          servers and injects each one's credential off-pod.
                         items:
-                          description: A name-only reference to a sibling resource in the same namespace.
-                          properties:
-                            name:
-                              type: string
-                          required:
-                          - name
-                          type: object
+                          type: string
                         type: array
                       mode:
                         description: The run shape. Determines the rendered workload kind.
@@ -252,8 +223,8 @@ spec:
                         type: string
                       model:
                         description: |-
-                          The agent's declared model id (metadata; the real binding is via
-                          intelligence). Surfaced as a printer column.
+                          The agent's declared model id (metadata; the real binding is `modelPool`).
+                          Surfaced as a printer column.
                         nullable: true
                         type: string
                       modelPool:
@@ -477,17 +448,6 @@ spec:
                         nullable: true
                         type: boolean
                     type: object
-                  classRef:
-                    description: |-
-                      Reference to an `AgentClass` supplying the ops profile + image. Mutually
-                      exclusive with `image`.
-                    nullable: true
-                    properties:
-                      name:
-                        type: string
-                    required:
-                    - name
-                    type: object
                   egress:
                     description: |-
                       **Declared capability**: the agent requests outbound network egress. The
@@ -504,26 +464,16 @@ spec:
                     type: boolean
                   image:
                     description: |-
-                      The conformant-agent image to run. When omitted (and no `classRef`
-                      supplies one), the operator falls back to its configured **default agent
-                      image** (`operator.defaultAgentImage` / `AGENTCTL_DEFAULT_AGENT_IMAGE`);
-                      an explicit value here always overrides that default. Mutually exclusive
-                      with `classRef`.
+                      The conformant-agent image to run. When omitted, the operator falls back
+                      to its configured **default agent image** (`operator.defaultAgentImage` /
+                      `AGENTCTL_DEFAULT_AGENT_IMAGE`); an explicit value here always overrides
+                      that default.
                     nullable: true
                     type: string
                   instruction:
                     description: Inline instruction. Required for non-reactive modes (CEL/admission).
                     nullable: true
                     type: string
-                  intelligenceRef:
-                    description: Reference to an `IntelligenceService`/`ModelPool`.
-                    nullable: true
-                    properties:
-                      name:
-                        type: string
-                    required:
-                    - name
-                    type: object
                   limits:
                     description: Resolved limits/budgets (override the agent defaults).
                     nullable: true
@@ -543,11 +493,6 @@ spec:
                         minimum: 0.0
                         nullable: true
                         type: integer
-                      treeTokenBudget:
-                        format: uint64
-                        minimum: 0.0
-                        nullable: true
-                        type: integer
                     type: object
                   loop:
                     description: Loop-mode cadence. Used only for `loop`.
@@ -563,16 +508,13 @@ spec:
                     required:
                     - interval
                     type: object
-                  mcpServerSetRefs:
-                    description: Reusable MCP server bundles (`MCPServerSet`).
+                  mcpServers:
+                    description: |-
+                      The reusable MCP tool-server bundles this agent binds, by `MCPServerSet`
+                      name (same namespace). The MCPGateway scopes the agent to exactly these
+                      servers and injects each one's credential off-pod.
                     items:
-                      description: A name-only reference to a sibling resource in the same namespace.
-                      properties:
-                        name:
-                          type: string
-                      required:
-                      - name
-                      type: object
+                      type: string
                     type: array
                   mode:
                     description: The run shape. Determines the rendered workload kind.
@@ -585,8 +527,8 @@ spec:
                     type: string
                   model:
                     description: |-
-                      The agent's declared model id (metadata; the real binding is via
-                      intelligence). Surfaced as a printer column.
+                      The agent's declared model id (metadata; the real binding is `modelPool`).
+                      Surfaced as a printer column.
                     nullable: true
                     type: string
                   modelPool:

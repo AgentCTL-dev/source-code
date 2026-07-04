@@ -8,7 +8,7 @@
 //! 1. **attests** the calling agent by its (unforgeable) source IP → `(ns,
 //!    agent)`, exactly as the ModelGateway does;
 //! 2. **scopes** it to only the servers of the `MCPServerSet`s its `Agent` CR
-//!    binds (`spec.mcpServerSetRefs`) — the peer→Agent→allowed-servers
+//!    binds (`spec.mcpServers`) — the peer→Agent→allowed-servers
 //!    authorization, so one tenant cannot reach another's tool server;
 //! 3. **injects** the server's credential (read from a `Secret`, held off-pod)
 //!    onto the upstream hop;
@@ -24,7 +24,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_api::{Agent, AgentFleet, LocalRef, MCPServerSet, McpAuthMode, McpServer};
+use agent_api::{Agent, AgentFleet, MCPServerSet, McpAuthMode, McpServer};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -259,13 +259,13 @@ async fn identity_for_ip(client: &Client, ip: IpAddr) -> Option<(String, String)
 }
 
 /// Find the server named `server_name` among the `MCPServerSet`s the caller binds
-/// (`spec.mcpServerSetRefs`) — the authorization scope. `Ok(None)` ⇒ the caller is
+/// (`spec.mcpServers`) — the authorization scope. `Ok(None)` ⇒ the caller is
 /// not bound to a server of that name (reject with 403, not a 502).
 ///
 /// The attested caller (`agentctl.dev/agent=<name>`) is EITHER a singleton `Agent`
 /// OR an `AgentFleet` member — fleet pods carry the FLEET name in that label and the
 /// operator creates no per-member `Agent` CR, so a fleet's tool calls must resolve
-/// their bindings from `AgentFleet.spec.template.mcpServerSetRefs`. Without this
+/// their bindings from `AgentFleet.spec.template.mcpServers`. Without this
 /// fallback every tool call from a fleet 404s the Agent lookup and 502s.
 async fn resolve_bound_server(
     client: &Client,
@@ -279,12 +279,12 @@ async fn resolve_bound_server(
     };
     let sets: Api<MCPServerSet> = Api::namespaced(client.clone(), ns);
     for r in &refs {
-        let set = match sets.get(&r.name).await {
+        let set = match sets.get(r).await {
             Ok(s) => s,
             // A dangling ref is a config error, not this caller's fault — skip it
             // (another ref may still carry the server) but log.
             Err(e) => {
-                tracing::warn!(%ns, set = %r.name, error = %e, "bound MCPServerSet not found");
+                tracing::warn!(%ns, set = %r, error = %e, "bound MCPServerSet not found");
                 continue;
             }
         };
@@ -295,7 +295,7 @@ async fn resolve_bound_server(
     Ok(None)
 }
 
-/// Load the caller's `mcpServerSetRefs` from its `Agent` CR, falling back to an
+/// Load the caller's `mcpServers` from its `Agent` CR, falling back to an
 /// `AgentFleet`'s `spec.template` when no `Agent` of that name exists (the fleet
 /// case). `Ok(None)` ⇒ neither exists (a 404 is NOT a gateway error — it means the
 /// caller is bound to nothing and should be rejected 403, not 502).
@@ -303,16 +303,16 @@ async fn load_binding_refs(
     client: &Client,
     ns: &str,
     name: &str,
-) -> Result<Option<Vec<LocalRef>>, String> {
+) -> Result<Option<Vec<String>>, String> {
     let agents: Api<Agent> = Api::namespaced(client.clone(), ns);
     match agents.get(name).await {
-        Ok(a) => return Ok(Some(a.spec.mcp_server_set_refs)),
+        Ok(a) => return Ok(Some(a.spec.mcp_servers)),
         Err(kube::Error::Api(ae)) if ae.code == 404 => { /* not a singleton Agent → try Fleet */ }
         Err(e) => return Err(format!("get Agent {ns}/{name}: {e}")),
     }
     let fleets: Api<AgentFleet> = Api::namespaced(client.clone(), ns);
     match fleets.get(name).await {
-        Ok(f) => Ok(Some(f.spec.template.mcp_server_set_refs)),
+        Ok(f) => Ok(Some(f.spec.template.mcp_servers)),
         Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
         Err(e) => Err(format!("get AgentFleet {ns}/{name}: {e}")),
     }

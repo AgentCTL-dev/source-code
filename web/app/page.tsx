@@ -128,7 +128,7 @@ spec:
   image: ${AGENTD_IMAGE}
   mode: reactive
   modelPool: gpt          # keyless — the ModelGateway holds the key
-  mcpServerSetRefs: [tools] # brokered — no tool credential on the pod
+  mcpServers: [tools] # brokered — no tool credential on the pod
 
 # the operator renders a restricted-PSS pod that:
 #   serves  https://0.0.0.0:8443/mcp   (mTLS, per-workload cert)

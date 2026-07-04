@@ -35,7 +35,7 @@ I run a one-node cluster in a closet and I want a personal assistant that wakes 
 
 1. Define one ModelPool pointing at your LLM provider, with a tight budget.maxTokens. The modelgateway attests the agent, injects the provider key OFF-POD on each call, meters tokens, and returns a 429 when the budget is spent — so a runaway loop caps your spend instead of your credit card.
 2. Define one MCPServerSet with the one or two tools the assistant needs (e.g. an inbox/reader server and a notify/write server). Each server's token lives in a Secret the mcpgateway reads; the agent is scoped to only these servers and holds NO tool credential.
-3. Declare a reactive Agent (mode: reactive) that binds the pool via spec.modelPool and the tools via mcpServerSetRefs, and lists its event sources in subscribe (MCP resource URIs like inbox://unread or hook://intake). The operator renders it to a single-replica Deployment that idles and wakes on those subscribed resources.
+3. Declare a reactive Agent (mode: reactive) that binds the pool via spec.modelPool and the tools via mcpServers, and lists its event sources in subscribe (MCP resource URIs like inbox://unread or hook://intake). The operator renders it to a single-replica Deployment that idles and wakes on those subscribed resources.
 4. The reactive agent triages each event with its instruction, then acts through exactly one or two bound MCP tools via the gateway — no exec, no egress, no secrets declared, so it never trips the lethal-trifecta admission gate.
 5. Add a second on-demand Agent in mode: once for deeper research. The operator renders it to a Job; kubectl apply it (or delete + re-apply) when you want a one-shot run, and it terminates to zero when done.
 6. Everything is secret-free on the pod, mTLS on the Management surface, restricted-PSS, and metered by budget. At rest the reactive Deployment is a single idle pod and the once Job is nothing at all — near-zero cost until an event actually arrives.
@@ -108,8 +108,8 @@ spec:
   image: ghcr.io/agentd-dev/agentd:1.0.0
   instruction: "Triage each incoming item. Classify urgency, draft a one-line action, and post a summary via the notify tool. Do nothing else."
   modelPool: home-pool
-  mcpServerSetRefs:
-    - name: home-tools
+  mcpServers:
+    - home-tools
   subscribe: ["inbox://unread", "hook://intake"]
   surfaces:
     metrics: true
@@ -127,8 +127,8 @@ spec:
   image: ghcr.io/agentd-dev/agentd:1.0.0
   instruction: "Research the topic in /data/topic.txt and write a cited brief to /data/brief.md"
   modelPool: home-pool
-  mcpServerSetRefs:
-    - name: home-tools
+  mcpServers:
+    - home-tools
   limits:
     maxTokens: 120000
 ```
@@ -230,8 +230,8 @@ spec:
     image: ghcr.io/agentd-dev/agentd:1.0.0
     instruction: "Classify the ticket, apply tags, draft a customer reply, and escalate anything you are not confident resolving."
     modelPool: support-llm
-    mcpServerSetRefs:
-      - name: helpdesk-tools
+    mcpServers:
+      - helpdesk-tools
     subscribe: ["queue://tickets"]
     surfaces:
       metrics: true
@@ -348,8 +348,8 @@ spec:
     image: ghcr.io/agentd-dev/agentd:1.0.0
     instruction: "Review the claimed PR diff; run code-search and static checks via the git-codesearch tool; post findings as the work result."
     modelPool: review-pool
-    mcpServerSetRefs:
-      - name: code-tools
+    mcpServers:
+      - code-tools
     subscribe: ["queue://pr-review"]
     surfaces:
       a2a: true
@@ -395,7 +395,7 @@ We run content + CRM chores for a dozen clients. Every night I want SEO drafts w
 
 1. Declare a ModelPool `content-llm` pointing at your provider, with `credentialSecretRef` naming a Secret and `budget.maxTokens` set to a hard cumulative cap. The modelgateway holds the key, meters every call, and returns a 429 the moment the pool crosses the cap — agents dial it keyless and never mount the provider Secret.
 2. Declare one MCPServerSet `content-tools` bundling two `servers[]`: your CMS MCP server and your CRM MCP server, each with `auth.mode: staticToken` and a `tokenSecretRef`. The mcpgateway injects each server's token off-pod and scopes each agent to only the servers it binds.
-3. Declare schedule-mode Agents (one per job) with `mode: schedule`, `image: ghcr.io/agentd-dev/agentd:1.0.0`, an `instruction`, `modelPool: content-llm`, and `mcpServerSetRefs: [{ name: content-tools }]`. The operator renders each to a Kubernetes CronJob.
+3. Declare schedule-mode Agents (one per job) with `mode: schedule`, `image: ghcr.io/agentd-dev/agentd:1.0.0`, an `instruction`, `modelPool: content-llm`, and `mcpServers: [{ name: content-tools }]`. The operator renders each to a Kubernetes CronJob.
 4. Each night the CronJob fires a fresh Pod, the agent runs its instruction against the CMS/CRM tools through the mcpgateway and the model through the modelgateway, then exits. A CronJob runs no Pods between fires, so idle cost is nothing beyond the control plane.
 5. Set a per-agent belt-and-suspenders cap with `limits.maxTokens` (and `maxSteps` to bound tool-call loops) so a single misbehaving run self-limits before it even touches the pool ceiling.
 6. When the pool budget is exhausted, the modelgateway returns 429; the in-flight run fails cleanly and the next night's run resumes once you raise the cap or the budget window resets. Watch `ModelPool.status.usedTokens` against `spec.budget.maxTokens` via `kubectl get mp`.
@@ -467,7 +467,7 @@ spec:
   image: ghcr.io/agentd-dev/agentd:1.0.0
   instruction: "For each client topic queue in the CMS, draft an SEO article and save it as a draft post."
   modelPool: content-llm
-  mcpServerSetRefs: [{ name: content-tools }]
+  mcpServers: [content-tools]
   limits: { maxTokens: 2000000, maxSteps: 60 }
 ---
 apiVersion: agentctl.dev/v1alpha1
@@ -481,7 +481,7 @@ spec:
   image: ghcr.io/agentd-dev/agentd:1.0.0
   instruction: "Summarize leads created since yesterday and enrich each CRM record with the summary and firmographics."
   modelPool: content-llm
-  mcpServerSetRefs: [{ name: content-tools }]
+  mcpServers: [content-tools]
   limits: { maxTokens: 2000000, maxSteps: 60 }
 ```
 
@@ -562,7 +562,7 @@ spec:
     image: ghcr.io/agentd-dev/agentd:1.0.0
     instruction: "Claim a record, classify + embed it, write results back, ack."
     modelPool: enrich-pool
-    mcpServerSetRefs: [{ name: datastore-tools }]
+    mcpServers: [datastore-tools]
     subscribe: ["queue://records-backfill"]
     surfaces: { metrics: true }
     limits: { maxTokens: 8000 }
@@ -585,7 +585,7 @@ spec:
     image: ghcr.io/agentd-dev/agentd:1.0.0
     instruction: "Own your partition of sources; enrich new records as they arrive."
     modelPool: enrich-pool
-    mcpServerSetRefs: [{ name: datastore-tools }]
+    mcpServers: [datastore-tools]
     subscribe: ["queue://sources"]
     surfaces: { metrics: true }
   scaling:
@@ -614,7 +614,7 @@ Our deal-desk process has four stages — intake, research, draft, compliance-re
 
 **How it works**
 
-1. Model each stage as its own agent bound to ONLY the tools that stage needs (via mcpServerSetRefs), so the drafting agent literally cannot reach CRM or policy tools — least privilege is a binding, not a convention.
+1. Model each stage as its own agent bound to ONLY the tools that stage needs (via mcpServers), so the drafting agent literally cannot reach CRM or policy tools — least privilege is a binding, not a convention.
 2. Chain the stages over the coordination work fabric: each stage subscribes to its input queue (queue://cases -> queue://research -> queue://drafting -> queue://compliance) and, when done, submits the next stage's work item via work.submit. The queue topology IS the process graph — no orchestrator script.
 3. Run stage 1 (intake) as a CLAIM-mode AgentFleet with min 0: KEDA scales workers from ZERO on the case backlog and back to zero when idle; workers lease exactly-one-owner claims (claimTtlMs) and poison cases dead-letter to dlq://items after maxAttempts. Leave workSource UNSET so the scaler reads the coordination backlog (a queue:// workSource would break scaler activation).
 4. Run stages 2-4 (research/draft/compliance) as long-lived reactive Agents, each bound to its own MCPServerSet; the mcpgateway attests each agent, scopes it to only its bound servers, and injects each server's credential OFF-POD (crm's staticToken lives at the gateway, never on the pod).
@@ -706,7 +706,7 @@ spec:
   instruction: "Research the case with CRM tools; submit the result to queue://drafting."
   subscribe: ["queue://research"]
   modelPool: process-brain
-  mcpServerSetRefs: [{ name: research-tools }]
+  mcpServers: [research-tools]
   surfaces: { a2a: true, metrics: true }
 ---
 apiVersion: agentctl.dev/v1alpha1
@@ -718,7 +718,7 @@ spec:
   instruction: "Draft the deal doc from the research; submit it to queue://compliance."
   subscribe: ["queue://drafting"]
   modelPool: process-brain
-  mcpServerSetRefs: [{ name: drafting-tools }]
+  mcpServers: [drafting-tools]
   surfaces: { a2a: true, metrics: true }
 ---
 apiVersion: agentctl.dev/v1alpha1
@@ -730,7 +730,7 @@ spec:
   instruction: "Compliance-review the draft against policy; emit the terminal result."
   subscribe: ["queue://compliance"]
   modelPool: process-brain
-  mcpServerSetRefs: [{ name: compliance-tools }]
+  mcpServers: [compliance-tools]
   surfaces: { a2a: true, metrics: true }
 ```
 
@@ -832,8 +832,8 @@ spec:
   image: ghcr.io/agentd-dev/agentd:1.0.0   # must match admission allow-list
   instruction: "Customer-authored, untrusted."
   modelPool: acme-pool
-  mcpServerSetRefs:
-    - name: acme-tools
+  mcpServers:
+    - acme-tools
   subscribe: ["mcp://acme-crm/tickets"]
   surfaces:
     a2a: true

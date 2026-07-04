@@ -29,7 +29,7 @@ spec:
           spec:
             description: |-
               A reusable, namespaced bundle of MCP tool servers an `Agent`/`AgentFleet`
-              binds via `spec.mcpServerSetRefs`. Agents hold **NO tool-server
+              binds via `spec.mcpServers`. Agents hold **NO tool-server
               credentials**: they never hold a tool server's token. The
               control plane brokers every remote MCP server through a credential-injecting,
               attesting, policy-enforcing proxy (the `MCPGateway`, the tool-plane analog of
