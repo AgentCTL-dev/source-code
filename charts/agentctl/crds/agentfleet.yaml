@@ -6,7 +6,8 @@ metadata:
 spec:
   group: agentctl.dev
   names:
-    categories: []
+    categories:
+    - agentctl
     kind: AgentFleet
     plural: agentfleets
     shortNames:
@@ -89,9 +90,9 @@ spec:
                     properties:
                       access:
                         description: |-
-                          Declarative per-agent access policy (authn/authz at the A2A gateway).
-                          `public` is documentation-only; `oidc` configures JWT verification and
-                          claim-based authorization for inbound A2A calls.
+                          Declarative per-agent access policy (authn/authz at the A2A gateway):
+                          `oidc` configures JWT verification and claim-based authorization for
+                          inbound A2A calls. Exposure itself is governed by `surfaces.a2a`.
                         nullable: true
                         properties:
                           oidc:
@@ -137,27 +138,39 @@ spec:
                             required:
                             - issuer
                             type: object
-                          public:
+                        type: object
+                      capabilities:
+                        description: |-
+                          The privileged capability grants — `exec` / `egress` / `secrets` — the
+                          admission gate evaluates **as a union** (the lethal trifecta). Grouped so
+                          the grants read as one reviewable block (mirrors k8s `securityContext`).
+                          **Declared intent, enforced at admission only**: the operator does not
+                          itself mount the `Secret`s, drive the egress `NetworkPolicy`, or pass
+                          `exec` to the agent.
+                        nullable: true
+                        properties:
+                          egress:
                             description: |-
-                              Whether this agent is served publicly via the A2A gateway. Documentation-
-                              only (no enforcement yet); records intent.
+                              The agent requests outbound network egress. Declared intent; gated at
+                              admission (a trifecta leg), never wired by the operator.
                             nullable: true
                             type: boolean
+                          exec:
+                            description: |-
+                              The agent requests in-sandbox command execution. Declared intent; gated at
+                              admission (a privileged trifecta leg), never wired by the operator.
+                            nullable: true
+                            type: boolean
+                          secrets:
+                            description: |-
+                              The namespace-local `Secret` names the agent may read. Declared intent;
+                              each name is validated at admission (a trifecta leg); the operator does
+                              not itself mount them.
+                            items:
+                              type: string
+                            nullable: true
+                            type: array
                         type: object
-                      egress:
-                        description: |-
-                          **Declared capability**: the agent requests outbound network egress. The
-                          admission webhook gates this — combined with `exec` and `secrets` it forms
-                          the lethal trifecta and triggers the override gate.
-                        nullable: true
-                        type: boolean
-                      exec:
-                        description: |-
-                          **Declared capability**: the agent requests in-sandbox command execution.
-                          The admission webhook gates this — it is a privileged capability and one
-                          leg of the lethal trifecta, never granted implicitly.
-                        nullable: true
-                        type: boolean
                       image:
                         description: |-
                           The conformant-agent image to run. When omitted, the operator falls back
@@ -223,17 +236,25 @@ spec:
                         type: string
                       model:
                         description: |-
-                          The agent's declared model id (metadata; the real binding is `modelPool`).
-                          Surfaced as a printer column.
+                          The intelligence binding: `pool` names the `ModelPool` this agent draws
+                          keyless model access from (the admission-validated binding), and `id` is
+                          the model chosen within that pool (metadata/default).
                         nullable: true
-                        type: string
-                      modelPool:
-                        description: |-
-                          **Declared capability**: the `ModelPool` this agent binds for model access.
-                          The admission webhook validates the binding (the pool exists / is permitted
-                          for this tenant).
-                        nullable: true
-                        type: string
+                        properties:
+                          id:
+                            description: |-
+                              The model id to request within the pool. Metadata/default — when unset the
+                              pool's own `defaultModel` applies. Surfaced as a printer column.
+                            nullable: true
+                            type: string
+                          pool:
+                            description: |-
+                              The `ModelPool` (same namespace) this agent binds for model access. The
+                              admission webhook validates it (the pool exists / is permitted for this
+                              tenant). This is the real, load-bearing binding.
+                            nullable: true
+                            type: string
+                        type: object
                       schedule:
                         description: Schedule-mode cron. Used only for `schedule`.
                         nullable: true
@@ -246,15 +267,6 @@ spec:
                         required:
                         - cron
                         type: object
-                      secrets:
-                        description: |-
-                          **Declared capability**: the names of namespace-local `Secret`s the agent
-                          may read. The admission webhook validates each requested name against
-                          policy; access to untrusted private data is a trifecta leg.
-                        items:
-                          type: string
-                        nullable: true
-                        type: array
                       subscribe:
                         description: Reactive-mode subscriptions (MCP resource URIs). Required for `reactive`.
                         items:
@@ -325,6 +337,10 @@ spec:
                       rule: self.mode != 'schedule' || has(self.schedule)
                     - message: workflow is required when mode is 'workflow'
                       rule: self.mode != 'workflow' || has(self.workflow)
+                    - message: instruction is required for once/loop/schedule modes
+                      rule: self.mode == 'reactive' || self.mode == 'workflow' || has(self.instruction)
+                    - message: reactive mode requires subscribe, a workflow, or the a2a surface (a wake source)
+                      rule: self.mode != 'reactive' || (has(self.subscribe) && self.subscribe.size() > 0) || has(self.workflow) || (has(self.surfaces) && has(self.surfaces.a2a) && self.surfaces.a2a)
                 required:
                 - template
                 type: object
@@ -341,13 +357,13 @@ spec:
               scaling:
                 description: The **worker** scaling regime.
                 properties:
-                  max:
+                  maxReplicas:
                     description: 'Claim mode: maximum replicas.'
                     format: uint32
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  min:
+                  minReplicas:
                     description: 'Claim mode: minimum replicas (KEDA-elastic range). Unset ⇒ may scale to 0.'
                     format: uint32
                     minimum: 0.0
@@ -373,7 +389,7 @@ spec:
                       operator maps onto the negotiated metrics schema).
                     nullable: true
                     properties:
-                      signal:
+                      metric:
                         description: |-
                           A contract-neutral metric token (mapped onto the negotiated metrics
                           schema by the operator — never the branded literal).
@@ -382,7 +398,7 @@ spec:
                         description: The per-replica target value KEDA scales toward.
                         type: string
                     required:
-                    - signal
+                    - metric
                     - value
                     type: object
                 required:
@@ -393,9 +409,9 @@ spec:
                 properties:
                   access:
                     description: |-
-                      Declarative per-agent access policy (authn/authz at the A2A gateway).
-                      `public` is documentation-only; `oidc` configures JWT verification and
-                      claim-based authorization for inbound A2A calls.
+                      Declarative per-agent access policy (authn/authz at the A2A gateway):
+                      `oidc` configures JWT verification and claim-based authorization for
+                      inbound A2A calls. Exposure itself is governed by `surfaces.a2a`.
                     nullable: true
                     properties:
                       oidc:
@@ -441,27 +457,39 @@ spec:
                         required:
                         - issuer
                         type: object
-                      public:
+                    type: object
+                  capabilities:
+                    description: |-
+                      The privileged capability grants — `exec` / `egress` / `secrets` — the
+                      admission gate evaluates **as a union** (the lethal trifecta). Grouped so
+                      the grants read as one reviewable block (mirrors k8s `securityContext`).
+                      **Declared intent, enforced at admission only**: the operator does not
+                      itself mount the `Secret`s, drive the egress `NetworkPolicy`, or pass
+                      `exec` to the agent.
+                    nullable: true
+                    properties:
+                      egress:
                         description: |-
-                          Whether this agent is served publicly via the A2A gateway. Documentation-
-                          only (no enforcement yet); records intent.
+                          The agent requests outbound network egress. Declared intent; gated at
+                          admission (a trifecta leg), never wired by the operator.
                         nullable: true
                         type: boolean
+                      exec:
+                        description: |-
+                          The agent requests in-sandbox command execution. Declared intent; gated at
+                          admission (a privileged trifecta leg), never wired by the operator.
+                        nullable: true
+                        type: boolean
+                      secrets:
+                        description: |-
+                          The namespace-local `Secret` names the agent may read. Declared intent;
+                          each name is validated at admission (a trifecta leg); the operator does
+                          not itself mount them.
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
                     type: object
-                  egress:
-                    description: |-
-                      **Declared capability**: the agent requests outbound network egress. The
-                      admission webhook gates this — combined with `exec` and `secrets` it forms
-                      the lethal trifecta and triggers the override gate.
-                    nullable: true
-                    type: boolean
-                  exec:
-                    description: |-
-                      **Declared capability**: the agent requests in-sandbox command execution.
-                      The admission webhook gates this — it is a privileged capability and one
-                      leg of the lethal trifecta, never granted implicitly.
-                    nullable: true
-                    type: boolean
                   image:
                     description: |-
                       The conformant-agent image to run. When omitted, the operator falls back
@@ -527,17 +555,25 @@ spec:
                     type: string
                   model:
                     description: |-
-                      The agent's declared model id (metadata; the real binding is `modelPool`).
-                      Surfaced as a printer column.
+                      The intelligence binding: `pool` names the `ModelPool` this agent draws
+                      keyless model access from (the admission-validated binding), and `id` is
+                      the model chosen within that pool (metadata/default).
                     nullable: true
-                    type: string
-                  modelPool:
-                    description: |-
-                      **Declared capability**: the `ModelPool` this agent binds for model access.
-                      The admission webhook validates the binding (the pool exists / is permitted
-                      for this tenant).
-                    nullable: true
-                    type: string
+                    properties:
+                      id:
+                        description: |-
+                          The model id to request within the pool. Metadata/default — when unset the
+                          pool's own `defaultModel` applies. Surfaced as a printer column.
+                        nullable: true
+                        type: string
+                      pool:
+                        description: |-
+                          The `ModelPool` (same namespace) this agent binds for model access. The
+                          admission webhook validates it (the pool exists / is permitted for this
+                          tenant). This is the real, load-bearing binding.
+                        nullable: true
+                        type: string
+                    type: object
                   schedule:
                     description: Schedule-mode cron. Used only for `schedule`.
                     nullable: true
@@ -550,15 +586,6 @@ spec:
                     required:
                     - cron
                     type: object
-                  secrets:
-                    description: |-
-                      **Declared capability**: the names of namespace-local `Secret`s the agent
-                      may read. The admission webhook validates each requested name against
-                      policy; access to untrusted private data is a trifecta leg.
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
                   subscribe:
                     description: Reactive-mode subscriptions (MCP resource URIs). Required for `reactive`.
                     items:
@@ -629,35 +656,44 @@ spec:
                   rule: self.mode != 'schedule' || has(self.schedule)
                 - message: workflow is required when mode is 'workflow'
                   rule: self.mode != 'workflow' || has(self.workflow)
-              workPolicy:
+                - message: instruction is required for once/loop/schedule modes
+                  rule: self.mode == 'reactive' || self.mode == 'workflow' || has(self.instruction)
+                - message: reactive mode requires subscribe, a workflow, or the a2a surface (a wake source)
+                  rule: self.mode != 'reactive' || (has(self.subscribe) && self.subscribe.size() > 0) || has(self.workflow) || (has(self.surfaces) && has(self.surfaces.a2a) && self.surfaces.a2a)
+              work:
                 description: |-
-                  Work-fabric policy for this fleet's items: dead-letter threshold and the
-                  default lease TTL. Absent ⇒ unbounded redelivery + server-default TTL.
+                  The fleet's shared **work fabric**: the work source (an MCP resource URI
+                  for claim/shard distribution) plus the redelivery/lease policy the
+                  operator advertises to the coordinator. Absent ⇒ no shared source +
+                  server-default redelivery/TTL.
                 nullable: true
                 properties:
-                  claimTtlMs:
+                  claimTtl:
                     description: |-
-                      Default lease TTL (ms) the operator advertises to workers for this fleet's
-                      claims. Absent ⇒ the agent/server default.
-                    format: uint64
-                    minimum: 0.0
+                      Default claim lease TTL as a Go-duration string (e.g. `"30s"`), matching
+                      `loop.interval` / `loop.deadline`. Absent ⇒ the server default. Delivered
+                      to the coordinator as `AGENT_FLEET_CLAIM_TTL`.
                     nullable: true
-                    type: integer
+                    type: string
                   maxAttempts:
                     description: |-
                       Dead-letter an item after it has been redelivered this many times without
                       a terminal `ack`. Absent ⇒ unbounded redelivery. A poison item is moved to
                       the `deadletter` state (surfaced at `dlq://items`) instead of cycling
-                      forever.
+                      forever. Delivered to the coordinator as `AGENT_FLEET_MAX_ATTEMPTS`, which
+                      a conformant coordinator stamps onto each `work.submit`.
                     format: uint32
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  source:
+                    description: |-
+                      The shared work source — an MCP resource URI (e.g. `queue://jobs`) for
+                      claim/shard distribution. The operator delivers it to the coordinator
+                      (as `AGENT_FLEET_WORKSOURCE`) and to the KEDA scaler's backlog probe.
+                    nullable: true
+                    type: string
                 type: object
-              workSource:
-                description: The shared work source (an MCP resource URI) for claim/shard distribution.
-                nullable: true
-                type: string
             required:
             - scaling
             - template

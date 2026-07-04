@@ -6,7 +6,8 @@ metadata:
 spec:
   group: agentctl.dev
   names:
-    categories: []
+    categories:
+    - agentctl
     kind: ModelPool
     plural: modelpools
     shortNames:
@@ -28,6 +29,9 @@ spec:
     - jsonPath: .status.usedTokens
       name: Used
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -100,6 +104,37 @@ spec:
             description: '`ModelPool.status` — running meter against the pool''s budget.'
             nullable: true
             properties:
+              conditions:
+                description: |-
+                  Health conditions (`Ready`, …); shares the `conditions` + `Ready`-column
+                  idiom with `Agent`/`AgentFleet`.
+                items:
+                  description: A status condition. Mirrors `metav1.Condition` shape.
+                  properties:
+                    lastTransitionTime:
+                      description: An ISO 8601 / UTC timestamp.
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`"True"` | `"False"` | `"Unknown"`.'
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
               usedTokens:
                 description: Total tokens consumed against the pool so far.
                 format: int64

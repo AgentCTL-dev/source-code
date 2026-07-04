@@ -54,7 +54,7 @@ struct GetArgs {
     /// List across all namespaces (adds a NAMESPACE column).
     #[arg(short = 'A', long = "all-namespaces")]
     all_namespaces: bool,
-    /// Output format. Only `wide` is supported (adds the MODEL column).
+    /// Output format. Only `wide` is supported (adds the POOL column).
     #[arg(short = 'o', long = "output")]
     output: Option<String>,
 }
@@ -202,7 +202,7 @@ fn format_age(now: Timestamp, creation: Timestamp) -> String {
     format!("{}y", days / 365)
 }
 
-/// One table row for an agent, in printer-column order: NAME, MODE, [MODEL when
+/// One table row for an agent, in printer-column order: NAME, MODE, [POOL when
 /// `wide`], READY, PHASE, AGE. NAMESPACE (for `-A`) is prepended by the caller.
 fn get_row(agent: &Agent, now: Timestamp, wide: bool) -> Vec<String> {
     let ready = agent.status.as_ref().map_or("-", ready_of).to_string();
@@ -213,7 +213,15 @@ fn get_row(agent: &Agent, now: Timestamp, wide: bool) -> Vec<String> {
 
     let mut row = vec![agent.name_any(), mode_str(agent.spec.mode).to_string()];
     if wide {
-        row.push(agent.spec.model.clone().unwrap_or_else(|| "-".to_string()));
+        // Surface the real binding (the ModelPool), not the decorative model id.
+        row.push(
+            agent
+                .spec
+                .model
+                .as_ref()
+                .and_then(|m| m.pool.clone())
+                .unwrap_or_else(|| "-".to_string()),
+        );
     }
     row.push(ready);
     row.push(phase);
@@ -230,7 +238,7 @@ fn header_row(wide: bool, all_ns: bool) -> Vec<String> {
     h.push("NAME".to_string());
     h.push("MODE".to_string());
     if wide {
-        h.push("MODEL".to_string());
+        h.push("POOL".to_string());
     }
     h.push("READY".to_string());
     h.push("PHASE".to_string());
@@ -283,8 +291,18 @@ fn describe_agent(agent: &Agent, now: Timestamp) -> String {
         spec.image.as_deref().unwrap_or("-")
     ));
     out.push_str(&format!(
+        "Model Pool:  {}\n",
+        spec.model
+            .as_ref()
+            .and_then(|m| m.pool.as_deref())
+            .unwrap_or("-")
+    ));
+    out.push_str(&format!(
         "Model:       {}\n",
-        spec.model.as_deref().unwrap_or("-")
+        spec.model
+            .as_ref()
+            .and_then(|m| m.id.as_deref())
+            .unwrap_or("-")
     ));
     out.push_str(&format!(
         "Substrate:   {}\n",
@@ -348,7 +366,7 @@ fn wants_wide(output: Option<&str>) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_api::{AgentSpec, Condition, ContractStatus};
+    use agent_api::{AgentSpec, Condition, ContractStatus, ModelBinding};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 
     /// A fixed reference instant (2023-11-14T22:13:20Z) for clock-free tests.
@@ -430,7 +448,10 @@ mod tests {
             "demo",
             AgentSpec {
                 mode: Mode::Reactive,
-                model: Some("frontier-1".to_string()),
+                model: Some(ModelBinding {
+                    pool: Some("gpt".to_string()),
+                    id: Some("frontier-1".to_string()),
+                }),
                 ..Default::default()
             },
         );
@@ -444,10 +465,11 @@ mod tests {
         let narrow = get_row(&a, now, false);
         assert_eq!(narrow, vec!["demo", "reactive", "True", "Running", "2d"]);
 
+        // The wide column surfaces the ModelPool binding (pool), not the id.
         let wide = get_row(&a, now, true);
         assert_eq!(
             wide,
-            vec!["demo", "reactive", "frontier-1", "True", "Running", "2d"]
+            vec!["demo", "reactive", "gpt", "True", "Running", "2d"]
         );
     }
 
@@ -487,7 +509,10 @@ mod tests {
             AgentSpec {
                 mode: Mode::Loop,
                 image: Some("ghcr.io/example/agent:1".to_string()),
-                model: Some("frontier-1".to_string()),
+                model: Some(ModelBinding {
+                    pool: Some("gpt".to_string()),
+                    id: Some("frontier-1".to_string()),
+                }),
                 substrate: Some(Substrate::StockUnix),
                 ..Default::default()
             },

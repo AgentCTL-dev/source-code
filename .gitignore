@@ -1,3 +1,5 @@
 /target
+# the workspace-excluded e2e crate builds into its own target dir
+/crates/agentctl-e2e/target
 **/*.rs.bk
 Cargo.lock.orig

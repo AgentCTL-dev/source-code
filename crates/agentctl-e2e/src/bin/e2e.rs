@@ -29,7 +29,8 @@ use clap::Parser;
 use serde_json::{json, Value};
 
 use agent_api::{
-    Agent, AgentFleet, AgentFleetSpec, AgentSpec, Mode, ScaleMode, ScaleTarget, Scaling,
+    Agent, AgentFleet, AgentFleetSpec, AgentSpec, ModelBinding, Mode, ScaleMode, ScaleTarget,
+    Scaling, Work,
 };
 use agentctl_e2e::{contract, kube_helpers as kh, prom, shell, Ctx};
 
@@ -253,7 +254,7 @@ fn scrape(ctx: &Ctx, svc: &str, port: u16, scheme: &str) -> Result<prom::Metrics
 /// renders a keyless `INTELLIGENCE=https://<modelgateway>…` endpoint and mounts
 /// the per-namespace CA. agentd validates the intelligence endpoint at boot in every
 /// mode (`once` infers immediately; a reactive/shard daemon dials it only when it does
-/// work), so a bound `modelPool` is enough.
+/// work), so a bound `model.pool` is enough.
 fn agentd_agent(ctx: &Ctx, name: &str, mode: Mode, instruction: &str) -> Agent {
     let mut a = Agent::new(
         name,
@@ -579,7 +580,10 @@ async fn intel_once_infer(ctx: &Ctx) -> Result<Outcome> {
 
     let name = "e2e-infer";
     let mut agent = agentd_agent(ctx, name, Mode::Once, "summarize: hello world");
-    agent.spec.model_pool = Some("mockpool".to_string());
+    agent.spec.model = Some(ModelBinding {
+        pool: Some("mockpool".to_string()),
+        id: None,
+    });
     kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     // The Agent's Ready can flip true before the Job pod actually infers; wait for
     // the once pod to TERMINATE (its work — the inference — is then done) before
@@ -1506,16 +1510,16 @@ fn claim_fleet(ctx: &Ctx, name: &str) -> AgentFleet {
             },
             scaling: Scaling {
                 mode: ScaleMode::Claim,
-                min: Some(0),
-                max: Some(5),
+                min_replicas: Some(0),
+                max_replicas: Some(5),
                 target: Some(ScaleTarget {
-                    signal: "pending_events".to_string(),
+                    metric: "pending_events".to_string(),
                     value: "5".to_string(),
                 }),
                 ..Default::default()
             },
-            // workSource is LEFT UNSET on purpose: the operator renders the KEDA
-            // ScaledObject's `coordinationUrl` from `spec.workSource` when set, but
+            // work.source is LEFT UNSET on purpose: the operator renders the KEDA
+            // ScaledObject's `coordinationUrl` from `spec.work.source` when set, but
             // the scaler dials that value as the backlog HTTP endpoint — a queue
             // URI like `work://pending` is not a URL and the scaler's read fails
             // ("builder error for url"), so it never goes active. Unset, the
@@ -1523,8 +1527,9 @@ fn claim_fleet(ctx: &Ctx, name: &str) -> AgentFleet {
             // (http://agentctl-coordination.agentctl-system/), which the scaler
             // reads `work.stats` from correctly. The agents still claim from
             // `subscribe` above.
-            work_source: None,
+            work: None,
             replicas: None,
+            ..Default::default()
         },
     );
     f.metadata.namespace = Some(ctx.cfg.ns.clone());
@@ -1548,8 +1553,12 @@ fn shard_fleet(ctx: &Ctx, name: &str, n: u32) -> AgentFleet {
                 shards: Some(n),
                 ..Default::default()
             },
-            work_source: Some("work://pending".to_string()),
+            work: Some(Work {
+                source: Some("work://pending".to_string()),
+                ..Default::default()
+            }),
             replicas: None,
+            ..Default::default()
         },
     );
     f.metadata.namespace = Some(ctx.cfg.ns.clone());

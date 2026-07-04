@@ -13,9 +13,10 @@ spec:
     subscribe: ["queue://noop"]
   scaling:
     mode: claim
-    min: 1
-    max: 5
+    minReplicas: 1
+    maxReplicas: 5
     target:
-      signal: pending_events
+      metric: pending_events
       value: "5"
-  workSource: "queue://noop"
+  work:
+    source: "queue://noop"

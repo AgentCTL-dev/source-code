@@ -160,7 +160,7 @@ pub struct DeadItem {
 /// `claim` so exactly one of N concurrent racers for the same item is granted.
 pub trait ClaimStore: Send + Sync {
     /// Enqueue `item` into the backlog. Skipped if `claim_key` is already done or
-    /// dead-lettered. `max_attempts` (from the fleet `workPolicy`) bounds
+    /// dead-lettered. `max_attempts` (from the fleet `work` policy) bounds
     /// redelivery: after that many deliveries without a terminal ack the item is
     /// dead-lettered instead of re-offered. `None` ⇒ unbounded.
     fn submit(
@@ -249,7 +249,7 @@ struct Lease {
     /// Deliveries so far (incremented on each grant). Redelivery past
     /// `max_attempts` dead-letters the unit.
     attempts: u32,
-    /// Redelivery bound from `work.submit` (the fleet `workPolicy`). `None` ⇒
+    /// Redelivery bound from `work.submit` (the fleet `work` policy). `None` ⇒
     /// unbounded (never dead-lettered).
     max_attempts: Option<u32>,
 }

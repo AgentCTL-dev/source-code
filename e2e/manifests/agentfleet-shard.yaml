@@ -20,4 +20,5 @@ spec:
     # Fixed partition count N -> StatefulSet replicas. Required for shard mode
     # (the operator errors without it: "shard-mode fleet requires scaling.shards").
     shards: 3
-  workSource: "queue://shards"
+  work:
+    source: "queue://shards"

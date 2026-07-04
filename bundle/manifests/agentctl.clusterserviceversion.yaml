@@ -28,7 +28,7 @@ metadata:
             "mode": "once",
             "image": "ghcr.io/agentctl-dev/mock-agent:1.0.0",
             "instruction": "Read /data/report.md and write a 3-bullet summary to /data/summary.md",
-            "modelPool": "mockpool",
+            "model": { "pool": "mockpool" },
             "substrate": "stock-unix"
           }
         },
@@ -44,11 +44,11 @@ metadata:
             },
             "scaling": {
               "mode": "claim",
-              "min": 0,
-              "max": 10,
-              "target": { "signal": "pending_events", "value": "5" }
+              "minReplicas": 0,
+              "maxReplicas": 10,
+              "target": { "metric": "pending_events", "value": "5" }
             },
-            "workSource": "queue://jobs"
+            "work": { "source": "queue://jobs" }
           }
         },
         {

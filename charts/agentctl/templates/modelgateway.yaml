@@ -41,7 +41,7 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["modelpools/status"]
     verbs: ["get", "update", "patch"]
-  # agents + agentfleets: resolve the attested caller's declared spec.modelPool so an
+  # agents + agentfleets: resolve the attested caller's declared spec.model.pool so an
   # agent CHOOSES its intelligence source (the operator renders no X-Model-Pool
   # header). The caller is a singleton Agent or a fleet member (fleet name), so both.
   - apiGroups: ["agentctl.dev"]

@@ -141,7 +141,7 @@ pub struct ScalerConfig {
     /// default [`DEFAULT_SCALER_ADDRESS`].
     pub scaler_address: String,
     /// Coordination base URL the scaler reads the backlog from when a fleet does
-    /// not set its own `spec.workSource`. `COORDINATION_URL`, default
+    /// not set its own `spec.work.source`. `COORDINATION_URL`, default
     /// [`DEFAULT_COORDINATION_URL`].
     pub coordination_url: String,
 }

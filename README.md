@@ -117,13 +117,13 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 | `mode` | `once` / `loop` / `reactive` / `schedule` / `workflow`. Determines the rendered workload. |
 | `image` | The conformant-agent image to run. Optional when the operator has a default agent image configured (`operator.defaultAgentImage`); an explicit value overrides it. |
 | `instruction` | The agent's task instruction (required for non-reactive modes). |
-| `modelPool` | The `ModelPool` this agent binds for model access (admission-validated). |
+| `model.pool` | The `ModelPool` this agent binds for model access (admission-validated). |
 | `mcpServers` | The `MCPServerSet`s (by name) whose tools the agent may call. |
 | `subscribe` / `loop` / `schedule` / `workflow` | Mode-specific inputs (reactive subscriptions, loop cadence, cron, workflow graph). |
 | `surfaces` | Which control-plane surfaces to expose: `management`, `metrics`, `a2a`. |
-| `access` | A2A access policy: `public` (intent) and `oidc` (JWT verification + claim-based authz). |
+| `access` | A2A access policy: `oidc` (JWT verification + claim-based authz). |
 | `limits` | Per-agent budgets (`maxTokens`, `maxDepth`, `maxSteps`). |
-| `exec` / `egress` / `secrets` | Declared privileged capabilities. Together they form the **lethal trifecta** the admission webhook gates. |
+| `capabilities.exec` / `capabilities.egress` / `capabilities.secrets` | Declared privileged capabilities. Together they form the **lethal trifecta** the admission webhook gates. |
 
 **Rendered workload by mode:** `once` and `workflow` → **Job**; `schedule` →
 **CronJob**; `loop` and `reactive` → **Deployment**.
@@ -134,13 +134,13 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 |---|---|
 | `template` | The per-replica **worker** `AgentSpec`. |
 | `scaling.mode` | `claim` (elastic, KEDA) or `shard` (fixed partitions). |
-| `scaling.min` / `max` | Claim-mode replica range (may scale to 0). |
+| `scaling.minReplicas` / `maxReplicas` | Claim-mode replica range (may scale to 0). |
 | `scaling.shards` | Shard-mode fixed partition count `N`. |
-| `scaling.target` | Claim-mode autoscaling signal (e.g. `pending_events`) and per-replica target value. |
-| `workSource` | The shared work source the workers claim from. |
+| `scaling.target` | Claim-mode autoscaling metric (e.g. `pending_events`) and per-replica target value. |
+| `work.source` | The shared work source the workers claim from. |
 | `coordinator` | An optional **main agent** — its own `AgentSpec`, `replicas`, and `distribution` (`queue` or `a2a`). Renders an additional Deployment and becomes the fleet's A2A front door + work producer. |
 | `budget.maxTokens` | Per-fleet model budget, enforced *in addition to* the pool budget. |
-| `workPolicy` | Work-fabric policy: dead-letter threshold `maxAttempts` and lease TTL `claimTtlMs`. |
+| `work` | Work-fabric policy: dead-letter threshold `work.maxAttempts` and lease TTL `work.claimTtl` (a Go-duration string like "30s"). |
 
 **Rendered workload by scaling mode:** `claim` → a **Deployment** (KEDA owns
 replicas, elastic from zero); `shard` → a **StatefulSet** of `N` fixed hash
@@ -248,7 +248,8 @@ spec:
   mode: once
   image: ghcr.io/agentd-dev/agentd:1.0.0
   instruction: "Read /data/report.md and write a 3-bullet summary to /data/summary.md"
-  modelPool: mockpool
+  model:
+    pool: mockpool
 EOF
 
 kubectl get agents
@@ -275,15 +276,17 @@ spec:
     mode: reactive
     image: ghcr.io/agentd-dev/agentd:1.0.0
     subscribe: ["queue://jobs"]
-    modelPool: mockpool
+    model:
+      pool: mockpool
   scaling:
     mode: claim
-    min: 0
-    max: 10
+    minReplicas: 0
+    maxReplicas: 10
     target:
-      signal: pending_events
+      metric: pending_events
       value: "5"
-  workSource: "queue://jobs"
+  work:
+    source: "queue://jobs"
 EOF
 
 kubectl get afleets
@@ -332,7 +335,7 @@ request and fans subtasks to the elastic worker pool over the work fabric
 (default) or via A2A delegation. The fabric carries results end to end:
 `work.submit` returns a work id, `work.ack` records a result, `work.result`
 correlates the outcome, and a poison item is **dead-lettered** after
-`workPolicy.maxAttempts` redeliveries (surfaced for requeue or drop). The whole
+`work.maxAttempts` redeliveries (surfaced for requeue or drop). The whole
 fleet is one addressable A2A endpoint — the coordinator is the front door, else
 the gateway load-balances across workers with task affinity.
 
@@ -365,7 +368,7 @@ Identity is cryptographic:
   by the chart and reconciled per-namespace by the operator.
 - **Admission** — an image-registry allow-list, plus a gate that requires an
   explicit annotation before an agent may hold the **lethal trifecta**
-  (`exec` + `egress` + `secrets` together).
+  (`capabilities.exec` + `capabilities.egress` + `capabilities.secrets` together).
 - **PKI + RBAC** — all control-plane TLS is issued by cert-manager; management
   access is RBAC-gated via `SubjectAccessReview`.
 

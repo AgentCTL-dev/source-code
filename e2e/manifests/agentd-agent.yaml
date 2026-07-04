@@ -8,7 +8,7 @@
 #     The operator ALWAYS renders INTELLIGENCE=https://<modelgateway>… keyless
 #     and mounts the per-namespace CA; the ModelGateway attests the caller by
 #     SOURCE IP and injects the ModelPool credential (no key on the agent).
-#   - modelPool: mockpool — binds the ModelPool from modelpool-mock.yaml (apply that
+#   - model.pool: mockpool — binds the ModelPool from modelpool-mock.yaml (apply that
 #     + mock-provider.yaml first). The pool caps the budget at 150 tokens (mock
 #     returns 100/call) so the 3rd call 429s.
 #   - image: agentd:1.0.0 — the real contract-1.0 reference agent (images.sh builds/loads it).
@@ -21,4 +21,5 @@ spec:
   mode: once
   image: agentd:1.0.0
   instruction: "Summarize the input in one sentence."
-  modelPool: mockpool
+  model:
+    pool: mockpool

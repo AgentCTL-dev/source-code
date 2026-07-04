@@ -13,9 +13,10 @@ spec:
     subscribe: ["queue://jobs"]
   scaling:
     mode: claim
-    min: 0
-    max: 10
+    minReplicas: 0
+    maxReplicas: 10
     target:
-      signal: pending_events
+      metric: pending_events
       value: "5"
-  workSource: "queue://jobs"
+  work:
+    source: "queue://jobs"

@@ -6,7 +6,8 @@ metadata:
 spec:
   group: agentctl.dev
   names:
-    categories: []
+    categories:
+    - agentctl
     kind: Agent
     plural: agents
     shortNames:
@@ -19,7 +20,11 @@ spec:
     - jsonPath: .spec.mode
       name: Mode
       type: string
-    - jsonPath: .spec.model
+    - jsonPath: .spec.model.pool
+      name: Pool
+      priority: 1
+      type: string
+    - jsonPath: .spec.model.id
       name: Model
       priority: 1
       type: string
@@ -44,9 +49,9 @@ spec:
             properties:
               access:
                 description: |-
-                  Declarative per-agent access policy (authn/authz at the A2A gateway).
-                  `public` is documentation-only; `oidc` configures JWT verification and
-                  claim-based authorization for inbound A2A calls.
+                  Declarative per-agent access policy (authn/authz at the A2A gateway):
+                  `oidc` configures JWT verification and claim-based authorization for
+                  inbound A2A calls. Exposure itself is governed by `surfaces.a2a`.
                 nullable: true
                 properties:
                   oidc:
@@ -92,27 +97,39 @@ spec:
                     required:
                     - issuer
                     type: object
-                  public:
+                type: object
+              capabilities:
+                description: |-
+                  The privileged capability grants — `exec` / `egress` / `secrets` — the
+                  admission gate evaluates **as a union** (the lethal trifecta). Grouped so
+                  the grants read as one reviewable block (mirrors k8s `securityContext`).
+                  **Declared intent, enforced at admission only**: the operator does not
+                  itself mount the `Secret`s, drive the egress `NetworkPolicy`, or pass
+                  `exec` to the agent.
+                nullable: true
+                properties:
+                  egress:
                     description: |-
-                      Whether this agent is served publicly via the A2A gateway. Documentation-
-                      only (no enforcement yet); records intent.
+                      The agent requests outbound network egress. Declared intent; gated at
+                      admission (a trifecta leg), never wired by the operator.
                     nullable: true
                     type: boolean
+                  exec:
+                    description: |-
+                      The agent requests in-sandbox command execution. Declared intent; gated at
+                      admission (a privileged trifecta leg), never wired by the operator.
+                    nullable: true
+                    type: boolean
+                  secrets:
+                    description: |-
+                      The namespace-local `Secret` names the agent may read. Declared intent;
+                      each name is validated at admission (a trifecta leg); the operator does
+                      not itself mount them.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
                 type: object
-              egress:
-                description: |-
-                  **Declared capability**: the agent requests outbound network egress. The
-                  admission webhook gates this — combined with `exec` and `secrets` it forms
-                  the lethal trifecta and triggers the override gate.
-                nullable: true
-                type: boolean
-              exec:
-                description: |-
-                  **Declared capability**: the agent requests in-sandbox command execution.
-                  The admission webhook gates this — it is a privileged capability and one
-                  leg of the lethal trifecta, never granted implicitly.
-                nullable: true
-                type: boolean
               image:
                 description: |-
                   The conformant-agent image to run. When omitted, the operator falls back
@@ -178,17 +195,25 @@ spec:
                 type: string
               model:
                 description: |-
-                  The agent's declared model id (metadata; the real binding is `modelPool`).
-                  Surfaced as a printer column.
+                  The intelligence binding: `pool` names the `ModelPool` this agent draws
+                  keyless model access from (the admission-validated binding), and `id` is
+                  the model chosen within that pool (metadata/default).
                 nullable: true
-                type: string
-              modelPool:
-                description: |-
-                  **Declared capability**: the `ModelPool` this agent binds for model access.
-                  The admission webhook validates the binding (the pool exists / is permitted
-                  for this tenant).
-                nullable: true
-                type: string
+                properties:
+                  id:
+                    description: |-
+                      The model id to request within the pool. Metadata/default — when unset the
+                      pool's own `defaultModel` applies. Surfaced as a printer column.
+                    nullable: true
+                    type: string
+                  pool:
+                    description: |-
+                      The `ModelPool` (same namespace) this agent binds for model access. The
+                      admission webhook validates it (the pool exists / is permitted for this
+                      tenant). This is the real, load-bearing binding.
+                    nullable: true
+                    type: string
+                type: object
               schedule:
                 description: Schedule-mode cron. Used only for `schedule`.
                 nullable: true
@@ -201,15 +226,6 @@ spec:
                 required:
                 - cron
                 type: object
-              secrets:
-                description: |-
-                  **Declared capability**: the names of namespace-local `Secret`s the agent
-                  may read. The admission webhook validates each requested name against
-                  policy; access to untrusted private data is a trifecta leg.
-                items:
-                  type: string
-                nullable: true
-                type: array
               subscribe:
                 description: Reactive-mode subscriptions (MCP resource URIs). Required for `reactive`.
                 items:
@@ -280,6 +296,10 @@ spec:
               rule: self.mode != 'schedule' || has(self.schedule)
             - message: workflow is required when mode is 'workflow'
               rule: self.mode != 'workflow' || has(self.workflow)
+            - message: instruction is required for once/loop/schedule modes
+              rule: self.mode == 'reactive' || self.mode == 'workflow' || has(self.instruction)
+            - message: reactive mode requires subscribe, a workflow, or the a2a surface (a wake source)
+              rule: self.mode != 'reactive' || (has(self.subscribe) && self.subscribe.size() > 0) || has(self.workflow) || (has(self.surfaces) && has(self.surfaces.a2a) && self.surfaces.a2a)
           status:
             description: |-
               `Agent.status` — a curated projection of the live capabilities manifest +

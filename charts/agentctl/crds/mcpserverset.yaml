@@ -6,7 +6,8 @@ metadata:
 spec:
   group: agentctl.dev
   names:
-    categories: []
+    categories:
+    - agentctl
     kind: MCPServerSet
     plural: mcpserversets
     shortNames:
@@ -18,6 +19,9 @@ spec:
     - jsonPath: .status.serverCount
       name: Servers
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -126,6 +130,37 @@ spec:
             description: '`MCPServerSet.status` — resolution + per-server broker health.'
             nullable: true
             properties:
+              conditions:
+                description: |-
+                  Health conditions (`Ready`, …); shares the `conditions` + `Ready`-column
+                  idiom with `Agent`/`AgentFleet`.
+                items:
+                  description: A status condition. Mirrors `metav1.Condition` shape.
+                  properties:
+                    lastTransitionTime:
+                      description: An ISO 8601 / UTC timestamp.
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`"True"` | `"False"` | `"Unknown"`.'
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
               serverCount:
                 description: Number of servers in the set (printer column).
                 format: int64

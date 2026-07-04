@@ -127,7 +127,8 @@ metadata: { name: researcher, namespace: team-a }
 spec:
   image: ${AGENTD_IMAGE}
   mode: reactive
-  modelPool: gpt          # keyless — the ModelGateway holds the key
+  surfaces: { a2a: true } # reachable over the A2A gateway (its wake source)
+  model: { pool: gpt }    # keyless — the ModelGateway holds the key
   mcpServers: [tools] # brokered — no tool credential on the pod
 
 # the operator renders a restricted-PSS pod that:

@@ -18,12 +18,10 @@
 //! 2. **Defaulting** (`POST /mutate`): a mutating webhook that returns a base64
 //!    JSONPatch of **secure defaults** — the standard `app.kubernetes.io/*` labels,
 //!    a conservative `mode`, and a minimal-exposure `surfaces` set. It deliberately
-//!    does **not** hard-default `substrate`: the secure default is tenancy-derived
-//!    (`kata-hybrid` for hostile tenancy, `stock-unix` for single) and the
-//!    most-isolated tier needs a Kata `RuntimeClass` absent on most stock clusters,
-//!    so forcing one cluster-wide would either break stock clusters or be insecure.
-//!    Leaving `substrate` absent lets the operator/renderer resolve it from the
-//!    `AgentClass`/tenancy — the secure path.
+//!    does **not** hard-default `substrate`: absent ⇒ `stock-unix`, the only tier
+//!    the operator renders today (`kata-hybrid` / `sidecar-emptydir` are roadmap
+//!    tiers, rejected at render until implemented). Leaving it absent keeps the
+//!    resolved tier the operator/renderer's decision rather than baking one in.
 //!
 //! `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` point the
 //! kube-apiserver at `POST /validate` and `POST /mutate` over HTTPS (mutating runs
@@ -108,7 +106,7 @@ async fn main() {
     tracing::info!(
         %addr,
         registries = ?allowed_registries,
-        "agentctl admission webhook serving (validate: registry + trifecta + modelPool over Agent/AgentFleet; mutate: secure defaults)"
+        "agentctl admission webhook serving (validate: registry + trifecta + model.pool over Agent/AgentFleet; mutate: secure defaults)"
     );
     axum_server::bind_rustls(addr, config)
         .handle(handle)
@@ -217,7 +215,7 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     let empty = Value::Object(Map::new());
     let spec = object.get("spec").unwrap_or(&empty);
     let kind = reviewed_kind(request, object);
-    // The same image/exec/egress/secrets/modelPool checks apply to an Agent's spec
+    // The same image/capabilities/model.pool checks apply to an Agent's spec
     // and to an AgentFleet's `spec.template` (itself an AgentSpec), so a fleet
     // template is held to the same policy as a standalone agent.
     let view = agent_spec_view(&kind, spec, &empty);
@@ -254,7 +252,7 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     Json(admission_response(&uid, verdict))
 }
 
-/// Run the full policy (registry + trifecta + modelPool existence) against ONE
+/// Run the full policy (registry + trifecta + model.pool existence) against ONE
 /// `AgentSpec`-shaped `view`, resolving its named `ModelPool` cross-object. Shared
 /// by the worker template and the coordinator template so both are held to the
 /// same bar.
@@ -332,17 +330,17 @@ async fn mutate(State(state): State<AppState>, Json(review): Json<Value>) -> Jso
     Json(mutation_response(&uid, &patch))
 }
 
-/// If `spec.modelPool` names a pool, look it up in `namespace`: `Some(true)` if
+/// If `spec.model.pool` names a pool, look it up in `namespace`: `Some(true)` if
 /// it exists, `Some(false)` if not. `None` when no pool is named — and also when
 /// the lookup itself errors (fail-open: a transient apiserver hiccup must not
 /// block otherwise-valid admissions; the existence check is simply skipped).
 async fn resolve_model_pool(client: &Client, spec: &Value, namespace: &str) -> Option<bool> {
-    let name = spec.get("modelPool").and_then(Value::as_str)?;
+    let name = spec.pointer("/model/pool").and_then(Value::as_str)?;
     let api: Api<ModelPool> = Api::namespaced(client.clone(), namespace);
     match api.get_opt(name).await {
         Ok(found) => Some(found.is_some()),
         Err(e) => {
-            tracing::error!(modelPool = name, %namespace, error = %e, "ModelPool lookup failed; skipping cross-object check");
+            tracing::error!(model_pool = name, %namespace, error = %e, "ModelPool lookup failed; skipping cross-object check");
             None
         }
     }
@@ -385,9 +383,10 @@ fn parse_registries(csv: Option<String>) -> Vec<String> {
 /// Denies when:
 /// 1. `allowed_registries` is non-empty, `spec.image` is set, and the image is
 ///    not prefixed by an allowed registry.
-/// 2. The lethal trifecta (`exec` && `egress` && a non-empty `secrets`) is
-///    requested without the `agentctl.dev/allow-trifecta: "true"` annotation.
-/// 3. `spec.modelPool` is named but `model_pool_exists == Some(false)`.
+/// 2. The lethal trifecta (`capabilities.exec` && `capabilities.egress` && a
+///    non-empty `capabilities.secrets`) is requested without the
+///    `agentctl.dev/allow-trifecta: "true"` annotation.
+/// 3. `spec.model.pool` is named but `model_pool_exists == Some(false)`.
 /// 4. `spec.access.oidc` is present but malformed (non-https/empty `issuer`,
 ///    empty `audiences`, or a non-https `jwksUri`) — see [`validate_oidc`].
 fn evaluate(
@@ -410,11 +409,15 @@ fn evaluate(
         }
     }
 
-    // 2. Lethal-trifecta override gate.
-    let exec = spec.get("exec").and_then(Value::as_bool) == Some(true);
-    let egress = spec.get("egress").and_then(Value::as_bool) == Some(true);
+    // 2. Lethal-trifecta override gate. The grants are grouped under
+    // `spec.capabilities{}` (evaluated as a union).
+    let exec = spec.pointer("/capabilities/exec").and_then(Value::as_bool) == Some(true);
+    let egress = spec
+        .pointer("/capabilities/egress")
+        .and_then(Value::as_bool)
+        == Some(true);
     let secrets = spec
-        .get("secrets")
+        .pointer("/capabilities/secrets")
         .and_then(Value::as_array)
         .is_some_and(|a| !a.is_empty());
     if exec && egress && secrets {
@@ -428,10 +431,10 @@ fn evaluate(
     }
 
     // 3. Cross-object: the named ModelPool must exist.
-    if let Some(name) = spec.get("modelPool").and_then(Value::as_str) {
+    if let Some(name) = spec.pointer("/model/pool").and_then(Value::as_str) {
         if model_pool_exists == Some(false) {
             return Err(format!(
-                "modelPool '{name}' not found in namespace {namespace}"
+                "ModelPool '{name}' not found in namespace {namespace}"
             ));
         }
     }
@@ -636,9 +639,7 @@ mod tests {
     fn trifecta_without_annotation_is_denied() {
         let spec = json!({
             "mode": "loop",
-            "exec": true,
-            "egress": true,
-            "secrets": ["db-password"]
+            "capabilities": { "exec": true, "egress": true, "secrets": ["db-password"] }
         });
         let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
         assert!(err.contains("lethal trifecta"));
@@ -649,9 +650,7 @@ mod tests {
     fn trifecta_with_annotation_is_allowed() {
         let spec = json!({
             "mode": "loop",
-            "exec": true,
-            "egress": true,
-            "secrets": ["db-password"]
+            "capabilities": { "exec": true, "egress": true, "secrets": ["db-password"] }
         });
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "true" }));
         assert!(evaluate(&spec, &anns, &[], None, "default").is_ok());
@@ -684,7 +683,7 @@ mod tests {
             "template": { "mode": "reactive", "image": "ghcr.io/acme/agent:v1" },
             "coordinator": { "template": {
                 "mode": "reactive",
-                "exec": true, "egress": true, "secrets": ["db-password"]
+                "capabilities": { "exec": true, "egress": true, "secrets": ["db-password"] }
             }}
         });
         let coord = coordinator_spec_view("AgentFleet", &fleet).unwrap();
@@ -698,9 +697,7 @@ mod tests {
     #[test]
     fn trifecta_annotation_must_be_literal_true() {
         let spec = json!({
-            "exec": true,
-            "egress": true,
-            "secrets": ["s"]
+            "capabilities": { "exec": true, "egress": true, "secrets": ["s"] }
         });
         // Any value other than "true" does not open the gate.
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "yes" }));
@@ -710,10 +707,10 @@ mod tests {
     #[test]
     fn two_of_three_trifecta_legs_is_allowed() {
         // exec + egress but no secrets ⇒ not the full trifecta ⇒ no gate.
-        let spec = json!({ "exec": true, "egress": true });
+        let spec = json!({ "capabilities": { "exec": true, "egress": true } });
         assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
         // exec + egress with an empty secrets array is still only two legs.
-        let spec = json!({ "exec": true, "egress": true, "secrets": [] });
+        let spec = json!({ "capabilities": { "exec": true, "egress": true, "secrets": [] } });
         assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
     }
 
@@ -742,7 +739,7 @@ mod tests {
 
     #[test]
     fn missing_model_pool_is_denied() {
-        let spec = json!({ "modelPool": "shared" });
+        let spec = json!({ "model": { "pool": "shared" } });
         let err = evaluate(&spec, &Map::new(), &[], Some(false), "team-a").unwrap_err();
         assert!(err.contains("shared"));
         assert!(err.contains("team-a"));
@@ -751,7 +748,7 @@ mod tests {
 
     #[test]
     fn present_model_pool_is_allowed() {
-        let spec = json!({ "modelPool": "shared" });
+        let spec = json!({ "model": { "pool": "shared" } });
         assert!(evaluate(&spec, &Map::new(), &[], Some(true), "team-a").is_ok());
     }
 
@@ -891,7 +888,7 @@ mod tests {
 
     #[test]
     fn deny_message_is_non_empty() {
-        let spec = json!({ "exec": true, "egress": true, "secrets": ["x"] });
+        let spec = json!({ "capabilities": { "exec": true, "egress": true, "secrets": ["x"] } });
         let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
         assert!(!err.trim().is_empty());
     }
@@ -947,7 +944,10 @@ mod tests {
         // The same lethal trifecta in a fleet's template must be gated, since the
         // fleet view is `spec.template`, an AgentSpec.
         let spec = json!({
-            "template": { "mode": "loop", "exec": true, "egress": true, "secrets": ["db"] },
+            "template": {
+                "mode": "loop",
+                "capabilities": { "exec": true, "egress": true, "secrets": ["db"] }
+            },
             "scaling": { "mode": "claim" }
         });
         let empty = Value::Object(Map::new());

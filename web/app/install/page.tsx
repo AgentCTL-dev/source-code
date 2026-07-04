@@ -75,7 +75,8 @@ metadata: { name: hello, namespace: team-a }
 spec:
   image: ${AGENTD_IMAGE}
   mode: reactive
-  # modelPool: gpt          # keyless intelligence (ModelGateway holds the key)
+  surfaces: { a2a: true }     # reachable over the A2A gateway (its wake source)
+  # model: { pool: gpt }      # keyless intelligence (ModelGateway holds the key)
   # mcpServers: [tools] # brokered tools (MCPGateway injects the credential)`}
       />
       <CodeBlock lang="bash" code={`kubectl apply -f agent.yaml

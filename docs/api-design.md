@@ -9,64 +9,49 @@ later).
 The guiding principles:
 
 - **One obvious place for each thing** — no near-duplicate fields.
-- **Name a binding after the kind it references** — `modelPool` ↔ `ModelPool`,
+- **Name a binding after the kind it references** — `model.pool` ↔ `ModelPool`,
   `mcpServers` ↔ `MCPServerSet`.
 - **Bare names for same-namespace references** (strings); objects only when a
   reference needs more than a name.
 - **Ship only wired fields** — no phantom references or documentation-only flags
-  in a served CRD.
+  in a served CRD; if a field is declared-but-enforced-elsewhere, say so in its
+  doc.
 - **Group fields evaluated together** — the lethal trifecta, the work fabric,
-  per-mode config.
+  the model binding.
 - **Durations are Go-duration strings**; be **safe-by-default**; make requiredness
   a **CEL invariant**, not just prose.
 - **Consistent observability** (`conditions` + a `Ready` column) across all kinds.
 
 ---
 
-## Applied (this pass)
+## Applied
 
-A consistency pass that removes dead surface and simplifies the tool binding.
-All are **breaking** CRD changes, made deliberately pre-adoption.
+Two passes of breaking, pre-adoption changes that remove dead surface, group
+fields by concern, and make documented invariants machine-checked.
+
+### Pass 1 — dead-surface removal + tool-binding flatten
 
 | Change | What & why |
 | --- | --- |
-| **Remove `spec.intelligenceRef`** | Vestigial: a `LocalRef` to a non-existent `IntelligenceService`, consumed nowhere. The real, admission-validated intelligence binding is `spec.modelPool`. |
-| **Remove `spec.classRef` + the `LocalRef` type** | Vestigial: there is no `AgentClass` CRD and no resolver — `resolve_image` never consulted it; the only reader was a cosmetic `Class:` line in `kubectl agent describe`. `LocalRef` had no remaining users after this + the `mcpServers` flatten. |
-| **Remove `spec.limits.treeTokenBudget`** | Declared but **never emitted** to the agent (`render.rs`: "no agentd flag yet → not emitted"). A silent no-op field is a versioning liability. (Unrelated to the agent's *reported* `tree_token_budget` in the capabilities manifest, which stays — that is the contract, not the CRD.) |
-| **`spec.mcpServerSetRefs` → `spec.mcpServers`** | Was `[]LocalRef{name}`; now `[]string`. Drops the redundant `Refs` suffix and the `{ name: … }` wrapper — a bare list of `MCPServerSet` names, parallel to `modelPool`. |
+| **Remove `spec.intelligenceRef`** | Vestigial: a `LocalRef` to a non-existent `IntelligenceService`, consumed nowhere. The real binding is `spec.model.pool`. |
+| **Remove `spec.classRef` + the `LocalRef` type** | Vestigial: there is no `AgentClass` CRD and no resolver. `LocalRef` had no remaining users after the `mcpServers` flatten. |
+| **Remove `spec.limits.treeTokenBudget`** | Declared but **never emitted** to the agent. A silent no-op field is a versioning liability. (Unrelated to the agent's *reported* `tree_token_budget` in the capabilities manifest, which stays — that is the contract, not the CRD.) |
+| **`spec.mcpServerSetRefs` → `spec.mcpServers`** | Was `[]LocalRef{name}`; now `[]string` — a bare list of `MCPServerSet` names. |
 
----
+### Pass 2 — grouping, latent-bug fixes, observability
 
-## Recommended — naming & structure
-
-Breaking, and best done together (pre-adoption). These were the strong consensus
-of an independent naming-scheme panel.
-
-- **Group the model binding.** `spec.model` (a decorative model-id string) and
-  `spec.modelPool` (the real binding) are two look-alike top-level keys one field
-  apart. Fold them into `spec.model: { pool, id }` — `pool` names the `ModelPool`
-  kind, `id` is the model chosen within it. (You earlier floated
-  `modelPool → intelligence`; `modelPool` was kept this pass per your call. The
-  `model: {pool, id}` grouping is the cleaner long-term fix — it *ends* the
-  `model`/`modelPool` confusion rather than renaming around it.)
-- **Group the lethal trifecta.** `spec.exec` / `spec.egress` / `spec.secrets` are
-  three scattered top-level flags that the admission gate evaluates **as a union**.
-  Move them into `spec.capabilities: { exec, egress, secrets }` so the privileged
-  grants read as one reviewable, gated block (mirrors k8s `securityContext`).
-- **Group the fleet work fabric.** `AgentFleet.spec.workSource` +
-  `spec.workPolicy{maxAttempts,claimTtlMs}` → `spec.work: { source, maxAttempts,
-  claimTtl }` — one work section instead of two same-prefixed top-level fields.
-- **Durations as Go-duration strings.** `workPolicy.claimTtlMs` (`u64` ms) →
-  `claimTtl: "30s"`, matching `loop.interval` / `loop.deadline`.
-- **Per-mode scaling sub-blocks.** `scaling: { mode, claim: {min, max, target},
-  shard: {count} }` so mode-only fields can't be set for the wrong mode (today only
-  a CEL rule could catch `shards` set on a claim fleet). Rename `scaling.min/max` →
-  `minReplicas/maxReplicas` and `scaling.target.signal` → `metric`.
-- **Cosmetic Rust-type tidies** (wire keys unchanged): `DesiredSurfaces` →
-  `Surfaces`, `LoopParams` → `Loop`.
-- **(Optional, low priority)** Fold the per-mode inputs (`subscribe`, `loop`,
-  `schedule`, `workflow`) under a discriminated `trigger`/`run` object keyed by
-  `mode`. The current flat form is readable, so this is a judgment call, not a fix.
+| Change | What & why |
+| --- | --- |
+| **Group the model binding → `spec.model: { pool, id }`** | `spec.model` (a decorative id string) and `spec.modelPool` (the real binding) were two look-alike top-level keys. `pool` names the `ModelPool` kind; `id` is the model within it. Ends the `model`/`modelPool` confusion instead of renaming around it. |
+| **Group the lethal trifecta → `spec.capabilities: { exec, egress, secrets }`** | The three grants the admission gate evaluates **as a union** now read as one reviewable block (mirrors k8s `securityContext`). Each doc says **"declared intent, enforced at admission only"** — the operator wires none of them downstream, so the honesty gap is closed. |
+| **Group the fleet work fabric → `spec.work: { source, maxAttempts, claimTtl }`** | Replaces `workSource` + `workPolicy{maxAttempts, claimTtlMs}`. `claimTtlMs` (`u64` ms) → `claimTtl` (Go-duration string, e.g. `"30s"`), matching `loop.interval`. `maxAttempts`/`claimTtl` were previously **unwired**; the operator now delivers them to the coordinator (`AGENT_FLEET_MAX_ATTEMPTS` / `AGENT_FLEET_CLAIM_TTL`, alongside `AGENT_FLEET_WORKSOURCE`), so a conformant coordinator can stamp them onto each `work.submit`. |
+| **Scaling renames** | `scaling.min`/`scaling.max` → `minReplicas`/`maxReplicas`; `scaling.target.signal` → `scaling.target.metric`. |
+| **`substrate` honesty** | The enum keeps all three tiers (`stock-unix` is the locked direction alongside Kata), but the field/variant docs now say plainly that **only `stock-unix` is rendered today** — `kata-hybrid`/`sidecar-emptydir` are declared roadmap tiers, rejected at render. The misleading "hostile tenancy forces `kata-hybrid`" default story is gone. |
+| **CEL invariants for requiredness** | Two rules added to `Agent`/`template`: `instruction` is required for `once`/`loop`/`schedule`; a `reactive` agent must carry a wake source — `subscribe`, a `workflow`, or `surfaces.a2a` (the last covers an A2A-driven coordinator that has neither `subscribe` nor `workflow`). |
+| **Remove `access.public`** | An unenforced `public: true` that gated nothing (a safe-by-default footgun). Real exposure is governed by `surfaces.a2a` + `access.oidc`. |
+| **`ModelPool` / `MCPServerSet` status `conditions` + `Ready` column** | All four kinds now share one health idiom (a `conditions` array + a `Ready` printer column). |
+| **Agent printer columns point at the binding** | The default-wide columns are now `Pool` (`.spec.model.pool`, the real binding) and `Model` (`.spec.model.id`), instead of the single decorative `.spec.model`. |
+| **Shared `agentctl` category on all four kinds** | `kubectl get agentctl` lists Agents/AgentFleets/ModelPools/MCPServerSets together (as cert-manager does with its `cert-manager` category). |
 
 **Illustrative target `Agent.spec`, grouped by concern:**
 
@@ -75,64 +60,42 @@ spec:
   mode: reactive
   image: ghcr.io/agentd-dev/agentd:1.0.0   # optional — operator default fills it
   instruction: "…"
-  model: { pool: gpt, id: gpt-4o-mini }    # was modelPool + model
-  mcpServers: [tools]                       # was mcpServerSetRefs: [{name: tools}]
-  subscribe: ["queue://jobs"]
+  model: { pool: gpt, id: gpt-4o-mini }    # the binding + the model id
+  mcpServers: [tools]                       # MCPServerSet names
+  subscribe: ["queue://jobs"]               # a wake source (CEL-required for reactive)
   surfaces: { a2a: true, metrics: true }
   limits: { maxTokens: 20000 }
-  capabilities: { exec: false, egress: true, secrets: [db-creds] }  # the trifecta, grouped
+  capabilities: { exec: false, egress: true, secrets: [db-creds] }  # trifecta, admission-gated
   access: { oidc: { … } }
 ```
 
 ---
 
-## Recommended — validation gaps & latent bugs
+## Still open
 
-These are correctness issues the review surfaced; worth addressing regardless of
-any renaming.
+Deliberately deferred — either a bigger restructure with modest marginal value,
+or a judgment call the current flat form already serves well.
 
-- **`substrate` default is inverted and advertises unrenderable tiers.** The
-  `Substrate` enum offers `stock-unix` / `kata-hybrid` / `sidecar-emptydir`, but the
-  renderer implements **only `stock-unix`** (`require_stock_unix` rejects the
-  others) — while the field doc says hostile tenancy *forces* `kata-hybrid`. So the
-  hardened "default" would fail to render. Restrict the enum to what is implemented
-  (mark `kata`/`sidecar` as roadmap), or implement them, and fix the default story.
-  **Potential bug.**
-- **`instruction` / `subscribe` requiredness is documented but unenforced.** The
-  docs promise "instruction required for non-reactive modes" and "subscribe required
-  for reactive", but the only CEL rules cover `schedule`/`workflow`. Add CEL
-  invariants: a non-reactive, non-workflow mode requires `instruction`; a reactive
-  mode requires `subscribe` **or** `workflow` (a reactive-daemon workflow is valid).
-- **The trifecta fields gate admission but wire nothing downstream.** `exec` /
-  `egress` / `secrets` are validated by the admission webhook, but the operator
-  never mounts the named `Secret`s, drives the egress `NetworkPolicy` from
-  `spec.egress`, or passes `exec` to the agent. Either wire them end-to-end or mark
-  each docstring "declared intent; enforced at admission only."
-
----
-
-## Recommended — consistency & ergonomics
-
-Mostly additive, non-breaking.
-
-- **`access.public` is unenforced** — a `public: true` that gates nothing (a
-  safe-by-default footgun). Wire it (gate A2A ingress, paired with `surfaces.a2a`)
-  or remove it; real exposure is already governed by `surfaces.a2a` + `access.oidc`.
-- **`ModelPool` and `MCPServerSet` status lack `conditions`.** `Agent`/`AgentFleet`
-  carry a `conditions` array + `Ready`; the other two do not. Add `conditions`
-  (reuse the `Condition` type) + a `Ready` printer column so all four kinds share
-  one health idiom.
-- **The Agent `Model` printer column surfaces the decorative `spec.model`, not the
-  real `spec.modelPool` binding.** Point it at the binding, or add a second column.
-- **Add a shared `agentctl` category to all four CRDs** so `kubectl get agentctl`
-  lists Agents/AgentFleets/ModelPools/MCPServerSets together (cert-manager does this
-  with its `cert-manager` category). Additive.
-- **Consider CRD-level `default:` values** (via `schemars`) so the apiserver applies
-  static safe defaults deterministically, rather than defaults living only in the
+- **Per-mode scaling sub-blocks.** `scaling: { mode, claim: {minReplicas,
+  maxReplicas, target}, shard: {count} }` would make it structurally impossible to
+  set a claim-only field on a shard fleet (today only a CEL rule could). The flat
+  form + the `shards`-requiredness CEL rule works; deferred as a larger change.
+- **Trifecta end-to-end wiring.** `capabilities.exec`/`egress`/`secrets` gate
+  admission but drive nothing in the operator (no `Secret` mounts, no egress
+  `NetworkPolicy` from the field, no `exec` flag). Now documented as
+  "admission only". Wiring them end-to-end (mount the named `Secret`s, derive the
+  egress policy, pass `exec`) remains the real fix and is the open item.
+- **Cosmetic Rust-type renames** (wire keys unchanged): `DesiredSurfaces` →
+  `Surfaces`, `LoopParams` → `Loop`. Pure internal tidy; deferred.
+- **Discriminated `trigger`/`run` union** keyed by `mode` (folding `subscribe` /
+  `loop` / `schedule` / `workflow`). The flat form is readable, so this is a
+  judgment call, not a fix.
+- **CRD-level `default:` values** (via `schemars`) so the apiserver applies static
+  safe defaults deterministically, rather than defaults living only in the
   operator/renderer.
-- **`workSource` vs `template.subscribe` overlap.** Every fleet example writes the
-  same queue URI twice. Default the worker `subscribe` from `workSource`, or
-  document that they are normally equal.
-- **`replicas` vs `scaling.min/max`.** `.spec.replicas` must stay top-level (it is
-  the scale-subresource path), but document that KEDA owns it in steady state for
-  claim fleets so the precedence is clear.
+- **`work.source` vs `template.subscribe` overlap.** Every claim-fleet example
+  still writes the same queue URI twice. Default the worker `subscribe` from
+  `work.source`, or keep documenting that they are normally equal.
+- **`replicas` vs `scaling.minReplicas`/`maxReplicas`.** `.spec.replicas` must
+  stay top-level (it is the scale-subresource path); documented that KEDA owns it
+  in steady state for claim fleets so the precedence is clear.

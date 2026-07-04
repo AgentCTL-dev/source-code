@@ -324,7 +324,7 @@ async fn infer(
         Err(resp) => return resp,
     };
     // The X-Model-Pool header is an explicit override; otherwise honor the pool the
-    // attested agent's CR declares (spec.modelPool). The operator renders no header,
+    // attested agent's CR declares (spec.model.pool). The operator renders no header,
     // so this is how an agent's declared intelligence choice actually takes effect.
     let want_pool = match header_str(&headers, H_POOL) {
         Some(p) => Some(p),
@@ -719,25 +719,25 @@ async fn select_pool(
             Ok(Some((name, mp.spec)))
         }
         // FAIL CLOSED on ambiguity: silently picking the first pool would bill an
-        // arbitrary tenant's pool/budget. The agent must declare spec.modelPool (or
+        // arbitrary tenant's pool/budget. The agent must declare spec.model.pool (or
         // send X-Model-Pool) when more than one pool exists.
         n => Err(format!(
-            "{n} ModelPools in the namespace and none selected — declare spec.modelPool on the Agent/AgentFleet (or send X-Model-Pool)"
+            "{n} ModelPools in the namespace and none selected — declare spec.model.pool on the Agent/AgentFleet (or send X-Model-Pool)"
         )),
     }
 }
 
-/// The `ModelPool` the attested caller's CR declares (`spec.modelPool`). Tries the
+/// The `ModelPool` the attested caller's CR declares (`spec.model.pool`). Tries the
 /// `Agent` CR and, on a 404, an `AgentFleet`'s template (fleet pods carry the fleet
 /// name). `None` ⇒ the CR declares no pool (or neither exists) — the caller then
 /// falls back to the sole namespace pool, or [`select_pool`] fails closed on
 /// ambiguity. This is what lets an agent CHOOSE its intelligence source: the
 /// operator renders no `X-Model-Pool` header, so without this the gateway used the
-/// first pool in the namespace regardless of `spec.modelPool`.
+/// first pool in the namespace regardless of `spec.model.pool`.
 async fn declared_pool(client: &Client, ns: &str, agent: &str) -> Option<String> {
     let agents: Api<Agent> = Api::namespaced(client.clone(), ns);
     match agents.get(agent).await {
-        Ok(a) => return a.spec.model_pool,
+        Ok(a) => return a.spec.model.and_then(|m| m.pool),
         Err(kube::Error::Api(ae)) if ae.code == 404 => { /* not an Agent → try Fleet */ }
         Err(_) => return None,
     }
@@ -746,7 +746,7 @@ async fn declared_pool(client: &Client, ns: &str, agent: &str) -> Option<String>
         .get(agent)
         .await
         .ok()
-        .and_then(|f| f.spec.template.model_pool)
+        .and_then(|f| f.spec.template.model.and_then(|m| m.pool))
 }
 
 /// The per-fleet token cap (`AgentFleet.spec.budget.maxTokens`) for the

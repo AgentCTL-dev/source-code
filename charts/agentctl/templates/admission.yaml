@@ -1,7 +1,7 @@
 {{- if .Values.admission.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
 # RBAC for the validating webhook: read ModelPool CRs for the cross-object
-# "referenced modelPool exists" check.
+# "referenced model.pool exists" check.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

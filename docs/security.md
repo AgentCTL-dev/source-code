@@ -283,11 +283,12 @@ agent.
   allow-list is **on by default**. Set it to your own registries in production; an
   empty value disables the check (allow any registry).
 - **Lethal-trifecta opt-in gate.** An agent that declares all three of
-  `exec: true`, `egress: true`, and a non-empty `secrets` list requests the
-  "lethal trifecta" and is **denied** unless it carries the annotation
+  `capabilities.exec: true`, `capabilities.egress: true`, and a non-empty
+  `capabilities.secrets` list requests the "lethal trifecta" and is **denied**
+  unless it carries the annotation
   `agentctl.dev/allow-trifecta: "true"` (the value must be literally `"true"`).
   Any two of the three legs is permitted without the annotation.
-- **ModelPool existence.** If `spec.modelPool` names a pool, it must exist in the
+- **ModelPool existence.** If `spec.model.pool` names a pool, it must exist in the
   same namespace. (A transient API-server error during the lookup fails open — the
   cross-object check is skipped rather than blocking an otherwise-valid admission.)
 - **OIDC policy well-formedness.** If `spec.access.oidc` is present, `issuer` must

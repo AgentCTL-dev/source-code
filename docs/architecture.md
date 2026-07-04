@@ -111,19 +111,19 @@ selects the rendered workload kind.
 | `mode` | `once` \| `loop` \| `reactive` \| `schedule` \| `workflow` — the run shape. |
 | `image` | The conformant-agent image. Optional — falls back to `operator.defaultAgentImage` when omitted. |
 | `instruction` | The agent's inline instruction (required for non-reactive modes). |
-| `model` | Declared model id (metadata + printer column). |
-| `modelPool` | The `ModelPool` this agent binds for inference. |
+| `model.id` | Declared model id (metadata + printer column). |
+| `model.pool` | The `ModelPool` this agent binds for inference. |
 | `mcpServers` | `MCPServerSet`s (by name) this agent binds for tools. |
 | `subscribe` | Reactive-mode MCP resource URIs the agent wakes on. |
 | `schedule` | `{ cron, timezone }` for `mode: schedule`. |
 | `workflow` | The workflow graph (`inline` or `configMapKeyRef`) for `mode: workflow`. |
 | `limits` | `{ maxTokens, maxDepth, maxSteps }` bounding box. |
 | `surfaces` | Which control-plane surfaces to expose (`management`/`metrics`/`a2a`). |
-| `access` | A2A caller policy: `oidc` (JWT verify + claim authz) and `public` (advisory). |
-| `exec` / `egress` / `secrets` | Declared privileged capabilities (the lethal-trifecta legs). |
+| `access` | A2A caller policy: `oidc` (JWT verify + claim authz). |
+| `capabilities.exec` / `capabilities.egress` / `capabilities.secrets` | Declared privileged capabilities (the lethal-trifecta legs). |
 | `substrate` | Substrate tier (see [Substrate](#substrate)). |
 
-`exec`, `egress`, and `secrets` are **declared capabilities** the admission
+`capabilities.exec`, `capabilities.egress`, and `capabilities.secrets` are **declared capabilities** the admission
 webhook gates: requesting all three at once (the "lethal trifecta") requires an
 explicit opt-in annotation.
 
@@ -171,12 +171,12 @@ a coordinator ("main agent").
 | Field | Meaning |
 |---|---|
 | `template` | The per-replica worker `AgentSpec`. |
-| `scaling` | `{ mode: claim \| shard, min/max (claim), shards N (shard), target }`. |
-| `workSource` | The shared work source (an MCP resource URI). |
+| `scaling` | `{ mode: claim \| shard, minReplicas/maxReplicas (claim), shards N (shard), target }`. |
+| `work.source` | The shared work source (an MCP resource URI). |
 | `replicas` | Claim-mode replica count; the target of the `scale` subresource (KEDA owns it in steady state). |
 | `coordinator` | The optional main agent: `{ template, replicas, distribution }`. |
 | `budget` | Per-fleet token cap (`maxTokens`), enforced alongside the pool budget. |
-| `workPolicy` | `{ maxAttempts (dead-letter), claimTtlMs (lease TTL) }`. |
+| `work` | `{ source?, maxAttempts (dead-letter), claimTtl (lease TTL) }`. |
 
 #### Rendering an AgentFleet
 
@@ -206,7 +206,7 @@ flowchart TB
   owned `Deployment` named `<fleet>-coordinator` (labeled
   `agentctl.dev/fleet-role: coordinator`, replicas default 1, coerced to
   `reactive`). Its `distribution` controls fan-out: `queue` (default) wires it as
-  a producer on the fleet `workSource` (injected as `AGENT_FLEET_WORKSOURCE`);
+  a producer on the fleet `work.source` (injected as `AGENT_FLEET_WORKSOURCE`);
   `a2a` appends `--a2a-peer worker=<gateway>/fleets/<ns>/<fleet>` so it delegates
   point-to-point through the gateway.
 
@@ -320,8 +320,9 @@ adds the two concerns the CRDs' CEL rules cannot express:
   disallowed image or an ungated trifecta.
 - **Mutating** (`POST /mutate`): secure defaults — standard labels, a
   conservative `mode`, and a minimal-exposure `surfaces` set. It deliberately
-  does not hard-default `substrate` (the secure default is tenancy-derived and
-  resolved downstream).
+  does not hard-default `substrate`; leaving it unset resolves to `stock-unix`,
+  the only rendered tier today (`kata-hybrid`/`sidecar-emptydir` are roadmap
+  tiers, rejected at render until implemented).
 
 ### gateway (A2A)
 
@@ -447,7 +448,7 @@ sequenceDiagram
   participant ADM as admission
   participant OP as operator
   participant AG as agent pod
-  U->>API: apply Agent (image, mode, modelPool, caps)
+  U->>API: apply Agent (image, mode, model.pool, caps)
   API->>ADM: mutate (defaults) then validate (trifecta + registry + ModelPool)
   ADM-->>API: patched + admitted
   OP->>API: watch Agents
@@ -586,7 +587,7 @@ flowchart TB
 ```
 
 `work.submit` returns a `work_id`; `work.ack` records a result; `work.result`
-correlates the outcome; an item is dead-lettered after `workPolicy.maxAttempts`
+correlates the outcome; an item is dead-lettered after `work.maxAttempts`
 redeliveries. A fleet's `budget` is enforced by the modelgateway alongside the
 pool budget. Coordinator replicas (`>1`) are peers, not shards: they coordinate
 through the work fabric like any other producer.

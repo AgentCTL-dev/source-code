@@ -35,8 +35,10 @@ pub const GROUP: &str = "agentctl.dev";
     status = "AgentStatus",
     shortname = "agent",
     shortname = "agents",
+    category = "agentctl",
     printcolumn = r#"{"name":"Mode","type":"string","jsonPath":".spec.mode"}"#,
-    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.model","priority":1}"#,
+    printcolumn = r#"{"name":"Pool","type":"string","jsonPath":".spec.model.pool","priority":1}"#,
+    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.model.id","priority":1}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
@@ -50,6 +52,19 @@ pub const GROUP: &str = "agentctl.dev";
     {
         "rule": "self.mode != 'workflow' || has(self.workflow)",
         "message": "workflow is required when mode is 'workflow'"
+    },
+    {
+        // once/loop/schedule drive a single instruction; reactive wakes on a
+        // source and workflow drives a graph, so those two need no instruction.
+        "rule": "self.mode == 'reactive' || self.mode == 'workflow' || has(self.instruction)",
+        "message": "instruction is required for once/loop/schedule modes"
+    },
+    {
+        // A reactive agent needs a wake source: subscriptions, a workflow graph,
+        // or the a2a surface (an A2A-driven coordinator/agent has neither
+        // subscribe nor workflow — inbound calls are its trigger).
+        "rule": "self.mode != 'reactive' || (has(self.subscribe) && self.subscribe.size() > 0) || has(self.workflow) || (has(self.surfaces) && has(self.surfaces.a2a) && self.surfaces.a2a)",
+        "message": "reactive mode requires subscribe, a workflow, or the a2a surface (a wake source)"
     }
 ]))]
 pub struct AgentSpec {
@@ -63,10 +78,11 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
-    /// The agent's declared model id (metadata; the real binding is `modelPool`).
-    /// Surfaced as a printer column.
+    /// The intelligence binding: `pool` names the `ModelPool` this agent draws
+    /// keyless model access from (the admission-validated binding), and `id` is
+    /// the model chosen within that pool (metadata/default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub model: Option<ModelBinding>,
 
     /// Inline instruction. Required for non-reactive modes (CEL/admission).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,8 +94,10 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<String>,
 
-    /// Substrate selection. Absent ⇒ the cluster default (hostile tenancy forces
-    /// `kata-hybrid`).
+    /// Substrate tier. Absent ⇒ `stock-unix`, which is the **only** tier the
+    /// operator renders today. `kata-hybrid` / `sidecar-emptydir` are declared
+    /// roadmap tiers (the locked hardening direction for hostile multi-tenancy);
+    /// selecting one is rejected at render until implemented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub substrate: Option<Substrate>,
 
@@ -110,45 +128,64 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
 
-    /// **Declared capability**: the agent requests in-sandbox command execution.
-    /// The admission webhook gates this — it is a privileged capability and one
-    /// leg of the lethal trifecta, never granted implicitly.
+    /// The privileged capability grants — `exec` / `egress` / `secrets` — the
+    /// admission gate evaluates **as a union** (the lethal trifecta). Grouped so
+    /// the grants read as one reviewable block (mirrors k8s `securityContext`).
+    /// **Declared intent, enforced at admission only**: the operator does not
+    /// itself mount the `Secret`s, drive the egress `NetworkPolicy`, or pass
+    /// `exec` to the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exec: Option<bool>,
+    pub capabilities: Option<Capabilities>,
 
-    /// **Declared capability**: the agent requests outbound network egress. The
-    /// admission webhook gates this — combined with `exec` and `secrets` it forms
-    /// the lethal trifecta and triggers the override gate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub egress: Option<bool>,
-
-    /// **Declared capability**: the names of namespace-local `Secret`s the agent
-    /// may read. The admission webhook validates each requested name against
-    /// policy; access to untrusted private data is a trifecta leg.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secrets: Option<Vec<String>>,
-
-    /// **Declared capability**: the `ModelPool` this agent binds for model access.
-    /// The admission webhook validates the binding (the pool exists / is permitted
-    /// for this tenant).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_pool: Option<String>,
-
-    /// Declarative per-agent access policy (authn/authz at the A2A gateway).
-    /// `public` is documentation-only; `oidc` configures JWT verification and
-    /// claim-based authorization for inbound A2A calls.
+    /// Declarative per-agent access policy (authn/authz at the A2A gateway):
+    /// `oidc` configures JWT verification and claim-based authorization for
+    /// inbound A2A calls. Exposure itself is governed by `surfaces.a2a`.
     #[serde(rename = "access", default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
+}
+
+/// The intelligence binding for an `Agent`: which `ModelPool` supplies keyless
+/// model access, and which model id to request within it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelBinding {
+    /// The `ModelPool` (same namespace) this agent binds for model access. The
+    /// admission webhook validates it (the pool exists / is permitted for this
+    /// tenant). This is the real, load-bearing binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    /// The model id to request within the pool. Metadata/default — when unset the
+    /// pool's own `defaultModel` applies. Surfaced as a printer column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+/// The privileged capability grants (the "lethal trifecta"), grouped because the
+/// admission gate evaluates them as a union: `exec` && `egress` && a non-empty
+/// `secrets` together trip the override gate. **Declared intent, enforced at
+/// admission only** — the operator wires none of these downstream.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Capabilities {
+    /// The agent requests in-sandbox command execution. Declared intent; gated at
+    /// admission (a privileged trifecta leg), never wired by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<bool>,
+    /// The agent requests outbound network egress. Declared intent; gated at
+    /// admission (a trifecta leg), never wired by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<bool>,
+    /// The namespace-local `Secret` names the agent may read. Declared intent;
+    /// each name is validated at admission (a trifecta leg); the operator does
+    /// not itself mount them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<String>>,
 }
 
 /// Per-agent access policy for the A2A surface.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Access {
-    /// Whether this agent is served publicly via the A2A gateway. Documentation-
-    /// only (no enforcement yet); records intent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public: Option<bool>,
     /// OIDC/JWT authentication + authorization for inbound A2A calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcAccess>,
@@ -220,11 +257,14 @@ pub enum Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Substrate {
-    /// Stock Kubernetes pods (dev / single-tenant).
+    /// Stock Kubernetes pods (dev / single-tenant). The only tier the operator
+    /// renders today; the default when `substrate` is absent.
     StockUnix,
-    /// Kata Containers isolation (hardened; default for hostile multi-tenant prod).
+    /// Kata Containers isolation (hardened; the locked direction for hostile
+    /// multi-tenant prod). **Roadmap — not yet rendered** (render rejects it).
     KataHybrid,
-    /// Per-pod sidecar (most portable; weakest isolation).
+    /// Per-pod sidecar (most portable; weakest isolation). **Roadmap — not yet
+    /// rendered** (render rejects it).
     SidecarEmptydir,
 }
 
@@ -388,6 +428,7 @@ pub struct Condition {
     status = "AgentFleetStatus",
     shortname = "afleet",
     shortname = "afleets",
+    category = "agentctl",
     printcolumn = r#"{"name":"Scaling","type":"string","jsonPath":".spec.scaling.mode"}"#,
     printcolumn = r#"{"name":"Desired","type":"integer","jsonPath":".status.desiredReplicas"}"#,
     printcolumn = r#"{"name":"Ready","type":"integer","jsonPath":".status.readyReplicas"}"#,
@@ -416,9 +457,12 @@ pub struct AgentFleetSpec {
     pub template: AgentSpec,
     /// The **worker** scaling regime.
     pub scaling: Scaling,
-    /// The shared work source (an MCP resource URI) for claim/shard distribution.
+    /// The fleet's shared **work fabric**: the work source (an MCP resource URI
+    /// for claim/shard distribution) plus the redelivery/lease policy the
+    /// operator advertises to the coordinator. Absent ⇒ no shared source +
+    /// server-default redelivery/TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_source: Option<String>,
+    pub work: Option<Work>,
     /// Claim-mode **worker** replica count, the target of the `scale` subresource
     /// so `kubectl scale agentfleet` and an HPA can drive it. **KEDA owns this in
     /// steady state**; the rendered workload omits it. Optional so claim mode may
@@ -439,11 +483,6 @@ pub struct AgentFleetSpec {
     /// they share a pool. Absent ⇒ only the pool cap applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<FleetBudget>,
-
-    /// Work-fabric policy for this fleet's items: dead-letter threshold and the
-    /// default lease TTL. Absent ⇒ unbounded redelivery + server-default TTL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_policy: Option<WorkPolicy>,
 }
 
 /// The fleet's coordinator ("main agent"). A normal conformant agent,
@@ -465,7 +504,7 @@ pub struct Coordinator {
     pub replicas: Option<u32>,
 
     /// How the coordinator reaches the workers. `queue` (default): the operator
-    /// wires it as a producer on the fleet `workSource`; workers claim
+    /// wires it as a producer on the fleet `work.source`; workers claim
     /// (load-balanced, elastic). `a2a`: the operator injects an
     /// `--a2a-peer worker=<gateway>/fleets/<ns>/<name>` so it delegates
     /// point-to-point through the gateway PEP.
@@ -496,21 +535,30 @@ pub struct FleetBudget {
     pub max_tokens: Option<i64>,
 }
 
-/// Work-fabric policy for a fleet's items.
+/// The fleet's shared work fabric: the work source plus the redelivery/lease
+/// policy the operator advertises to the coordinator.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkPolicy {
+pub struct Work {
+    /// The shared work source — an MCP resource URI (e.g. `queue://jobs`) for
+    /// claim/shard distribution. The operator delivers it to the coordinator
+    /// (as `AGENT_FLEET_WORKSOURCE`) and to the KEDA scaler's backlog probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
     /// Dead-letter an item after it has been redelivered this many times without
     /// a terminal `ack`. Absent ⇒ unbounded redelivery. A poison item is moved to
     /// the `deadletter` state (surfaced at `dlq://items`) instead of cycling
-    /// forever.
+    /// forever. Delivered to the coordinator as `AGENT_FLEET_MAX_ATTEMPTS`, which
+    /// a conformant coordinator stamps onto each `work.submit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
 
-    /// Default lease TTL (ms) the operator advertises to workers for this fleet's
-    /// claims. Absent ⇒ the agent/server default.
+    /// Default claim lease TTL as a Go-duration string (e.g. `"30s"`), matching
+    /// `loop.interval` / `loop.deadline`. Absent ⇒ the server default. Delivered
+    /// to the coordinator as `AGENT_FLEET_CLAIM_TTL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_ttl_ms: Option<u64>,
+    pub claim_ttl: Option<String>,
 }
 
 /// The scaling regime.
@@ -519,11 +567,19 @@ pub struct WorkPolicy {
 pub struct Scaling {
     pub mode: ScaleMode,
     /// Claim mode: minimum replicas (KEDA-elastic range). Unset ⇒ may scale to 0.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min: Option<u32>,
+    #[serde(
+        rename = "minReplicas",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_replicas: Option<u32>,
     /// Claim mode: maximum replicas.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max: Option<u32>,
+    #[serde(
+        rename = "maxReplicas",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_replicas: Option<u32>,
     /// Shard mode: the fixed partition count `N` (the FNV-1a/64 modulus and the
     /// StatefulSet replica count). A partition count, **not** a KEDA range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -551,7 +607,7 @@ pub enum ScaleMode {
 pub struct ScaleTarget {
     /// A contract-neutral metric token (mapped onto the negotiated metrics
     /// schema by the operator — never the branded literal).
-    pub signal: String,
+    pub metric: String,
     /// The per-replica target value KEDA scales toward.
     pub value: String,
 }
@@ -600,10 +656,12 @@ pub struct AgentFleetStatus {
     namespaced,
     status = "ModelPoolStatus",
     shortname = "mp",
+    category = "agentctl",
     printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".spec.provider"}"#,
     printcolumn = r#"{"name":"Endpoint","type":"string","jsonPath":".spec.endpoint","priority":1}"#,
     printcolumn = r#"{"name":"Budget","type":"integer","jsonPath":".spec.budget.maxTokens"}"#,
     printcolumn = r#"{"name":"Used","type":"integer","jsonPath":".status.usedTokens"}"#,
+    printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -663,6 +721,10 @@ pub struct Budget {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPoolStatus {
+    /// Health conditions (`Ready`, …); shares the `conditions` + `Ready`-column
+    /// idiom with `Agent`/`AgentFleet`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
     /// Total tokens consumed against the pool so far.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_tokens: Option<i64>,
@@ -688,7 +750,9 @@ pub struct ModelPoolStatus {
     namespaced,
     status = "MCPServerSetStatus",
     shortname = "mcpset",
+    category = "agentctl",
     printcolumn = r#"{"name":"Servers","type":"integer","jsonPath":".status.serverCount"}"#,
+    printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -772,6 +836,10 @@ pub enum McpAuthMode {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MCPServerSetStatus {
+    /// Health conditions (`Ready`, …); shares the `conditions` + `Ready`-column
+    /// idiom with `Agent`/`AgentFleet`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
     /// Number of servers in the set (printer column).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_count: Option<i64>,
@@ -911,6 +979,15 @@ mod tests {
                     a2a: false,
                 }),
                 substrate: Some(Substrate::KataHybrid),
+                model: Some(ModelBinding {
+                    pool: Some("gpt".into()),
+                    id: Some("gpt-4o-mini".into()),
+                }),
+                capabilities: Some(Capabilities {
+                    exec: Some(false),
+                    egress: Some(true),
+                    secrets: Some(vec!["db-creds".into()]),
+                }),
                 ..Default::default()
             },
         );
@@ -919,9 +996,59 @@ mod tests {
         assert_eq!(json["spec"]["mode"], "reactive");
         assert_eq!(json["spec"]["substrate"], "kata-hybrid");
         assert_eq!(json["kind"], "Agent");
+        // grouped bindings land under model{} / capabilities{}
+        assert_eq!(json["spec"]["model"]["pool"], "gpt");
+        assert_eq!(json["spec"]["model"]["id"], "gpt-4o-mini");
+        assert_eq!(json["spec"]["capabilities"]["egress"], true);
+        assert_eq!(json["spec"]["capabilities"]["secrets"][0], "db-creds");
         // round-trip back
         let back: Agent = serde_json::from_value(json).unwrap();
         assert_eq!(back.spec.mode, Mode::Reactive);
         assert_eq!(back.spec.substrate, Some(Substrate::KataHybrid));
+        assert_eq!(back.spec.model.unwrap().pool.as_deref(), Some("gpt"));
+        assert_eq!(back.spec.capabilities.unwrap().exec, Some(false));
+    }
+
+    #[test]
+    fn fleet_work_and_scaling_use_grouped_camelcase_keys() {
+        let f = AgentFleet::new(
+            "workers",
+            AgentFleetSpec {
+                template: AgentSpec {
+                    mode: Mode::Reactive,
+                    subscribe: vec!["queue://jobs".into()],
+                    ..Default::default()
+                },
+                scaling: Scaling {
+                    mode: ScaleMode::Claim,
+                    min_replicas: Some(0),
+                    max_replicas: Some(10),
+                    target: Some(ScaleTarget {
+                        metric: "pending_events".into(),
+                        value: "5".into(),
+                    }),
+                    ..Default::default()
+                },
+                work: Some(Work {
+                    source: Some("queue://jobs".into()),
+                    max_attempts: Some(5),
+                    claim_ttl: Some("30s".into()),
+                }),
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["spec"]["scaling"]["minReplicas"], 0);
+        assert_eq!(json["spec"]["scaling"]["maxReplicas"], 10);
+        assert_eq!(
+            json["spec"]["scaling"]["target"]["metric"],
+            "pending_events"
+        );
+        assert_eq!(json["spec"]["work"]["source"], "queue://jobs");
+        assert_eq!(json["spec"]["work"]["maxAttempts"], 5);
+        assert_eq!(json["spec"]["work"]["claimTtl"], "30s");
+        let back: AgentFleet = serde_json::from_value(json).unwrap();
+        assert_eq!(back.spec.scaling.min_replicas, Some(0));
+        assert_eq!(back.spec.work.unwrap().claim_ttl.as_deref(), Some("30s"));
     }
 }

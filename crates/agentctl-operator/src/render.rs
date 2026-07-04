@@ -586,10 +586,33 @@ fn apply_distribution(
     };
     match distribution {
         Distribution::Queue => {
-            if let Some(ws) = fleet.spec.work_source.as_deref() {
-                container.env.get_or_insert_with(Vec::new).push(EnvVar {
+            let env = container.env.get_or_insert_with(Vec::new);
+            if let Some(ws) = fleet.spec.work.as_ref().and_then(|w| w.source.as_deref()) {
+                env.push(EnvVar {
                     name: "AGENT_FLEET_WORKSOURCE".to_string(),
                     value: Some(ws.to_string()),
+                    ..Default::default()
+                });
+            }
+            // Deliver the redelivery/lease policy to the coordinator, which a
+            // conformant coordinator stamps onto each `work.submit`. Absent ⇒
+            // omitted (server defaults apply).
+            if let Some(ma) = fleet.spec.work.as_ref().and_then(|w| w.max_attempts) {
+                env.push(EnvVar {
+                    name: "AGENT_FLEET_MAX_ATTEMPTS".to_string(),
+                    value: Some(ma.to_string()),
+                    ..Default::default()
+                });
+            }
+            if let Some(ttl) = fleet
+                .spec
+                .work
+                .as_ref()
+                .and_then(|w| w.claim_ttl.as_deref())
+            {
+                env.push(EnvVar {
+                    name: "AGENT_FLEET_CLAIM_TTL".to_string(),
+                    value: Some(ttl.to_string()),
                     ..Default::default()
                 });
             }
@@ -666,7 +689,7 @@ pub fn inject_api_token(rendered: &mut Rendered) {
 pub const DEFAULT_SCALER_ADDRESS: &str = "agentctl-scaler.agentctl-system:9100";
 /// Default in-cluster coordination-server base URL the scaler reads the claim
 /// backlog (`work.stats`) from. Overridden from `COORDINATION_URL`, or per-fleet
-/// by `spec.workSource` when set.
+/// by `spec.work.source` when set.
 pub const DEFAULT_COORDINATION_URL: &str = "http://agentctl-coordination.agentctl-system/";
 /// Fallback per-replica backlog target KEDA scales toward when a claim fleet does
 /// not set `scaling.target.value`.
@@ -689,7 +712,7 @@ const DEFAULT_SCALE_THRESHOLD: &str = "5";
 /// - `scaler_address` — gRPC address KEDA dials for the external trigger
 ///   (operator `SCALER_ADDRESS`, default [`DEFAULT_SCALER_ADDRESS`]).
 /// - `coordination_url` — coordination base URL the scaler reads the backlog
-///   from; the fleet's own `spec.workSource` wins when set, else this operator
+///   from; the fleet's own `spec.work.source` wins when set, else this operator
 ///   default (`COORDINATION_URL`, default [`DEFAULT_COORDINATION_URL`]).
 pub fn render_scaled_object(
     fleet: &AgentFleet,
@@ -705,7 +728,7 @@ pub fn render_scaled_object(
 
     // minReplicaCount defaults to 0 (scale-to-zero); maxReplicaCount is emitted
     // only when set (else KEDA's own default applies).
-    let min = scaling.min.unwrap_or(0);
+    let min = scaling.min_replicas.unwrap_or(0);
     // threshold: the per-replica backlog target (scaling.target.value, default 5).
     let threshold = scaling
         .target
@@ -715,8 +738,9 @@ pub fn render_scaled_object(
     // coordinationUrl: the fleet's own work source wins; else the operator default.
     let coordination_url = fleet
         .spec
-        .work_source
-        .clone()
+        .work
+        .as_ref()
+        .and_then(|w| w.source.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| coordination_url.to_string());
 
@@ -734,7 +758,7 @@ pub fn render_scaled_object(
             }
         }]
     });
-    if let Some(max) = scaling.max {
+    if let Some(max) = scaling.max_replicas {
         spec["maxReplicaCount"] = serde_json::json!(max);
     }
 
@@ -1064,9 +1088,9 @@ fn agent_args(spec: &AgentSpec) -> Vec<String> {
         args.push("--instruction".to_string());
         args.push(instruction.clone());
     }
-    if let Some(model) = &spec.model {
+    if let Some(model_id) = spec.model.as_ref().and_then(|m| m.id.as_deref()) {
         args.push("--model".to_string());
-        args.push(model.clone());
+        args.push(model_id.to_string());
     }
     for sub in &spec.subscribe {
         args.push("--subscribe".to_string());
@@ -1140,14 +1164,17 @@ mod tests {
                 scaling: Scaling {
                     mode,
                     shards,
-                    max: if mode == ScaleMode::Claim {
+                    max_replicas: if mode == ScaleMode::Claim {
                         Some(10)
                     } else {
                         None
                     },
                     ..Default::default()
                 },
-                work_source: Some("queue://jobs".into()),
+                work: Some(agent_api::Work {
+                    source: Some("queue://jobs".into()),
+                    ..Default::default()
+                }),
                 replicas: None,
                 ..Default::default()
             },
@@ -1710,7 +1737,7 @@ mod tests {
         assert_eq!(owner["uid"], "fleet-uid");
         assert_eq!(owner["controller"], true);
 
-        // min defaults to 0 (scale-to-zero); max comes from scaling.max (10 here).
+        // minReplicas defaults to 0 (scale-to-zero); max from scaling.maxReplicas (10 here).
         assert_eq!(so["spec"]["minReplicaCount"], 0);
         assert_eq!(so["spec"]["maxReplicaCount"], 10);
 
@@ -1719,7 +1746,7 @@ mod tests {
         assert_eq!(trigger["type"], "external");
         let md = &trigger["metadata"];
         assert_eq!(md["scalerAddress"], DEFAULT_SCALER_ADDRESS);
-        // the fleet helper sets workSource = "queue://jobs", which wins over the
+        // the fleet helper sets work.source = "queue://jobs", which wins over the
         // operator COORDINATION_URL default.
         assert_eq!(md["coordinationUrl"], "queue://jobs");
         // no scaling.target set → default threshold "5".
@@ -1729,9 +1756,9 @@ mod tests {
 
     #[test]
     fn scaled_object_falls_back_to_default_coordination_url() {
-        // No per-fleet workSource → the operator COORDINATION_URL default is used.
+        // No per-fleet work.source → the operator COORDINATION_URL default is used.
         let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.work_source = None;
+        f.spec.work = None;
         let so =
             render_scaled_object(&f, DEFAULT_SCALER_ADDRESS, DEFAULT_COORDINATION_URL).unwrap();
         assert_eq!(
@@ -1753,16 +1780,19 @@ mod tests {
     fn scaled_object_honors_target_value_and_work_source() {
         let mut f = fleet(ScaleMode::Claim, None);
         f.spec.scaling.target = Some(agent_api::ScaleTarget {
-            signal: "backlog".into(),
+            metric: "backlog".into(),
             value: "12".into(),
         });
-        f.spec.work_source = Some("http://my-coordination.custom.svc/".into());
+        f.spec.work = Some(agent_api::Work {
+            source: Some("http://my-coordination.custom.svc/".into()),
+            ..Default::default()
+        });
 
         let so = render_scaled_object(&f, "scaler:9100", DEFAULT_COORDINATION_URL).unwrap();
         let md = &so["spec"]["triggers"][0]["metadata"];
         // scaling.target.value wins over the default threshold.
         assert_eq!(md["threshold"], "12");
-        // the fleet's own workSource wins over the operator coordination default.
+        // the fleet's own work.source wins over the operator coordination default.
         assert_eq!(md["coordinationUrl"], "http://my-coordination.custom.svc/");
         assert_eq!(md["scalerAddress"], "scaler:9100");
     }
@@ -1873,7 +1903,10 @@ mod tests {
     #[test]
     fn coordinator_queue_distribution_injects_worksource_env() {
         let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.work_source = Some("https://coord.svc/mcp".into());
+        f.spec.work = Some(agent_api::Work {
+            source: Some("https://coord.svc/mcp".into()),
+            ..Default::default()
+        });
         f.spec.coordinator = Some(agent_api::Coordinator {
             template: coord_template(),
             replicas: None,

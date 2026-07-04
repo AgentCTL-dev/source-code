@@ -408,7 +408,7 @@ fn tool_release(
 /// `{item, claim_key?, max_attempts?}`. Skips if `claim_key` is already done or
 /// dead-lettered. Returns the `work_id` (the effective `claim_key`) so a producer
 /// can later correlate the outcome via `work.result`. `max_attempts`
-/// bounds redelivery (from the fleet `workPolicy`); absent ⇒ unbounded.
+/// bounds redelivery (from the fleet `work` policy); absent ⇒ unbounded.
 ///
 /// Producers may be EXTERNAL (not pod-attestable), so submit is NOT hard-blocked by
 /// attestation — it stays token-gated. We attest-if-resolvable only to LOG the
