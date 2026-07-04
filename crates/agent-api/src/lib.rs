@@ -57,9 +57,11 @@ pub struct AgentSpec {
     /// The run shape. Determines the rendered workload kind.
     pub mode: Mode,
 
-    /// The conformant-agent image to run. **Required iff `classRef` is unset;
-    /// forbidden when `classRef` is set** (enforced by CEL/admission). A classless
-    /// `Agent` names its own image here.
+    /// The conformant-agent image to run. When omitted (and no `classRef`
+    /// supplies one), the operator falls back to its configured **default agent
+    /// image** (`operator.defaultAgentImage` / `AGENTCTL_DEFAULT_AGENT_IMAGE`);
+    /// an explicit value here always overrides that default. Mutually exclusive
+    /// with `classRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Reference to an `AgentClass` supplying the ops profile + image. Mutually

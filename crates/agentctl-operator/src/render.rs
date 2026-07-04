@@ -82,6 +82,12 @@ pub struct RenderConfig {
     /// is rendered against for `distribution: a2a`. Unused for the default
     /// `queue` distribution.
     pub gateway_url: String,
+    /// Operator-configured **default agent image**. When an `Agent`/fleet
+    /// template omits `spec.image` (and no `classRef` supplied one upstream),
+    /// this image is used. A per-resource `spec.image` always overrides it.
+    /// `None` (unset / empty `AGENTCTL_DEFAULT_AGENT_IMAGE`) ⇒ `spec.image` is
+    /// required, as before.
+    pub default_agent_image: Option<String>,
 }
 
 /// Default in-cluster ModelGateway URL (chart Service, control-plane
@@ -101,14 +107,15 @@ impl Default for RenderConfig {
             modelgateway_url: DEFAULT_MODELGATEWAY_URL.to_string(),
             mcpgateway_url: DEFAULT_MCPGATEWAY_URL.to_string(),
             gateway_url: DEFAULT_GATEWAY_URL.to_string(),
+            default_agent_image: None,
         }
     }
 }
 
 impl RenderConfig {
     /// Build from the operator environment (`AGENTCTL_MODELGATEWAY_URL`,
-    /// `AGENTCTL_MCPGATEWAY_URL`, `AGENTCTL_GATEWAY_URL`), falling back to the
-    /// in-cluster defaults.
+    /// `AGENTCTL_MCPGATEWAY_URL`, `AGENTCTL_GATEWAY_URL`,
+    /// `AGENTCTL_DEFAULT_AGENT_IMAGE`), falling back to the in-cluster defaults.
     pub fn from_env() -> Self {
         let d = Self::default();
         let env = |k: &str, dflt: String| {
@@ -122,8 +129,24 @@ impl RenderConfig {
             modelgateway_url: env("AGENTCTL_MODELGATEWAY_URL", d.modelgateway_url),
             mcpgateway_url: env("AGENTCTL_MCPGATEWAY_URL", d.mcpgateway_url),
             gateway_url: env("AGENTCTL_GATEWAY_URL", d.gateway_url),
+            // Empty / unset ⇒ None ⇒ spec.image stays required.
+            default_agent_image: std::env::var("AGENTCTL_DEFAULT_AGENT_IMAGE")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
         }
     }
+}
+
+/// Resolve the container image for an agent or fleet template: an explicit
+/// `spec.image` always wins; otherwise fall back to the operator's configured
+/// default agent image (`AGENTCTL_DEFAULT_AGENT_IMAGE` / `operator.defaultAgentImage`).
+/// Errors only when neither is set.
+fn resolve_image(image: &Option<String>, cfg: &RenderConfig) -> Result<String, RenderError> {
+    image
+        .clone()
+        .or_else(|| cfg.default_agent_image.clone())
+        .ok_or(RenderError::MissingImage)
 }
 
 /// A resolved MCP server binding for an agent — the server name (which is both
@@ -275,8 +298,8 @@ pub enum Rendered {
 pub enum RenderError {
     /// The resource has no `.metadata.name`.
     MissingName,
-    /// No image to run: a classless `Agent`/fleet template must set `image` (a
-    /// classRef is resolved upstream, before rendering).
+    /// No image to run: neither `spec.image`, a `classRef` (resolved upstream),
+    /// nor the operator's default agent image is set.
     MissingImage,
     /// A shard-mode fleet did not set `scaling.shards` (the partition count `N`).
     MissingShards,
@@ -289,7 +312,11 @@ impl std::fmt::Display for RenderError {
         match self {
             RenderError::MissingName => write!(f, "resource has no metadata.name"),
             RenderError::MissingImage => {
-                write!(f, "image is required (resolve classRef first)")
+                write!(
+                    f,
+                    "image is required: set spec.image, or configure the operator's \
+                     default agent image (operator.defaultAgentImage / AGENTCTL_DEFAULT_AGENT_IMAGE)"
+                )
             }
             RenderError::MissingShards => {
                 write!(
@@ -313,7 +340,7 @@ pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, Rende
         .name
         .clone()
         .ok_or(RenderError::MissingName)?;
-    let image = agent.spec.image.clone().ok_or(RenderError::MissingImage)?;
+    let image = resolve_image(&agent.spec.image, cfg)?;
     require_stock_unix(agent.spec.substrate)?;
 
     let labels = managed_labels(&name);
@@ -394,7 +421,7 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
     let mut template = fleet.spec.template.clone();
     template.mode = Mode::Reactive;
     let spec = &template;
-    let image = spec.image.clone().ok_or(RenderError::MissingImage)?;
+    let image = resolve_image(&spec.image, cfg)?;
     require_stock_unix(spec.substrate)?;
 
     let labels = managed_labels(&name);
@@ -508,7 +535,7 @@ fn render_coordinator_inner(
     let mut template = coord.template.clone();
     template.mode = Mode::Reactive;
     let spec = &template;
-    let image = spec.image.clone().ok_or(RenderError::MissingImage)?;
+    let image = resolve_image(&spec.image, cfg)?;
     require_stock_unix(spec.substrate)?;
 
     let mut labels = managed_labels(&name);
@@ -1524,9 +1551,44 @@ mod tests {
 
     #[test]
     fn missing_image_is_an_error() {
+        // No spec.image AND no operator default ⇒ still an error.
         let mut a = agent(Mode::Once);
         a.spec.image = None;
         assert_eq!(render_agent(&a, &cfg()), Err(RenderError::MissingImage));
+    }
+
+    #[test]
+    fn image_falls_back_to_operator_default() {
+        // No spec.image, but the operator has a configured default ⇒ it is used.
+        let mut a = agent(Mode::Once);
+        a.spec.image = None;
+        let mut c = cfg();
+        c.default_agent_image = Some("ghcr.io/agentd-dev/agentd:1.0.0".into());
+        let Rendered::Job(job) = render_agent(&a, &c).expect("renders with the default image")
+        else {
+            panic!("expected a Job")
+        };
+        let pod = job.spec.unwrap().template;
+        assert_eq!(
+            container_of(&pod).image.as_deref(),
+            Some("ghcr.io/agentd-dev/agentd:1.0.0")
+        );
+    }
+
+    #[test]
+    fn explicit_image_overrides_the_operator_default() {
+        // A per-Agent spec.image always wins over the operator default.
+        let a = agent(Mode::Once); // sets an explicit image
+        let mut c = cfg();
+        c.default_agent_image = Some("ghcr.io/agentd-dev/agentd:1.0.0".into());
+        let Rendered::Job(job) = render_agent(&a, &c).unwrap() else {
+            panic!("expected a Job")
+        };
+        let pod = job.spec.unwrap().template;
+        assert_eq!(
+            container_of(&pod).image.as_deref(),
+            Some("ghcr.io/example/agent@sha256:abc")
+        );
     }
 
     #[test]

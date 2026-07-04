@@ -115,7 +115,7 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 | Field | Meaning |
 |---|---|
 | `mode` | `once` / `loop` / `reactive` / `schedule` / `workflow`. Determines the rendered workload. |
-| `image` | The conformant-agent image to run. |
+| `image` | The conformant-agent image to run. Optional when the operator has a default agent image configured (`operator.defaultAgentImage`); an explicit value overrides it. |
 | `instruction` | The agent's task instruction (required for non-reactive modes). |
 | `modelPool` | The `ModelPool` this agent binds for model access (admission-validated). |
 | `mcpServerSetRefs` | The `MCPServerSet`s whose tools the agent may call. |

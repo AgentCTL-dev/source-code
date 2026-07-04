@@ -226,6 +226,12 @@ spec:
             - name: AGENTCTL_MCPGATEWAY_URL
               value: {{ .Values.operator.mcpgatewayUrl | default (printf "https://agentctl-mcpgateway.%s.svc.cluster.local." $ns) | quote }}
             {{- end }}
+            {{- with .Values.operator.defaultAgentImage }}
+            # Default agent image: rendered into an Agent/AgentFleet pod when the
+            # template omits spec.image. A per-resource spec.image always overrides.
+            - name: AGENTCTL_DEFAULT_AGENT_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.gateway.enabled }}
             # The A2A gateway base URL a coordinator's `--a2a-peer worker=…` is
             # rendered against for `distribution: a2a`. Unused for the default

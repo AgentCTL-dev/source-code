@@ -141,6 +141,11 @@ operator:
   # Override the MCPGateway URL rendered into agent --mcp flags.
   # Empty => https://agentctl-mcpgateway.<ns>.svc.cluster.local.
   mcpgatewayUrl: ""
+  # Default agent image. When set, an Agent / AgentFleet whose template omits
+  # `spec.image` renders with THIS image; a per-resource `spec.image` always
+  # overrides it. Empty (default) => `spec.image` is required, as before.
+  # e.g. defaultAgentImage: ghcr.io/agentd-dev/agentd:1.0.0
+  defaultAgentImage: ""
   # Leader-elected singleton: default to the small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }
