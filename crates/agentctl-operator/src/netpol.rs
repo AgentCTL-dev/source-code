@@ -2,12 +2,12 @@
 //! Per-tenant-namespace agent NetworkPolicies, reconciled by the operator for
 //! defence-in-depth tenant isolation.
 //!
-//! The chart ships the SAME three data-plane policies, but only for the
+//! The chart ships the SAME four data-plane policies, but only for the
 //! *statically* enumerated `networkPolicies.agentNamespaces` — so a tenant
 //! namespace created after install (the normal case for a multi-tenant control
 //! plane) gets NO isolation until someone re-renders the chart. To cover that
 //! case, on every `Agent`/`AgentFleet` reconcile the operator ensures, in the
-//! workload's OWN namespace, the three policies that make the tenancy boundary
+//! workload's OWN namespace, the four policies that make the tenancy boundary
 //! real for agent pods (label `app.kubernetes.io/name: agent`):
 //!
 //! 1. **`agent-default-deny`** — deny all ingress AND egress by default;
@@ -16,9 +16,14 @@
 //!    coordination), scoped by pod selector so a tenant agent cannot reach e.g.
 //!    the admission webhook or another tenant;
 //! 3. **`agent-ingress-controlplane-only`** — accept ingress only from the
-//!    control-plane namespace (no cross-tenant pod-to-pod traffic).
+//!    control-plane namespace (no cross-tenant pod-to-pod traffic);
+//! 4. **`agent-aauth-internet-egress`** — for **identity-provisioned (AAuth)**
+//!    agents only (selected by [`AAUTH_POD_LABEL`], RFC 0024): HTTPS to PUBLIC
+//!    address space (private/link-local/CGNAT carved out), so direct signed
+//!    dials work while lateral movement stays default-denied. Inert in a
+//!    namespace with no AAuth agents.
 //!
-//! All three are server-side-applied (idempotent, drift-corrected) namespace
+//! All four are server-side-applied (idempotent, drift-corrected) namespace
 //! singletons carrying NO owner reference — they gate EVERY agent pod in the
 //! namespace, so deleting one Agent must not tear the namespace's isolation down.
 //! The bodies are byte-identical to the chart's, so where both the chart (a listed
@@ -30,7 +35,7 @@
 //! default off — matching the chart's `networkPolicies.enabled`).
 
 use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
+    IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
     NetworkPolicyPort, NetworkPolicySpec,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
@@ -54,6 +59,12 @@ const AGENT_POD_NAME: &str = "agent";
 const P_DEFAULT_DENY: &str = "agent-default-deny";
 const P_ALLOW_CP_DNS: &str = "agent-allow-controlplane-and-dns";
 const P_INGRESS_CP_ONLY: &str = "agent-ingress-controlplane-only";
+const P_AAUTH_EGRESS: &str = "agent-aauth-internet-egress";
+
+/// Pod label the renderer stamps on identity-provisioned (AAuth) agent pods —
+/// the selector key of [`P_AAUTH_EGRESS`], so the internet-egress hole opens
+/// for exactly those pods and no other agent.
+pub const AAUTH_POD_LABEL: &str = "agentctl.dev/aauth";
 
 /// The control-plane gateway app names an agent is permitted to egress to — and
 /// ONLY these (a bare namespaceSelector would also expose the admission webhook /
@@ -113,7 +124,7 @@ fn env_truthy(v: &str) -> bool {
     )
 }
 
-/// Ensure the three agent NetworkPolicies in `agent_ns` (server-side apply;
+/// Ensure the four agent NetworkPolicies in `agent_ns` (server-side apply;
 /// idempotent, drift-corrected). No-op when [`NetPolConfig::active`] is false.
 /// Errors bubble to the reconcile (transient apiserver errors → retried).
 pub async fn ensure_agent_netpols(
@@ -138,13 +149,17 @@ pub async fn ensure_agent_netpols(
     Ok(())
 }
 
-/// The three agent NetworkPolicy bodies (pure) for an agent namespace, with the
-/// egress/ingress rules pointed at the control-plane namespace `cp_ns`.
+/// The four agent NetworkPolicy bodies (pure) for an agent namespace, with the
+/// egress/ingress rules pointed at the control-plane namespace `cp_ns`. The
+/// aauth internet-egress policy is always rendered — it selects only pods the
+/// renderer labels [`AAUTH_POD_LABEL`], so it is inert in a namespace with no
+/// identity-provisioned agents.
 pub fn agent_network_policies(cp_ns: &str) -> Vec<NetworkPolicy> {
     vec![
         default_deny(),
         allow_controlplane_and_dns(cp_ns),
         ingress_controlplane_only(cp_ns),
+        aauth_internet_egress(),
     ]
 }
 
@@ -195,6 +210,50 @@ fn allow_controlplane_and_dns(cp_ns: &str) -> NetworkPolicy {
     }
 }
 
+/// `agent-aauth-internet-egress`: the RFC 0024 baseline egress tier for
+/// identity-provisioned agents — HTTPS to **public** address space only
+/// (`0.0.0.0/0`/`::/0` minus private/link-local/CGNAT ranges), selected by the
+/// [`AAUTH_POD_LABEL`] the renderer stamps. Direct signed dials to remote
+/// AAuth resources (and a public Agent Provider) work; lateral movement into
+/// cluster/private space stays blocked by the default-deny. Vanilla
+/// NetworkPolicy cannot express per-FQDN egress — this is the honest coarse
+/// tier; DNS-aware CNIs (Cilium/Calico) can tighten it to the declared
+/// endpoints (documented, not rendered).
+fn aauth_internet_egress() -> NetworkPolicy {
+    let v4 = NetworkPolicyPeer {
+        ip_block: Some(IPBlock {
+            cidr: "0.0.0.0/0".to_string(),
+            except: Some(vec![
+                "10.0.0.0/8".to_string(),
+                "172.16.0.0/12".to_string(),
+                "192.168.0.0/16".to_string(),
+                "169.254.0.0/16".to_string(),
+                "100.64.0.0/10".to_string(),
+            ]),
+        }),
+        ..Default::default()
+    };
+    let v6 = NetworkPolicyPeer {
+        ip_block: Some(IPBlock {
+            cidr: "::/0".to_string(),
+            except: Some(vec!["fc00::/7".to_string(), "fe80::/10".to_string()]),
+        }),
+        ..Default::default()
+    };
+    NetworkPolicy {
+        metadata: meta(P_AAUTH_EGRESS),
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(aauth_pod_selector()),
+            policy_types: Some(vec!["Egress".to_string()]),
+            egress: Some(vec![NetworkPolicyEgressRule {
+                to: Some(vec![v4, v6]),
+                ports: Some(vec![port("TCP", 443)]),
+            }]),
+            ..Default::default()
+        }),
+    }
+}
+
 /// `agent-ingress-controlplane-only`: accept ingress only from the control-plane
 /// namespace (the apiserver + A2A gateway reach the agent's mTLS :8443); no
 /// cross-tenant pod-to-pod traffic.
@@ -223,6 +282,17 @@ fn meta(name: &str) -> ObjectMeta {
         labels: Some(BTreeMap::from([(
             "app.kubernetes.io/managed-by".to_string(),
             "agentctl".to_string(),
+        )])),
+        ..Default::default()
+    }
+}
+
+/// Selector matching only identity-provisioned (AAuth) agent pods.
+fn aauth_pod_selector() -> LabelSelector {
+    LabelSelector {
+        match_labels: Some(BTreeMap::from([(
+            AAUTH_POD_LABEL.to_string(),
+            "true".to_string(),
         )])),
         ..Default::default()
     }
@@ -304,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_exactly_three_named_policies() {
+    fn renders_exactly_four_named_policies() {
         let ps = agent_network_policies("agentctl-system");
         let names: Vec<&str> = ps
             .iter()
@@ -312,7 +382,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![P_DEFAULT_DENY, P_ALLOW_CP_DNS, P_INGRESS_CP_ONLY]
+            vec![
+                P_DEFAULT_DENY,
+                P_ALLOW_CP_DNS,
+                P_INGRESS_CP_ONLY,
+                P_AAUTH_EGRESS
+            ]
         );
     }
 
@@ -380,6 +455,57 @@ mod tests {
         assert!(!vals.contains(&"agentctl-apiserver".to_string()));
         let gw_ports: Vec<i32> = gw.ports.as_ref().unwrap().iter().map(int_port).collect();
         assert!(gw_ports.contains(&443) && gw_ports.contains(&8080));
+    }
+
+    #[test]
+    fn aauth_egress_opens_public_https_only_for_labeled_pods() {
+        // Rendered as the fourth policy of the set.
+        let all = agent_network_policies("agentctl-system");
+        assert_eq!(all.len(), 4);
+        let p = &all[3];
+        assert_eq!(p.metadata.name.as_deref(), Some(P_AAUTH_EGRESS));
+
+        let spec = p.spec.as_ref().unwrap();
+        // Selects ONLY identity-provisioned pods — inert for every other agent.
+        assert_eq!(
+            spec.pod_selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref()
+                .unwrap()[AAUTH_POD_LABEL],
+            "true"
+        );
+        assert_eq!(
+            spec.policy_types.as_ref().unwrap(),
+            &vec!["Egress".to_string()]
+        );
+        let rule = &spec.egress.as_ref().unwrap()[0];
+        // 443 only — CEL already forbids plaintext direct endpoints.
+        let ports: Vec<i32> = rule.ports.as_ref().unwrap().iter().map(int_port).collect();
+        assert_eq!(ports, vec![443]);
+        // Public space only: v4 + v6 blocks each carve out private/link-local
+        // (and v4 CGNAT) ranges, so lateral movement stays default-denied.
+        let peers = rule.to.as_ref().unwrap();
+        let v4 = peers[0].ip_block.as_ref().unwrap();
+        assert_eq!(v4.cidr, "0.0.0.0/0");
+        let except = v4.except.as_ref().unwrap();
+        for range in [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+            "100.64.0.0/10",
+        ] {
+            assert!(except.contains(&range.to_string()), "missing {range}");
+        }
+        let v6 = peers[1].ip_block.as_ref().unwrap();
+        assert_eq!(v6.cidr, "::/0");
+        assert!(v6
+            .except
+            .as_ref()
+            .unwrap()
+            .contains(&"fc00::/7".to_string()));
     }
 
     #[test]

@@ -251,6 +251,16 @@ pub fn inject_aauth(rendered: &mut Rendered, provider: &str) {
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
     let Some(pod) = pod else { return };
+    // Stamp the aauth pod label (template labels only — never the immutable
+    // workload selector): the netpol plane keys its internet-egress tier off
+    // it ([`crate::netpol::AAUTH_POD_LABEL`]), so the hole opens for exactly
+    // these pods.
+    if let Some(labels) = pod.metadata.as_mut().and_then(|m| m.labels.as_mut()) {
+        labels.insert(
+            crate::netpol::AAUTH_POD_LABEL.to_string(),
+            "true".to_string(),
+        );
+    }
     let Some(spec) = pod.spec.as_mut() else {
         return;
     };
@@ -1718,6 +1728,24 @@ mod tests {
         // Secret-name stem = the workload name from the agentctl.dev/agent label.
         assert_eq!(src.secret_name.as_deref(), Some("demo-aauth-key"));
         assert_eq!(src.default_mode, Some(0o400));
+        // The netpol selector label lands on the TEMPLATE only — the immutable
+        // workload selector keeps the base managed labels.
+        let tpl_labels = tpl.metadata.as_ref().unwrap().labels.as_ref().unwrap();
+        assert_eq!(
+            tpl_labels
+                .get(crate::netpol::AAUTH_POD_LABEL)
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+        let selector = dep
+            .spec
+            .as_ref()
+            .unwrap()
+            .selector
+            .match_labels
+            .as_ref()
+            .unwrap();
+        assert!(!selector.contains_key(crate::netpol::AAUTH_POD_LABEL));
     }
 
     #[test]

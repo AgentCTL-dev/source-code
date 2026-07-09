@@ -223,14 +223,18 @@ Supporting facts:
 
 ## Tenant network isolation
 
-Tenant isolation is enforced by three NetworkPolicies applied in every agent
-namespace. They select agent pods by the label `app.kubernetes.io/name: agent`.
+Tenant isolation is enforced by four NetworkPolicies applied in every agent
+namespace. The first three select agent pods by the label
+`app.kubernetes.io/name: agent`; the fourth selects **only**
+identity-provisioned (AAuth) agent pods by `agentctl.dev/aauth: "true"` and is
+inert in a namespace with none.
 
 | Policy | Type | Effect |
 |---|---|---|
 | `agent-default-deny` | Ingress + Egress | Deny all traffic in and out by default (no rules). |
 | `agent-allow-controlplane-and-dns` | Egress | Re-open egress **only** to DNS (UDP/TCP 53, any namespace) and to the control-plane **gateway pods** — ModelGateway, MCPGateway, A2A gateway, coordination — on TCP 443 and TCP 8080. |
 | `agent-ingress-controlplane-only` | Ingress | Accept ingress **only** from the control-plane namespace (the apiserver + A2A gateway reaching the agent's mTLS 8443). No cross-tenant pod-to-pod traffic. |
+| `agent-aauth-internet-egress` | Egress | For **AAuth identity-provisioned agents only** (RFC 0024): HTTPS (TCP 443) to **public** address space — `0.0.0.0/0` / `::/0` minus private, link-local, and CGNAT ranges — so direct signed dials to remote AAuth resources (and a public Agent Provider) work while lateral movement into cluster/private space stays default-denied. Vanilla NetworkPolicy cannot express per-FQDN egress; this is the honest coarse tier — a DNS-aware CNI (Cilium/Calico) can tighten it to the declared endpoints. |
 
 Design points worth noting for review:
 
@@ -240,16 +244,20 @@ Design points worth noting for review:
   expose the admission webhook and the aggregated apiserver to a tenant agent; the
   pod selector forbids that. The apiserver and admission app names are explicitly
   not in the allow set.
-- **No internet, no other tenants.** The only permitted egress is DNS and those
-  gateway pods. There is no allow for the public internet or for peer tenant
-  namespaces.
+- **No internet, no other tenants — unless identity-provisioned.** For a plain
+  agent the only permitted egress is DNS and those gateway pods; there is no
+  allow for the public internet or for peer tenant namespaces. An **AAuth**
+  agent (labeled `agentctl.dev/aauth: "true"` by the operator) additionally
+  gets public-HTTPS egress via `agent-aauth-internet-egress` — the declared,
+  admission-gated (`capabilities.egress`) exception for direct signed dials,
+  still excluding every private range.
 
 ### Shipped by the chart AND reconciled by the operator
 
-The chart renders these three policies for the namespaces statically listed in
+The chart renders these four policies for the namespaces statically listed in
 `networkPolicies.agentNamespaces`. That does not cover a tenant namespace created
 **after** install, so on every `Agent`/`AgentFleet` reconcile the **operator**
-also ensures the same three policies in the workload's own namespace. The two
+also ensures the same four policies in the workload's own namespace. The two
 sources use byte-identical names and bodies and are applied server-side, so they
 co-own each object rather than conflict. The operator-reconciled policies are
 namespace singletons carrying no owner reference, so deleting one Agent never

@@ -226,5 +226,43 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ns }}
+---
+# RFC 0024 baseline egress tier for identity-provisioned (AAuth) agents:
+# HTTPS to PUBLIC address space only — direct signed dials to remote AAuth
+# resources (and a public Agent Provider) work, while private/link-local/CGNAT
+# ranges stay carved out (lateral movement remains default-denied). Selects
+# ONLY pods the operator labels agentctl.dev/aauth=true, so it is inert in a
+# namespace with no identity-provisioned agents. Vanilla NetworkPolicy cannot
+# express per-FQDN egress — this is the honest coarse tier; a DNS-aware CNI
+# (Cilium/Calico) can tighten it to the declared endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-aauth-internet-egress
+  namespace: {{ $agentNs }}
+  labels:
+    {{- include "agentctl.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      agentctl.dev/aauth: "true"
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+        - ipBlock:
+            cidr: "::/0"
+            except:
+              - fc00::/7
+              - fe80::/10
+      ports:
+        - { protocol: TCP, port: 443 }
 {{- end }}
 {{- end }}
