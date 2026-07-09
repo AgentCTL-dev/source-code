@@ -22,7 +22,15 @@ kube = { version = "4", default-features = false, features = ["client", "rustls-
 k8s-openapi = { version = "0.28", features = ["latest"] }
 # HTTP client for the gateway→provider hop. No tls feature → pure Rust
 # (in-cluster the provider endpoint is plain HTTP; TLS is later hardening).
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# The provider dial. default-features off; TLS is a hand-built ring
+# `ClientConfig` passed via `use_preconfigured_tls` (webpki roots + optional
+# extra CA) — never aws-lc-rs, no C toolchain. Without a TLS backend reqwest
+# refuses `https://` outright, which silently limited pools to http providers.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-manual-roots-no-provider",
+] }
+webpki-roots = "1"
 # The ModelPool CRD type (agentctl.dev/v1alpha1).
 agent-api = { path = "../agent-api" }
 # Durable usage meter. sslmode=disable → NoTls (default); when the DSN asks for

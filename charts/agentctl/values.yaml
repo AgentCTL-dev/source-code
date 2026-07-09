@@ -305,6 +305,12 @@ modelgateway:
   # a deliberate single-tenant/dev opt-out — matching the MCPGateway, which is always
   # attested. Set false ONLY for a trusted single-tenant install.
   attestIdentity: true
+  # Extra CA bundle (PEM path IN the modelgateway pod) trusted for UPSTREAM
+  # provider dials, on top of the always-trusted webpki public roots. Use for
+  # https providers behind a private/org CA; for one whose cert chains to the
+  # cluster CA, the bundle is already mounted — set
+  # providerCaFile: /etc/agentctl/tls/ca.crt. Empty = public roots only.
+  providerCaFile: ""
   # Inference proxy: small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }

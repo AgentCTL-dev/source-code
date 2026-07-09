@@ -216,6 +216,14 @@ spec:
             - name: MODELGATEWAY_TLS_DIR
               value: /etc/agentctl/tls
             {{- end }}
+            {{- with .Values.modelgateway.providerCaFile }}
+            # Extra CA bundle for UPSTREAM provider dials (webpki public roots
+            # are always trusted). For an in-cluster https provider whose cert
+            # chains to the cluster CA, point at the already-mounted
+            # /etc/agentctl/tls/ca.crt.
+            - name: MODELGATEWAY_PROVIDER_CA_FILE
+              value: {{ . | quote }}
+            {{- end }}
           {{- with (index .Values "modelgateway").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

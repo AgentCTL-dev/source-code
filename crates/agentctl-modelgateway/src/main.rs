@@ -55,6 +55,12 @@ const H_POD_UID: &str = "X-Agent-Pod-Uid";
 struct AppState {
     client: Client,
     pool: Pool,
+    /// The shared upstream (provider) HTTP client: ring-backed rustls with
+    /// webpki roots (+ optional extra CA via `MODELGATEWAY_PROVIDER_CA_FILE`),
+    /// built ONCE at startup — see [`build_provider_client`]. Replaces the old
+    /// per-request `reqwest::Client::new()`, which had NO TLS backend at all
+    /// (an `https://` pool endpoint failed outright at request time).
+    http: reqwest::Client,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
     /// When `true`, the caller's identity is **attested** from its source IP
@@ -104,6 +110,17 @@ async fn main() {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
+    }
+
+    // The shared provider-dial client (https-capable; see AppState.http).
+    // Fail-fast: a gateway that cannot dial providers is not serving anything.
+    let provider_ca = std::env::var("MODELGATEWAY_PROVIDER_CA_FILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let http = build_provider_client(provider_ca.as_deref()).expect("build provider HTTP client");
+    if let Some(ca) = &provider_ca {
+        tracing::info!(ca = %ca, "provider dials trust webpki roots + the extra CA bundle");
     }
 
     // Shared metrics surface (also feeds the access gate's rejection counter).
@@ -182,6 +199,7 @@ async fn main() {
         .with_state(AppState {
             client,
             pool,
+            http,
             metrics,
             attest,
             control_plane_ns,
@@ -265,6 +283,51 @@ fn tls_server_config(dir: &std::path::Path) -> Result<rustls::ServerConfig, Stri
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| format!("server config: {e}"))
+}
+
+/// The shared upstream (provider) HTTP client. TLS is a hand-built rustls
+/// `ClientConfig` on the **ring** provider (explicit — never the absent
+/// process default, never aws-lc-rs) trusting the **webpki roots** (public
+/// providers) plus an optional extra PEM bundle (`MODELGATEWAY_PROVIDER_CA_FILE`
+/// — in-cluster/org providers whose serving certs chain to a private CA; the
+/// pod already mounts the cluster CA at `/etc/agentctl/tls/ca.crt`). Plain
+/// `http://` endpoints (the bundled mock provider) bypass TLS entirely.
+///
+/// Timeouts: 10 s connect; overall capped to [`store::RESERVATION_TTL_SECS`] —
+/// a provider hung longer than the reservation sweep would hold budget the
+/// sweeper has already reclaimed, so the dial gives up in lockstep.
+fn build_provider_client(extra_ca_file: Option<&str>) -> Result<reqwest::Client, String> {
+    let provider = rustls::crypto::ring::default_provider();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(path) = extra_ca_file {
+        let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        let mut reader = std::io::BufReader::new(f);
+        let mut added = 0usize;
+        for cert in rustls_pemfile::certs(&mut reader) {
+            let cert = cert.map_err(|e| format!("read {path}: {e}"))?;
+            roots
+                .add(cert)
+                .map_err(|e| format!("add CA from {path}: {e}"))?;
+            added += 1;
+        }
+        // A named-but-empty bundle is a misconfiguration — fail loudly rather
+        // than silently trusting only the public roots.
+        if added == 0 {
+            return Err(format!("{path} contains no PEM certificates"));
+        }
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("rustls protocol versions: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(store::RESERVATION_TTL_SECS as u64))
+        .build()
+        .map_err(|e| format!("build provider client: {e}"))
 }
 
 // --- graceful shutdown -----------------------------------------------------
@@ -414,7 +477,8 @@ async fn infer(
     //    pool's credential injected as a bearer token.
     inject_model(&mut body, spec.default_model.as_deref());
     let url = format!("{}/v1/infer", spec.endpoint.trim_end_matches('/'));
-    let resp = match reqwest::Client::new()
+    let resp = match state
+        .http
         .post(&url)
         .bearer_auth(&key)
         .json(&body)
@@ -966,6 +1030,26 @@ async fn release_reservation(state: &AppState, reservation: &Option<(i64, i64)>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_client_builds_with_and_without_an_extra_ca() {
+        // webpki roots only — the https-capable default. (The old
+        // `reqwest::Client::new()` had no TLS backend at all: any https pool
+        // endpoint failed at request time.)
+        assert!(build_provider_client(None).is_ok());
+
+        // A named-but-missing bundle is a loud misconfig, not a silent skip.
+        let err = build_provider_client(Some("/nonexistent/ca.pem")).unwrap_err();
+        assert!(err.contains("/nonexistent/ca.pem"), "got: {err}");
+
+        // A file with no PEM certificates is equally loud.
+        let dir = std::env::temp_dir().join("mg-provider-ca-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty.pem");
+        std::fs::write(&empty, "not a certificate\n").unwrap();
+        let err = build_provider_client(Some(empty.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("no PEM certificates"), "got: {err}");
+    }
 
     #[test]
     fn extract_token_count_handles_provider_shapes() {
