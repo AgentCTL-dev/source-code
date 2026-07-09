@@ -76,6 +76,25 @@ log "cargo build --release -p mock-agent"
 build "mock-agent:$TAG" "$REPO_ROOT/deploy/examples/mock-agent.Dockerfile" "$REPO_ROOT"
 publish "mock-agent:$TAG"
 
+# ---- mock-aauth-mcp:dev --------------------------------------------------
+# The AAuth-verifying remote-MCP fixture (RFC 0024 phase 0): verifies RFC 9421
+# signatures + agent tokens against the e2e Agent Provider (apd). Same crate,
+# second binary (already built by the -p mock-agent build above).
+build "mock-aauth-mcp:$TAG" "$REPO_ROOT/deploy/examples/mock-aauth-mcp.Dockerfile" "$REPO_ROOT"
+publish "mock-aauth-mcp:$TAG"
+
+# ---- apd:e2e (the Agent Provider — "the house", RFC 0023) ------------------
+# Built from the sibling agentprovider checkout when present (hermetic, like
+# agentd); skipped-with-warning otherwise — the aauth e2e scenario then SKIPs.
+APD_SRC="${APD_SRC:-/root/agentprovider/source-code}"
+APD_IMAGE="${APD_IMAGE:-apd:e2e}"
+if [ -f "$APD_SRC/Dockerfile" ]; then
+  build "$APD_IMAGE" "$APD_SRC/Dockerfile" "$APD_SRC"
+  publish "$APD_IMAGE"
+else
+  log "WARN: $APD_SRC not found — skipping $APD_IMAGE (aauth scenario will SKIP)"
+fi
+
 # ---- the 8 control-plane images -----------------------------------------
 for comp in "${COMPONENTS[@]}"; do
   build "agentctl/$comp:$TAG" "$REPO_ROOT/deploy/$comp/Dockerfile" "$REPO_ROOT"

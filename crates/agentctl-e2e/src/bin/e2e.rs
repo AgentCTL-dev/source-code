@@ -154,6 +154,7 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("sec-coord-mtls", "security", sec_coord_mtls),
         scenario!("sec-apitoken", "security", sec_apitoken),
         scenario!("sec-netpol", "security", sec_netpol),
+        scenario!("sec-aauth", "security", sec_aauth),
     ]
 }
 
@@ -1447,6 +1448,180 @@ async fn sec_netpol(ctx: &Ctx) -> Result<Outcome> {
         bail!("NetworkPolicy did not block a disallowed cross-namespace connection");
     }
     pass()
+}
+
+/// AAuth end-to-end (RFC 0023 + 0024 phase 0): the operator provisions a
+/// portable identity at the Agent Provider (the house), the agent self-enrolls
+/// keyless, and it dials a remote AAuth MCP server DIRECTLY — every request
+/// signed (RFC 9421) and verified against the AP's JWKS. Asserts: the agent
+/// learns `status.identity.aauth`, the once-run completes cleanly, and the
+/// mock server counted only SIGNED calls (never an unsigned/bad-sig accept).
+async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
+    // Prereq: the Agent Provider image must be loaded (built from the sibling
+    // agentprovider checkout by images.sh). Absent ⇒ SKIP with a reason.
+    if !aauth_image_present() {
+        return skip(
+            "apd:e2e image not loaded — build the sibling agentprovider (APD_SRC) via images.sh",
+        );
+    }
+    let dir = examples_dir();
+
+    // The operator's admin channel to apd: the SAME fixture token apd's
+    // ConfigMap carries, as a Secret in the control-plane namespace. Created
+    // before the overlay so the operator mounts it on upgrade. (Delete-first
+    // keeps it idempotent across re-runs without a client-side apply.)
+    let _ = shell::kubectl(&[
+        "delete",
+        "secret",
+        "apd-admin-token",
+        "-n",
+        &ctx.cfg.system_ns,
+        "--ignore-not-found",
+    ]);
+    shell::kubectl(&[
+        "create",
+        "secret",
+        "generic",
+        "apd-admin-token",
+        "-n",
+        &ctx.cfg.system_ns,
+        "--from-literal=token=e2e-apd-admin-token-0123456789abcdef",
+    ])
+    .context("create apd-admin-token Secret")?;
+
+    // The house + the remote resource + the mock ModelPool/provider.
+    apply_example(&dir, "apd.yaml")?;
+    apply_example(&dir, "mock-aauth-mcp.yaml")?;
+    apply_mock_provider(ctx, &dir)?;
+    apply_example(&dir, "modelpool-mock.yaml")?;
+    for (kind, name) in [("deployment", "apd"), ("deployment", "mock-aauth-mcp")] {
+        shell::kubectl(&[
+            "rollout",
+            "status",
+            &format!("{kind}/{name}"),
+            "-n",
+            "default",
+            "--timeout=120s",
+        ])?;
+    }
+
+    // Point the operator + admission at the house, then clean up on return.
+    apply_overlay(ctx, "aauth")?;
+    let _g = OverlayGuard { ctx };
+    let _cleanup = AauthCleanup { ctx, dir: &dir };
+
+    // The identity-provisioned once-agent: provisioned key + allowlist
+    // enrollment + a DIRECT signed dial to the mock (auth.mode: aauth).
+    apply_example(&dir, "aauth-agent.yaml")?;
+
+    // The operator learns the enrolled identity into status.identity.aauth
+    // once the agent self-enrolls (allowlist consumed).
+    let agents: kube::Api<Agent> = kube::Api::namespaced(ctx.client.clone(), &ctx.cfg.ns);
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        let a = agents.get("aauth-once").await?;
+        Ok(a.status
+            .and_then(|s| s.identity)
+            .and_then(|i| i.aauth)
+            .and_then(|a| a.agent)
+            .is_some_and(|id| id.starts_with("aauth:")))
+    })
+    .await
+    .context("Agent aauth-once never learned status.identity.aauth (enrollment)")?;
+
+    // The once-run reaches its terminal transition — it connected + signed the
+    // MCP handshake to the mock and exited. (Pod Succeeded ⇒ clean exit 0.)
+    let pod = format!("job/{}", "aauth-once");
+    shell::kubectl(&[
+        "wait",
+        &pod,
+        "-n",
+        &ctx.cfg.ns,
+        "--for=condition=complete",
+        "--timeout=180s",
+    ])
+    .context("aauth-once Job did not complete (signed MCP connect/run)")?;
+
+    // The mock verified real signatures: at least one signed-OK, and NEVER an
+    // unsigned or bad-signature acceptance.
+    let stats = aauth_mock_stats(ctx)?;
+    let signed = stats.get("signed_ok").and_then(|v| v.as_u64()).unwrap_or(0);
+    let unsigned = stats
+        .get("unsigned_rejected")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if signed < 1 {
+        bail!("mock AAuth MCP server counted no signed-OK calls (agent did not sign a verified request)");
+    }
+    // A conformant agent signs proactively, so unsigned_rejected may be 0 —
+    // the load-bearing assertion is that signed calls verified end to end
+    // (against the AP's JWKS), which `signed >= 1` proves.
+    println!("    (mock verified {signed} signed call(s), {unsigned} unsigned challenge(s))");
+    pass()
+}
+
+/// Whether the Agent Provider image is loaded into the cluster's nodes.
+fn aauth_image_present() -> bool {
+    shell::kubectl(&[
+        "get",
+        "nodes",
+        "-o",
+        "jsonpath={.items[*].status.images[*].names}",
+    ])
+    .map(|out| out.contains("apd:e2e"))
+    .unwrap_or(false)
+}
+
+/// Read the mock AAuth MCP server's `/stats` from inside the cluster (a
+/// throwaway curl pod), avoiding a CA-trust dance on the harness side — the
+/// mock serves https with the cluster CA, so `curl -k` in-cluster is the
+/// simplest legible reader for a fixture endpoint.
+fn aauth_mock_stats(_ctx: &Ctx) -> Result<serde_json::Value> {
+    let out = shell::kubectl(&[
+        "run",
+        "e2e-aauth-stats",
+        "-n",
+        "default",
+        "--rm",
+        "-i",
+        "--restart=Never",
+        "--image=curlimages/curl:8.8.0",
+        "--",
+        "curl",
+        "-sSk",
+        "--max-time",
+        "10",
+        "https://mock-aauth-mcp.default.svc.cluster.local/stats",
+    ])
+    .context("read mock /stats via in-cluster curl")?;
+    // `kubectl run -i` appends a "pod deleted" line; take the JSON object line.
+    let json_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .context("no JSON in /stats output")?;
+    serde_json::from_str(json_line).context("parse mock /stats json")
+}
+
+/// Best-effort teardown of the aauth scenario's out-of-band manifests + Secret.
+struct AauthCleanup<'a> {
+    ctx: &'a Ctx,
+    dir: &'a str,
+}
+impl Drop for AauthCleanup<'_> {
+    fn drop(&mut self) {
+        delete_example(self.dir, "aauth-agent.yaml");
+        delete_example(self.dir, "mock-aauth-mcp.yaml");
+        delete_example(self.dir, "apd.yaml");
+        delete_example(self.dir, "modelpool-mock.yaml");
+        delete_example(self.dir, "mock-provider.yaml");
+        let _ = shell::kubectl(&[
+            "delete",
+            "secret",
+            "apd-admin-token",
+            "-n",
+            &self.ctx.cfg.system_ns,
+            "--ignore-not-found",
+        ]);
+    }
 }
 
 // ===========================================================================

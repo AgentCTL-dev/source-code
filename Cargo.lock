@@ -1937,6 +1937,7 @@ dependencies = [
  "agent-contract-client",
  "axum",
  "axum-server",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde_json",

@@ -11,8 +11,16 @@ repository.workspace = true
 name = "mock-agent"
 path = "src/main.rs"
 
+# The AAuth-verifying remote-MCP fixture (RFC 0024 e2e phase 0): verifies
+# RFC 9421 signatures + aa-agent+jwt tokens against the e2e Agent Provider.
+[[bin]]
+name = "mock-aauth-mcp"
+path = "src/bin/mock_aauth_mcp.rs"
+
 [dependencies]
 axum = "0.8"
+# Ed25519 verification for the AAuth fixture (same ring the rustls stack links).
+ring = "0.17"
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"

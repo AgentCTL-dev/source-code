@@ -1,0 +1,42 @@
+# e2e: an identity-provisioned agentd Agent dialing a remote AAuth MCP server
+# DIRECTLY (RFC 0023 + RFC 0024 phase 0).
+#
+#   - identity.aauth {} — opt in; the provider comes from the operator default
+#     (values/aauth.yaml → http://apd.default.svc.cluster.local). The operator
+#     provisions the key Secret, pre-registers its thumbprint (allowlist), and
+#     the agent self-enrolls at boot (aauth.ready) before doing anything else.
+#   - mcpServers [aauth-tools] + auth.mode aauth on the server ⇒ the operator
+#     renders --mcp secure=<REAL https endpoint> (no gateway facade — a
+#     rewriting proxy cannot preserve RFC 9421 signatures) and admission
+#     requires capabilities.egress (rule 8).
+#   - mode: once — agentd connects its MCP servers at startup (the SIGNED
+#     initialize/tools handshake the mock asserts), runs one instruction
+#     against the mock ModelPool, and exits cleanly.
+apiVersion: agentctl.dev/v1alpha1
+kind: MCPServerSet
+metadata:
+  name: aauth-tools
+  namespace: default
+spec:
+  servers:
+    - name: secure
+      endpoint: https://mock-aauth-mcp.default.svc.cluster.local/mcp
+      auth: { mode: aauth }
+      tags: ["egress"]
+---
+apiVersion: agentctl.dev/v1alpha1
+kind: Agent
+metadata:
+  name: aauth-once
+  namespace: default
+spec:
+  mode: once
+  image: agentd:1.0.0
+  instruction: "Say hello in one short sentence."
+  model:
+    pool: mockpool
+  mcpServers: ["aauth-tools"]
+  identity:
+    aauth: {}
+  capabilities:
+    egress: true

@@ -1,0 +1,11 @@
+# AAuth house-provisioning overlay (RFC 0023 phase 0): point the operator +
+# admission at the e2e Agent Provider (e2e/manifests/apd.yaml) and hand the
+# operator the admin channel. The scenario creates the apd-admin-token Secret
+# (same fixture value as apd's ConfigMap) in the control-plane namespace
+# before applying this overlay, and reverts to base afterwards.
+identity:
+  aauth:
+    provider: "http://apd.default.svc.cluster.local"
+    adminTokenSecret:
+      name: apd-admin-token
+      key: token

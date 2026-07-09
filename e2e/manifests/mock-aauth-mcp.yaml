@@ -1,0 +1,66 @@
+# e2e: the AAuth-verifying REMOTE MCP server (RFC 0024 phase 0) — stands in
+# for a third-party resource that authorizes agents by identity. It verifies
+# every request's RFC 9421 signature + aa-agent+jwt against the e2e Agent
+# Provider's JWKS, challenges unsigned calls with the spec 401, and exposes
+# GET /stats for the scenario's assertions.
+#
+# Serves https with a cert-manager cert from the cluster CA
+# (ClusterIssuer/agentctl-ca): the CEL rule requires an https endpoint for
+# aauth-mode servers, and the dialing agent already trusts this CA (--tls-ca).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mock-aauth-mcp-tls
+  namespace: default
+spec:
+  secretName: mock-aauth-mcp-tls
+  duration: 2160h
+  privateKey: { algorithm: ECDSA, size: 256 }
+  usages: ["server auth"]
+  dnsNames:
+    - mock-aauth-mcp.default.svc
+    - mock-aauth-mcp.default.svc.cluster.local
+  issuerRef: { kind: ClusterIssuer, name: agentctl-ca }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-aauth-mcp
+  namespace: default
+  labels: { app.kubernetes.io/name: mock-aauth-mcp }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: mock-aauth-mcp }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: mock-aauth-mcp }
+    spec:
+      containers:
+        - name: mock
+          image: mock-aauth-mcp:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: APD_HOST, value: "apd.default.svc.cluster.local:80" }
+            - { name: TLS_DIR, value: /etc/mock/tls }
+          ports:
+            - { containerPort: 8443, name: https }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/mock/tls, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: tls
+          secret: { secretName: mock-aauth-mcp-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-aauth-mcp
+  namespace: default
+spec:
+  selector: { app.kubernetes.io/name: mock-aauth-mcp }
+  ports:
+    - { name: https, port: 443, targetPort: 8443 }

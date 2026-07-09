@@ -1,0 +1,88 @@
+# e2e: the Agent Provider (apd) — "the house" (RFC 0023 phase 0).
+#
+# ALLOWLIST enrollment mode: the agentctl operator pre-registers each agent
+# key's thumbprint over the admin API; agents then self-enroll keyless. The
+# issuer is plain http IN-CLUSTER ONLY (apd `insecure_dev_mode`) — the e2e
+# posture-1 shape; a production/public house terminates TLS in front and uses
+# a real https issuer (RFC 0023 §4.3). Memory storage: this is a fixture.
+#
+# The admin token here is an E2E FIXTURE VALUE, shared with the operator via
+# the apd-admin-token Secret the scenario creates in the control-plane
+# namespace (values/aauth.yaml points identity.aauth.adminTokenSecret at it).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apd-config
+  namespace: default
+data:
+  apd.json: |
+    {
+      "issuer": "http://apd.default.svc.cluster.local",
+      "listen": "0.0.0.0:8420",
+      "insecure_dev_mode": true,
+      "storage": { "backend": "memory" },
+      "keys_file": "/var/lib/apd/keys.json",
+      "agent_token_ttl_secs": 300,
+      "enrollment": { "methods": ["allowlist"] },
+      "admin_token": "e2e-apd-admin-token-0123456789abcdef"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apd
+  namespace: default
+  labels: { app.kubernetes.io/name: apd }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: apd }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: apd }
+    spec:
+      # apd serve requires an existing keys file ("run `apd keygen` first" —
+      # it never auto-generates, so a restart can't silently rotate the fleet
+      # identity). For the memory-backed fixture, generate into the shared
+      # emptyDir at pod start.
+      initContainers:
+        - name: keygen
+          image: apd:e2e
+          imagePullPolicy: IfNotPresent
+          args: ["keygen", "--keys", "/var/lib/apd/keys.json"]
+          volumeMounts:
+            - { name: keys, mountPath: /var/lib/apd }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: apd
+          image: apd:e2e
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "--config", "/etc/apd/apd.json"]
+          ports:
+            - { containerPort: 8420, name: http }
+          volumeMounts:
+            - { name: config, mountPath: /etc/apd, readOnly: true }
+            # Signing keys generated at first boot; memory-backed fixture.
+            - { name: keys, mountPath: /var/lib/apd }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: config
+          configMap: { name: apd-config }
+        - name: keys
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apd
+  namespace: default
+spec:
+  selector: { app.kubernetes.io/name: apd }
+  ports:
+    - { name: http, port: 80, targetPort: 8420 }
