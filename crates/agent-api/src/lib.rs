@@ -142,6 +142,42 @@ pub struct AgentSpec {
     /// inbound A2A calls. Exposure itself is governed by `surfaces.a2a`.
     #[serde(rename = "access", default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
+
+    /// Portable agent identity (RFC 0023). `aauth` opts the agent into an
+    /// AAuth identity the operator provisions and lifecycle-manages at an
+    /// Agent Provider. **Experimental, default-off** — absent ⇒ rendering is
+    /// byte-identical to today. Grouped so future identity systems slot
+    /// beside `aauth` rather than flattening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
+}
+
+/// Portable-identity opt-ins for an agent (RFC 0023). One member today.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    /// AAuth identity (`aauth:local@domain`): the operator provisions a
+    /// per-Agent Ed25519 key, pre-registers its thumbprint at the Agent
+    /// Provider (allowlist enrollment), and the agent self-enrolls at startup
+    /// — no secret beyond the agent's own key ever reaches the pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aauth: Option<AauthIdentity>,
+}
+
+/// The AAuth identity opt-in. An empty object is valid: the operator's
+/// configured default provider applies.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AauthIdentity {
+    /// The Agent Provider issuer URL (`https://…`). Absent ⇒ the operator's
+    /// configured default (`AGENTCTL_AAUTH_PROVIDER`). The admission webhook
+    /// denies the opt-in when neither is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// RESERVED (AAuth Case C, user-scoped access via a Person Server). Not
+    /// rendered in v1; accepted so specs written for the roadmap stay valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_server: Option<String>,
 }
 
 /// The intelligence binding for an `Agent`: which `ModelPool` supplies keyless
@@ -359,6 +395,33 @@ pub struct AgentStatus {
     /// The curated contract projection from the live manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract: Option<ContractStatus>,
+    /// Provisioned portable identity (RFC 0023), learned after the agent
+    /// enrolls at its Agent Provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityStatus>,
+}
+
+/// Provisioned portable identities, mirroring `spec.identity`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aauth: Option<AauthIdentityStatus>,
+}
+
+/// The enrolled AAuth identity as learned from the Agent Provider.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AauthIdentityStatus {
+    /// The stable agent identifier, e.g. `aauth:k7q3p9n2@ap.example`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The Agent Provider issuer URL the identity is enrolled at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// RFC 3339 time the operator first observed the enrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrolled_at: Option<String>,
 }
 
 /// Curated facts projected from the agent's live capabilities manifest.
@@ -988,6 +1051,12 @@ mod tests {
                     egress: Some(true),
                     secrets: Some(vec!["db-creds".into()]),
                 }),
+                identity: Some(Identity {
+                    aauth: Some(AauthIdentity {
+                        provider: Some("https://ap.example.com".into()),
+                        person_server: Some("https://ps.example.com".into()),
+                    }),
+                }),
                 ..Default::default()
             },
         );
@@ -996,17 +1065,58 @@ mod tests {
         assert_eq!(json["spec"]["mode"], "reactive");
         assert_eq!(json["spec"]["substrate"], "kata-hybrid");
         assert_eq!(json["kind"], "Agent");
-        // grouped bindings land under model{} / capabilities{}
+        // grouped bindings land under model{} / capabilities{} / identity{}
         assert_eq!(json["spec"]["model"]["pool"], "gpt");
         assert_eq!(json["spec"]["model"]["id"], "gpt-4o-mini");
         assert_eq!(json["spec"]["capabilities"]["egress"], true);
         assert_eq!(json["spec"]["capabilities"]["secrets"][0], "db-creds");
+        assert_eq!(
+            json["spec"]["identity"]["aauth"]["provider"],
+            "https://ap.example.com"
+        );
+        assert_eq!(
+            json["spec"]["identity"]["aauth"]["personServer"],
+            "https://ps.example.com"
+        );
         // round-trip back
         let back: Agent = serde_json::from_value(json).unwrap();
         assert_eq!(back.spec.mode, Mode::Reactive);
         assert_eq!(back.spec.substrate, Some(Substrate::KataHybrid));
         assert_eq!(back.spec.model.unwrap().pool.as_deref(), Some("gpt"));
         assert_eq!(back.spec.capabilities.unwrap().exec, Some(false));
+        assert_eq!(
+            back.spec
+                .identity
+                .unwrap()
+                .aauth
+                .unwrap()
+                .person_server
+                .as_deref(),
+            Some("https://ps.example.com")
+        );
+    }
+
+    #[test]
+    fn identity_status_uses_camelcase_enrolled_at() {
+        let s = AgentStatus {
+            identity: Some(IdentityStatus {
+                aauth: Some(AauthIdentityStatus {
+                    agent: Some("aauth:k7q3p9n2@ap.example".into()),
+                    provider: Some("https://ap.example.com".into()),
+                    enrolled_at: Some("2026-07-09T12:00:00Z".into()),
+                }),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json["identity"]["aauth"]["agent"],
+            "aauth:k7q3p9n2@ap.example"
+        );
+        assert_eq!(
+            json["identity"]["aauth"]["enrolledAt"],
+            "2026-07-09T12:00:00Z"
+        );
     }
 
     #[test]

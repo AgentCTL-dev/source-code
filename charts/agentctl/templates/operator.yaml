@@ -239,18 +239,39 @@ spec:
             - name: AGENTCTL_GATEWAY_URL
               value: {{ .Values.operator.gatewayUrl | default (printf "http://agentctl-gateway.%s.svc.cluster.local.:8080" $ns) | quote }}
             {{- end }}
+            {{- if .Values.identity.aauth.provider }}
+            # AAuth house-provisioning (RFC 0023): the default Agent Provider
+            # agents enroll at, and the operator-side admin token file for
+            # allowlist registration / identity learning / revocation. The
+            # token never reaches an agent pod.
+            - name: AGENTCTL_AAUTH_PROVIDER
+              value: {{ .Values.identity.aauth.provider | quote }}
+            {{- if .Values.identity.aauth.adminTokenSecret.name }}
+            - name: AGENTCTL_AAUTH_ADMIN_TOKEN_FILE
+              value: /etc/agentctl/aauth-admin/{{ .Values.identity.aauth.adminTokenSecret.key }}
+            {{- end }}
+            {{- end }}
           {{- with .Values.operator.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if .Values.certManager.enabled }}
+          {{- $aauthAdmin := and .Values.identity.aauth.provider .Values.identity.aauth.adminTokenSecret.name }}
+          {{- if or .Values.certManager.enabled $aauthAdmin }}
           volumeMounts:
+            {{- if .Values.certManager.enabled }}
             # The cluster CA PUBLIC cert (every chart leaf Secret carries
             # ca.crt; the client-tls leaf always exists). Source of the
             # per-namespace agentctl-ca ConfigMap the operator distributes.
             - name: agentctl-ca
               mountPath: /etc/agentctl/ca
               readOnly: true
+            {{- end }}
+            {{- if $aauthAdmin }}
+            # The Agent Provider admin bearer token (operator-side only).
+            - name: aauth-admin-token
+              mountPath: /etc/agentctl/aauth-admin
+              readOnly: true
+            {{- end }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -270,8 +291,10 @@ spec:
             periodSeconds: {{ .Values.operator.probes.readiness.periodSeconds }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
-      {{- if .Values.certManager.enabled }}
+      {{- $aauthAdminVol := and .Values.identity.aauth.provider .Values.identity.aauth.adminTokenSecret.name }}
+      {{- if or .Values.certManager.enabled $aauthAdminVol }}
       volumes:
+        {{- if .Values.certManager.enabled }}
         # ca.crt only — the operator holds the CA PUBLIC half, never its key.
         - name: agentctl-ca
           secret:
@@ -279,6 +302,12 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if $aauthAdminVol }}
+        - name: aauth-admin-token
+          secret:
+            secretName: {{ .Values.identity.aauth.adminTokenSecret.name }}
+        {{- end }}
       {{- end }}
 ---
 # Metrics Service for the operator. Selects every operator replica and

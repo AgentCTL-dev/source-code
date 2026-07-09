@@ -183,6 +183,9 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "reqwest",
+ "ring",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror",
@@ -190,6 +193,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots",
 ]
 
 [[package]]

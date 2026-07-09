@@ -493,6 +493,28 @@ apiToken:
   # lookup-stable generated one). Empty = chart generates + keeps a random token.
   value: ""
 
+# Portable agent identity (AAuth, RFC 0023) — EXPERIMENTAL, default-off.
+# When `provider` is set, an Agent opting in via `spec.identity.aauth` gets an
+# operator-provisioned Ed25519 identity at that Agent Provider (apd): the
+# operator generates a per-Agent key Secret, pre-registers its thumbprint over
+# the provider's admin API (allowlist enrollment — no secret ever reaches the
+# pod beyond the agent's own key), renders the keyless `--aauth-provider` dial,
+# learns the enrolled identity into `status.identity`, and revokes it on
+# deletion. The underlying protocol tracks unreleased IETF drafts; the reference
+# agent ships the client behind a build flag (`--features aauth`) — see
+# rfcs/0023-aauth-identity-provisioning.md.
+identity:
+  aauth:
+    # The Agent Provider issuer URL (e.g. https://ap.example.com). Empty =
+    # feature off. Per-Agent `spec.identity.aauth.provider` overrides it.
+    provider: ""
+    # Secret (this namespace) holding the provider's ADMIN bearer token. Read
+    # by the OPERATOR ONLY (allowlist registration / identity learning /
+    # revocation) — never rendered into agent pods.
+    adminTokenSecret:
+      name: ""
+      key: "token"
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the

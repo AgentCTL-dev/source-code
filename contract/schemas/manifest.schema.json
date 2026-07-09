@@ -324,6 +324,34 @@
               }
             }
           ]
+        },
+        "aauth": {
+          "description": "SUM TYPE (false|object): the portable-identity surface (AAuth, draft-hardt-oauth-aauth). OMITTED-when-absent (a stock/unconfigured build leaves the key out; consumers MUST treat absence as unbuilt, not error). When an object, the instance holds an AAuth identity: it signs its outbound MCP requests (RFC 9421) and presents short-lived proof-of-possession agent tokens issued by the named Agent Provider. The surface carries the DRAFT marker, the bound provider issuer URL, and the resolved identity — NEVER key or token material (a conformant agent MUST NOT surface either). Additive, MINOR-bump — the top-level contract_version is unchanged. While `draft` is true the underlying protocol tracks unreleased IETF drafts and consumers MUST treat the capability as experimental (wire forms may change).",
+          "oneOf": [
+            { "type": "boolean", "const": false },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["provider"],
+              "properties": {
+                "draft": {
+                  "type": "boolean",
+                  "description": "True while the AAuth protocol support tracks unreleased IETF drafts. Consumers treat the whole surface as experimental while set."
+                },
+                "provider": {
+                  "type": "string",
+                  "format": "uri",
+                  "description": "The Agent Provider issuer URL this instance is bound to (the `iss` of its agent tokens; verifiers fetch `{iss}/.well-known/aauth-agent.json`).",
+                  "examples": ["https://ap.example.com"]
+                },
+                "agent": {
+                  "type": ["string", "null"],
+                  "description": "The resolved stable agent identifier (`aauth:local@domain`), or null until the instance has enrolled and fetched its first agent token (`aauth.ready`).",
+                  "examples": ["aauth:k7q3p9n2@ap.example"]
+                }
+              }
+            }
+          ]
         }
       }
     }

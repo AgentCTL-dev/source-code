@@ -208,6 +208,12 @@ pub struct Surfaces {
     /// [`WorkflowSurface::resumable`] (`dialect >= 2 && checkpoint`).
     #[serde(default)]
     pub workflow: Option<WorkflowSurface>,
+    /// AAuth identity surface, if the agent carries a portable AAuth identity
+    /// (RFC 0023). Omitted-when-absent (a stock/unconfigured build). Carries
+    /// the draft marker, the bound provider, and the resolved identity —
+    /// never key or token material.
+    #[serde(default)]
+    pub aauth: Option<AauthSurface>,
     /// Shard identity `"K/N"`, or `null`.
     #[serde(default)]
     pub shard: Option<String>,
@@ -439,6 +445,70 @@ impl<'de> Deserialize<'de> for WorkflowSurface {
     }
 }
 
+/// `surfaces.aauth` — the portable-identity surface (RFC 0023): `false`/omitted
+/// (a stock or unconfigured build) or an object `{draft, provider, agent}`.
+/// `agent` is `null` until the instance has enrolled + fetched its first token
+/// (`aauth.ready`). The surface NEVER carries key or token material. While
+/// `draft` is true the underlying protocol tracks unreleased IETF drafts —
+/// consumers treat the capability as experimental.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AauthSurface {
+    /// No AAuth identity is configured/built.
+    Off,
+    /// An AAuth identity is configured.
+    On {
+        /// The protocol is a draft; treat as experimental while true.
+        draft: bool,
+        /// The Agent Provider issuer URL this instance is bound to.
+        provider: String,
+        /// The resolved identity (`aauth:local@domain`), or `None` pre-enroll.
+        agent: Option<String>,
+    },
+}
+
+impl AauthSurface {
+    /// Whether an AAuth identity is configured at all.
+    pub fn is_served(&self) -> bool {
+        matches!(self, AauthSurface::On { .. })
+    }
+    /// The resolved identity, once the instance has enrolled.
+    pub fn agent_id(&self) -> Option<&str> {
+        match self {
+            AauthSurface::On {
+                agent: Some(id), ..
+            } => Some(id),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AauthSurface {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Aa {
+            #[serde(default)]
+            draft: bool,
+            provider: String,
+            #[serde(default)]
+            agent: Option<String>,
+        }
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::Bool(false) => Ok(AauthSurface::Off),
+            v @ serde_json::Value::Object(_) => {
+                let a: Aa = serde_json::from_value(v).map_err(D::Error::custom)?;
+                Ok(AauthSurface::On {
+                    draft: a.draft,
+                    provider: a.provider,
+                    agent: a.agent,
+                })
+            }
+            other => Err(D::Error::custom(format!(
+                "surfaces.aauth must be `false` or an object, got {other}"
+            ))),
+        }
+    }
+}
+
 /// `"unknown" | bool` — intelligence reachability, or unknown pre-connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Health {
@@ -609,5 +679,43 @@ mod unit {
         )
         .unwrap();
         assert!(m.surfaces.workflow.as_ref().unwrap().resumable());
+    }
+
+    #[test]
+    fn aauth_surface_exposes_identity_never_material() {
+        use AauthSurface as A;
+        // Absent ⇒ None (a stock/unconfigured build leaves the key out).
+        let s: Surfaces = serde_json::from_str("{}").unwrap();
+        assert!(s.aauth.is_none());
+
+        // Configured but not yet enrolled: agent is null.
+        let pre: A =
+            serde_json::from_str(r#"{"draft":true,"provider":"https://ap.example"}"#).unwrap();
+        assert!(pre.is_served());
+        assert_eq!(pre.agent_id(), None);
+
+        // Enrolled: the resolved identity is readable.
+        let m = parse_manifest(
+            r#"{"contract_version":"1.0",
+                "surfaces":{"aauth":{"draft":true,
+                                     "provider":"https://ap.example",
+                                     "agent":"aauth:k7q3p9n2@ap.example"}}}"#,
+        )
+        .unwrap();
+        let a = m.surfaces.aauth.as_ref().unwrap();
+        assert_eq!(a.agent_id(), Some("aauth:k7q3p9n2@ap.example"));
+        assert_eq!(
+            a,
+            &A::On {
+                draft: true,
+                provider: "https://ap.example".into(),
+                agent: Some("aauth:k7q3p9n2@ap.example".into()),
+            }
+        );
+
+        // `false` ⇒ Off; a missing provider on the object form is an error
+        // (the surface is meaningless without its issuer).
+        assert_eq!(serde_json::from_str::<A>("false").unwrap(), A::Off);
+        assert!(serde_json::from_str::<A>(r#"{"draft":true}"#).is_err());
     }
 }

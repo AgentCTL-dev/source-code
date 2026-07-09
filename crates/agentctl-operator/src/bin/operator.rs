@@ -135,6 +135,19 @@ async fn main() -> Result<(), kube::Error> {
              metadata.namespace)."
         );
     }
+    let aauth = agentctl_operator::aauth::AauthConfig::from_env();
+    info!(
+        provider = ?aauth.provider,
+        admin_ready = aauth.admin_ready(),
+        "aauth house-provisioning config"
+    );
+    if aauth.provider.is_some() && !aauth.admin_ready() {
+        warn!(
+            "AGENTCTL_AAUTH_PROVIDER set but the admin channel is unusable (set \
+             AGENTCTL_AAUTH_ADMIN_TOKEN_FILE to the mounted apd admin token): \
+             identity.aauth Agents will be held Validated=False."
+        );
+    }
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
@@ -144,6 +157,7 @@ async fn main() -> Result<(), kube::Error> {
         render,
         pki,
         netpol,
+        aauth,
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet)");

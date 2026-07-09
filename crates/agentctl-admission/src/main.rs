@@ -14,7 +14,10 @@
 //!    per-agent **`spec.access.oidc`** A2A caller-identity policy (issuer is a
 //!    non-empty `https://` URL, `audiences` is non-empty, any `jwksUri` override is
 //!    `https://`) so a malformed OIDC gate is rejected at admission rather than
-//!    failing opaquely at the gateway.
+//!    failing opaquely at the gateway. And it gates the **`identity.aauth`**
+//!    opt-in (RFC 0023): denied on fleet templates (per-pod identities are
+//!    phase-gated on assertion enrollment), denied without a resolvable
+//!    provider, and spec-level provider/personServer URLs must be `https://`.
 //! 2. **Defaulting** (`POST /mutate`): a mutating webhook that returns a base64
 //!    JSONPatch of **secure defaults** — the standard `app.kubernetes.io/*` labels,
 //!    a conservative `mode`, and a minimal-exposure `surfaces` set. It deliberately
@@ -59,12 +62,21 @@ const TRIFECTA_ANNOTATION: &str = "agentctl.dev/allow-trifecta";
 /// CSV of allowed image-registry prefixes; empty/unset ⇒ allow any registry.
 const ALLOWED_REGISTRIES_ENV: &str = "ALLOWED_REGISTRIES";
 
+/// The operator's default Agent Provider (RFC 0023). Presence is all admission
+/// needs: an `identity.aauth` opt-in without a spec-level `provider` is only
+/// admissible when this default exists (the chart passes the operator's value
+/// here so the two agree).
+const AAUTH_PROVIDER_ENV: &str = "AGENTCTL_AAUTH_PROVIDER";
+
 #[derive(Clone)]
 struct AppState {
     /// kube client for cross-object lookups (does the `ModelPool` exist?).
     client: Client,
     /// Allowed image-registry prefixes (empty ⇒ allow all).
     allowed_registries: Vec<String>,
+    /// Whether the operator has a default AAuth provider configured
+    /// (`AGENTCTL_AAUTH_PROVIDER`) — gates provider-less `identity.aauth`.
+    aauth_default_provider: bool,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
 }
@@ -80,6 +92,9 @@ async fn main() {
 
     let client = Client::try_default().await.expect("in-cluster kube client");
     let allowed_registries = parse_registries(std::env::var(ALLOWED_REGISTRIES_ENV).ok());
+    let aauth_default_provider = std::env::var(AAUTH_PROVIDER_ENV)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
 
     let tls = build_tls_config().expect("build TLS server config");
 
@@ -94,6 +109,7 @@ async fn main() {
         .with_state(AppState {
             client,
             allowed_registries: allowed_registries.clone(),
+            aauth_default_provider,
             metrics: Arc::new(metrics::Metrics::new()),
         });
 
@@ -234,10 +250,11 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     // Evaluate every AgentSpec view under review (worker template always; the
     // coordinator template when present). The first denial is the verdict — a
     // fleet is admitted only if BOTH its members pass.
-    let mut verdict = evaluate_view(&state, view, annotations, &namespace).await;
+    let is_template = kind == "AgentFleet";
+    let mut verdict = evaluate_view(&state, view, annotations, &namespace, is_template).await;
     if verdict.is_ok() {
         if let Some(coord) = coordinator_view {
-            verdict = evaluate_view(&state, coord, annotations, &namespace)
+            verdict = evaluate_view(&state, coord, annotations, &namespace, true)
                 .await
                 .map_err(|m| format!("coordinator.template: {m}"));
         }
@@ -261,6 +278,7 @@ async fn evaluate_view(
     view: &Value,
     annotations: &Map<String, Value>,
     namespace: &str,
+    is_template: bool,
 ) -> Result<(), String> {
     let model_pool_exists = resolve_model_pool(&state.client, view, namespace).await;
     evaluate(
@@ -269,6 +287,8 @@ async fn evaluate_view(
         &state.allowed_registries,
         model_pool_exists,
         namespace,
+        state.aauth_default_provider,
+        is_template,
     )
 }
 
@@ -389,12 +409,24 @@ fn parse_registries(csv: Option<String>) -> Vec<String> {
 /// 3. `spec.model.pool` is named but `model_pool_exists == Some(false)`.
 /// 4. `spec.access.oidc` is present but malformed (non-https/empty `issuer`,
 ///    empty `audiences`, or a non-https `jwksUri`) — see [`validate_oidc`].
+/// 5. `identity.aauth` on a FLEET view (worker or coordinator template) —
+///    phase-gated: fleet identities land with per-pod (assertion) enrollment
+///    (RFC 0023 §5.3/§10.1); a shared-template identity today would silently
+///    alias every replica.
+/// 6. `identity.aauth` without a resolvable provider (no spec `provider` and
+///    no operator default) — catch the config error here, not as a
+///    crash-looping pod.
+/// 7. `identity.aauth.provider` / `.personServer`, when set, are not
+///    `https://` URLs (the operator's own default is its config, not re-checked
+///    here; a spec-level override travels the cluster and must be verifiable).
 fn evaluate(
     spec: &Value,
     annotations: &Map<String, Value>,
     allowed_registries: &[String],
     model_pool_exists: Option<bool>,
     namespace: &str,
+    aauth_default_provider: bool,
+    is_template: bool,
 ) -> Result<(), String> {
     // 1. Image registry allow-list.
     if !allowed_registries.is_empty() {
@@ -447,6 +479,42 @@ fn evaluate(
         .filter(|v| !v.is_null())
     {
         validate_oidc(oidc)?;
+    }
+
+    // 5–7. AAuth identity opt-in (`identity.aauth`, RFC 0023).
+    if let Some(aauth) = spec.pointer("/identity/aauth").filter(|v| !v.is_null()) {
+        if is_template {
+            return Err(
+                "identity.aauth is not yet supported on fleet templates (replicas would \
+                 share one identity); per-pod fleet identities land with assertion \
+                 enrollment (RFC 0023)"
+                    .to_string(),
+            );
+        }
+        let provider = aauth.get("provider").and_then(Value::as_str);
+        match provider {
+            None if !aauth_default_provider => {
+                return Err(
+                    "identity.aauth requires a provider: set spec.identity.aauth.provider \
+                     or configure the operator default (AGENTCTL_AAUTH_PROVIDER / chart \
+                     identity.aauth.provider)"
+                        .to_string(),
+                );
+            }
+            Some(p) if !is_https_url(p) => {
+                return Err(format!(
+                    "spec.identity.aauth.provider must be an https:// URL (got '{p}')"
+                ));
+            }
+            _ => {}
+        }
+        if let Some(ps) = aauth.get("personServer").and_then(Value::as_str) {
+            if !is_https_url(ps) {
+                return Err(format!(
+                    "spec.identity.aauth.personServer must be an https:// URL (got '{ps}')"
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -632,7 +700,7 @@ mod tests {
     #[test]
     fn clean_agent_is_allowed() {
         let spec = json!({ "mode": "once", "image": "ghcr.io/acme/agent:v1" });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -641,7 +709,7 @@ mod tests {
             "mode": "loop",
             "capabilities": { "exec": true, "egress": true, "secrets": ["db-password"] }
         });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("lethal trifecta"));
         assert!(!err.is_empty());
     }
@@ -653,7 +721,7 @@ mod tests {
             "capabilities": { "exec": true, "egress": true, "secrets": ["db-password"] }
         });
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "true" }));
-        assert!(evaluate(&spec, &anns, &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &anns, &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -687,7 +755,7 @@ mod tests {
             }}
         });
         let coord = coordinator_spec_view("AgentFleet", &fleet).unwrap();
-        let err = evaluate(coord, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(coord, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(
             err.contains("lethal trifecta"),
             "coordinator trifecta must be denied: {err}"
@@ -701,24 +769,33 @@ mod tests {
         });
         // Any value other than "true" does not open the gate.
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "yes" }));
-        assert!(evaluate(&spec, &anns, &[], None, "default").is_err());
+        assert!(evaluate(&spec, &anns, &[], None, "default", false, false).is_err());
     }
 
     #[test]
     fn two_of_three_trifecta_legs_is_allowed() {
         // exec + egress but no secrets ⇒ not the full trifecta ⇒ no gate.
         let spec = json!({ "capabilities": { "exec": true, "egress": true } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
         // exec + egress with an empty secrets array is still only two legs.
         let spec = json!({ "capabilities": { "exec": true, "egress": true, "secrets": [] } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn disallowed_registry_is_denied() {
         let spec = json!({ "image": "docker.io/library/evil:latest" });
         let registries = vec!["ghcr.io/acme/".to_string()];
-        let err = evaluate(&spec, &Map::new(), &registries, None, "default").unwrap_err();
+        let err = evaluate(
+            &spec,
+            &Map::new(),
+            &registries,
+            None,
+            "default",
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(err.contains("not from an allowed registry"));
         assert!(err.contains("ghcr.io/acme/"));
         assert!(!err.is_empty());
@@ -728,19 +805,29 @@ mod tests {
     fn allowed_registry_is_allowed() {
         let spec = json!({ "image": "ghcr.io/acme/agent@sha256:abc" });
         let registries = vec!["ghcr.io/acme/".to_string()];
-        assert!(evaluate(&spec, &Map::new(), &registries, None, "default").is_ok());
+        assert!(evaluate(
+            &spec,
+            &Map::new(),
+            &registries,
+            None,
+            "default",
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
     fn empty_registry_list_allows_any_image() {
         let spec = json!({ "image": "quay.io/whatever:1" });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn missing_model_pool_is_denied() {
         let spec = json!({ "model": { "pool": "shared" } });
-        let err = evaluate(&spec, &Map::new(), &[], Some(false), "team-a").unwrap_err();
+        let err =
+            evaluate(&spec, &Map::new(), &[], Some(false), "team-a", false, false).unwrap_err();
         assert!(err.contains("shared"));
         assert!(err.contains("team-a"));
         assert!(!err.is_empty());
@@ -749,14 +836,23 @@ mod tests {
     #[test]
     fn present_model_pool_is_allowed() {
         let spec = json!({ "model": { "pool": "shared" } });
-        assert!(evaluate(&spec, &Map::new(), &[], Some(true), "team-a").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], Some(true), "team-a", false, false).is_ok());
     }
 
     #[test]
     fn no_model_pool_named_skips_cross_object_check() {
         let spec = json!({ "mode": "once" });
         // Even if the resolver reported a negative, no pool is named ⇒ no deny.
-        assert!(evaluate(&spec, &Map::new(), &[], Some(false), "default").is_ok());
+        assert!(evaluate(
+            &spec,
+            &Map::new(),
+            &[],
+            Some(false),
+            "default",
+            false,
+            false
+        )
+        .is_ok());
     }
 
     // --- per-agent OIDC access policy (spec.access.oidc) -------------------
@@ -772,7 +868,7 @@ mod tests {
                 "forwardIdentity": true
             }}
         });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -784,26 +880,26 @@ mod tests {
                 "audiences": ["agentctl-a2a"]
             }}
         });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn oidc_absent_or_public_only_access_is_allowed() {
         // No access block at all.
         let spec = json!({ "mode": "once" });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
         // access present but only the doc-only `public` flag, no oidc.
         let spec = json!({ "access": { "public": true } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
         // explicit null oidc is treated as absent.
         let spec = json!({ "access": { "oidc": null } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default").is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn oidc_missing_issuer_is_denied() {
         let spec = json!({ "access": { "oidc": { "audiences": ["a"] } } });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
         assert!(!err.is_empty());
     }
@@ -811,7 +907,7 @@ mod tests {
     #[test]
     fn oidc_empty_issuer_is_denied() {
         let spec = json!({ "access": { "oidc": { "issuer": "", "audiences": ["a"] } } });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
     }
 
@@ -820,7 +916,7 @@ mod tests {
         let spec = json!({
             "access": { "oidc": { "issuer": "http://idp.example.com", "audiences": ["a"] } }
         });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
         assert!(err.contains("https://"));
     }
@@ -829,19 +925,19 @@ mod tests {
     fn oidc_empty_audiences_is_denied() {
         // Missing audiences.
         let spec = json!({ "access": { "oidc": { "issuer": "https://idp.example.com" } } });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("audiences"));
         // Present but empty array.
         let spec = json!({
             "access": { "oidc": { "issuer": "https://idp.example.com", "audiences": [] } }
         });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("audiences"));
         // Present but only a blank string ⇒ still effectively empty.
         let spec = json!({
             "access": { "oidc": { "issuer": "https://idp.example.com", "audiences": [""] } }
         });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("audiences"));
     }
 
@@ -854,7 +950,7 @@ mod tests {
                 "jwksUri": "http://idp.example.com/keys"
             }}
         });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("jwksUri"));
         assert!(err.contains("https://"));
     }
@@ -872,7 +968,7 @@ mod tests {
         });
         let empty = Value::Object(Map::new());
         let view = agent_spec_view("AgentFleet", &spec, &empty);
-        let err = evaluate(view, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(view, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
     }
 
@@ -889,8 +985,56 @@ mod tests {
     #[test]
     fn deny_message_is_non_empty() {
         let spec = json!({ "capabilities": { "exec": true, "egress": true, "secrets": ["x"] } });
-        let err = evaluate(&spec, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(!err.trim().is_empty());
+    }
+
+    // --- identity.aauth (RFC 0023) ------------------------------------------
+
+    #[test]
+    fn aauth_on_a_fleet_template_is_denied_phase_gated() {
+        let spec = json!({ "identity": { "aauth": {} } });
+        // The SAME spec passes as an Agent (with a default provider) but is
+        // denied as a template view — replicas would alias one identity.
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", true, false).is_ok());
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", true, true).unwrap_err();
+        assert!(err.contains("fleet templates"), "got: {err}");
+    }
+
+    #[test]
+    fn aauth_without_any_provider_is_denied() {
+        let spec = json!({ "identity": { "aauth": {} } });
+        // No spec provider + no operator default ⇒ deny with a pointed message.
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
+        assert!(err.contains("requires a provider"), "got: {err}");
+        // Operator default configured ⇒ the empty opt-in is fine.
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", true, false).is_ok());
+        // A spec-level provider also satisfies it (no default needed).
+        let with = json!({ "identity": { "aauth": { "provider": "https://ap.example" } } });
+        assert!(evaluate(&with, &Map::new(), &[], None, "default", false, false).is_ok());
+    }
+
+    #[test]
+    fn aauth_urls_must_be_https() {
+        let plaintext = json!({ "identity": { "aauth": { "provider": "http://ap.example" } } });
+        let err =
+            evaluate(&plaintext, &Map::new(), &[], None, "default", false, false).unwrap_err();
+        assert!(err.contains("https://"), "got: {err}");
+
+        let bad_ps = json!({ "identity": { "aauth": {
+            "provider": "https://ap.example",
+            "personServer": "http://ps.example"
+        } } });
+        let err = evaluate(&bad_ps, &Map::new(), &[], None, "default", false, false).unwrap_err();
+        assert!(err.contains("personServer"), "got: {err}");
+    }
+
+    #[test]
+    fn absent_or_null_identity_is_ignored() {
+        let absent = json!({ "mode": "once" });
+        assert!(evaluate(&absent, &Map::new(), &[], None, "default", false, false).is_ok());
+        let null = json!({ "identity": { "aauth": null } });
+        assert!(evaluate(&null, &Map::new(), &[], None, "default", false, true).is_ok());
     }
 
     #[test]
@@ -952,7 +1096,7 @@ mod tests {
         });
         let empty = Value::Object(Map::new());
         let view = agent_spec_view("AgentFleet", &spec, &empty);
-        let err = evaluate(view, &Map::new(), &[], None, "default").unwrap_err();
+        let err = evaluate(view, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("lethal trifecta"));
     }
 
@@ -966,7 +1110,7 @@ mod tests {
         let view = agent_spec_view("AgentFleet", &spec, &empty);
         // The override annotation rides on the AgentFleet object's metadata.
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "true" }));
-        assert!(evaluate(view, &anns, &[], None, "default").is_ok());
+        assert!(evaluate(view, &anns, &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -978,7 +1122,16 @@ mod tests {
         let empty = Value::Object(Map::new());
         let view = agent_spec_view("AgentFleet", &spec, &empty);
         let registries = vec!["ghcr.io/acme/".to_string()];
-        let err = evaluate(view, &Map::new(), &registries, None, "default").unwrap_err();
+        let err = evaluate(
+            view,
+            &Map::new(),
+            &registries,
+            None,
+            "default",
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(err.contains("not from an allowed registry"));
     }
 

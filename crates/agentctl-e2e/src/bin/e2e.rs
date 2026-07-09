@@ -29,7 +29,7 @@ use clap::Parser;
 use serde_json::{json, Value};
 
 use agent_api::{
-    Agent, AgentFleet, AgentFleetSpec, AgentSpec, ModelBinding, Mode, ScaleMode, ScaleTarget,
+    Agent, AgentFleet, AgentFleetSpec, AgentSpec, Mode, ModelBinding, ScaleMode, ScaleTarget,
     Scaling, Work,
 };
 use agentctl_e2e::{contract, kube_helpers as kh, prom, shell, Ctx};

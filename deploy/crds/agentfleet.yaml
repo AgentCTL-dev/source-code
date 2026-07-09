@@ -171,6 +171,38 @@ spec:
                             nullable: true
                             type: array
                         type: object
+                      identity:
+                        description: |-
+                          Portable agent identity (RFC 0023). `aauth` opts the agent into an
+                          AAuth identity the operator provisions and lifecycle-manages at an
+                          Agent Provider. **Experimental, default-off** — absent ⇒ rendering is
+                          byte-identical to today. Grouped so future identity systems slot
+                          beside `aauth` rather than flattening.
+                        nullable: true
+                        properties:
+                          aauth:
+                            description: |-
+                              AAuth identity (`aauth:local@domain`): the operator provisions a
+                              per-Agent Ed25519 key, pre-registers its thumbprint at the Agent
+                              Provider (allowlist enrollment), and the agent self-enrolls at startup
+                              — no secret beyond the agent's own key ever reaches the pod.
+                            nullable: true
+                            properties:
+                              personServer:
+                                description: |-
+                                  RESERVED (AAuth Case C, user-scoped access via a Person Server). Not
+                                  rendered in v1; accepted so specs written for the roadmap stay valid.
+                                nullable: true
+                                type: string
+                              provider:
+                                description: |-
+                                  The Agent Provider issuer URL (`https://…`). Absent ⇒ the operator's
+                                  configured default (`AGENTCTL_AAUTH_PROVIDER`). The admission webhook
+                                  denies the opt-in when neither is set.
+                                nullable: true
+                                type: string
+                            type: object
+                        type: object
                       image:
                         description: |-
                           The conformant-agent image to run. When omitted, the operator falls back
@@ -489,6 +521,38 @@ spec:
                           type: string
                         nullable: true
                         type: array
+                    type: object
+                  identity:
+                    description: |-
+                      Portable agent identity (RFC 0023). `aauth` opts the agent into an
+                      AAuth identity the operator provisions and lifecycle-manages at an
+                      Agent Provider. **Experimental, default-off** — absent ⇒ rendering is
+                      byte-identical to today. Grouped so future identity systems slot
+                      beside `aauth` rather than flattening.
+                    nullable: true
+                    properties:
+                      aauth:
+                        description: |-
+                          AAuth identity (`aauth:local@domain`): the operator provisions a
+                          per-Agent Ed25519 key, pre-registers its thumbprint at the Agent
+                          Provider (allowlist enrollment), and the agent self-enrolls at startup
+                          — no secret beyond the agent's own key ever reaches the pod.
+                        nullable: true
+                        properties:
+                          personServer:
+                            description: |-
+                              RESERVED (AAuth Case C, user-scoped access via a Person Server). Not
+                              rendered in v1; accepted so specs written for the roadmap stay valid.
+                            nullable: true
+                            type: string
+                          provider:
+                            description: |-
+                              The Agent Provider issuer URL (`https://…`). Absent ⇒ the operator's
+                              configured default (`AGENTCTL_AAUTH_PROVIDER`). The admission webhook
+                              denies the opt-in when neither is set.
+                            nullable: true
+                            type: string
+                        type: object
                     type: object
                   image:
                     description: |-

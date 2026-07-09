@@ -22,7 +22,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_api::{
-    Agent, AgentFleet, AgentSpec, Condition, ContractStatus, MCPServerSet, Mode, ScaleMode,
+    AauthIdentityStatus, Agent, AgentFleet, AgentSpec, Condition, ContractStatus, IdentityStatus,
+    MCPServerSet, Mode, ScaleMode,
 };
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
@@ -36,10 +37,10 @@ use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
 use crate::{
-    coordinator_name, fleet_selector_string, inject_api_token, inject_mcp_servers, inject_workflow,
-    render_agent, render_coordinator, render_fleet, render_scaled_object, workflow_configmap_name,
-    McpBinding, RenderConfig, RenderError, Rendered, DEFAULT_COORDINATION_URL,
-    DEFAULT_SCALER_ADDRESS,
+    coordinator_name, fleet_selector_string, inject_aauth, inject_api_token, inject_mcp_servers,
+    inject_workflow, render_agent, render_coordinator, render_fleet, render_scaled_object,
+    workflow_configmap_name, McpBinding, RenderConfig, RenderError, Rendered,
+    DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
 
 /// Finalizer key gating `Agent` deletion until cleanup runs.
@@ -77,6 +78,10 @@ pub struct Ctx {
     /// `NETWORK_POLICIES_ENABLED`; chart `networkPolicies.enabled`). Read once at
     /// startup ([`crate::netpol::NetPolConfig::from_env`]).
     pub netpol: crate::netpol::NetPolConfig,
+    /// AAuth house-provisioning (RFC 0023; envs `AGENTCTL_AAUTH_PROVIDER` /
+    /// `AGENTCTL_AAUTH_ADMIN_TOKEN_FILE`). Read once at startup
+    /// ([`crate::aauth::AauthConfig::from_env`]). Inert unless configured.
+    pub aauth: crate::aauth::AauthConfig,
 }
 
 /// Operator-side wiring for the optional in-cluster bearer-token gate (chart
@@ -207,6 +212,11 @@ pub enum Error {
     /// The finalizer machinery (add/remove, or a wrapped handler error) failed.
     #[error("finalizer error: {0}")]
     Finalizer(#[source] Box<kube::runtime::finalizer::Error<Error>>),
+    /// AAuth identity provisioning failed on a cluster-side step (the key
+    /// Secret) — transient, retried with backoff. Provider-side (admin API)
+    /// failures are best-effort warnings, never reconcile errors.
+    #[error("aauth provisioning: {0}")]
+    Aauth(String),
 }
 
 /// Reconcile one `Agent`, recording the reconcile-total/-errors counters and the
@@ -273,7 +283,7 @@ async fn reconcile_inner(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Err
     finalizer(&agents, FINALIZER, agent, |event| async move {
         match event {
             Event::Apply(agent) => apply(agent, ctx, &ns).await,
-            Event::Cleanup(agent) => Ok(cleanup(agent.as_ref())),
+            Event::Cleanup(agent) => Ok(cleanup(agent.as_ref(), ctx.as_ref(), &ns).await),
         }
     })
     .await
@@ -285,6 +295,55 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     let name = agent.name_any();
     let observed = agent.metadata.generation;
     let agents: Api<Agent> = Api::namespaced(ctx.client.clone(), ns);
+
+    // AAuth identity (RFC 0023): resolve the opt-in up front. An opted-in Agent
+    // whose provider/admin channel is unconfigured is a USER/config error —
+    // surfaced as Validated=False exactly like a RenderError (admission also
+    // denies the provider-less shape; this is the defense for direct writes).
+    let aauth_provider = match agent.spec.identity.as_ref().and_then(|i| i.aauth.as_ref()) {
+        Some(spec) => match ctx.aauth.resolve_provider(spec) {
+            Some(p) if ctx.aauth.admin_ready() => Some(p),
+            misconfig => {
+                let msg = if misconfig.is_none() {
+                    "identity.aauth requires a provider (spec.identity.aauth.provider or the \
+                     operator's AGENTCTL_AAUTH_PROVIDER)"
+                } else {
+                    "identity.aauth requires the operator's Agent Provider admin channel \
+                     (AGENTCTL_AAUTH_ADMIN_TOKEN_FILE)"
+                };
+                warn!(agent = %name, "{msg}");
+                publish_event(
+                    ctx.as_ref(),
+                    agent.as_ref(),
+                    EventType::Warning,
+                    "IdentityUnconfigured",
+                    "ProvisionIdentity",
+                    msg.to_string(),
+                )
+                .await;
+                let condition = validated_failed_condition(msg);
+                let identity = agent.status.as_ref().and_then(|s| s.identity.clone());
+                let desired = desired_status(
+                    &condition,
+                    observed,
+                    "Invalid",
+                    &ContractStatus::default(),
+                    identity.as_ref(),
+                )?;
+                if status_changed(agent.status.as_ref(), &desired)? {
+                    let patch = serde_json::json!({ "status": desired });
+                    agents
+                        .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                        .await?;
+                }
+                return Ok(Action::requeue(requeue_after()));
+            }
+        },
+        None => None,
+    };
+    // Carry forward an already-learned identity; learning fills it below.
+    let mut identity: Option<IdentityStatus> =
+        agent.status.as_ref().and_then(|s| s.identity.clone());
 
     // Render + apply the workload, then derive the desired status. A RenderError
     // is a user error (invalid spec) → Validated=False, not a retried failure.
@@ -310,6 +369,32 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             // (inline → generated ConfigMap; ref → mount) + --workflow <file>.
             ensure_and_inject_workflow(&ctx.client, ns, &name, &agent.spec, &owner, &mut rendered)
                 .await?;
+            // AAuth identity (RFC 0023): durable key Secret + allowlist
+            // pre-registration + the keyless provider dial. The key Secret is
+            // load-bearing (Err ⇒ retried reconcile); the admin registration is
+            // best-effort (the agent's self-enroll retries via exit-4 restarts,
+            // and we re-register every reconcile until enrolled).
+            if let Some(provider) = &aauth_provider {
+                let jkt = crate::aauth::ensure_key_secret(&ctx.client, ns, &name, &owner)
+                    .await
+                    .map_err(Error::Aauth)?;
+                if identity.is_none() {
+                    let label = crate::aauth::registration_label(ns, &name);
+                    if let Err(e) = ctx.aauth.register_allowed_key(provider, &jkt, &label).await {
+                        warn!(agent = %name, error = %e, "aauth: allowlist registration failed; retrying next reconcile");
+                        publish_event(
+                            ctx.as_ref(),
+                            agent.as_ref(),
+                            EventType::Warning,
+                            "AauthRegisterFailed",
+                            "ProvisionIdentity",
+                            e,
+                        )
+                        .await;
+                    }
+                }
+                inject_aauth(&mut rendered, provider);
+            }
             // Workload PKI (serving Certificate + per-ns CA ConfigMap), so the
             // pod's mounts resolve as it schedules.
             if ctx.pki.enabled() {
@@ -332,6 +417,42 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
                 format!("{kind} workload applied"),
             )
             .await;
+            // Identity learning (RFC 0023 §7.2): once the agent has
+            // self-enrolled, the provider's admin API knows our registration
+            // label — project the identity into status. Best-effort; the
+            // steady-state resync retries until enrolled.
+            if identity.is_none() {
+                if let Some(provider) = &aauth_provider {
+                    let label = crate::aauth::registration_label(ns, &name);
+                    match ctx.aauth.find_enrollment(provider, &label).await {
+                        Ok(Some(enr)) => {
+                            info!(agent = %name, identity = %enr.agent, "aauth: identity enrolled");
+                            publish_event(
+                                ctx.as_ref(),
+                                agent.as_ref(),
+                                EventType::Normal,
+                                "AauthEnrolled",
+                                "ProvisionIdentity",
+                                format!("enrolled as {}", enr.agent),
+                            )
+                            .await;
+                            identity = Some(IdentityStatus {
+                                aauth: Some(AauthIdentityStatus {
+                                    agent: Some(enr.agent),
+                                    provider: Some(provider.clone()),
+                                    enrolled_at: enr.created_at,
+                                }),
+                            });
+                        }
+                        Ok(None) => {
+                            debug!(agent = %name, "aauth: enrollment pending (agent has not enrolled yet)");
+                        }
+                        Err(e) => {
+                            warn!(agent = %name, error = %e, "aauth: enrollment lookup failed");
+                        }
+                    }
+                }
+            }
             // Ready reflects the single pod's OBSERVED readiness (a reactive/loop
             // Deployment); a once/workflow Job keeps the applied condition (its
             // health is the exit-code disposition, not replica readiness).
@@ -374,7 +495,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
 
     // DeepEqual guard: only write status if it actually changed,
     // so we don't churn the Agent (and re-trigger our own watch) every reconcile.
-    let desired = desired_status(&condition, observed, phase, &contract)?;
+    let desired = desired_status(&condition, observed, phase, &contract, identity.as_ref())?;
     if status_changed(agent.status.as_ref(), &desired)? {
         let patch = serde_json::json!({ "status": desired });
         agents
@@ -388,10 +509,63 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
 }
 
 /// The `Cleanup` branch: the workload is owner-referenced, so Kubernetes GC
-/// reclaims it. We only log; deletion proceeds once the finalizer is removed.
-fn cleanup(agent: &Agent) -> Action {
-    info!(agent = %agent.name_any(), "agent deleted; owned workload reclaimed by GC");
+/// reclaims it (the AAuth key Secret included). For an AAuth-provisioned Agent
+/// we additionally revoke the identity at the provider — BEST-EFFORT: the key
+/// dies with its Secret either way, so a failed revoke degrades to hygiene
+/// (the enrollment record lingers until the orphan sweep), never a wedged
+/// deletion (RFC 0023 §7.3).
+async fn cleanup(agent: &Agent, ctx: &Ctx, ns: &str) -> Action {
+    let name = agent.name_any();
+    if let Some(spec) = agent.spec.identity.as_ref().and_then(|i| i.aauth.as_ref()) {
+        if let Some(provider) = ctx.aauth.resolve_provider(spec) {
+            revoke_identity(agent, ctx, ns, &name, &provider).await;
+        }
+    }
+    info!(agent = %name, "agent deleted; owned workload reclaimed by GC");
     Action::await_change()
+}
+
+/// Revoke the Agent's AAuth identity on deletion: the enrolled `local` comes
+/// from status (or an admin lookup by registration label); a never-enrolled
+/// Agent instead has its pending allowed-key registration withdrawn. Every
+/// step is best-effort and logged.
+async fn revoke_identity(agent: &Agent, ctx: &Ctx, ns: &str, name: &str, provider: &str) {
+    let label = crate::aauth::registration_label(ns, name);
+    // Prefer the identity status; fall back to an admin lookup.
+    let local = agent
+        .status
+        .as_ref()
+        .and_then(|s| s.identity.as_ref())
+        .and_then(|i| i.aauth.as_ref())
+        .and_then(|a| a.agent.as_deref())
+        .and_then(|id| id.strip_prefix("aauth:"))
+        .and_then(|rest| rest.split('@').next())
+        .map(str::to_string);
+    let local = match local {
+        Some(l) => Some(l),
+        None => match ctx.aauth.find_enrollment(provider, &label).await {
+            Ok(found) => found.map(|e| e.local),
+            Err(e) => {
+                warn!(agent = %name, error = %e, "aauth: enrollment lookup at cleanup failed; skipping revoke");
+                return;
+            }
+        },
+    };
+    match local {
+        Some(local) => {
+            if let Err(e) = ctx.aauth.revoke(provider, &local).await {
+                warn!(agent = %name, local, error = %e, "aauth: revoke failed (identity record lingers; key Secret is GC'd regardless)");
+            }
+        }
+        None => {
+            // Never enrolled: withdraw the pending allowed-key registration.
+            if let Some(jkt) = crate::aauth::pending_jkt(&ctx.client, ns, name).await {
+                if let Err(e) = ctx.aauth.withdraw_allowed_key(provider, &jkt).await {
+                    warn!(agent = %name, error = %e, "aauth: allowed-key withdrawal failed");
+                }
+            }
+        }
+    }
 }
 
 /// Server-side-apply the rendered workload into `ns` under our field manager.
@@ -514,13 +688,20 @@ fn desired_status(
     observed: Option<i64>,
     phase: &str,
     contract: &ContractStatus,
+    identity: Option<&IdentityStatus>,
 ) -> Result<serde_json::Value, Error> {
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "conditions": [serde_json::to_value(condition)?],
         "observedGeneration": serde_json::to_value(observed)?,
         "phase": phase,
         "contract": serde_json::to_value(contract)?,
-    }))
+    });
+    // Omitted-when-absent, matching the live status' skip_serializing_if so
+    // the DeepEqual guard compares like with like.
+    if let Some(id) = identity {
+        body["identity"] = serde_json::to_value(id)?;
+    }
+    Ok(body)
 }
 
 /// Whether the desired status differs from the live one. Compares as JSON so the
@@ -1397,6 +1578,7 @@ mod tests {
             Some(3),
             "Ready",
             &contract,
+            None,
         )
         .unwrap();
         assert_eq!(status["observedGeneration"], 3);
@@ -1404,6 +1586,29 @@ mod tests {
         assert_eq!(status["conditions"][0]["type"], "Ready");
         assert_eq!(status["conditions"][0]["status"], "True");
         assert_eq!(status["contract"]["mode"], "loop");
+        // No identity ⇒ the key is omitted (matches the live status'
+        // skip_serializing_if for the DeepEqual guard).
+        assert!(status.get("identity").is_none());
+        // A learned identity is projected under status.identity.aauth.
+        let id = IdentityStatus {
+            aauth: Some(AauthIdentityStatus {
+                agent: Some("aauth:k7q3p9n2@ap.example".into()),
+                provider: Some("https://ap.example".into()),
+                enrolled_at: None,
+            }),
+        };
+        let with_id = desired_status(
+            &ready_condition(Some(3), "Deployment"),
+            Some(3),
+            "Ready",
+            &contract,
+            Some(&id),
+        )
+        .unwrap();
+        assert_eq!(
+            with_id["identity"]["aauth"]["agent"],
+            "aauth:k7q3p9n2@ap.example"
+        );
     }
 
     #[test]
@@ -1417,6 +1622,7 @@ mod tests {
             Some(1),
             "Ready",
             &contract,
+            None,
         )
         .unwrap();
         // no status yet → changed
@@ -1430,6 +1636,7 @@ mod tests {
             Some(1),
             "Draining",
             &contract,
+            None,
         )
         .unwrap();
         assert!(status_changed(Some(&current), &draining).unwrap());

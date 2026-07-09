@@ -106,6 +106,13 @@ spec:
             # Image-registry allow-list (CSV prefixes); empty would allow all.
             - name: ALLOWED_REGISTRIES
               value: {{ .Values.admission.allowedRegistries | quote }}
+            {{- if .Values.identity.aauth.provider }}
+            # Presence of the operator's default Agent Provider (RFC 0023):
+            # admits a provider-less `spec.identity.aauth` opt-in. Same value
+            # the operator gets, so the two agree.
+            - name: AGENTCTL_AAUTH_PROVIDER
+              value: {{ .Values.identity.aauth.provider | quote }}
+            {{- end }}
           {{- with (index .Values "admission").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

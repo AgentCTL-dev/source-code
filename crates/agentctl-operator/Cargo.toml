@@ -30,6 +30,20 @@ serde_json.workspace = true
 # Health/metrics surface: the same axum stack the other control-plane services serve
 # /healthz + /metrics with — no second HTTP/metrics framework.
 axum = "0.8"
+# AAuth house-provisioning (RFC 0023): the Agent Provider admin client
+# (allowlist pre-registration / identity learning / revocation) + per-Agent
+# Ed25519 key material. reqwest is handed a fully-built ring `ClientConfig`
+# via `use_preconfigured_tls` (webpki roots) — never aws-lc-rs, no C toolchain,
+# matching the gateway's client pattern.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-manual-roots-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+# Ed25519 seed generation + RFC 7638 thumbprints (SHA-256) — the same ring the
+# rustls stack already links.
+ring = "0.17"
 
 [dev-dependencies]
 serde_json.workspace = true

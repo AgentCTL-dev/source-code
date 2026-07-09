@@ -9,68 +9,151 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "replicas": { "type": "integer", "minimum": 0 },
-        "logLevel": { "type": "string" },
-        "resources": { "type": "object" },
-        "nodeSelector": { "type": "object" },
-        "affinity": { "type": "object" },
-        "tolerations": { "type": "array" },
-        "topologySpreadConstraints": { "type": "array" },
-        "priorityClassName": { "type": "string" },
-        "podAnnotations": { "type": "object" },
-        "podLabels": { "type": "object" },
-        "extraEnv": { "type": "array" },
-        "envFrom": { "type": "array" },
-        "allowedRegistries": { "type": "string" },
-        "secretsNamespaces": { "type": "array" },
-        "attestIdentity": { "type": "boolean" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "logLevel": {
+          "type": "string"
+        },
+        "resources": {
+          "type": "object"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "affinity": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "topologySpreadConstraints": {
+          "type": "array"
+        },
+        "priorityClassName": {
+          "type": "string"
+        },
+        "podAnnotations": {
+          "type": "object"
+        },
+        "podLabels": {
+          "type": "object"
+        },
+        "extraEnv": {
+          "type": "array"
+        },
+        "envFrom": {
+          "type": "array"
+        },
+        "allowedRegistries": {
+          "type": "string"
+        },
+        "secretsNamespaces": {
+          "type": "array"
+        },
+        "attestIdentity": {
+          "type": "boolean"
+        },
         "inferProxy": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "socketDir": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "socketDir": {
+              "type": "string"
+            }
           }
         },
-        "store": { "type": "string", "enum": ["memory", "postgres"] },
+        "store": {
+          "type": "string",
+          "enum": [
+            "memory",
+            "postgres"
+          ]
+        },
         "mtls": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "allowedNames": { "type": "array", "items": { "type": "string" } },
-            "scalerCommonName": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "allowedNames": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "scalerCommonName": {
+              "type": "string"
+            }
           }
         },
-        "federationPeers": { "type": "string" },
-        "address": { "type": "string" },
-        "coordinationUrl": { "type": "string" },
-        "scaler": { "type": "object" },
-        "probes": { "type": "object" },
+        "federationPeers": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "coordinationUrl": {
+          "type": "string"
+        },
+        "scaler": {
+          "type": "object"
+        },
+        "probes": {
+          "type": "object"
+        },
         "serviceAccount": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "annotations": { "type": "object" }
+            "annotations": {
+              "type": "object"
+            }
           }
         },
         "pdb": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "minAvailable": { "type": ["integer", "string"] }
+            "enabled": {
+              "type": "boolean"
+            },
+            "minAvailable": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            }
           }
         },
         "autoscaling": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "minReplicas": { "type": "integer", "minimum": 1 },
-            "maxReplicas": { "type": "integer", "minimum": 1 },
-            "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "enabled": {
+              "type": "boolean"
+            },
+            "minReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
           }
         }
       }
@@ -81,22 +164,46 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "registry": { "type": "string" },
-        "tag": { "type": ["string", "number"] },
-        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
-        "pullSecrets": { "type": "array" },
-        "digests": { "type": "object" }
+        "registry": {
+          "type": "string"
+        },
+        "tag": {
+          "type": [
+            "string",
+            "number"
+          ]
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        },
+        "pullSecrets": {
+          "type": "array"
+        },
+        "digests": {
+          "type": "object"
+        }
       }
     },
     "referenceAgent": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "image": { "type": "string" }
+        "image": {
+          "type": "string"
+        }
       }
     },
-    "commonLabels": { "type": "object" },
-    "commonAnnotations": { "type": "object" },
+    "commonLabels": {
+      "type": "object"
+    },
+    "commonAnnotations": {
+      "type": "object"
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": true,
@@ -105,10 +212,18 @@
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "interval": { "type": "string" },
-            "scrapeTimeout": { "type": "string" },
-            "labels": { "type": "object" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "interval": {
+              "type": "string"
+            },
+            "scrapeTimeout": {
+              "type": "string"
+            },
+            "labels": {
+              "type": "object"
+            }
           }
         }
       }
@@ -121,15 +236,21 @@
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" }
+            "enabled": {
+              "type": "boolean"
+            }
           }
         },
         "alerts": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "labels": { "type": "object" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "object"
+            }
           }
         }
       }
@@ -138,39 +259,69 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "name": { "type": "string" },
-        "create": { "type": "boolean" },
-        "podSecurity": { "type": "string" }
+        "name": {
+          "type": "string"
+        },
+        "create": {
+          "type": "boolean"
+        },
+        "podSecurity": {
+          "type": "string"
+        }
       }
     },
     "certManager": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "caIssuerRef": { "type": "string" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "caIssuerRef": {
+          "type": "string"
+        }
       }
     },
     "postgres": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "mode": { "type": "string", "enum": ["bundled", "external"] },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "bundled",
+            "external"
+          ]
+        },
         "bundled": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "image": { "type": "string" },
-            "runAsUser": { "type": "integer" },
-            "storage": { "type": "string" },
-            "pvcSize": { "type": "string" },
-            "storageClassName": { "type": "string" },
+            "image": {
+              "type": "string"
+            },
+            "runAsUser": {
+              "type": "integer"
+            },
+            "storage": {
+              "type": "string"
+            },
+            "pvcSize": {
+              "type": "string"
+            },
+            "storageClassName": {
+              "type": "string"
+            },
             "tls": {
               "type": "object",
               "additionalProperties": true,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "verifyFull": { "type": "boolean" }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "verifyFull": {
+                  "type": "boolean"
+                }
               }
             }
           }
@@ -179,49 +330,130 @@
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "dsnSecretName": { "type": "string" },
-            "dsnSecretKey": { "type": "string" }
+            "dsnSecretName": {
+              "type": "string"
+            },
+            "dsnSecretKey": {
+              "type": "string"
+            }
           }
         }
       }
     },
-    "operator": { "$ref": "#/definitions/component" },
-    "apiserver": { "$ref": "#/definitions/component" },
-    "gateway": { "$ref": "#/definitions/component" },
-    "modelgateway": { "$ref": "#/definitions/component" },
-    "admission": { "$ref": "#/definitions/component" },
-    "coordination": { "$ref": "#/definitions/component" },
-    "scaler": { "$ref": "#/definitions/component" },
+    "operator": {
+      "$ref": "#/definitions/component"
+    },
+    "apiserver": {
+      "$ref": "#/definitions/component"
+    },
+    "gateway": {
+      "$ref": "#/definitions/component"
+    },
+    "modelgateway": {
+      "$ref": "#/definitions/component"
+    },
+    "admission": {
+      "$ref": "#/definitions/component"
+    },
+    "coordination": {
+      "$ref": "#/definitions/component"
+    },
+    "scaler": {
+      "$ref": "#/definitions/component"
+    },
     "apiToken": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "value": { "type": "string" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "string"
+        }
       }
     },
     "trustedProxy": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "allowedNames": { "type": "array", "items": { "type": "string" } },
-        "proxyCommonName": { "type": "string" },
-        "headerPrefix": { "type": "string" },
-        "identityHeaders": { "type": "object", "properties": { "user": { "type": "string" }, "email": { "type": "string" }, "groups": { "type": "string" } } }
+        "enabled": {
+          "type": "boolean"
+        },
+        "allowedNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "proxyCommonName": {
+          "type": "string"
+        },
+        "headerPrefix": {
+          "type": "string"
+        },
+        "identityHeaders": {
+          "type": "object",
+          "properties": {
+            "user": {
+              "type": "string"
+            },
+            "email": {
+              "type": "string"
+            },
+            "groups": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "networkPolicies": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "enabled": { "type": "boolean" },
+        "enabled": {
+          "type": "boolean"
+        },
         "agentNamespaces": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
-    "resources": { "type": "object" }
+    "resources": {
+      "type": "object"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Portable agent identity (AAuth, RFC 0023) - experimental, default-off.",
+      "properties": {
+        "aauth": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "Agent Provider issuer URL; empty = off."
+            },
+            "adminTokenSecret": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

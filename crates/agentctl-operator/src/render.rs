@@ -220,6 +220,79 @@ pub fn inject_workflow(rendered: &mut Rendered, configmap: &str, key: &str) {
     }
 }
 
+/// In-pod mount of the AAuth durable key (RFC 0023). The Secret
+/// `<workload>-aauth-key` holds the base64url seed under `agent.key` — exactly
+/// the `--aauth-key-file` format the reference agent reads (load-if-present;
+/// the read-only mount is fine because the key always pre-exists).
+const AAUTH_MOUNT: &str = "/etc/agentctl/aauth";
+const AAUTH_VOLUME: &str = "agentctl-aauth-key";
+
+/// Wire the AAuth identity into the rendered pod: mount the per-workload key
+/// Secret and pass `--aauth-provider <issuer>` + `--aauth-key-file <mount>`.
+/// No token, no admin credential — the pod's only identity material is its own
+/// key. Idempotent. A conformant agent without the aauth surface fails
+/// validation loudly (exit 2) rather than running unsigned — the capability
+/// probe reports the missing surface.
+pub fn inject_aauth(rendered: &mut Rendered, provider: &str) {
+    let pod = match rendered {
+        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::CronJob(cj) => cj
+            .spec
+            .job_template
+            .spec
+            .as_mut()
+            .map(|js| &mut js.template),
+        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
+        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
+    };
+    let Some(pod) = pod else { return };
+    let Some(spec) = pod.spec.as_mut() else {
+        return;
+    };
+    // The workload name is the Secret-name stem; recover it from the pod
+    // label the renderer always stamps (`agentctl.dev/agent`, see
+    // [`managed_labels`]).
+    let workload = pod
+        .metadata
+        .as_ref()
+        .and_then(|m| m.labels.as_ref())
+        .and_then(|l| l.get("agentctl.dev/agent"))
+        .cloned();
+    let Some(workload) = workload else { return };
+    // Volume (idempotent).
+    let volumes = spec.volumes.get_or_insert_with(Vec::new);
+    if !volumes.iter().any(|v| v.name == AAUTH_VOLUME) {
+        volumes.push(Volume {
+            name: AAUTH_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(crate::aauth::key_secret_name(&workload)),
+                default_mode: Some(0o400),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    let Some(container) = spec.containers.first_mut() else {
+        return;
+    };
+    let mounts = container.volume_mounts.get_or_insert_with(Vec::new);
+    if !mounts.iter().any(|m| m.name == AAUTH_VOLUME) {
+        mounts.push(VolumeMount {
+            name: AAUTH_VOLUME.to_string(),
+            mount_path: AAUTH_MOUNT.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
+    let args = container.args.get_or_insert_with(Vec::new);
+    if !args.iter().any(|a| a == "--aauth-provider") {
+        args.push("--aauth-provider".to_string());
+        args.push(provider.to_string());
+        args.push("--aauth-key-file".to_string());
+        args.push(format!("{AAUTH_MOUNT}/{}", crate::aauth::KEY_FILENAME));
+    }
+}
+
 /// Append the agent's bound MCP servers to the rendered container args, each
 /// pointing at the MCPGateway facade (`--mcp <name>=<gateway>/s/<name>`) with
 /// its trifecta tags (`--mcp-tags <name>=<comma-list>`). The agent dials the
@@ -1496,6 +1569,43 @@ mod tests {
         assert_eq!(n, 1);
         // The agent trusts the gateway via the already-rendered --tls-ca.
         assert!(has_arg_pair(c, "--tls-ca", "/etc/agentctl/ca/ca.crt"));
+    }
+
+    #[test]
+    fn inject_aauth_mounts_the_key_and_renders_the_provider_dial() {
+        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
+        inject_aauth(&mut r, "https://ap.example.com");
+        inject_aauth(&mut r, "https://ap.example.com"); // idempotent
+        let Rendered::Deployment(dep) = &r else {
+            unreachable!()
+        };
+        let tpl = &dep.spec.as_ref().unwrap().template;
+        let c = container_of(tpl);
+        assert!(has_arg_pair(
+            c,
+            "--aauth-provider",
+            "https://ap.example.com"
+        ));
+        assert!(has_arg_pair(
+            c,
+            "--aauth-key-file",
+            "/etc/agentctl/aauth/agent.key"
+        ));
+        // Exactly one provider flag (idempotent), and NEVER a token/secret arg.
+        let args = c.args.as_ref().unwrap();
+        assert_eq!(args.iter().filter(|a| *a == "--aauth-provider").count(), 1);
+        assert!(!args.iter().any(|a| a == "--aauth-enroll-token"));
+        // The key Secret is mounted read-only at the aauth mount.
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let m = mounts.iter().find(|m| m.name == AAUTH_VOLUME).unwrap();
+        assert_eq!(m.mount_path, AAUTH_MOUNT);
+        assert_eq!(m.read_only, Some(true));
+        let volumes = tpl.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        let v = volumes.iter().find(|v| v.name == AAUTH_VOLUME).unwrap();
+        let src = v.secret.as_ref().unwrap();
+        // Secret-name stem = the workload name from the agentctl.dev/agent label.
+        assert_eq!(src.secret_name.as_deref(), Some("demo-aauth-key"));
+        assert_eq!(src.default_mode, Some(0o400));
     }
 
     #[test]
