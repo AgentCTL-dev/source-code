@@ -34,6 +34,11 @@ implemented in Rust.
 - **Cryptographic identity, hostile-multi-tenant defaults.** mTLS inbound,
   attested source-IP outbound, hardened pods, per-namespace NetworkPolicies, an
   admission allow-list, and a lethal-trifecta opt-in gate.
+- **Portable agent identity** *(experimental)*. Opt an agent into an
+  operator-provisioned AAuth identity (`spec.identity.aauth`) so it can
+  authenticate *itself* — signing every request — to remote MCP servers on the
+  internet, with no shared credential to provision or leak. See
+  [RFC 0023](rfcs/0023-aauth-identity-provisioning.md)/[0024](rfcs/0024-aauth-delegation-remote-resources.md).
 
 ---
 
@@ -124,6 +129,7 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 | `access` | A2A access policy: `oidc` (JWT verification + claim-based authz). |
 | `limits` | Per-agent budgets (`maxTokens`, `maxDepth`, `maxSteps`). |
 | `capabilities.exec` / `capabilities.egress` / `capabilities.secrets` | Declared privileged capabilities. Together they form the **lethal trifecta** the admission webhook gates. |
+| `identity.aauth` | *(experimental)* Opt into an operator-provisioned portable AAuth identity for direct, self-authenticated access to remote resources. |
 
 **Rendered workload by mode:** `once` and `workflow` → **Job**; `schedule` →
 **CronJob**; `loop` and `reactive` → **Deployment**.

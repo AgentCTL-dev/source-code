@@ -1,0 +1,50 @@
+# Portable agent identity (AAuth) — EXPERIMENTAL (RFC 0023/0024), default-off.
+#
+# This worked example gives an agent its OWN cryptographic identity and lets it
+# reach a remote MCP server DIRECTLY, authenticating itself by signing every
+# request (RFC 9421) — no shared credential, no gateway facade on that hop.
+#
+# Prerequisites (operator side, once per cluster):
+#   1. Run an Agent Provider (apd) reachable at an issuer URL.
+#   2. Install/upgrade the chart with the provider + its admin token:
+#        --set identity.aauth.provider=https://ap.example.com \
+#        --set identity.aauth.adminTokenSecret.name=apd-admin-token
+#      (the operator then provisions each opted-in agent's key, pre-registers
+#      its thumbprint over apd's admin API, and revokes on delete).
+#
+# The remote MCP server must VERIFY AAuth (agent token + RFC 9421 signature
+# against the Agent Provider's JWKS). See docs/security.md and RFC 0024.
+---
+apiVersion: agentctl.dev/v1alpha1
+kind: MCPServerSet
+metadata:
+  name: partner-tools
+  namespace: default
+spec:
+  servers:
+    - name: partner
+      # The REAL remote endpoint the agent dials directly (must be https).
+      endpoint: https://mcp.partner.example/mcp
+      # auth.mode: aauth ⇒ the AGENT signs; no tokenSecretRef, no facade.
+      auth: { mode: aauth }
+      tags: ["egress"]
+---
+apiVersion: agentctl.dev/v1alpha1
+kind: Agent
+metadata:
+  name: aauth-demo
+  namespace: default
+spec:
+  mode: once
+  image: ghcr.io/agentd-dev/agentd:1.0.0
+  instruction: "List the partner tools and summarize what they do."
+  mcpServers: ["partner-tools"]
+  # Opt into a provisioned AAuth identity. Empty {} = use the operator's
+  # configured default provider; set `provider:` here to override per-agent.
+  identity:
+    aauth: {}
+  # Required for an aauth-mode server: the direct dial leaves the cluster, and
+  # admission enforces this declared-intent egress (which the operator renders
+  # as the agent-aauth-internet-egress NetworkPolicy).
+  capabilities:
+    egress: true

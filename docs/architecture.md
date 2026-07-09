@@ -120,12 +120,16 @@ selects the rendered workload kind.
 | `limits` | `{ maxTokens, maxDepth, maxSteps }` bounding box. |
 | `surfaces` | Which control-plane surfaces to expose (`management`/`metrics`/`a2a`). |
 | `access` | A2A caller policy: `oidc` (JWT verify + claim authz). |
+| `identity.aauth` | **Experimental (RFC 0023).** Opt into an operator-provisioned portable AAuth identity (`aauth:local@domain`) — see [Portable agent identity](#portable-agent-identity-aauth). |
 | `capabilities.exec` / `capabilities.egress` / `capabilities.secrets` | Declared privileged capabilities (the lethal-trifecta legs). |
 | `substrate` | Substrate tier (see [Substrate](#substrate)). |
 
 `capabilities.exec`, `capabilities.egress`, and `capabilities.secrets` are **declared capabilities** the admission
 webhook gates: requesting all three at once (the "lethal trifecta") requires an
-explicit opt-in annotation.
+explicit opt-in annotation. `capabilities.egress` additionally gains real
+enforcement when the agent binds an `auth.mode: aauth` MCP server: admission
+requires it, and the operator renders the public-egress NetworkPolicy tier
+(see [Portable agent identity](#portable-agent-identity-aauth)).
 
 #### Rendering an Agent
 
@@ -237,10 +241,62 @@ brokers. Agents hold no tool-server credential.
 | Field (per `servers[]` entry) | Meaning |
 |---|---|
 | `name` | Server name — the agent's `--mcp` key and the gateway facade path segment (`/s/<name>`). |
-| `endpoint` | The remote MCP server URL (Streamable HTTP). The agent never dials this. |
-| `auth` | `{ mode: none \| staticToken, tokenSecretRef, header }` — the credential the gateway attaches upstream, held off-pod. |
+| `endpoint` | The remote MCP server URL (Streamable HTTP). The agent never dials this — **except** `auth.mode: aauth`, which is a direct signed dial. |
+| `auth` | `{ mode: none \| staticToken \| aauth, tokenSecretRef, header }` — how the server is authenticated (see below). |
 | `tags` | Per-tool trifecta capability tags. |
 | `budget.maxTokens` | Optional per-server call budget. |
+
+Three `auth.mode`s, chosen by what the remote accepts:
+
+- **`none`** — unauthenticated server, brokered through the gateway facade.
+- **`staticToken`** — the `mcpgateway` reads a `Secret`-backed bearer and
+  attaches it upstream; the credential is never on the pod.
+- **`aauth`** (experimental, RFC 0024) — the **agent authenticates itself**: it
+  signs each request (RFC 9421) with its portable AAuth identity, and the
+  server verifies against the Agent Provider's JWKS. No credential exists to
+  hold, so the operator renders a **direct dial** to `endpoint` (the facade is
+  bypassed — a rewriting proxy cannot preserve a signature that covers
+  `@authority`/`@path`). Requires the binding `Agent` to carry `identity.aauth`
+  and declare `capabilities.egress` (admission-enforced).
+
+### Portable agent identity (AAuth)
+
+> **Experimental (RFC 0023/0024), default-off.** Tracks the unreleased
+> `draft-hardt-oauth-aauth` IETF drafts; the reference agent ships the client
+> behind a build flag. Enable per-Agent via `spec.identity.aauth` once the
+> operator is configured with an Agent Provider (`identity.aauth.provider`).
+
+agentctl's perimeter identity (a source IP resolved to a pod → namespace) is
+unforgeable inside the cluster but worthless outside it. AAuth gives each agent
+a **portable cryptographic identity** — an Ed25519 key bound to
+`aauth:local@domain` by an **Agent Provider (AP)**, presented as short-lived
+proof-of-possession tokens — that any resource on the internet can verify from
+the AP's published JWKS, without contacting agentctl.
+
+The operator is the **house-provisioner**. For an opted-in `Agent` it:
+
+1. generates a per-Agent Ed25519 key `Secret` (the agent's only identity
+   material; the model surface is MCP tools, so the key sits with the harness);
+2. pre-registers the key's thumbprint at the AP over the admin API
+   (**allowlist enrollment** — the "credential" is a public-key hash sent over
+   the operator's authenticated channel; nothing secret reaches the pod);
+3. renders the keyless `--aauth-provider` dial; the agent self-enrolls at
+   startup and signs every MCP request thereafter;
+4. learns the enrolled identity into `status.identity.aauth`, and revokes it at
+   the AP on deletion.
+
+**What stays.** The `modelgateway` remains in-path for intelligence — token
+budgets require being on the data path, and the AP never is. Only remote
+**MCP** servers move to direct signed dials; the mcpgateway continues to broker
+credential-bearing servers.
+
+**Egress.** Direct dials need real egress. Admission requires
+`capabilities.egress: true` for any `auth.mode: aauth` binding, and the
+operator renders a fourth agent-namespace NetworkPolicy
+(`agent-aauth-internet-egress`, selecting `agentctl.dev/aauth: "true"` pods):
+HTTPS to public address space only, private ranges carved out. Vanilla
+NetworkPolicy cannot express per-FQDN egress — a DNS-aware CNI can tighten it
+to the declared endpoints.
 
 ---
 
@@ -429,7 +485,8 @@ Each capability plane is a composition of the components above.
 |---|---|---|
 | **Provisioning** | operator + CRDs + admission | Declarative agents/fleets rendered to hardened workloads with per-workload PKI. |
 | **Intelligence** | modelgateway + `ModelPool` | Secret-free, metered, budgeted inference. |
-| **Tools** | mcpgateway + `MCPServerSet` | Secret-free, scoped MCP tool access. |
+| **Tools** | mcpgateway + `MCPServerSet` | Secret-free, scoped MCP tool access; optional direct signed dials (AAuth). |
+| **Identity** *(experimental)* | operator + Agent Provider (AAuth) | Portable per-agent cryptographic identity for direct, self-authenticated access to remote resources. |
 | **Scaling** | coordination + scaler + KEDA (claim); StatefulSet partitioning (shard) | Elastic scale-from-zero for claim fleets; keyed/ordered partitioning for shard fleets. |
 | **A2A** | gateway | Agents and fleets as authenticated A2A endpoints, plus agent-to-agent delegation. |
 | **Management** | apiserver | `drain`/`lame-duck`/`cancel`/`pause`/`resume` via kubectl, RBAC-gated. |

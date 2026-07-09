@@ -81,10 +81,12 @@ or a judgment call the current flat form already serves well.
   set a claim-only field on a shard fleet (today only a CEL rule could). The flat
   form + the `shards`-requiredness CEL rule works; deferred as a larger change.
 - **Trifecta end-to-end wiring.** `capabilities.exec`/`egress`/`secrets` gate
-  admission but drive nothing in the operator (no `Secret` mounts, no egress
-  `NetworkPolicy` from the field, no `exec` flag). Now documented as
-  "admission only". Wiring them end-to-end (mount the named `Secret`s, derive the
-  egress policy, pass `exec`) remains the real fix and is the open item.
+  admission; **`egress` is now partially wired** (RFC 0024): binding an
+  `auth.mode: aauth` MCP server requires `capabilities.egress: true` at
+  admission, and the operator then renders the `agent-aauth-internet-egress`
+  NetworkPolicy (public-HTTPS egress for that agent). `exec` and `secrets`
+  remain admission-only — mounting the named `Secret`s and passing `exec`
+  end-to-end is the residual open item.
 - **Cosmetic Rust-type renames** (wire keys unchanged): `DesiredSurfaces` →
   `Surfaces`, `LoopParams` → `Loop`. Pure internal tidy; deferred.
 - **Discriminated `trigger`/`run` union** keyed by `mode` (folding `subscribe` /
