@@ -150,13 +150,18 @@ fn resolve_image(image: &Option<String>, cfg: &RenderConfig) -> Result<String, R
 }
 
 /// A resolved MCP server binding for an agent — the server name (which is both
-/// the gateway facade path segment and the agent's `--mcp` server name) and its
-/// operator-declared trifecta tags. Produced by the controller (which reads the
-/// `MCPServerSet`s the agent binds) and rendered by [`inject_mcp_servers`].
+/// the gateway facade path segment and the agent's `--mcp` server name), its
+/// operator-declared trifecta tags, and — for an `auth.mode: aauth` server
+/// (RFC 0024) — the REAL remote endpoint the agent dials **directly**, signed
+/// (`direct_endpoint: Some`; a rewriting facade cannot preserve RFC 9421
+/// signatures). `None` keeps today's gateway-facade dial. Produced by the
+/// controller (which reads the `MCPServerSet`s the agent binds) and rendered by
+/// [`inject_mcp_servers`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpBinding {
     pub name: String,
     pub tags: Vec<String>,
+    pub direct_endpoint: Option<String>,
 }
 
 /// In-pod mount of the workflow graph (agentd v2 `--mode workflow`). The
@@ -324,7 +329,14 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
     let args = container.args.get_or_insert_with(Vec::new);
     let base = gateway_url.trim_end_matches('/');
     for s in servers {
-        let mcp_val = format!("{}={}/s/{}", s.name, base, s.name);
+        let mcp_val = match &s.direct_endpoint {
+            // aauth-mode (RFC 0024): the agent dials the REAL endpoint,
+            // signed; the facade is bypassed (it would rewrite the covered
+            // `@authority`/`@path`). In-cluster endpoints are absolutized so
+            // no DNS search list can capture them.
+            Some(endpoint) => format!("{}={}", s.name, absolutize_endpoint(endpoint)),
+            None => format!("{}={}/s/{}", s.name, base, s.name),
+        };
         // Idempotent: never render the same server twice.
         if args.iter().any(|a| a == &mcp_val) {
             continue;
@@ -335,6 +347,30 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
             args.push("--mcp-tags".to_string());
             args.push(format!("{}={}", s.name, s.tags.join(",")));
         }
+    }
+}
+
+/// Absolutize an in-cluster Service FQDN in a direct-dial endpoint: a host
+/// ending in `.svc.cluster.local` (no trailing dot) gets the trailing dot, so
+/// an ndots search list can never rewrite the 4-dot name to a foreign host
+/// (mirrors the MCPGateway's own upstream absolutization). External hosts pass
+/// through untouched.
+fn absolutize_endpoint(endpoint: &str) -> String {
+    let Some(scheme_end) = endpoint.find("://") else {
+        return endpoint.to_string();
+    };
+    let rest = &endpoint[scheme_end + 3..];
+    let host_end = rest.find(['/', ':', '?']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    if host.ends_with(".svc.cluster.local") {
+        let mut out = String::with_capacity(endpoint.len() + 1);
+        out.push_str(&endpoint[..scheme_end + 3]);
+        out.push_str(host);
+        out.push('.');
+        out.push_str(&rest[host_end..]);
+        out
+    } else {
+        endpoint.to_string()
     }
 }
 
@@ -1523,10 +1559,12 @@ mod tests {
             McpBinding {
                 name: "github".into(),
                 tags: vec!["untrusted_input".into(), "egress".into()],
+                direct_endpoint: None,
             },
             McpBinding {
                 name: "fs".into(),
                 tags: vec![],
+                direct_endpoint: None,
             },
         ];
         inject_mcp_servers(&mut r, "https://mcpgw.cp.svc.cluster.local.", &servers);
@@ -1569,6 +1607,80 @@ mod tests {
         assert_eq!(n, 1);
         // The agent trusts the gateway via the already-rendered --tls-ca.
         assert!(has_arg_pair(c, "--tls-ca", "/etc/agentctl/ca/ca.crt"));
+    }
+
+    #[test]
+    fn aauth_mode_servers_render_a_direct_signed_dial() {
+        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
+        let servers = vec![
+            // aauth (RFC 0024): direct dial to the REAL endpoint — no facade.
+            McpBinding {
+                name: "github".into(),
+                tags: vec!["egress".into()],
+                direct_endpoint: Some("https://mcp.github.example/mcp".into()),
+            },
+            // legacy staticToken/none: unchanged facade dial.
+            McpBinding {
+                name: "fs".into(),
+                tags: vec![],
+                direct_endpoint: None,
+            },
+            // in-cluster direct endpoint gets the trailing-dot absolutization.
+            McpBinding {
+                name: "local".into(),
+                tags: vec![],
+                direct_endpoint: Some("https://tools.team-a.svc.cluster.local:8443/mcp".into()),
+            },
+        ];
+        inject_mcp_servers(&mut r, "https://mcpgw.cp.svc.cluster.local.", &servers);
+        let Rendered::Deployment(dep) = &r else {
+            unreachable!()
+        };
+        let c = container_of(&dep.spec.as_ref().unwrap().template);
+        assert!(has_arg_pair(
+            c,
+            "--mcp",
+            "github=https://mcp.github.example/mcp"
+        ));
+        assert!(has_arg_pair(c, "--mcp-tags", "github=egress"));
+        assert!(has_arg_pair(
+            c,
+            "--mcp",
+            "fs=https://mcpgw.cp.svc.cluster.local./s/fs"
+        ));
+        assert!(has_arg_pair(
+            c,
+            "--mcp",
+            "local=https://tools.team-a.svc.cluster.local.:8443/mcp"
+        ));
+        // The facade never appears in a direct dial.
+        assert!(!c
+            .args
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|a| a.contains("/s/github")));
+    }
+
+    #[test]
+    fn absolutize_endpoint_dots_only_cluster_local_hosts() {
+        assert_eq!(
+            absolutize_endpoint("https://x.ns.svc.cluster.local/mcp"),
+            "https://x.ns.svc.cluster.local./mcp"
+        );
+        assert_eq!(
+            absolutize_endpoint("https://x.ns.svc.cluster.local:8443"),
+            "https://x.ns.svc.cluster.local.:8443"
+        );
+        // Already-absolute and external hosts pass through untouched.
+        assert_eq!(
+            absolutize_endpoint("https://x.ns.svc.cluster.local./mcp"),
+            "https://x.ns.svc.cluster.local./mcp"
+        );
+        assert_eq!(
+            absolutize_endpoint("https://mcp.github.example/mcp"),
+            "https://mcp.github.example/mcp"
+        );
     }
 
     #[test]

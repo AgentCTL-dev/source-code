@@ -66,6 +66,7 @@ spec:
                           enum:
                           - none
                           - staticToken
+                          - aauth
                           type: string
                         tokenSecretRef:
                           description: |-
@@ -126,6 +127,8 @@ spec:
               rule: self.servers.all(s, s.name != '')
             - message: each server endpoint must be an http(s):// URL
               rule: self.servers.all(s, s.endpoint.startsWith('https://') || s.endpoint.startsWith('http://'))
+            - message: an aauth-mode server takes no tokenSecretRef and its endpoint must be https://
+              rule: self.servers.all(s, !has(s.auth) || s.auth.mode != 'aauth' || (!has(s.auth.tokenSecretRef) && s.endpoint.startsWith('https://')))
           status:
             description: '`MCPServerSet.status` — resolution + per-server broker health.'
             nullable: true

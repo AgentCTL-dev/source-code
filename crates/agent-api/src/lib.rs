@@ -827,6 +827,12 @@ pub struct ModelPoolStatus {
     {
         "rule": "self.servers.all(s, s.endpoint.startsWith('https://') || s.endpoint.startsWith('http://'))",
         "message": "each server endpoint must be an http(s):// URL"
+    },
+    {
+        // aauth = the AGENT authenticates itself: no credential exists to hold,
+        // and the dial is direct — plaintext would strip the signature's value.
+        "rule": "self.servers.all(s, !has(s.auth) || s.auth.mode != 'aauth' || (!has(s.auth.tokenSecretRef) && s.endpoint.startsWith('https://')))",
+        "message": "an aauth-mode server takes no tokenSecretRef and its endpoint must be https://"
     }
 ]))]
 pub struct MCPServerSetSpec {
@@ -893,6 +899,14 @@ pub enum McpAuthMode {
     None,
     /// A `Secret`-backed bearer the gateway attaches upstream (off-pod).
     StaticToken,
+    /// The **agent authenticates itself** (AAuth, RFC 0024): the server
+    /// verifies the agent's signed requests against its Agent Provider — no
+    /// credential exists to hold. The operator renders a **direct dial** to
+    /// `endpoint` (the MCPGateway facade is bypassed: a rewriting proxy cannot
+    /// preserve RFC 9421 signatures, which cover `@authority`/`@path`).
+    /// Requires the binding Agent to carry `identity.aauth` and declare
+    /// `capabilities.egress` (admission-enforced).
+    Aauth,
 }
 
 /// `MCPServerSet.status` — resolution + per-server broker health.

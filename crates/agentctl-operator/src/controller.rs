@@ -639,9 +639,17 @@ async fn resolve_mcp_bindings(client: &Client, ns: &str, spec: &AgentSpec) -> Ve
                     if out.iter().any(|b| b.name == s.name) {
                         continue;
                     }
+                    // aauth-mode (RFC 0024): direct dial to the real endpoint,
+                    // signed by the agent; everything else stays on the facade.
+                    let direct_endpoint = s
+                        .auth
+                        .as_ref()
+                        .is_some_and(|a| a.mode == agent_api::McpAuthMode::Aauth)
+                        .then(|| s.endpoint.clone());
                     out.push(McpBinding {
                         name: s.name,
                         tags: s.tags,
+                        direct_endpoint,
                     });
                 }
             }

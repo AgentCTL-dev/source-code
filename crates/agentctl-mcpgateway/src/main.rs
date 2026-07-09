@@ -172,6 +172,23 @@ async fn proxy(
         }
     };
 
+    // 2b. Defense-in-depth: an `aauth`-mode server is DIRECT-DIAL by design
+    // (RFC 0024) — the agent signs for the true upstream authority, and this
+    // facade rewrites `@authority`/`@path`, which would break the signature.
+    // The operator never renders a facade dial for one; refuse if something
+    // dials it anyway.
+    if server
+        .auth
+        .as_ref()
+        .is_some_and(|a| a.mode == McpAuthMode::Aauth)
+    {
+        tracing::warn!(%ns, %agent, server = %server.name, "authz: aauth server dialed via facade");
+        return forbidden(&format!(
+            "MCP server '{server_name}' is aauth-mode: agents dial it directly \
+             (signed); it is not served through the gateway facade"
+        ));
+    }
+
     // 3. Read the credential (off-pod) for the upstream hop.
     let auth_header = match credential_header(&state.client, &ns, &server).await {
         Ok(h) => h,
@@ -332,6 +349,10 @@ async fn credential_header(
     };
     match auth.mode {
         McpAuthMode::None => Ok(None),
+        // Unreachable in practice: the proxy handler refuses aauth-mode servers
+        // before this point (they are direct-dial; RFC 0024). No credential
+        // exists for them by definition.
+        McpAuthMode::Aauth => Err("aauth-mode servers hold no gateway credential".to_string()),
         McpAuthMode::StaticToken => {
             let secret_ref = auth
                 .token_secret_ref
