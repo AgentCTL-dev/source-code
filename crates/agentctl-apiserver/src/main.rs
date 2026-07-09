@@ -5,8 +5,10 @@
 //! kube-aggregator proxies requests here.
 //!
 //! Serves TLS, discovery, and health so the `APIService` reports
-//! `Available=True`, and exposes the `agents/<name>/{drain,lame-duck,cancel}`
-//! connect verbs under the front-proxy trust model: rustls **requires** a client
+//! `Available=True`, and exposes the
+//! `agents/<name>/{drain,lame-duck,cancel,pause,resume}` connect verbs (and the
+//! same set on `agentfleets`) under the front-proxy trust model: rustls
+//! **requires** a client
 //! cert verified against the `requestheader-client-ca` (so only the
 //! kube-apiserver can reach the API surface), the handler trusts
 //! `X-Remote-User`/`-Group`, and a `SubjectAccessReview` authorizes the verb
