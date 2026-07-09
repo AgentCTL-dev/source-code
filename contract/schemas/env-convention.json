@@ -53,6 +53,16 @@
       "AGENT_INTELLIGENCE_TOKEN_{N}_FILE":{ "type": "path",           "endpoint": "N" }
     },
 
+    "budget": {
+      "description": "Per-INSTANCE token budget (RFC 0025). Cumulative across every run/reaction of the instance — distinct from the per-RUN box (--max-tokens, which bounds each once-run/reaction). Restart-only; never a secret. Absent => unbounded (today's behaviour). Enforcement: a bounded `once` run folds exhaustion into EXIT_BUDGET(7); a reactive/loop/schedule daemon stops accepting new reactions and drains cleanly (exit 0 by default, tunable via --budget-exit-code). Observability: the value is NOT in the --capabilities manifest or report.usage; it surfaces via the `agent://config/effective` resource (limits.lifetime_tokens) and the gauge agent_budget_tokens_remaining (metrics_schema 1.1), with agent_limit_exceeded_total{limit=tokens_lifetime} on the trip.",
+      "AGENT_BUDGET_TOKENS": {
+        "type": "integer (tokens)",
+        "maps_to": "limits.lifetime_tokens",
+        "also_settable": "--budget-tokens-lifetime; config-file limits.lifetime_tokens",
+        "note": "per-instance cumulative token cap; 0/absent => unbounded"
+      }
+    },
+
     "lifecycle": {
       "description": "Other control/lifecycle env. Restart-only (env/flag, never a config-file key). Contract 1.0: the served control surface and the intelligence endpoint are BOTH mTLS HTTPS URLs. Serving-TLS material (leaf cert, key, and the client-CA used to verify management peers) and the outbound private-CA trust anchor are supplied via flags/paths (--serve-cert / --serve-key / --serve-client-ca / --tls-ca), NOT via this env convention — that material is filesystem paths to mounted Secrets, never inline in env.",
       "AGENT_SERVE_MCP":     { "type": "string (mTLS https URL) | absent", "note": "management address; contract 1.0 an mTLS HTTPS URL e.g. https://0.0.0.0:8443; optional; drives surfaces.management" },

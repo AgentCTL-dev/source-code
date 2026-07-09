@@ -1,10 +1,24 @@
 # agentctl RFC 0025: Harness-tracked budgets — budget as a property of the agent
 
-**Status:** Proposed (identity/delegation track; standalone value beyond it; unblocks
-0024 §7.2; extends 0012's cost governance and 0022's per-fleet budget with a third
-enforcement point)
+**Status:** Partially implemented (identity/delegation track; standalone value beyond it;
+unblocks 0024 §7.2; extends 0012's cost governance and 0022's per-fleet budget with a
+third enforcement point)
 **Author:** Andrii Tsok
 **Date:** 2026-07-09
+
+> **Implemented (agentctl):** `Agent.spec.limits.lifetimeTokens` →
+> `--budget-tokens-lifetime` (operator render); the contract's `budget`
+> env-convention group + the `agent_budget_tokens_remaining` gauge +
+> `limit=tokens_lifetime` (metrics_schema 1.1). The reference agent (agentd
+> `7394dea`) implements the enforcement. **Corrections folded in from what
+> landed** (see §3.1/§3.4): exhaustion is `EXIT_BUDGET(7)` only on a bounded
+> `once` run; a `reactive`/`loop`/`schedule` daemon **drains to exit 0** (or the
+> agent's `--budget-exit-code`), it does not hard-exit 7. And the lifetime value
+> is **not** surfaced in the `--capabilities` manifest or `report.usage` — only
+> the `agent://config/effective` resource and the metric expose it.
+> **Deferred:** the §3.3 admission requiredness keys on `ModelPool.auth.mode:
+> aauth` (0024 §7.2), which is itself gated on modelgateway-inbound AAuth — so
+> it lands with that, not now.
 
 **Part of:** the agentctl control plane — moves budget from *a property of the gateway
 path* to *a property of the agent*: the control plane **declares** the budget on the CR,

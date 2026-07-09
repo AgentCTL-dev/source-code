@@ -4,8 +4,9 @@
   "title": "Agent Control Contract — Metrics Registry (metrics_schema 1.0)",
   "description": "DATA catalogue (not a JSON-Schema validator) of the frozen, versioned Prometheus metrics a conformant agent exposes on the opt-in /metrics surface, gated by manifest surfaces.metrics_schema. Metrics are Prometheus 0.0.4 text exposition, not a JSON document, so a per-metric registry of neutral agent_* names is the right artifact for agentctl to codegen dashboards/alerts/scalers from. Versioned additive-within-major (new series / new bounded label values tolerated); removal/rename bumps major. A consumer MUST ignore unknown additive series + unknown bounded-label values and refuse only an unknown major. NOTE: a conformant agent emits ONLY counters and gauges on /metrics — NO histograms — so all histograms here are provisional/unbuilt with bucket boundaries undefined.",
 
-  "metrics_schema": "1.0",
+  "metrics_schema": "1.1",
   "x-contract-version": "1.0",
+  "x-version-note": "1.1 (additive minor): added the gauge agent_budget_tokens_remaining and the bounded label value limit=tokens_lifetime (RFC 0025 per-instance lifetime budget). A consumer refuses only an unknown MAJOR; these are additive.",
 
   "prefix": {
     "neutral": "agent_"
@@ -19,7 +20,7 @@
     "status":        ["completed", "refused", "exhausted_steps", "exhausted_tokens", "deadline", "stalled", "loop_detected", "cancelled", "crashed", "other"],
     "token_type":    ["in", "out"],
     "refusal_reason":["trifecta", "rate", "budget", "depth", "mcp", "other"],
-    "limit":         ["steps", "tokens", "deadline", "depth", "tree_tokens", "restart_storm", "spawn_rate", "other"],
+    "limit":         ["steps", "tokens", "tokens_lifetime", "deadline", "depth", "tree_tokens", "restart_storm", "spawn_rate", "other"],
     "restart_reason":["crashed", "stuck", "rate", "other"],
     "stuck_signal":  ["term", "kill", "other"],
     "intel_error_reason":["unreachable", "auth", "timeout", "5xx", "other"],
@@ -134,9 +135,16 @@
     {
       "name": "agent_limit_exceeded_total", "neutral_name": "agent_limit_exceeded_total",
       "type": "counter", "labels": [{ "key": "limit", "domain": "limit" }], "unit": "1",
-      "help": "Hard-bound trips by limit.",
+      "help": "Hard-bound trips by limit (incl. limit=tokens_lifetime for the per-instance budget).",
       "source": "Standard /metrics series.", "status": "stable",
       "autoscaling_signal": false, "cost_signal": false
+    },
+    {
+      "name": "agent_budget_tokens_remaining", "neutral_name": "agent_budget_tokens_remaining",
+      "type": "gauge", "labels": [], "unit": "1",
+      "help": "Tokens remaining against the per-instance lifetime budget (RFC 0025). Reads 0 when the budget is unbounded AND when it is exhausted — disambiguate via agent_limit_exceeded_total{limit=\"tokens_lifetime\"} / the limit.exceeded event. The alerting/scaling hook for a long-lived reactive instance approaching its cap.",
+      "source": "Emitted when --budget-tokens-lifetime (AGENT_BUDGET_TOKENS) is set.", "status": "stable",
+      "autoscaling_signal": false, "cost_signal": true
     },
     {
       "name": "agent_active_subagents", "neutral_name": "agent_active_subagents",

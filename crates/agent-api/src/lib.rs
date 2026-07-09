@@ -369,12 +369,22 @@ pub struct ConfigMapKeyRef {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Limits {
+    /// Per-RUN token box (each once-run / each reaction). Renders `--max-tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_depth: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
+    /// Per-INSTANCE lifetime token budget — cumulative across every run/reaction
+    /// of this instance (RFC 0025). Renders `--budget-tokens-lifetime`. On a
+    /// bounded `once` run exhaustion folds into `EXIT_BUDGET(7)`; a
+    /// `reactive`/`loop`/`schedule` daemon stops accepting new reactions and
+    /// drains cleanly (exit 0 by default, operator-tunable via the agent's
+    /// `--budget-exit-code`). Fleet members each get their own lifetime box;
+    /// the fleet-aggregate cap is `AgentFleet.spec.budget` at the modelgateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime_tokens: Option<u64>,
 }
 
 /// `Agent.status` — a curated projection of the live capabilities manifest +

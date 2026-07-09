@@ -1217,7 +1217,8 @@ fn agent_args(spec: &AgentSpec) -> Vec<String> {
     }
     // Deliver the declared bounding box to the agent, so subagent step/token caps
     // set on the CR reach agentd (which consumes these flags): `max_tokens`,
-    // `max_depth`, and `max_steps` each map to an agentd flag.
+    // `max_depth`, and `max_steps` each map to an agentd flag, plus the
+    // per-instance `lifetime_tokens` (RFC 0025) → `--budget-tokens-lifetime`.
     if let Some(limits) = &spec.limits {
         if let Some(v) = limits.max_tokens {
             args.push("--max-tokens".to_string());
@@ -1229,6 +1230,10 @@ fn agent_args(spec: &AgentSpec) -> Vec<String> {
         }
         if let Some(v) = limits.max_steps {
             args.push("--max-steps".to_string());
+            args.push(v.to_string());
+        }
+        if let Some(v) = limits.lifetime_tokens {
+            args.push("--budget-tokens-lifetime".to_string());
             args.push(v.to_string());
         }
     }
@@ -1958,6 +1963,7 @@ mod tests {
             max_tokens: Some(500_000),
             max_depth: Some(3),
             max_steps: Some(40),
+            lifetime_tokens: Some(2_000_000),
         });
         let r = render_agent(&a, &cfg()).unwrap();
         let Rendered::Deployment(dep) = r else {
@@ -1967,6 +1973,8 @@ mod tests {
         assert!(has_arg_pair(&c, "--max-tokens", "500000"));
         assert!(has_arg_pair(&c, "--max-depth", "3"));
         assert!(has_arg_pair(&c, "--max-steps", "40"));
+        // RFC 0025 per-instance lifetime budget.
+        assert!(has_arg_pair(&c, "--budget-tokens-lifetime", "2000000"));
     }
 
     #[test]
