@@ -1604,15 +1604,20 @@ fn aauth_mock_stats(_ctx: &Ctx) -> Result<serde_json::Value> {
         "-sSk",
         "--max-time",
         "10",
-        "https://mock-aauth-mcp.default.svc.cluster.local/stats",
+        // Trailing-dot absolute FQDN: a 4-dot name under ndots:5 is otherwise
+        // captured by a search-domain wildcard (SSL error to a foreign host).
+        "https://mock-aauth-mcp.default.svc.cluster.local./stats",
     ])
     .context("read mock /stats via in-cluster curl")?;
-    // `kubectl run -i` appends a "pod deleted" line; take the JSON object line.
-    let json_line = out
-        .lines()
-        .find(|l| l.trim_start().starts_with('{'))
-        .context("no JSON in /stats output")?;
-    serde_json::from_str(json_line).context("parse mock /stats json")
+    // `kubectl run -i` concatenates its "pod deleted" notice onto the curl
+    // output (often on the same line), so slice out just the JSON object —
+    // the first `{` through the matching (flat-object) `}`.
+    let start = out.find('{').context("no JSON object in /stats output")?;
+    let end = out[start..]
+        .find('}')
+        .map(|e| start + e + 1)
+        .context("unterminated JSON object in /stats output")?;
+    serde_json::from_str(&out[start..end]).context("parse mock /stats json")
 }
 
 /// Best-effort teardown of the aauth scenario's out-of-band manifests + Secret.
