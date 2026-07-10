@@ -281,7 +281,14 @@ pub fn inject_aauth(rendered: &mut Rendered, provider: &str) {
             name: AAUTH_VOLUME.to_string(),
             secret: Some(SecretVolumeSource {
                 secret_name: Some(crate::aauth::key_secret_name(&workload)),
-                default_mode: Some(0o400),
+                // 0444, not 0400: a Secret volume's files are owned by root, and
+                // a conformant agent runs as an arbitrary non-root uid (agentd is
+                // 65532) that could not read a root-owned 0400 file. The volume
+                // is mounted read-only into the agent's OWN single-container pod,
+                // so world-readable here means "readable by the one process that
+                // is this agent" — no cross-container exposure. (fsGroup would let
+                // us keep 0440, but the operator does not pin the agent's gid.)
+                default_mode: Some(0o444),
                 ..Default::default()
             }),
             ..Default::default()
@@ -365,7 +372,7 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
 /// an ndots search list can never rewrite the 4-dot name to a foreign host
 /// (mirrors the MCPGateway's own upstream absolutization). External hosts pass
 /// through untouched.
-fn absolutize_endpoint(endpoint: &str) -> String {
+pub(crate) fn absolutize_endpoint(endpoint: &str) -> String {
     let Some(scheme_end) = endpoint.find("://") else {
         return endpoint.to_string();
     };
@@ -1732,7 +1739,7 @@ mod tests {
         let src = v.secret.as_ref().unwrap();
         // Secret-name stem = the workload name from the agentctl.dev/agent label.
         assert_eq!(src.secret_name.as_deref(), Some("demo-aauth-key"));
-        assert_eq!(src.default_mode, Some(0o400));
+        assert_eq!(src.default_mode, Some(0o444));
         // The netpol selector label lands on the TEMPLATE only — the immutable
         // workload selector keeps the base managed labels.
         let tpl_labels = tpl.metadata.as_ref().unwrap().labels.as_ref().unwrap();

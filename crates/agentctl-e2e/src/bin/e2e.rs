@@ -1559,8 +1559,22 @@ async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// Whether the Agent Provider image is loaded into the cluster's nodes.
+/// Whether the Agent Provider image is available for the scenario.
+///
+/// `AGENTCTL_E2E_AAUTH=1` forces the scenario to run (the caller asserts apd is
+/// loaded). Otherwise we consult `node.status.images` as a best-effort signal —
+/// but the kubelet only reports images already referenced by a pod / above a
+/// size floor, so a freshly `kind load`ed-but-unused image often does NOT
+/// appear there. That means the auto-detect can only turn the scenario ON (a
+/// positive hit is reliable), never confidently SKIP a genuinely-present image;
+/// use the env override when you've loaded apd out of band.
 fn aauth_image_present() -> bool {
+    if std::env::var("AGENTCTL_E2E_AAUTH")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
     shell::kubectl(&[
         "get",
         "nodes",

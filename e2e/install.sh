@@ -22,10 +22,14 @@ REGISTRY="${REGISTRY:-}"            # "" = local kind-loaded names
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 
-# Resolve each overlay arg into a -f flag.
+# Resolve each overlay arg into a -f flag. `--base` (used by the e2e's
+# overlay-revert) means "no overlays, base values only" — a no-op arg, not an
+# overlay name to look up.
 VALUE_FLAGS=(-f "$SCRIPT_DIR/values/e2e-base.yaml")
 for ov in "$@"; do
-  if [ -f "$ov" ]; then
+  if [ "$ov" = "--base" ]; then
+    continue
+  elif [ -f "$ov" ]; then
     f="$ov"
   elif [ -f "$SCRIPT_DIR/values/$ov" ]; then
     f="$SCRIPT_DIR/values/$ov"

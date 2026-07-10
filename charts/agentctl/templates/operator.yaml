@@ -57,6 +57,15 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
+{{- if .Values.identity.aauth.provider }}
+  # AAuth house-provisioning (RFC 0023): the operator generates + owns each
+  # opted-in Agent's per-workload Ed25519 key Secret (<name>-aauth-key). The
+  # agent's serving-cert Secrets are cert-manager-owned; this is the only Secret
+  # the operator creates. Owner references drive deletion (GC), so no delete verb.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+{{- end }}
 {{- if .Values.networkPolicies.enabled }}
   # Tenant isolation: when networkPolicies.enabled, the operator
   # reconciles the per-namespace agent NetworkPolicies (default-deny + sanctioned

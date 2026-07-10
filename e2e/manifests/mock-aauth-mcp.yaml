@@ -41,7 +41,10 @@ spec:
           image: mock-aauth-mcp:dev
           imagePullPolicy: IfNotPresent
           env:
-            - { name: APD_HOST, value: "apd.default.svc.cluster.local:80" }
+            # Trailing-dot ABSOLUTE FQDN: a 4-dot name under ndots:5 would be
+            # treated as non-absolute and a search-domain wildcard could capture
+            # it (a foreign 404). The dot pins in-cluster resolution.
+            - { name: APD_HOST, value: "apd.default.svc.cluster.local.:80" }
             - { name: TLS_DIR, value: /etc/mock/tls }
           ports:
             - { containerPort: 8443, name: https }

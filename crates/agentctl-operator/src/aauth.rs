@@ -100,11 +100,18 @@ impl AauthConfig {
     /// Resolve the provider for one Agent: spec override wins, else the
     /// operator default. `None` ⇒ the opt-in is unconfigured (admission also
     /// denies this; the controller degrades to `Validated=False`).
+    ///
+    /// The result is **absolutized** (an in-cluster `.svc.cluster.local` host
+    /// gets a trailing dot) so neither the operator's admin dials nor the
+    /// rendered `--aauth-provider` can be captured by an ndots search-domain
+    /// wildcard — the same defense the MCP/modelgateway URLs already carry.
+    /// A public provider (not `.svc.cluster.local`) passes through untouched.
     pub fn resolve_provider(&self, spec: &agent_api::AauthIdentity) -> Option<String> {
         spec.provider
             .as_ref()
             .map(|p| p.trim_end_matches('/').to_string())
             .or_else(|| self.provider.clone())
+            .map(|p| absolutize_provider(&p))
     }
 
     /// Whether the admin channel is usable (client built + token file named).
@@ -292,6 +299,13 @@ fn build_http_client() -> Result<reqwest::Client, String> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("build reqwest client: {e}"))
+}
+
+/// Absolutize an in-cluster provider URL's host (`…svc.cluster.local` →
+/// `…svc.cluster.local.`) so DNS resolution is absolute; external hosts pass
+/// through. Delegates to the renderer's shared helper so the two never drift.
+fn absolutize_provider(provider: &str) -> String {
+    crate::render::absolutize_endpoint(provider)
 }
 
 /// Construct the agent identifier from a `local` + the provider issuer URL
@@ -588,12 +602,23 @@ mod tests {
             cfg.resolve_provider(&none).as_deref(),
             Some("https://default.ap")
         );
-        // trailing slash normalized off
+        // trailing slash normalized off; a public host passes through absolutize
         assert_eq!(
             cfg.resolve_provider(&over).as_deref(),
             Some("https://tenant.ap")
         );
         let empty = AauthConfig::default();
         assert_eq!(empty.resolve_provider(&none), None);
+
+        // An in-cluster provider is absolutized (trailing dot) so DNS resolution
+        // cannot be captured by an ndots search-domain wildcard.
+        let incluster = AauthConfig {
+            provider: Some("http://apd.default.svc.cluster.local".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            incluster.resolve_provider(&none).as_deref(),
+            Some("http://apd.default.svc.cluster.local.")
+        );
     }
 }

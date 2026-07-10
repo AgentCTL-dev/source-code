@@ -57,7 +57,8 @@ async fn main() {
     let apd_host = std::env::var("APD_HOST")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "apd.default.svc.cluster.local:80".to_string());
+        // Trailing-dot absolute FQDN (ndots search-domain-capture defense).
+        .unwrap_or_else(|| "apd.default.svc.cluster.local.:80".to_string());
     let tls_dir = std::env::var("TLS_DIR").unwrap_or_else(|_| "/etc/mock/tls".to_string());
 
     let app = App {
