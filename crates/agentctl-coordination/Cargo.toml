@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 [package]
 name = "agentctl-coordination"
-version = "1.1.0"
+version = "1.2.0"
 description = "agentctl coordination MCP server: the claim-mode serializing point that makes exactly-one-owner hold across replicas. Serves the work.* tools (submit/claim/renew/ack/release/result/deadletter) and the off-pod backlog count that drives scale-from-zero, over MCP JSON-RPC. Rust (axum)."
 edition.workspace = true
 rust-version.workspace = true

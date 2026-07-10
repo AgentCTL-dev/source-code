@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 [package]
 name = "agentctl-scaler"
-version = "1.1.0"
+version = "1.2.0"
 description = "agentctl KEDA external gRPC scaler: serves KEDA's externalscaler.proto over the coordination server's off-pod backlog so claim-mode AgentFleets scale from zero. Rust (tonic + axum)."
 edition.workspace = true
 rust-version.workspace = true

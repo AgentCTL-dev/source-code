@@ -1,6 +1,6 @@
 [package]
 name = "agentctl-mcpgateway"
-version = "1.1.0"
+version = "1.2.0"
 description = "agentctl MCPGateway: the credential-injecting, attesting, policy-enforcing broker for the tool plane. Agents hold no tool-server secrets; the gateway attests the caller by source IP, scopes it to its bound MCPServerSet, injects the server credential off-pod, and forwards MCP. Rust (axum)."
 edition.workspace = true
 rust-version.workspace = true

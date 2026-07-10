@@ -1,6 +1,6 @@
 [package]
 name = "agentctl-gateway"
-version = "1.1.0"
+version = "1.2.0"
 description = "agentctl A2A gateway: the public A2A HTTP/JSON-RPC surface with signed Agent Card projection, reaching agents by dialing their pods directly over mTLS. Rust (axum)."
 edition.workspace = true
 rust-version.workspace = true

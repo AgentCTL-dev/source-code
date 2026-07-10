@@ -10,7 +10,7 @@ agentctl manages any agent that conforms to the published Agent Control Contract
 never depends on a specific agent binary. The reference agent is used only by the
 bundled examples.
 
-- Chart version / app version: **1.1.0**
+- Chart version / app version: **1.2.0**
 - API group for the CRDs: **`agentctl.dev/v1alpha1`**
 - Management API group (aggregated API): **`management.agentctl.dev/v1alpha1`**
 
@@ -95,11 +95,11 @@ helm install agentctl ./charts/agentctl \
 ### From the published GHCR images
 
 Use the `values-ghcr.yaml` overlay (sets `image.registry: ghcr.io/agentctl-dev` and
-`image.tag: 1.1.0`), or install the chart straight from the OCI registry:
+`image.tag: 1.2.0`), or install the chart straight from the OCI registry:
 
 ```bash
 helm install agentctl oci://ghcr.io/agentctl-dev/charts/agentctl \
-  --version 1.1.0 \
+  --version 1.2.0 \
   -n agentctl-system --create-namespace \
   -f charts/agentctl/values-ghcr.yaml
 ```

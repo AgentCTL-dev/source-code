@@ -1,13 +1,13 @@
 apiVersion: operators.coreos.com/v1alpha1
 kind: ClusterServiceVersion
 metadata:
-  name: agentctl.v1.1.0
+  name: agentctl.v1.2.0
   namespace: placeholder
   annotations:
     capabilities: Basic Install
     categories: "Application Runtime,AI/Machine Learning,Developer Tools"
-    containerImage: ghcr.io/agentctl-dev/operator:1.1.0
-    createdAt: "2026-07-04T00:00:00Z"
+    containerImage: ghcr.io/agentctl-dev/operator:1.2.0
+    createdAt: "2026-07-10T00:00:00Z"
     support: Andrii Tsok (andrii@tsok.org)
     repository: https://github.com/AgentCTL-dev/source-code
     description: >-
@@ -26,7 +26,7 @@ metadata:
           "metadata": { "name": "summarizer", "namespace": "default" },
           "spec": {
             "mode": "once",
-            "image": "ghcr.io/agentctl-dev/mock-agent:1.1.0",
+            "image": "ghcr.io/agentctl-dev/mock-agent:1.2.0",
             "instruction": "Read /data/report.md and write a 3-bullet summary to /data/summary.md",
             "model": { "pool": "mockpool" },
             "substrate": "stock-unix"
@@ -39,7 +39,7 @@ metadata:
           "spec": {
             "template": {
               "mode": "reactive",
-              "image": "ghcr.io/agentctl-dev/mock-agent:1.1.0",
+              "image": "ghcr.io/agentctl-dev/mock-agent:1.2.0",
               "subscribe": ["queue://jobs"]
             },
             "scaling": {
@@ -67,10 +67,10 @@ metadata:
       ]
 spec:
   displayName: agentctl
-  version: 1.1.0
+  version: 1.2.0
   maturity: alpha
   minKubeVersion: 1.31.0
-  replaces: agentctl.v1.0.0
+  replaces: agentctl.v1.1.0
   provider:
     name: Andrii Tsok
     url: https://github.com/AgentCTL-dev
@@ -275,7 +275,7 @@ spec:
                     type: RuntimeDefault
                 containers:
                   - name: operator
-                    image: ghcr.io/agentctl-dev/operator:1.1.0
+                    image: ghcr.io/agentctl-dev/operator:1.2.0
                     imagePullPolicy: IfNotPresent
                     env:
                       - name: RUST_LOG
@@ -310,7 +310,7 @@ spec:
                     type: RuntimeDefault
                 containers:
                   - name: apiserver
-                    image: ghcr.io/agentctl-dev/apiserver:1.1.0
+                    image: ghcr.io/agentctl-dev/apiserver:1.2.0
                     imagePullPolicy: IfNotPresent
                     ports:
                       - { containerPort: 6443, name: https }
@@ -366,7 +366,7 @@ spec:
                     type: RuntimeDefault
                 containers:
                   - name: gateway
-                    image: ghcr.io/agentctl-dev/gateway:1.1.0
+                    image: ghcr.io/agentctl-dev/gateway:1.2.0
                     imagePullPolicy: IfNotPresent
                     ports:
                       - { containerPort: 8080, name: http }
@@ -429,7 +429,7 @@ spec:
                     type: RuntimeDefault
                 containers:
                   - name: modelgateway
-                    image: ghcr.io/agentctl-dev/modelgateway:1.1.0
+                    image: ghcr.io/agentctl-dev/modelgateway:1.2.0
                     imagePullPolicy: IfNotPresent
                     ports:
                       - { containerPort: 8080, name: http }
@@ -481,7 +481,7 @@ spec:
                     type: RuntimeDefault
                 containers:
                   - name: admission
-                    image: ghcr.io/agentctl-dev/admission:1.1.0
+                    image: ghcr.io/agentctl-dev/admission:1.2.0
                     imagePullPolicy: IfNotPresent
                     ports:
                       - { containerPort: 8443, name: https }

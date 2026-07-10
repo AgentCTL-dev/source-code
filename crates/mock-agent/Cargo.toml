@@ -1,6 +1,6 @@
 [package]
 name = "mock-agent"
-version = "1.1.0"
+version = "1.2.0"
 description = "A minimal CONFORMANT-AGENT stand-in (contract 1.0): serves the management + A2A self-MCP over mTLS HTTPS POST /mcp (client cert = Management) and a plaintext /readyz+/metrics listener. A dev/e2e/conformance fixture — not a real agent (no agentic loop). Proves agentctl is agent-agnostic (P0)."
 edition.workspace = true
 rust-version.workspace = true
