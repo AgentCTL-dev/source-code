@@ -112,7 +112,7 @@ async fn main() -> Result<(), kube::Error> {
     );
 
     let render = agentctl_operator::RenderConfig::from_env();
-    info!(modelgateway = %render.modelgateway_url, "render config");
+    info!(gateway = %render.gateway_url, "render config (agents dial intelligence + MCP directly; no gateways)");
     let pki = agentctl_operator::pki::PkiConfig::from_env();
     info!(
         issuer = ?pki.issuer,

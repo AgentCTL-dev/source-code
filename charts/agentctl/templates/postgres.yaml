@@ -36,7 +36,7 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_PASSWORD: {{ $pw | quote }}
-  # Consumed by the gateway + modelgateway (and coordination when
+  # Consumed by the gateway (and coordination when
   # coordination.store=postgres). sslmode=disable (NoTls) by default — the working
   # path; sslmode=require when bundled TLS is on (rustls encrypts the hop without CA
   # verify); sslmode=verify-full when tls.verifyFull is also set (the client pins

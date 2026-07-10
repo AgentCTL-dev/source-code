@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Shared tracing/telemetry init for the agentctl control-plane binaries
-//! (operator, apiserver, gateway, modelgateway, coordination, scaler, admission).
+//! (operator, apiserver, gateway, coordination, scaler, admission).
 //!
 //! Every binary calls [`init`] once, early in `main` (inside the tokio runtime).
 //! By default it installs a standard `tracing_subscriber` fmt layer — honoring

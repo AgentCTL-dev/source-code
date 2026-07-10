@@ -97,9 +97,10 @@ function Hero() {
           <p className="text-muted-foreground mt-5 max-w-xl text-lg text-pretty">
             agentctl provisions, secures, scales, and routes fleets of contract-conformant
             agents. Agents <strong className="text-foreground">serve mTLS HTTPS</strong> and
-            dial the gateways <strong className="text-foreground">keyless</strong>. Identity is
-            the boundary — a verified client cert, or an attested source IP. No per-node agent, no
-            pod-resident secrets.
+            dial their LLM provider and MCP servers{" "}
+            <strong className="text-foreground">directly</strong>. Identity is the boundary — a
+            verified client cert inbound, an AAuth-signed identity outbound. No per-node agent, no
+            broker, no pod-resident secrets.
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Button asChild size="lg">
@@ -128,13 +129,13 @@ spec:
   image: ${AGENTD_IMAGE}
   mode: reactive
   surfaces: { a2a: true } # reachable over the A2A gateway (its wake source)
-  model: { pool: gpt }    # keyless — the ModelGateway holds the key
-  mcpServers: [tools] # brokered — no tool credential on the pod
+  model: { pool: gpt }    # agent dials the pool's provider directly (AAuth, or a mounted INTELLIGENCE_TOKEN)
+  mcpServers: [{ name: tools, endpoint: https://…, auth: { mode: aauth } }] # dialed directly
 
 # the operator renders a restricted-PSS pod that:
 #   serves  https://0.0.0.0:8443/mcp   (mTLS, per-workload cert)
-#   dials   INTELLIGENCE=https://…   (keyless, source-IP attested)
-#   holds   zero credentials · no hostPath · runAsNonRoot`}
+#   dials   INTELLIGENCE + mcpServers directly   (AAuth-signed, secret-free)
+#   holds   no provider/tool secret · no hostPath · runAsNonRoot`}
           />
         </div>
       </div>
@@ -150,7 +151,7 @@ function Model() {
       id="model"
       eyebrow="The model"
       title="Reached over the network, bounded by identity."
-      lead="Agents are reached the way Kubernetes reaches anything else — over the network, with a verified identity. The whole control surface is mTLS HTTPS, and agents act only through brokered MCP tools, so there is no local execution surface. The control plane manages an agent completely while staying out of its execution layer."
+      lead="Agents are reached the way Kubernetes reaches anything else — over the network, with a verified identity. The whole control surface is mTLS HTTPS, and agents act only through operator-declared MCP tools they dial directly, so there is no local execution surface. The control plane manages an agent completely while staying out of its execution layer."
     >
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="p-6">
@@ -168,12 +169,13 @@ function Model() {
         <Card className="p-6">
           <div className="mb-3 flex items-center gap-2">
             <Fingerprint className="text-primary size-5" />
-            <h3 className="font-semibold">Out of the agent — attested source IP</h3>
+            <h3 className="font-semibold">Out of the agent — signed direct dial</h3>
           </div>
           <p className="text-muted-foreground text-sm">
-            The agent dials the ModelGateway and MCPGateway <strong>keyless</strong>. Each gateway
-            attests the caller by source IP (a kube pod lookup), scopes it, injects the real
-            credential it holds off-pod, meters, and forwards. No secret ever lands on the pod.
+            The agent dials its bound LLM provider and MCP servers <strong>directly</strong> over
+            public-HTTPS egress. With AAuth it signs each request with its own workload identity, so
+            no provider or tool secret rests on the pod; the fallback is a token mounted from a
+            referenced Secret. No broker sits in the path.
           </p>
         </Card>
       </div>
@@ -182,7 +184,7 @@ function Model() {
           ✓ no per-node agent
         </div>
         <div className="border-border/60 bg-muted/30 rounded-md border px-3 py-2">
-          ✓ zero pod credentials
+          ✓ secret-free with AAuth
         </div>
         <div className="border-border/60 bg-muted/30 rounded-md border px-3 py-2">
           ✓ restricted-PSS · no hostPath
@@ -208,12 +210,12 @@ const PLANES = [
   {
     icon: KeyRound,
     title: "Intelligence",
-    body: "The ModelGateway is the secretless inference path: agents dial it keyless, it attests by source IP, injects the ModelPool credential, meters tokens, and enforces the budget — a 429 on exhaustion. The pod never holds a provider key.",
+    body: "The operator resolves the Agent's bound ModelPool and renders INTELLIGENCE=<the provider endpoint> into the pod; the agent dials the provider directly. With AAuth the dial is secret-free — identity signed per request — with an optional mounted INTELLIGENCE_TOKEN as the fallback. Budgets are harness-tracked (lifetimeTokens, maxTokens), never enforced by an in-path broker.",
   },
   {
     icon: Network,
     title: "Tool plane (MCP)",
-    body: "Agents work only through operator-provided MCP tools. An MCPServerSet binds servers; the MCPGateway attests, scopes to what the agent may reach, injects the credential off-pod, and forwards. No stdio, no tool secret on the pod.",
+    body: "Agents work only through operator-declared MCP tools. spec.mcpServers is an inline list of { name, endpoint, auth, tags } the agent dials directly — authenticating with AAuth, a mounted staticToken, or none. No stdio, no broker, no facade in the path.",
   },
   {
     icon: Workflow,
@@ -284,7 +286,7 @@ spec:
 EOF
 
 kubectl get agents -n team-a   # READY=True
-# the pod serves mTLS :8443/mcp and dials keyless.`}
+# the pod serves mTLS :8443/mcp and dials its provider directly.`}
         />
       </div>
     </Section>
@@ -295,8 +297,8 @@ kubectl get agents -n team-a   # READY=True
 
 const STATS = [
   { value: "~1m", label: "CPU / idle agent", sub: "sub-MiB working set" },
-  { value: "0", label: "pod credentials", sub: "keyless dials, mTLS serve" },
-  { value: "~18m", label: "control plane CPU", sub: "~79 MiB across 9 pods" },
+  { value: "0", label: "pod credentials", sub: "secret-free AAuth dials" },
+  { value: "~16m", label: "control plane CPU", sub: "~76 MiB across 7 pods" },
   { value: "0", label: "per-node cost", sub: "no per-node agent" },
 ];
 
@@ -306,7 +308,7 @@ function Benchmarks() {
       id="benchmarks"
       eyebrow="Measured"
       title="Light data plane, negligible control plane."
-      lead="Live kubectl-top readings from a running stack: a full control plane plus a reactive agent bound to a brokered MCP tool, all Ready."
+      lead="Live kubectl-top readings from a running stack: a full control plane plus a reactive agent that dials an MCP tool directly, all Ready."
     >
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {STATS.map((s) => (
@@ -318,8 +320,8 @@ function Benchmarks() {
         ))}
       </div>
       <p className="text-muted-foreground mt-4 text-xs">
-        Point-in-time readings of one idle agent — the eight Rust components together idle at
-        ~10m / ~25 MiB; Postgres is the single largest line. Full density / throughput / latency
+        Point-in-time readings of one idle agent — the six Rust components together idle at
+        ~8m / ~22 MiB; Postgres is the single largest line. Full density / throughput / latency
         methodology in the repo benchmarks.
       </p>
     </Section>
@@ -331,15 +333,15 @@ function Benchmarks() {
 const PRINCIPLES = [
   {
     title: "Depend on the contract, never on an agent",
-    body: "agentctl consumes only the published, language-neutral Agent Control Contract. Any binary that emits a conformant manifest, serves mTLS /mcp, and dials keyless is managed unchanged. agentd is the reference, not a dependency.",
+    body: "agentctl consumes only the published, language-neutral Agent Control Contract. Any binary that emits a conformant manifest, serves mTLS /mcp, and dials its provider and tools directly is managed unchanged. agentd is the reference, not a dependency.",
   },
   {
     title: "Identity is the boundary",
-    body: "A verified mTLS client cert into agents; an attested source IP into the gateways. Reachability is never authority. mTLS-only — the control plane never puts a bearer on the pod.",
+    body: "A verified mTLS client cert into agents; an AAuth-signed identity out to providers and tools, and an attested source IP for coordination work claims. Reachability is never authority. mTLS-only — the control plane never puts a bearer on the pod.",
   },
   {
     title: "The pod holds no power it doesn't need",
-    body: "No provider key, no tool credential, no bearer, no hostPath, no privilege — only a rotatable serving identity. Credentials live off-pod in the gateways that inject them.",
+    body: "No bearer, no hostPath, no privilege, and — with AAuth — no provider or tool secret: the agent signs its own dials, and the only always-present key material is its rotatable mTLS serving identity. Where a static token is unavoidable it is mounted from a referenced Secret, never brokered off-pod.",
   },
 ];
 

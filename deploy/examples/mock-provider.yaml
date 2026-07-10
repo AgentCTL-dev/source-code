@@ -1,7 +1,8 @@
 # A mock model provider for the intelligence-plane examples: it REQUIRES an
-# Authorization header (proving the ModelGateway injected the pool credential —
-# the agent never sent one) and returns a canned completion with token usage.
-# Dev/test only.
+# Authorization header (the agent dials it DIRECTLY and presents the pool
+# credential itself — mounted as INTELLIGENCE_TOKEN from the pool's
+# credentialSecretRef, or a keyless AAuth-signed dial) and returns a canned
+# completion with token usage. Dev/test only.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

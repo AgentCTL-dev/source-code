@@ -35,7 +35,7 @@ imagePullSecrets:
 {{- end -}}
 
 {{/*
-The DATABASE_URL env entry for the durable store (gateway + modelgateway).
+The DATABASE_URL env entry for the durable store (gateway).
 bundled -> the chart's agentctl-postgres secret; external -> the user's DSN secret.
 Usage: {{ include "agentctl.databaseUrlEnv" $ | nindent 12 }}
 */}}

@@ -62,14 +62,12 @@ contract client and CRD types are shared libraries.
 
 | Crate | Role |
 | --- | --- |
-| `agent-api` | CRD types (`Agent`, `AgentFleet`, `ModelPool`, `MCPServerSet`) as kube-rs `CustomResource`s. |
+| `agent-api` | CRD types (`Agent`, `AgentFleet`, `ModelPool`) as kube-rs `CustomResource`s. |
 | `agent-contract-client` | Typed client for the Agent Control Contract (capabilities manifest, surfaces discovery, version negotiation). |
 | `agentctl-operator` | Reconciles `Agent`/`AgentFleet` into workloads (the pure rendering core plus the kube runtime controller). |
 | `agentctl-apiserver` | Aggregated APIServer serving the management verbs (drain, lame-duck, cancel, pause, resume). |
 | `agentctl-admission` | Validating + mutating webhooks (image allow-list, lethal-trifecta gate, secure defaults). |
 | `agentctl-gateway` | A2A gateway — the public agent-to-agent surface + Agent Card projection. |
-| `agentctl-modelgateway` | Intelligence broker — injects the ModelPool credential, meters tokens, enforces budgets. |
-| `agentctl-mcpgateway` | Tools broker — scopes calls to the bound MCPServerSet and injects the server credential off-pod. |
 | `agentctl-coordination` | Reference work-distribution MCP server (`work.*`) — the exactly-one-owner claim backbone and backlog signal. |
 | `agentctl-scaler` | KEDA external gRPC scaler that reads the coordination backlog so claim fleets scale from zero. |
 | `agentctl-cli` | The `agentctl` CLI / `kubectl-agent` plugin (`get`/`describe`, management verbs). |

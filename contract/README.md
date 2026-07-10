@@ -196,9 +196,10 @@ Identity is cryptographic, not positional.
   is unauthenticated and refused; it is never downgraded to a weaker origin. The A2A gateway relays to
   the agent under the control-plane client certificate, so gateway-forwarded work arrives as
   Management.
-- **Outbound from an agent.** The agent dials the control-plane gateways (intelligence, tools) with
-  **no embedded credential**. The gateways attest the caller and inject the provider or tool
-  credential off-pod.
+- **Outbound from an agent.** The agent dials its configured intelligence and tool endpoints
+  **directly**, presenting **no credential from its manifest**. It either signs each request with
+  its own portable identity (secret-free) or presents a credential supplied out-of-band on the
+  `AGENT_*_TOKEN[_FILE]` env path — there is no off-pod broker injecting credentials.
 - **Secret-freedom is structural.** The manifest never carries a credential; the config file carries
   only `{{secret:NAME}}` / `{{secret-file:PATH}}` references; credentials travel only the
   `AGENT_*_TOKEN[_FILE]` env path.

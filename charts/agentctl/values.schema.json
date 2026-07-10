@@ -349,9 +349,6 @@
     "gateway": {
       "$ref": "#/definitions/component"
     },
-    "modelgateway": {
-      "$ref": "#/definitions/component"
-    },
     "admission": {
       "$ref": "#/definitions/component"
     },

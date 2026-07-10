@@ -1,7 +1,7 @@
 {{- $ns := include "agentctl.namespace" . }}
 {{- if .Values.apiToken.enabled }}
 # Optional in-cluster bearer-token gate (apiToken.enabled). When enabled, the
-# coordination server, ModelGateway, and A2A gateway require
+# coordination server and A2A gateway require
 # `Authorization: Bearer <AGENTCTL_API_TOKEN>` on their data-plane endpoints
 # (the code reads AGENTCTL_API_TOKEN from env; default off -> services run open).
 # The scaler and control-plane-namespace agents get the token injected; external

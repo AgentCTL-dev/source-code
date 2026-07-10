@@ -9,7 +9,6 @@ excluded — they don't scale on CPU.
 {{- $comps := list
   (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled)
   (dict "comp" "gateway"      "enabled" .Values.gateway.enabled)
-  (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled)
 }}
 {{- range $c := $comps }}
 {{- $cfg := index $.Values $c.comp }}

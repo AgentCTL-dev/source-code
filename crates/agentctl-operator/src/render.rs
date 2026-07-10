@@ -10,11 +10,12 @@
 //! boundary.** Every rendered pod SERVES its
 //! management/A2A surface over mTLS-gated HTTPS (`--serve-mcp
 //! https://0.0.0.0:8443`) with a cert-manager-issued serving identity, trusts
-//! the cluster CA for callers (`--serve-client-ca`) and for its own keyless
-//! outbound dials (`--tls-ca`, `INTELLIGENCE=https://<modelgateway>`),
-//! and exposes `/readyz` on a separate metrics listener. No hostPath, no
-//! unix sockets, no pod-held credential: the ONLY key material in the pod is
-//! its OWN serving identity (cert-manager Secret, rotated live by the agent).
+//! the cluster CA for callers (`--serve-client-ca`) and for its own outbound
+//! dials (`--tls-ca`, `INTELLIGENCE=https://<provider>` — the ModelPool
+//! endpoint the agent dials DIRECTLY), and exposes `/readyz` on a separate
+//! metrics listener. No hostPath, no unix sockets, no off-pod broker: the only
+//! key material in the pod is its OWN serving identity (cert-manager Secret,
+//! rotated live by the agent) plus any provider/MCP token the CR mounts.
 
 use std::collections::BTreeMap;
 
@@ -64,20 +65,11 @@ pub fn serving_secret_name(workload: &str) -> String {
     format!("{workload}-serving-tls")
 }
 
-/// Operator-scoped render inputs that do not live on the CR: where the model +
-/// MCP gateways are. Built once by the controller from its environment; a test
-/// passes a literal.
+/// Operator-scoped render inputs that do not live on the CR: the A2A gateway URL
+/// (for coordinator delegation) and the default agent image. Built once by the
+/// controller from its environment; a test passes a literal.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
-    /// The ModelGateway base URL rendered into `INTELLIGENCE` (keyless
-    /// dial; identity = source-IP attestation at the gateway). MUST be an
-    /// `https://` URL whose cert chains to the cluster CA, and SHOULD be an
-    /// absolute (trailing-dot) FQDN so no DNS search list can capture it.
-    pub modelgateway_url: String,
-    /// The MCPGateway base URL each bound MCP server is rendered against
-    /// (`--mcp <name>=<url>/s/<name>`). Same constraints as the ModelGateway
-    /// URL; the agent dials it keyless (identity = source IP).
-    pub mcpgateway_url: String,
     /// The A2A gateway base URL a coordinator's `--a2a-peer worker=…/fleets/<ns>/<name>`
     /// is rendered against for `distribution: a2a`. Unused for the default
     /// `queue` distribution.
@@ -90,13 +82,6 @@ pub struct RenderConfig {
     pub default_agent_image: Option<String>,
 }
 
-/// Default in-cluster ModelGateway URL (chart Service, control-plane
-/// namespace; absolute FQDN — trailing dot — so ndots search never rewrites it).
-pub const DEFAULT_MODELGATEWAY_URL: &str =
-    "https://agentctl-modelgateway.agentctl-system.svc.cluster.local.";
-/// Default in-cluster MCPGateway URL (chart Service, control-plane namespace).
-pub const DEFAULT_MCPGATEWAY_URL: &str =
-    "https://agentctl-mcpgateway.agentctl-system.svc.cluster.local.";
 /// Default in-cluster A2A gateway URL (chart Service, control-plane namespace).
 pub const DEFAULT_GATEWAY_URL: &str =
     "http://agentctl-gateway.agentctl-system.svc.cluster.local.:8080";
@@ -104,8 +89,6 @@ pub const DEFAULT_GATEWAY_URL: &str =
 impl Default for RenderConfig {
     fn default() -> Self {
         RenderConfig {
-            modelgateway_url: DEFAULT_MODELGATEWAY_URL.to_string(),
-            mcpgateway_url: DEFAULT_MCPGATEWAY_URL.to_string(),
             gateway_url: DEFAULT_GATEWAY_URL.to_string(),
             default_agent_image: None,
         }
@@ -113,8 +96,7 @@ impl Default for RenderConfig {
 }
 
 impl RenderConfig {
-    /// Build from the operator environment (`AGENTCTL_MODELGATEWAY_URL`,
-    /// `AGENTCTL_MCPGATEWAY_URL`, `AGENTCTL_GATEWAY_URL`,
+    /// Build from the operator environment (`AGENTCTL_GATEWAY_URL`,
     /// `AGENTCTL_DEFAULT_AGENT_IMAGE`), falling back to the in-cluster defaults.
     pub fn from_env() -> Self {
         let d = Self::default();
@@ -126,8 +108,6 @@ impl RenderConfig {
                 .unwrap_or(dflt)
         };
         RenderConfig {
-            modelgateway_url: env("AGENTCTL_MODELGATEWAY_URL", d.modelgateway_url),
-            mcpgateway_url: env("AGENTCTL_MCPGATEWAY_URL", d.mcpgateway_url),
             gateway_url: env("AGENTCTL_GATEWAY_URL", d.gateway_url),
             // Empty / unset ⇒ None ⇒ spec.image stays required.
             default_agent_image: std::env::var("AGENTCTL_DEFAULT_AGENT_IMAGE")
@@ -149,19 +129,20 @@ fn resolve_image(image: &Option<String>, cfg: &RenderConfig) -> Result<String, R
         .ok_or(RenderError::MissingImage)
 }
 
-/// A resolved MCP server binding for an agent — the server name (which is both
-/// the gateway facade path segment and the agent's `--mcp` server name), its
-/// operator-declared trifecta tags, and — for an `auth.mode: aauth` server
-/// (RFC 0024) — the REAL remote endpoint the agent dials **directly**, signed
-/// (`direct_endpoint: Some`; a rewriting facade cannot preserve RFC 9421
-/// signatures). `None` keeps today's gateway-facade dial. Produced by the
-/// controller (which reads the `MCPServerSet`s the agent binds) and rendered by
+/// A resolved MCP server binding for an agent (inline `spec.mcpServers`, RFC
+/// 0024 direct model — no gateway). The agent dials `endpoint` **directly**:
+/// `aauth` servers are signed by the agent's identity (secret-free);
+/// `staticToken` servers get their bearer `Secret` mounted onto the pod as
+/// `token_env` (the agent's config attaches it). Rendered by
 /// [`inject_mcp_servers`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpBinding {
     pub name: String,
+    pub endpoint: String,
     pub tags: Vec<String>,
-    pub direct_endpoint: Option<String>,
+    /// `Some((env_var, secret_name, secret_key))` ⇒ mount the bearer `Secret`
+    /// onto the agent as `env_var` (`staticToken` mode). `None` ⇒ `none`/`aauth`.
+    pub token_env: Option<(String, String, String)>,
 }
 
 /// In-pod mount of the workflow graph (agentd v2 `--mode workflow`). The
@@ -251,16 +232,6 @@ pub fn inject_aauth(rendered: &mut Rendered, provider: &str) {
         Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
     };
     let Some(pod) = pod else { return };
-    // Stamp the aauth pod label (template labels only — never the immutable
-    // workload selector): the netpol plane keys its internet-egress tier off
-    // it ([`crate::netpol::AAUTH_POD_LABEL`]), so the hole opens for exactly
-    // these pods.
-    if let Some(labels) = pod.metadata.as_mut().and_then(|m| m.labels.as_mut()) {
-        labels.insert(
-            crate::netpol::AAUTH_POD_LABEL.to_string(),
-            "true".to_string(),
-        );
-    }
     let Some(spec) = pod.spec.as_mut() else {
         return;
     };
@@ -315,13 +286,69 @@ pub fn inject_aauth(rendered: &mut Rendered, provider: &str) {
     }
 }
 
-/// Append the agent's bound MCP servers to the rendered container args, each
-/// pointing at the MCPGateway facade (`--mcp <name>=<gateway>/s/<name>`) with
-/// its trifecta tags (`--mcp-tags <name>=<comma-list>`). The agent dials the
-/// gateway keyless (trusting the cluster CA via the already-rendered `--tls-ca`);
-/// the gateway attests it, scopes it to these servers, and injects each server's
-/// credential off-pod. Idempotent per server name.
-pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &[McpBinding]) {
+/// Inject the direct intelligence dial (RFC 0024 — no gateway): set
+/// `INTELLIGENCE=<endpoint>` (the bound `ModelPool`'s provider endpoint,
+/// absolutized) and, when the pool carries a key, mount it as the agent's
+/// `INTELLIGENCE_TOKEN` env-secret. `aauth`-authenticated pools pass
+/// `token: None` (the agent signs; secret-free). Idempotent.
+pub fn inject_intelligence(
+    rendered: &mut Rendered,
+    endpoint: &str,
+    token: Option<&agent_api::SecretKeyRef>,
+) {
+    let pod = match rendered {
+        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
+        Rendered::CronJob(cj) => cj
+            .spec
+            .job_template
+            .spec
+            .as_mut()
+            .map(|js| &mut js.template),
+        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
+        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
+    };
+    let Some(pod) = pod else { return };
+    let Some(spec) = pod.spec.as_mut() else {
+        return;
+    };
+    let Some(container) = spec.containers.first_mut() else {
+        return;
+    };
+    let env = container.env.get_or_insert_with(Vec::new);
+    if !env.iter().any(|e| e.name == "INTELLIGENCE") {
+        env.push(EnvVar {
+            name: "INTELLIGENCE".to_string(),
+            value: Some(absolutize_endpoint(endpoint)),
+            ..Default::default()
+        });
+    }
+    // Key-authenticated provider ⇒ mount the key as INTELLIGENCE_TOKEN (the
+    // contract's env-secret path). The agent holds the key — no off-pod broker.
+    if let Some(t) = token {
+        if !env.iter().any(|e| e.name == "INTELLIGENCE_TOKEN") {
+            env.push(EnvVar {
+                name: "INTELLIGENCE_TOKEN".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: t.name.clone(),
+                        key: t.key.clone(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+    }
+}
+
+/// Render the agent's inline MCP servers as **direct dials**
+/// (`--mcp <name>=<endpoint>` + `--mcp-tags <name>=<comma-list>`) — there is no
+/// gateway. `aauth` servers are signed by the agent's identity (secret-free);
+/// `staticToken` servers get their bearer `Secret` mounted onto the pod as an
+/// env var (`token_env`). In-cluster endpoints are absolutized (trailing dot)
+/// so no DNS search list can capture them. Idempotent per server name.
+pub fn inject_mcp_servers(rendered: &mut Rendered, servers: &[McpBinding]) {
     if servers.is_empty() {
         return;
     }
@@ -343,17 +370,27 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
     let Some(container) = spec.containers.first_mut() else {
         return;
     };
-    let args = container.args.get_or_insert_with(Vec::new);
-    let base = gateway_url.trim_end_matches('/');
     for s in servers {
-        let mcp_val = match &s.direct_endpoint {
-            // aauth-mode (RFC 0024): the agent dials the REAL endpoint,
-            // signed; the facade is bypassed (it would rewrite the covered
-            // `@authority`/`@path`). In-cluster endpoints are absolutized so
-            // no DNS search list can capture them.
-            Some(endpoint) => format!("{}={}", s.name, absolutize_endpoint(endpoint)),
-            None => format!("{}={}/s/{}", s.name, base, s.name),
-        };
+        // staticToken: mount the bearer Secret onto the pod as its env var.
+        if let Some((env_var, secret_name, secret_key)) = &s.token_env {
+            let env = container.env.get_or_insert_with(Vec::new);
+            if !env.iter().any(|e| &e.name == env_var) {
+                env.push(EnvVar {
+                    name: env_var.clone(),
+                    value_from: Some(EnvVarSource {
+                        secret_key_ref: Some(SecretKeySelector {
+                            name: secret_name.clone(),
+                            key: secret_key.clone(),
+                            optional: Some(false),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+            }
+        }
+        let args = container.args.get_or_insert_with(Vec::new);
+        let mcp_val = format!("{}={}", s.name, absolutize_endpoint(&s.endpoint));
         // Idempotent: never render the same server twice.
         if args.iter().any(|a| a == &mcp_val) {
             continue;
@@ -369,9 +406,8 @@ pub fn inject_mcp_servers(rendered: &mut Rendered, gateway_url: &str, servers: &
 
 /// Absolutize an in-cluster Service FQDN in a direct-dial endpoint: a host
 /// ending in `.svc.cluster.local` (no trailing dot) gets the trailing dot, so
-/// an ndots search list can never rewrite the 4-dot name to a foreign host
-/// (mirrors the MCPGateway's own upstream absolutization). External hosts pass
-/// through untouched.
+/// an ndots search list can never rewrite the 4-dot name to a foreign host (the
+/// cluster-DNS-wildcard leak class). External hosts pass through untouched.
 pub(crate) fn absolutize_endpoint(endpoint: &str) -> String {
     let Some(scheme_end) = endpoint.find("://") else {
         return endpoint.to_string();
@@ -761,8 +797,8 @@ fn apply_distribution(
 /// Inject the optional in-cluster bearer token (`AGENTCTL_API_TOKEN`, `valueFrom`
 /// a `secretKeyRef` on [`API_TOKEN_SECRET`]) into the rendered agent pod's first
 /// container env, so a conformant agent can present it to the token-gated
-/// coordination server / ModelGateway (chart `apiToken.enabled`). Idempotent: a
-/// no-op if the env var is already set (e.g. a user `extraEnv`).
+/// coordination server (chart `apiToken.enabled`). Idempotent: a no-op if the
+/// env var is already set (e.g. a user `extraEnv`).
 ///
 /// LIMITATION (documented, not silently broken): a `secretKeyRef` resolves only
 /// within the pod's OWN namespace. The chart creates [`API_TOKEN_SECRET`] in the
@@ -1006,13 +1042,10 @@ fn pod_template(
     };
 
     let mut env = downward_env();
-    // Keyless intelligence dial: the ModelGateway holds the provider credential
-    // and attests the caller by source IP — NO token env is ever rendered.
-    env.push(EnvVar {
-        name: "INTELLIGENCE".to_string(),
-        value: Some(cfg.modelgateway_url.clone()),
-        ..Default::default()
-    });
+    // `INTELLIGENCE` is injected by the controller from the bound `ModelPool`'s
+    // endpoint (the agent dials the provider DIRECTLY — no gateway); see
+    // [`inject_intelligence`].
+    let _ = cfg;
     // Metrics + readiness listener (`/readyz`), probed below and scraped directly
     // (the pod is network-attached; there is no scrape proxy).
     env.push(EnvVar {
@@ -1459,30 +1492,63 @@ mod tests {
     }
 
     #[test]
-    fn intelligence_env_is_keyless_and_from_config() {
-        let custom = RenderConfig {
-            modelgateway_url: "https://mgw.cp.svc.cluster.local.".into(),
-            ..RenderConfig::default()
-        };
-        let r = render_agent(&agent(Mode::Reactive), &custom).unwrap();
-        let Rendered::Deployment(dep) = r else {
+    fn inject_intelligence_dials_the_pool_directly() {
+        // AAuth pool (no credential) ⇒ INTELLIGENCE set, secret-free.
+        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
+        inject_intelligence(&mut r, "https://api.anthropic.com", None);
+        let Rendered::Deployment(dep) = &r else {
             unreachable!()
         };
         let c = container_of(&dep.spec.as_ref().unwrap().template).clone();
         let env = c.env.as_ref().unwrap();
-        let intel = env
-            .iter()
-            .find(|e| e.name == "INTELLIGENCE")
-            .expect("INTELLIGENCE rendered");
         assert_eq!(
-            intel.value.as_deref(),
-            Some("https://mgw.cp.svc.cluster.local.")
+            env.iter()
+                .find(|e| e.name == "INTELLIGENCE")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("https://api.anthropic.com")
         );
-        // Keyless: NO intelligence token env of any spelling.
-        assert!(!env.iter().any(|e| e.name.contains("INTELLIGENCE_TOKEN")));
-        // Metrics listener env for the /readyz probe + direct scrape.
-        let metrics = env.iter().find(|e| e.name == "AGENT_METRICS_ADDR").unwrap();
-        assert_eq!(metrics.value.as_deref(), Some("0.0.0.0:9090"));
+        // No key ⇒ no INTELLIGENCE_TOKEN (secret-free AAuth path).
+        assert!(!env.iter().any(|e| e.name == "INTELLIGENCE_TOKEN"));
+        // Metrics listener env is still rendered.
+        assert_eq!(
+            env.iter()
+                .find(|e| e.name == "AGENT_METRICS_ADDR")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("0.0.0.0:9090")
+        );
+
+        // Key-authenticated pool ⇒ INTELLIGENCE_TOKEN mounted from the Secret.
+        let mut r2 = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
+        let key = agent_api::SecretKeyRef {
+            name: "anthropic-key".into(),
+            key: "token".into(),
+        };
+        inject_intelligence(&mut r2, "https://api.anthropic.com", Some(&key));
+        let Rendered::Deployment(dep2) = &r2 else {
+            unreachable!()
+        };
+        let c2 = container_of(&dep2.spec.as_ref().unwrap().template).clone();
+        let tok = c2
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "INTELLIGENCE_TOKEN")
+            .expect("INTELLIGENCE_TOKEN mounted for a key pool");
+        assert_eq!(
+            tok.value_from
+                .as_ref()
+                .unwrap()
+                .secret_key_ref
+                .as_ref()
+                .unwrap()
+                .name,
+            "anthropic-key"
+        );
     }
 
     #[test]
@@ -1575,113 +1641,86 @@ mod tests {
     }
 
     #[test]
-    fn inject_mcp_servers_renders_gateway_urls_and_tags() {
+    fn inject_mcp_servers_renders_direct_dials_tags_and_token_mounts() {
         let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
         let servers = vec![
+            // aauth / none: direct dial, no credential.
             McpBinding {
                 name: "github".into(),
+                endpoint: "https://mcp.github.example/mcp".into(),
                 tags: vec!["untrusted_input".into(), "egress".into()],
-                direct_endpoint: None,
+                token_env: None,
             },
+            // in-cluster endpoint gets the trailing-dot absolutization.
             McpBinding {
-                name: "fs".into(),
+                name: "local".into(),
+                endpoint: "https://tools.team-a.svc.cluster.local:8443/mcp".into(),
                 tags: vec![],
-                direct_endpoint: None,
+                token_env: None,
+            },
+            // staticToken: the bearer Secret mounts as an env var.
+            McpBinding {
+                name: "paid".into(),
+                endpoint: "https://mcp.paid.example/mcp".into(),
+                tags: vec![],
+                token_env: Some((
+                    "AGENT_MCP_PAID_TOKEN".into(),
+                    "paid-tok".into(),
+                    "token".into(),
+                )),
             },
         ];
-        inject_mcp_servers(&mut r, "https://mcpgw.cp.svc.cluster.local.", &servers);
-        inject_mcp_servers(&mut r, "https://mcpgw.cp.svc.cluster.local.", &servers); // idempotent
+        inject_mcp_servers(&mut r, &servers);
+        inject_mcp_servers(&mut r, &servers); // idempotent
         let Rendered::Deployment(dep) = &r else {
             unreachable!()
         };
         let c = container_of(&dep.spec.as_ref().unwrap().template);
-        // github: --mcp github=<gw>/s/github + --mcp-tags github=untrusted_input,egress
+        // Direct dials — no facade path anywhere.
         assert!(has_arg_pair(
             c,
             "--mcp",
-            "github=https://mcpgw.cp.svc.cluster.local./s/github"
+            "github=https://mcp.github.example/mcp"
         ));
         assert!(has_arg_pair(
             c,
             "--mcp-tags",
             "github=untrusted_input,egress"
         ));
-        // fs: dial rendered, but no tags flag (empty tags).
-        assert!(has_arg_pair(
-            c,
-            "--mcp",
-            "fs=https://mcpgw.cp.svc.cluster.local./s/fs"
-        ));
-        assert!(!c
-            .args
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|a| a.starts_with("fs=") && a.contains("=,")));
-        // Idempotent: exactly one --mcp entry for github.
-        let n = c
-            .args
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter(|a| a.as_str() == "github=https://mcpgw.cp.svc.cluster.local./s/github")
-            .count();
-        assert_eq!(n, 1);
-        // The agent trusts the gateway via the already-rendered --tls-ca.
-        assert!(has_arg_pair(c, "--tls-ca", "/etc/agentctl/ca/ca.crt"));
-    }
-
-    #[test]
-    fn aauth_mode_servers_render_a_direct_signed_dial() {
-        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
-        let servers = vec![
-            // aauth (RFC 0024): direct dial to the REAL endpoint — no facade.
-            McpBinding {
-                name: "github".into(),
-                tags: vec!["egress".into()],
-                direct_endpoint: Some("https://mcp.github.example/mcp".into()),
-            },
-            // legacy staticToken/none: unchanged facade dial.
-            McpBinding {
-                name: "fs".into(),
-                tags: vec![],
-                direct_endpoint: None,
-            },
-            // in-cluster direct endpoint gets the trailing-dot absolutization.
-            McpBinding {
-                name: "local".into(),
-                tags: vec![],
-                direct_endpoint: Some("https://tools.team-a.svc.cluster.local:8443/mcp".into()),
-            },
-        ];
-        inject_mcp_servers(&mut r, "https://mcpgw.cp.svc.cluster.local.", &servers);
-        let Rendered::Deployment(dep) = &r else {
-            unreachable!()
-        };
-        let c = container_of(&dep.spec.as_ref().unwrap().template);
-        assert!(has_arg_pair(
-            c,
-            "--mcp",
-            "github=https://mcp.github.example/mcp"
-        ));
-        assert!(has_arg_pair(c, "--mcp-tags", "github=egress"));
-        assert!(has_arg_pair(
-            c,
-            "--mcp",
-            "fs=https://mcpgw.cp.svc.cluster.local./s/fs"
-        ));
         assert!(has_arg_pair(
             c,
             "--mcp",
             "local=https://tools.team-a.svc.cluster.local.:8443/mcp"
         ));
-        // The facade never appears in a direct dial.
-        assert!(!c
-            .args
+        assert!(!c.args.as_ref().unwrap().iter().any(|a| a.contains("/s/")));
+        // Idempotent: exactly one --mcp entry for github.
+        assert_eq!(
+            c.args
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|a| a.as_str() == "github=https://mcp.github.example/mcp")
+                .count(),
+            1
+        );
+        // staticToken: the bearer Secret is mounted as the server's env var.
+        let tok = c
+            .env
             .as_ref()
             .unwrap()
             .iter()
-            .any(|a| a.contains("/s/github")));
+            .find(|e| e.name == "AGENT_MCP_PAID_TOKEN")
+            .expect("staticToken bearer env mounted");
+        assert_eq!(
+            tok.value_from
+                .as_ref()
+                .unwrap()
+                .secret_key_ref
+                .as_ref()
+                .unwrap()
+                .name,
+            "paid-tok"
+        );
     }
 
     #[test]
@@ -1740,24 +1779,6 @@ mod tests {
         // Secret-name stem = the workload name from the agentctl.dev/agent label.
         assert_eq!(src.secret_name.as_deref(), Some("demo-aauth-key"));
         assert_eq!(src.default_mode, Some(0o444));
-        // The netpol selector label lands on the TEMPLATE only — the immutable
-        // workload selector keeps the base managed labels.
-        let tpl_labels = tpl.metadata.as_ref().unwrap().labels.as_ref().unwrap();
-        assert_eq!(
-            tpl_labels
-                .get(crate::netpol::AAUTH_POD_LABEL)
-                .map(|s| s.as_str()),
-            Some("true")
-        );
-        let selector = dep
-            .spec
-            .as_ref()
-            .unwrap()
-            .selector
-            .match_labels
-            .as_ref()
-            .unwrap();
-        assert!(!selector.contains_key(crate::netpol::AAUTH_POD_LABEL));
     }
 
     #[test]

@@ -104,7 +104,7 @@ impl AauthConfig {
     /// The result is **absolutized** (an in-cluster `.svc.cluster.local` host
     /// gets a trailing dot) so neither the operator's admin dials nor the
     /// rendered `--aauth-provider` can be captured by an ndots search-domain
-    /// wildcard — the same defense the MCP/modelgateway URLs already carry.
+    /// wildcard — the same defense the direct MCP/intelligence endpoints carry.
     /// A public provider (not `.svc.cluster.local`) passes through untouched.
     pub fn resolve_provider(&self, spec: &agent_api::AauthIdentity) -> Option<String> {
         spec.provider

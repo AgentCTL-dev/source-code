@@ -28,7 +28,7 @@ bundle/
 - Package: `agentctl`  Channel: `alpha` (default `alpha`)
 - CSV: `agentctl.v1.2.0` (version `1.2.0`, maturity `alpha`, minKubeVersion `1.31.0`)
 - Operator image: `ghcr.io/agentctl-dev/operator:1.2.0` (other planes: `apiserver`,
-  `gateway`, `modelgateway`, `admission` under `ghcr.io/agentctl-dev/`)
+  `gateway`, `admission` under `ghcr.io/agentctl-dev/`)
 
 ## Build
 
@@ -69,11 +69,11 @@ do not fit that mold, so the following are **NOT installed by this CSV**:
 
 | Component / resource | Why it's out of scope | How to install it |
 | --- | --- | --- |
-| **MCPServerSet CRD + tools/scaling planes** (mcpgateway, coordination, scaler) | The bundle ships the three core CRDs and five Deployments only; the tools and scaling planes are not modeled in this preview CSV. | Helm chart, which installs every CRD, plane, and the KEDA wiring. |
+| **Scaling / work planes** (coordination, scaler) | The bundle ships the three CRDs and four Deployments only; the coordination + scaler planes are not modeled in this preview CSV. | Helm chart, which installs every plane and the KEDA wiring. |
 | **Aggregated APIService** `v1alpha1.management.agentctl.dev` | Modeling it as an `owned` apiservicedefinition forces OLM-managed serving certs and conflicts with the cert-manager flow used here. | Apply the `APIService` separately (Helm `templates/apiserver.yaml`). |
 | **ValidatingWebhookConfiguration** | The admission **Deployment** is installed, but its webhook registration (with cert-manager `caBundle` injection) is not. Until it's applied, the lethal-trifecta gate does not run. | Apply separately (Helm `templates/admission.yaml`). |
 | **cert-manager Certificates / Issuers** | The apiserver, admission webhook, and gateway client mount TLS Secrets (`agentctl-apiserver-tls`, `agentctl-client-tls`, `agentctl-admission-tls`). | **cert-manager ≥ 1.13 is a hard runtime prerequisite.** Install cert-manager, then apply the Certificates (Helm `templates/certificates.yaml`). Until the Secrets exist, those pods stay `Pending`. |
-| **Postgres + gateway signing Secret** | The gateway/modelgateway need `DATABASE_URL` (Secret `agentctl-postgres`) and the gateway needs `agentctl-gateway-signing`. | Bundled Postgres + signing Secret come from the Helm chart, or point at an external DSN. |
+| **Postgres + gateway signing Secret** | The gateway needs `DATABASE_URL` (Secret `agentctl-postgres`) and `agentctl-gateway-signing`. | Bundled Postgres + signing Secret come from the Helm chart, or point at an external DSN. |
 | **kube-system RoleBinding** to `extension-apiserver-authentication-reader` | CSV `permissions` only create RoleBindings in the install namespace, not in `kube-system`. | Apply the RoleBinding separately (Helm `templates/apiserver.yaml`). Without it the aggregated apiserver can't read the front-proxy CA. |
 
 RBAC note: the chart binds the apiserver ServiceAccount to the built-in
@@ -85,10 +85,10 @@ pre-existing ClusterRole, so the CSV **inlines** the equivalent `create` rules o
 
 - The 3 CRDs: `Agent`, `AgentFleet`, `ModelPool` (all `v1alpha1`).
 - ServiceAccounts + ClusterRoles + ClusterRoleBindings for the operator,
-  apiserver, gateway, modelgateway, and admission.
-- Deployments: `operator`, `apiserver`, `gateway`, `modelgateway`, `admission`.
+  apiserver, gateway, and admission.
+- Deployments: `operator`, `apiserver`, `gateway`, `admission`.
 
-Only the **operator** runs cleanly from the CSV alone; the other four planes
+Only the **operator** runs cleanly from the CSV alone; the other three planes
 depend on the externally-applied Secrets and registrations above.
 
 ## Recommended install (full, wired) — use Helm instead

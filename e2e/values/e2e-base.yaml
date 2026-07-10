@@ -3,7 +3,7 @@
 # security gate at its secure default (each overlay flips exactly one).
 #
 # image.registry is intentionally NOT set here — install.sh passes it (default ""
-# = local kind-loaded names: agentctl/<comp>:dev). The 8 control-plane images are
+# = local kind-loaded names: agentctl/<comp>:dev). The 6 control-plane images are
 # loaded by images.sh.
 
 # Claim-mode coordination server (work.* over HTTP/MCP). Needed by the
@@ -12,23 +12,17 @@ coordination:
   enabled: true
   store: memory                 # overlay store-postgres.yaml flips this
 
-# Secretless/budgeted intelligence plane (contract 1.0: agent dials the ModelGateway
-# keyless over TLS -> mock-provider). Enabled by default in the chart; pinned here.
+# Intelligence plane (direct-dial, contract 1.0): there is NO in-cluster broker.
+# The operator resolves an Agent's bound model.pool (a ModelPool) and renders
+# INTELLIGENCE=<the pool's provider endpoint> that the agent dials DIRECTLY —
+# secret-free via AAuth, or with an optional INTELLIGENCE_TOKEN key mounted on the
+# pod. No metering, no budgets. The once-mode scenarios (prov-once / conf-exit-codes)
+# ride this path because agentd once-mode REQUIRES an intelligence endpoint. Nothing
+# to enable here — the operator wires it from the bound ModelPool.
 #
-# attestIdentity is ON so the ModelGateway derives the agent's identity from the
-# caller's SOURCE IP (a kube pod lookup on status.podIP), never a spoofable header —
-# the contract-1.0 identity model. The intelligence scenarios (intel-infer, plus
-# prov-once / conf-exit-codes — agentd once-mode REQUIRES an intelligence endpoint)
-# all ride this path; sec-mg-attest exercises the anti-spoof rejection on top of it.
-modelgateway:
-  enabled: true
-  attestIdentity: true
-
-# Tool-plane broker (contract 1.0): agents dial MCP tools keyless; the
-# MCPGateway attests source-IP -> scopes to the bound MCPServerSet -> injects the
-# credential -> forwards. Needed by the MCPServerSet tool scenario.
-mcpgateway:
-  enabled: true
+# Tools plane (direct-dial, contract 1.0): Agent.spec.mcpServers is an inline list
+# of {name, endpoint, auth?, tags} the agent dials DIRECTLY — no separate tool CRD,
+# no broker facade. Nothing to enable here either.
 
 # KEDA external scaler — claim-depth autoscaling (0->N->0). Enabling it also
 # flips the operator's SCALER_ENABLED so it renders a ScaledObject per claim

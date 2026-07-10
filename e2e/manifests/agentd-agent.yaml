@@ -2,15 +2,15 @@
 #
 # Why these choices (contract 1.0):
 #   - mode: once + an instruction — agentd only reaches intelligence when it does
-#     work; an idle reactive agent never infers. once-mode drives exactly the
-#     inference the ModelGateway meters/budgets.
-#   - Agents reach intelligence by dialing the ModelGateway directly over HTTPS.
-#     The operator ALWAYS renders INTELLIGENCE=https://<modelgateway>… keyless
-#     and mounts the per-namespace CA; the ModelGateway attests the caller by
-#     SOURCE IP and injects the ModelPool credential (no key on the agent).
+#     work; an idle reactive agent never infers. once-mode drives exactly one
+#     inference against the bound provider.
+#   - Agents dial intelligence DIRECTLY (no in-cluster broker). The operator
+#     resolves the bound model.pool (a ModelPool) and renders a direct
+#     INTELLIGENCE=<the pool's provider endpoint> that the agent dials itself —
+#     secret-free via AAuth, or with an optional INTELLIGENCE_TOKEN mounted on the pod.
 #   - model.pool: mockpool — binds the ModelPool from modelpool-mock.yaml (apply that
-#     + mock-provider.yaml first). The pool caps the budget at 150 tokens (mock
-#     returns 100/call) so the 3rd call 429s.
+#     + mock-provider.yaml first); the agent dials that pool's endpoint (the OpenAI-
+#     shaped mock) and the once-mode run reaches a clean exit 0.
 #   - image: agentd:1.0.0 — the real contract-1.0 reference agent (images.sh builds/loads it).
 apiVersion: agentctl.dev/v1alpha1
 kind: Agent

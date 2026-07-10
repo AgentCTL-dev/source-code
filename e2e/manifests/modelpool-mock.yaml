@@ -1,13 +1,10 @@
 # e2e ModelPool wired to the e2e mock provider, plus the provider-credential
-# Secret it references. The ModelGateway reads this Secret and injects the key on
-# each request — the agent never holds it (the agent stays secret-free). This is
-# the HEADROOM pool for the metering + once-mode-complete scenarios (intel-infer,
-# prov-once): a high budget so an inference always succeeds and the intelligence
-# agentd run reaches a clean exit 0. The ModelGateway's per-pool usage is durable
-# (Postgres), cumulative, and NOT reset by deleting/recreating the CR, so a small
-# budget here would make repeated runs flake; the budget-REJECTION path is proven
-# by the separate low-budget e2e/manifests/modelpool-budget.yaml instead. Pairs
-# with e2e/manifests/mock-provider.yaml (the OpenAI-shaped mock).
+# Secret it references. The pool's optional credentialSecretRef names that Secret;
+# the operator mounts it on the agent as INTELLIGENCE_TOKEN and the agent presents
+# it when it dials the provider DIRECTLY (or the agent dials keyless via AAuth and
+# holds no key at all). Used by the once-mode-complete scenario (prov-once): the
+# intelligence agentd run dials the pool's endpoint and reaches a clean exit 0.
+# Pairs with e2e/manifests/mock-provider.yaml (the OpenAI-shaped mock).
 apiVersion: v1
 kind: Secret
 metadata:
@@ -32,5 +29,3 @@ spec:
     key: api-key
   models: ["mock-model-v1"]
   defaultModel: mock-model-v1
-  budget:
-    maxTokens: 100000

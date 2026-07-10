@@ -50,8 +50,8 @@ export default function Page() {
       <Ul>
         <li>
           <strong className="text-foreground">One transport.</strong> The entire control surface is
-          mTLS HTTPS — agents serve <C>POST /mcp</C> and dial the gateways keyless. There is no
-          stdio, unix-socket, or vsock transport.
+          mTLS HTTPS — agents serve <C>POST /mcp</C> and dial their provider and MCP endpoints over
+          HTTPS. There is no stdio, unix-socket, or vsock transport.
         </li>
         <li>
           <strong className="text-foreground">Identity is authority.</strong> A verified mTLS
@@ -71,9 +71,10 @@ export default function Page() {
       <H2>Secret-freedom is structural</H2>
       <P>
         The manifest never carries credentials — <C>intelligence</C> is structural only (transport
-        scheme + endpoint count + health), never a URL or token. Credentials travel only the
-        gateway path and are injected off-pod. The config file carries references, never resolved
-        values.
+        scheme + endpoint count + health), never a URL or token. With AAuth the agent proves its
+        identity per request, so no provider or tool secret rests on the pod; where a static token is
+        used it is mounted from a referenced Secret, never brokered off-pod. The config file carries
+        references, never resolved values.
       </P>
 
       <Note>

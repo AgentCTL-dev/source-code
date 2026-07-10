@@ -14,8 +14,8 @@ export const metadata: Metadata = {
   description:
     "agentctl is a Kubernetes control plane for provisioning, scaling, securing, " +
     "and observing fleets of contract-conformant agents. Agents serve mTLS HTTPS " +
-    "and dial the gateways keyless — identity is the boundary, and no model or " +
-    "tool credential ever lands on the pod.",
+    "and dial their LLM provider and MCP servers directly — identity is the boundary, " +
+    "and with AAuth no model or tool secret lands on the pod.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

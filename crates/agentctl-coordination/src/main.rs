@@ -170,8 +170,8 @@ async fn main() {
     // tenant's lease.
     let attest = attest::attest_enabled_from_env();
     // The own (control-plane) namespace, from the downward-API POD_NAMESPACE. Read
-    // and logged at startup for parity with the modelgateway; direct source-IP
-    // attestation does not otherwise need it.
+    // and logged at startup for observability; direct source-IP attestation does
+    // not otherwise need it.
     let pod_namespace = std::env::var("POD_NAMESPACE")
         .ok()
         .map(|s| s.trim().to_string())

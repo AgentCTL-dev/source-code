@@ -2,8 +2,8 @@ apiVersion: v2
 name: agentctl
 description: >-
   The Kubernetes control plane for fleets of conformant agents — operator,
-  aggregated apiserver, admission webhook, A2A gateway, intelligence
-  ModelGateway, tools MCPGateway, work-coordination server, and KEDA scaler.
+  aggregated apiserver, admission webhook, A2A gateway, work-coordination
+  server, and KEDA scaler.
   Installs the Agent Control Contract CRDs and wires all TLS via cert-manager.
 type: application
 version: 1.2.0            # chart version

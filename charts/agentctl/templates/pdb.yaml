@@ -8,7 +8,6 @@ keeps minAvailable replicas up during VOLUNTARY disruptions (node drains/upgrade
   (dict "comp" "operator"     "enabled" true)
   (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled)
   (dict "comp" "gateway"      "enabled" .Values.gateway.enabled)
-  (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled)
   (dict "comp" "admission"    "enabled" .Values.admission.enabled)
   (dict "comp" "coordination" "enabled" .Values.coordination.enabled)
   (dict "comp" "scaler"       "enabled" .Values.scaler.enabled)

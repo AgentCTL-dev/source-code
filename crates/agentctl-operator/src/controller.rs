@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use agent_api::{
     AauthIdentityStatus, Agent, AgentFleet, AgentSpec, Condition, ContractStatus, IdentityStatus,
-    MCPServerSet, Mode, ScaleMode,
+    Mode, ModelPool, ScaleMode,
 };
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
@@ -37,9 +37,9 @@ use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
 use crate::{
-    coordinator_name, fleet_selector_string, inject_aauth, inject_api_token, inject_mcp_servers,
-    inject_workflow, render_agent, render_coordinator, render_fleet, render_scaled_object,
-    workflow_configmap_name, McpBinding, RenderConfig, RenderError, Rendered,
+    coordinator_name, fleet_selector_string, inject_aauth, inject_api_token, inject_intelligence,
+    inject_mcp_servers, inject_workflow, render_agent, render_coordinator, render_fleet,
+    render_scaled_object, workflow_configmap_name, McpBinding, RenderConfig, RenderError, Rendered,
     DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
 
@@ -66,9 +66,9 @@ pub struct Ctx {
     /// Optional in-cluster bearer-token injection into rendered agent pods
     /// (chart `apiToken.enabled`).
     pub api_token: ApiTokenConfig,
-    /// Operator-scoped render inputs (the ModelGateway URL agents dial keyless;
-    /// env `AGENTCTL_MODELGATEWAY_URL`). Read once at startup
-    /// ([`RenderConfig::from_env`]).
+    /// Operator-scoped render inputs (the A2A gateway URL for coordinator
+    /// delegation + the default agent image; env `AGENTCTL_GATEWAY_URL`). Read
+    /// once at startup ([`RenderConfig::from_env`]).
     pub render: RenderConfig,
     /// Workload PKI wiring (serving Certificates + per-ns CA distribution;
     /// envs `AGENTCTL_ISSUER_REF` / `AGENTCTL_CA_FILE`). Read once at startup
@@ -89,8 +89,7 @@ pub struct Ctx {
 /// carried on [`Ctx`]. When `enabled` (env `API_TOKEN_ENABLED`, default
 /// `false`), the operator injects `AGENTCTL_API_TOKEN` (a `secretKeyRef` on the
 /// chart-created `agentctl-api-token` Secret) into rendered agent pods so a
-/// conformant agent can present it to the token-gated coordination server /
-/// ModelGateway.
+/// conformant agent can present it to the token-gated coordination server.
 ///
 /// CROSS-NAMESPACE LIMITATION: a `secretKeyRef` resolves only within the pod's
 /// own namespace, and the chart creates the token Secret in the control-plane
@@ -356,12 +355,18 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             if ctx.api_token.should_inject(ns) {
                 inject_api_token(&mut rendered);
             }
-            // Bind MCP tool servers: resolve the agent's MCPServerSet refs and
-            // render `--mcp <name>=<gateway>/s/<name>` so it dials the MCPGateway
-            // keyless. Best-effort — a dangling ref is logged, not
-            // fatal (surfaces as a missing tool, not a failed reconcile).
-            let bindings = resolve_mcp_bindings(&ctx.client, ns, &agent.spec).await;
-            inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
+            // Direct intelligence dial: INTELLIGENCE = the bound ModelPool's
+            // provider endpoint (+ its key mounted as INTELLIGENCE_TOKEN, if any).
+            if let Some((endpoint, token)) =
+                resolve_model_endpoint(&ctx.client, ns, &agent.spec).await
+            {
+                inject_intelligence(&mut rendered, &endpoint, token.as_ref());
+            }
+            // Direct MCP tool dials (inline `mcpServers`, no gateway):
+            // `--mcp <name>=<endpoint>` + tags; staticToken bearers mount as
+            // env-secrets. Best-effort per the reconcile discipline.
+            let bindings = mcp_bindings(&agent.spec);
+            inject_mcp_servers(&mut rendered, &bindings);
             let owner = agent
                 .controller_owner_ref(&())
                 .expect("Agent CRs always carry name+uid on the live object");
@@ -620,45 +625,61 @@ async fn ensure_and_inject_workflow(
     Ok(())
 }
 
-/// Resolve an agent/fleet-template's `mcpServers` into the flat list of
-/// bound MCP servers (name + trifecta tags) the renderer wires to the MCPGateway.
-/// Reads each referenced `MCPServerSet` in the workload's namespace.
-/// Best-effort: a missing/dangling ref is logged and skipped (a config error
-/// surfaces as a missing tool, never a failed reconcile). Duplicate server names
-/// across sets collapse to the first seen (admission owns collision rejection).
-async fn resolve_mcp_bindings(client: &Client, ns: &str, spec: &AgentSpec) -> Vec<McpBinding> {
-    if spec.mcp_servers.is_empty() {
-        return Vec::new();
-    }
-    let sets: Api<MCPServerSet> = Api::namespaced(client.clone(), ns);
-    let mut out: Vec<McpBinding> = Vec::new();
-    for r in &spec.mcp_servers {
-        match sets.get(r).await {
-            Ok(set) => {
-                for s in set.spec.servers {
-                    if out.iter().any(|b| b.name == s.name) {
-                        continue;
-                    }
-                    // aauth-mode (RFC 0024): direct dial to the real endpoint,
-                    // signed by the agent; everything else stays on the facade.
-                    let direct_endpoint = s
-                        .auth
-                        .as_ref()
-                        .is_some_and(|a| a.mode == agent_api::McpAuthMode::Aauth)
-                        .then(|| s.endpoint.clone());
-                    out.push(McpBinding {
-                        name: s.name,
-                        tags: s.tags,
-                        direct_endpoint,
-                    });
-                }
-            }
-            Err(e) => {
-                warn!(%ns, set = %r, error = %e, "bound MCPServerSet not found; skipping");
-            }
+/// Resolve the agent's bound `ModelPool` into `(endpoint, credentialSecretRef)`
+/// for the DIRECT intelligence dial (no gateway). `None` ⇒ no model bound (the
+/// agent does not infer) or the pool is missing (best-effort, like the rest of
+/// reconcile — a dangling ref surfaces as a boot-time failure, not a wedged
+/// reconcile). The credential ref (if any) is mounted onto the agent by
+/// [`inject_intelligence`]; `aauth`-authenticated pools carry none.
+async fn resolve_model_endpoint(
+    client: &Client,
+    ns: &str,
+    spec: &AgentSpec,
+) -> Option<(String, Option<agent_api::SecretKeyRef>)> {
+    let pool_name = spec.model.as_ref().and_then(|m| m.pool.as_deref())?;
+    let pools: Api<ModelPool> = Api::namespaced(client.clone(), ns);
+    match pools.get(pool_name).await {
+        Ok(pool) => Some((pool.spec.endpoint, pool.spec.credential_secret_ref)),
+        Err(e) => {
+            warn!(%ns, pool = %pool_name, error = %e, "bound ModelPool not found; INTELLIGENCE unset");
+            None
         }
     }
-    out
+}
+
+/// Map an agent/fleet-template's inline `mcpServers` to the renderer's direct
+/// `McpBinding`s (name + endpoint + tags, and — for `staticToken` — the env-var
+/// the bearer `Secret` mounts as). Pure: the operator MOUNTS secret refs, it
+/// never reads them, and the tool servers are declared inline (no cross-object
+/// lookup).
+fn mcp_bindings(spec: &AgentSpec) -> Vec<McpBinding> {
+    spec.mcp_servers
+        .iter()
+        .map(|s| {
+            // staticToken ⇒ mount the bearer onto the pod as AGENT_MCP_<NAME>_TOKEN.
+            let token_env = s.auth.as_ref().and_then(|a| {
+                (a.mode == agent_api::McpAuthMode::StaticToken)
+                    .then_some(a.token_secret_ref.as_ref())
+                    .flatten()
+                    .map(|r| {
+                        (
+                            format!(
+                                "AGENT_MCP_{}_TOKEN",
+                                s.name.to_uppercase().replace(['-', '.'], "_")
+                            ),
+                            r.name.clone(),
+                            r.key.clone(),
+                        )
+                    })
+            });
+            McpBinding {
+                name: s.name.clone(),
+                endpoint: s.endpoint.clone(),
+                tags: s.tags.clone(),
+                token_env,
+            }
+        })
+        .collect()
 }
 
 async fn apply_workload(client: &Client, ns: &str, rendered: &Rendered) -> Result<(), Error> {
@@ -940,10 +961,15 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             if ctx.api_token.should_inject(ns) {
                 inject_api_token(&mut rendered);
             }
-            // Bind MCP tool servers for the fleet template (same resolution as a
-            // singleton Agent; the fleet's template carries mcpServers).
-            let bindings = resolve_mcp_bindings(&ctx.client, ns, &fleet.spec.template).await;
-            inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
+            // Direct intelligence + MCP dials for the fleet template (same as a
+            // singleton Agent; the template carries model + mcpServers).
+            if let Some((endpoint, token)) =
+                resolve_model_endpoint(&ctx.client, ns, &fleet.spec.template).await
+            {
+                inject_intelligence(&mut rendered, &endpoint, token.as_ref());
+            }
+            let bindings = mcp_bindings(&fleet.spec.template);
+            inject_mcp_servers(&mut rendered, &bindings);
             let owner = fleet
                 .controller_owner_ref(&())
                 .expect("AgentFleet CRs always carry name+uid on the live object");
@@ -1111,8 +1137,12 @@ async fn reconcile_coordinator(
     if ctx.api_token.should_inject(ns) {
         inject_api_token(&mut rendered);
     }
-    let bindings = resolve_mcp_bindings(&ctx.client, ns, &coord.template).await;
-    inject_mcp_servers(&mut rendered, &ctx.render.mcpgateway_url, &bindings);
+    if let Some((endpoint, token)) = resolve_model_endpoint(&ctx.client, ns, &coord.template).await
+    {
+        inject_intelligence(&mut rendered, &endpoint, token.as_ref());
+    }
+    let bindings = mcp_bindings(&coord.template);
+    inject_mcp_servers(&mut rendered, &bindings);
     // The Certificate/CA are owned by the fleet (GC'd with it), and named for the
     // coordinator workload so the pod's serving-TLS mount resolves.
     let owner = fleet

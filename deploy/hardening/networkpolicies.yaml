@@ -1,8 +1,12 @@
-# Defence-in-depth network isolation for the data plane. An agent pod may egress
-# ONLY to DNS and the control plane / gateways in agentctl-system — never the
-# internet or other tenants. NOTE: enforced only by a NetworkPolicy-capable CNI
-# (Calico/Cilium); kind's default kindnet does NOT enforce these (they are inert
-# but correct, and enforce on a real cluster).
+# Defence-in-depth network isolation for the data plane (the four policies the
+# Helm chart and the operator reconcile, shown here statically for the `default`
+# namespace). An agent pod may egress to DNS, the control-plane services it needs
+# (the A2A gateway + coordination, scoped to those pods in agentctl-system), and
+# PUBLIC HTTPS — direct LLM-provider + MCP dials — but never into private/cluster
+# space or other tenants, and accepts ingress only from the control plane.
+# NOTE: enforced only by a NetworkPolicy-capable CNI (Calico/Cilium); kind's
+# default kindnet does NOT enforce these (they are inert but correct, and enforce
+# on a real cluster).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,7 +19,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: agent
   policyTypes: ["Ingress", "Egress"]
-  # Empty ingress/egress = deny all by default; the allow policy below re-opens
+  # Empty ingress/egress = deny all by default; the allow policies below re-open
   # only the sanctioned flows.
 ---
 apiVersion: networking.k8s.io/v1
@@ -37,14 +41,22 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
-    # The control plane and gateways in agentctl-system.
+    # The control-plane GATEWAYS ONLY, scoped to those specific pods (podSelector)
+    # — NOT any control-plane pod (a bare namespaceSelector would also expose the
+    # admission webhook / apiserver to a tenant agent). Port 8080 only: the A2A
+    # gateway (delegation-out) + the coordination server (claims), both plaintext
+    # HTTP. Intelligence + MCP are dialed DIRECTLY over public HTTPS (below).
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: agentctl-system
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["agentctl-gateway", "agentctl-coordination"]
       ports:
-        - { protocol: TCP, port: 8443 }  # mTLS control surface (POST /mcp)
-        - { protocol: TCP, port: 8080 }  # gateway / modelgateway
+        - { protocol: TCP, port: 8080 }  # A2A gateway + coordination (plaintext)
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane
 # (no cross-tenant pod-to-pod traffic).
@@ -65,3 +77,39 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: agentctl-system
+---
+# Direct-dial egress tier: since agents dial LLM providers + remote MCP servers
+# DIRECTLY (no gateway), every agent pod gets HTTPS egress to PUBLIC address
+# space only — private/link-local/CGNAT ranges stay carved out, so lateral
+# movement into cluster/private space remains default-denied. Vanilla
+# NetworkPolicy cannot express per-FQDN egress — this is the honest coarse tier;
+# a DNS-aware CNI (Cilium/Calico) can tighten it to the declared endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-internet-egress
+  namespace: default
+  labels:
+    app.kubernetes.io/managed-by: agentctl
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+        - ipBlock:
+            cidr: "::/0"
+            except:
+              - fc00::/7
+              - fe80::/10
+      ports:
+        - { protocol: TCP, port: 443 }

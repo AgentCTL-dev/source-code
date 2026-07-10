@@ -12,7 +12,7 @@ All commands assume the Helm release is `agentctl` in namespace `agentctl-system
 
 ## Control-plane components
 
-The control plane is eight Deployments (eight container images). All expose Prometheus
+The control plane is six Deployments (six container images). All expose Prometheus
 `/metrics`; the port and scheme differ by component.
 
 | Component | Role | Service port | `/metrics` scheme | Default |
@@ -21,14 +21,12 @@ The control plane is eight Deployments (eight container images). All expose Prom
 | `agentctl-apiserver` | Aggregated API for management verbs (drain, lame-duck, cancel, pause, resume) | `443` → `6443` (https) | https (mTLS-gated) | `apiserver.enabled: true` |
 | `agentctl-admission` | Validating + mutating webhooks | `443` → `8443` (https) | https | `admission.enabled: true` |
 | `agentctl-gateway` | A2A surface (Agent Cards, `message/send`, `message/stream`, tasks) | `80` → `8080` (http) | http | `gateway.enabled: true` |
-| `agentctl-modelgateway` | Secret-free inference broker (intelligence plane) | `80` → `8080` (http) | http | `modelgateway.enabled: true` |
-| `agentctl-mcpgateway` | Secret-free MCP tool broker (tools plane) | `80` → `8080` (http) | http | `mcpgateway.enabled: true` |
 | `agentctl-coordination` | Work fabric (`work.*`); claim-fleet backlog | `80` → `8080` (http) | http | `coordination.enabled: false` |
 | `agentctl-scaler` | KEDA external scaler; reads the coordination backlog | `80` → `8080` (http) | http | `scaler.enabled: false` |
 
 The reference agent (`agentd`) and any conformant agent run as ordinary pods on the pod
-network, serving mTLS HTTPS on `:8443`. They are not part of the control plane and are not
-installed by the chart.
+network, serving mTLS HTTPS on `:8443`, and reach model providers and MCP tools by direct
+dial. They are not part of the control plane and are not installed by the chart.
 
 ---
 
@@ -41,7 +39,7 @@ installed by the chart.
 | **cert-manager** (>= 1.13) | **Required** | Issues every control-plane serving/mTLS certificate and injects the `caBundle` into the aggregated `APIService` and the validating webhook. |
 | **KEDA** | Optional | Claim-fleet autoscaling only. Needed when `scaler.enabled=true`; the operator renders a `keda.sh` `ScaledObject` per claim fleet. |
 | **NetworkPolicy-capable CNI** (Calico, Cilium, …) | Optional | Tenant isolation. `networkPolicies.enabled=true` ships policies, but a policy-enforcing CNI must apply them — kindnet ignores NetworkPolicies. |
-| **Postgres** | Optional | Durable coordination/task/usage state. Bundled single-pod Postgres is the default; in-memory is the single-replica fallback. |
+| **Postgres** | Optional | Durable coordination/task state. Bundled single-pod Postgres is the default; in-memory is the single-replica fallback. |
 
 Install cert-manager first:
 
@@ -116,8 +114,8 @@ operator through OperatorHub tooling.
 
 ### CRDs
 
-The chart installs the four CRDs in [`charts/agentctl/crds/`](../charts/agentctl/crds) on
-first install — `agents`, `agentfleets`, `modelpools`, and `mcpserversets`, all in group
+The chart installs the three CRDs in [`charts/agentctl/crds/`](../charts/agentctl/crds) on
+first install — `agents`, `agentfleets`, and `modelpools`, all in group
 `agentctl.dev`, version `v1alpha1`. Helm intentionally never updates `crds/` on
 `helm upgrade`; see [Upgrades & CRDs](#6-upgrades--crds) for the upgrade procedure.
 
@@ -147,18 +145,15 @@ per-component scheduling/resource/env passthroughs (`nodeSelector`, `affinity`,
 | `coordination.attestIdentity` | `true` | Bind each claim to the caller's source-IP-attested pod identity (blocks cross-tenant ack/release). |
 | `coordination.mtls.enabled` | `false` | Mutually authenticate the scaler → coordination backlog hop. Requires cert-manager. |
 | `scaler.enabled` | `false` | KEDA external scaler for claim-depth autoscaling. Also flips the operator's `SCALER_ENABLED` on. **Requires KEDA.** |
-| `modelgateway.attestIdentity` | `true` | Derive the agent namespace from the caller's source IP (not the spoofable `X-Agent-Namespace` header). Set `false` only for a trusted single-tenant install. |
-| `modelgateway.secretsNamespaces` | `[]` | Namespaces the ModelGateway may read provider-credential Secrets in. Empty = cluster-wide read (dev). Scope in production. |
-| `mcpgateway.secretsNamespaces` | `[]` | Namespaces the MCPGateway may read tool-credential Secrets in. Empty = cluster-wide read (dev). The MCPGateway is always source-IP-attested. |
-| `apiToken.enabled` | `false` | In-cluster bearer gate (`AGENTCTL_API_TOKEN`) on the coordination server, ModelGateway, A2A gateway, and scaler. |
+| `apiToken.enabled` | `false` | In-cluster bearer gate (`AGENTCTL_API_TOKEN`) on the coordination server, A2A gateway, and scaler. |
 | `trustedProxy.enabled` | `false` | Second mTLS listener on the gateway (`:8443`) that trusts a fronting proxy's asserted identity headers. |
 | `networkPolicies.enabled` | `false` | Ship default-deny + sanctioned-flow policies. `networkPolicies.agentNamespaces` lists tenant namespaces. Needs a policy CNI. |
 | `metrics.serviceMonitor.enabled` | `false` | Render one Prometheus-Operator `ServiceMonitor` per component. |
 | `observability.dashboards.enabled` | `false` | Render the Grafana dashboard ConfigMap. |
 | `observability.alerts.enabled` | `false` | Render the `PrometheusRule`. Needs the Prometheus-Operator CRDs. |
 | `operator.replicas` | `1` | Leader-elected; raise for warm-standby HA (see [High availability](#3-high-availability)). |
-| `<comp>.autoscaling.enabled` | `false` | HPA for `apiserver`, `gateway`, `modelgateway`. When on, the HPA owns replicas and `<comp>.replicas` is ignored. |
-| `<comp>.pdb.enabled` | `false` | PodDisruptionBudget for `operator`, `apiserver`, `gateway`, `modelgateway`, `admission`, `coordination`, `scaler`. |
+| `<comp>.autoscaling.enabled` | `false` | HPA for `apiserver` and `gateway`. When on, the HPA owns replicas and `<comp>.replicas` is ignored. |
+| `<comp>.pdb.enabled` | `false` | PodDisruptionBudget for `operator`, `apiserver`, `gateway`, `admission`, `coordination`, `scaler`. |
 | `namespace.create` | `false` | Whether the chart renders the namespace object. |
 | `admission.allowedRegistries` | `agentd:,mock-agent,agentctl/,gcr.io/,registry.k8s.io/,ghcr.io/` | CSV image-registry prefix allow-list the webhook enforces (empty = allow all). |
 
@@ -166,22 +161,22 @@ per-component scheduling/resource/env passthroughs (`nodeSelector`, `affinity`,
 
 Two identity mechanisms are enforced cryptographically and are on by default:
 
-- **Outbound (agent → gateway).** The ModelGateway (`modelgateway.attestIdentity`, default
-  `true`), MCPGateway (always on), and coordination server (`coordination.attestIdentity`,
-  default `true`) resolve the caller's **source pod IP** to the owning pod via the
-  Kubernetes API and derive its namespace/identity from that — never from a self-asserted
-  request header. Confined tenant pods drop `CAP_NET_RAW` and so cannot spoof their source
-  IP, so one tenant cannot bill another's ModelPool budget or ack/release another's claim.
-  These paths require the cluster-wide `pods get/list` grant the chart renders for them.
+- **Outbound (agent → work fabric).** The coordination server
+  (`coordination.attestIdentity`, default `true`) resolves the caller's **source pod IP** to
+  the owning pod via the Kubernetes API and derives its namespace/identity from that — never
+  from a self-asserted request header. Confined tenant pods drop `CAP_NET_RAW` and so cannot
+  spoof their source IP, so one tenant cannot ack or release another's work claim. This path
+  requires the cluster-wide `pods get/list` grant the chart renders for it. (Agents reach
+  model providers and MCP servers by direct dial, authenticating themselves — no
+  control-plane component is on that path to attest.)
 
 - **Inbound (control plane → agent).** The aggregated apiserver and A2A gateway dial the
   agent pod directly over mTLS, presenting the control-plane client certificate that
   authenticates them as the **Management** origin — the only origin the agent accepts for
   management/A2A. The trust anchor is the cluster CA, not DNS.
 
-Turn attestation off (`modelgateway.attestIdentity=false`, `coordination.attestIdentity=false`)
-only for a deliberately trusted single-tenant install; the header/self-asserted fallbacks are
-spoofable by any in-cluster pod.
+Turn attestation off (`coordination.attestIdentity=false`) only for a deliberately trusted
+single-tenant install; the header/self-asserted fallback is spoofable by any in-cluster pod.
 
 ### Inbound A2A authentication
 
@@ -189,7 +184,7 @@ The gateway enforces inbound auth by one of three mechanisms. Two are chart-leve
 
 - **`apiToken.enabled`** — a single coarse in-cluster bearer token (`AGENTCTL_API_TOKEN`).
   The chart mints a `keep`-policy Secret `agentctl-api-token` and wires it into the
-  coordination server, ModelGateway, A2A gateway, and scaler; those services then require
+  coordination server, A2A gateway, and scaler; those services then require
   `Authorization: Bearer <token>`. The operator injects it into agent pods **only in the
   control-plane namespace** (a `secretKeyRef` cannot cross namespaces) — replicate the
   Secret into other tenant namespaces to gate agents there. Read the token with:
@@ -212,7 +207,7 @@ webhook. See [`security.md`](security.md) for the full trust model.
 
 ### Postgres TLS
 
-The gateway and modelgateway connect with a rustls client; the DSN's `sslmode` selects the
+The gateway connects with a rustls client; the DSN's `sslmode` selects the
 transport:
 
 | Mode | Behavior |
@@ -259,9 +254,8 @@ helm upgrade agentctl ./charts/agentctl -n agentctl-system --reuse-values \
 
 ### Stateless components
 
-`apiserver`, `gateway`, `modelgateway`, and `mcpgateway` are stateless (state lives in
-Postgres). Raise `<comp>.replicas`, or enable a CPU HPA for `apiserver`, `gateway`, and
-`modelgateway`:
+`apiserver` and `gateway` are stateless (state lives in Postgres). Raise
+`<comp>.replicas`, or enable a CPU HPA for `apiserver` and `gateway`:
 
 ```sh
 helm upgrade agentctl ./charts/agentctl -n agentctl-system --reuse-values \
@@ -278,10 +272,10 @@ When the HPA is enabled it owns the replica count and `<comp>.replicas` is ignor
 
 For HA, back shared state with Postgres and replicate the durable components:
 
-- **A2A tasks, push configs, token usage** persist to Postgres. The gateway and modelgateway
-  are stateless, so they scale horizontally against a shared DB. For HA/DR use an external
-  managed Postgres (`postgres.mode=external`) — the bundled Postgres is a single pod with no
-  replication or failover.
+- **A2A tasks and push configs** persist to Postgres. The gateway is stateless, so it scales
+  horizontally against a shared DB. For HA/DR use an external managed Postgres
+  (`postgres.mode=external`) — the bundled Postgres is a single pod with no replication or
+  failover.
 - **Coordination.** The default `coordination.store=memory` keeps the claim queue in
   process — keep `coordination.replicas=1`. Set `coordination.store=postgres` to make the
   queue durable and shared, then raise `coordination.replicas` for HA:
@@ -313,9 +307,8 @@ families:
 | operator | `:8080` http | `agentctl_operator_leader`, `agentctl_operator_reconcile_total`, `agentctl_operator_reconcile_errors_total`, `agentctl_operator_reconcile_duration_seconds` |
 | apiserver | `:6443` https (behind the front-proxy mTLS gate) | `agentctl_apiserver_verb_forwarded_total`, `agentctl_apiserver_verb_denied_total` |
 | gateway | `:8080` http | `agentctl_gateway_rpc_requests_total`, `_stream_requests_total`, `_card_requests_total`, `_tasks_total`, `_upstream_errors_total` |
-| modelgateway | `:8080` http | `agentctl_modelgateway_infer_requests_total`, `_infer_errors_total`, `_tokens_total`, `_budget_rejections_total` |
 | admission | `:8443` https | `agentctl_admission_admit_total`, `_deny_total`, `_reviews_total`, `_mutations_total`, `_mutations_patched_total` |
-| mcpgateway / coordination / scaler | `:8080` http | component `/metrics` |
+| coordination / scaler | `:8080` http | component `/metrics` |
 
 The apiserver serves `/metrics` on the same `:6443` mTLS surface as the API — only a
 CA-signed client cert can scrape it (the ServiceMonitor scrapes `scheme: https` with
@@ -340,8 +333,8 @@ helm upgrade agentctl ./charts/agentctl -n agentctl-system --reuse-values \
 - **`observability.dashboards.enabled`** renders the Grafana dashboard as a ConfigMap
   labeled `grafana_dashboard: "1"` for the Grafana sidecar's auto-discovery (no Grafana
   CRDs needed). The dashboard covers the operator (reconcile/error rate, latency, leader),
-  the A2A gateway (per-surface request + upstream-error rates), the ModelGateway (inference,
-  tokens, budget rejections), and the admission webhook (admit/deny, reviews, mutations).
+  the A2A gateway (per-surface request + upstream-error rates), and the admission webhook
+  (admit/deny, reviews, mutations).
 - **`observability.alerts.enabled`** renders the `PrometheusRule`. Requires the
   Prometheus-Operator CRDs. Set `observability.alerts.labels` to whatever your Prometheus
   `ruleSelector` matches (kube-prometheus-stack defaults to `release: <name>`).
@@ -354,7 +347,6 @@ Shipped alert rules:
 | `AgentctlReconcileErrors` | warning (10m) | `sum(rate(agentctl_operator_reconcile_errors_total[5m])) > 0.1` |
 | `AgentctlComponentDown` | critical (5m) | `(up{job=~"agentctl-.*"} == 0) or (absent(up{job="agentctl-operator"}) == 1)` |
 | `AgentctlAdmissionDenySpike` | warning (10m) | `sum(rate(agentctl_admission_deny_total[5m])) > 1` |
-| `AgentctlBudgetRejections` | warning (15m) | `sum(rate(agentctl_modelgateway_budget_rejections_total[5m])) > 0` |
 
 ### Distributed tracing (OTLP)
 
@@ -477,7 +469,7 @@ Restart a Deployment to pick up a rotated Secret or recover after a Postgres res
 
 ```sh
 kubectl -n agentctl-system rollout restart \
-  deploy/agentctl-gateway deploy/agentctl-modelgateway
+  deploy/agentctl-gateway deploy/agentctl-coordination
 ```
 
 ---
@@ -508,7 +500,7 @@ kubectl apply -f charts/agentctl/crds/
 
 The CRDs are single-version `v1alpha1`, so `kubectl apply` of the new schema is sufficient —
 there is no multi-version conversion. Never `kubectl delete` a CRD to refresh it: deleting a
-CRD cascade-deletes every `Agent`/`AgentFleet`/`ModelPool`/`MCPServerSet` instance.
+CRD cascade-deletes every `Agent`/`AgentFleet`/`ModelPool` instance.
 
 ### Rollback
 

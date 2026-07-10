@@ -10,14 +10,14 @@
 # Images produced (contract 1.0):
 #   agentd:1.0.0                 the real reference agent (built from
 #                                $AGENTD_SRC/Dockerfile — serves mTLS HTTPS /mcp,
-#                                dials gateways keyless). Built from source to match
-#                                the exact contract-1.0 build under test; the
-#                                published ghcr.io/agentd-dev/agentd:1.0.0 is used
-#                                when AGENTD_GHCR is set.
+#                                dials providers/MCP servers directly). Built from
+#                                source to match the exact contract-1.0 build under
+#                                test; the published ghcr.io/agentd-dev/agentd:1.0.0
+#                                is used when AGENTD_GHCR is set.
 #   mock-agent:dev               conformant-agent stand-in (mTLS HTTPS self-MCP).
-#   agentctl/<comp>:dev          the 8 control-plane components, each from
-#                                deploy/<comp>/Dockerfile (v2: mcpgateway, not the
-#                                the reference agent).
+#   agentctl/<comp>:dev          the 6 control-plane components, each from
+#                                deploy/<comp>/Dockerfile (a control-plane component
+#                                dir, not the reference agent).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,10 +30,10 @@ AGENTD_SRC="${AGENTD_SRC:-/root/agentd-dev/source-code}"
 AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:1.0.0}"
 AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:1.0.0}"
 
-# The 8 control-plane components (component == deploy/<comp>/Dockerfile dir),
-# matching the release.yml build matrix. Contract 1.0: agents serve HTTPS MCP natively;
-# the mcpgateway is the tool-plane broker.
-COMPONENTS=(operator mcpgateway apiserver gateway modelgateway admission coordination scaler)
+# The 6 control-plane components (component == deploy/<comp>/Dockerfile dir),
+# matching the release.yml build matrix. Contract 1.0: agents serve HTTPS MCP
+# natively and dial their model provider + MCP servers directly (no broker).
+COMPONENTS=(operator apiserver gateway admission coordination scaler)
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -95,7 +95,7 @@ else
   log "WARN: $APD_SRC not found — skipping $APD_IMAGE (aauth scenario will SKIP)"
 fi
 
-# ---- the 8 control-plane images -----------------------------------------
+# ---- the 6 control-plane images -----------------------------------------
 for comp in "${COMPONENTS[@]}"; do
   build "agentctl/$comp:$TAG" "$REPO_ROOT/deploy/$comp/Dockerfile" "$REPO_ROOT"
   publish "agentctl/$comp:$TAG"

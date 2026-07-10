@@ -76,10 +76,11 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 {{- end }}
-  # Bound MCP tool servers: the operator reads the MCPServerSets an
-  # Agent binds to render its --mcp gateway URLs + trifecta tags.
+  # Intelligence binding: the operator reads the bound ModelPool to render the
+  # agent's direct INTELLIGENCE endpoint (+ mount its key, if any). MCP servers
+  # are inline on the Agent now — no cross-object read.
   - apiGroups: ["agentctl.dev"]
-    resources: ["mcpserversets"]
+    resources: ["modelpools"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events"]
@@ -198,7 +199,7 @@ spec:
             # In-cluster bearer-token injection (apiToken.enabled). When set, the
             # operator injects the bearer token (valueFrom secretKeyRef on the
             # agentctl-api-token Secret) into rendered agent pods so a conformant
-            # agent can present it to the coordination server / ModelGateway. A
+            # agent can present it to the coordination server. A
             # secretKeyRef cannot cross namespaces, so the operator only injects
             # for agents IN the control-plane namespace (it reads POD_NAMESPACE
             # above); agents elsewhere need the Secret replicated. Default off ->
@@ -216,24 +217,14 @@ spec:
             # Workload PKI + keyless intelligence wiring (contract 1.0). The
             # operator issues a per-workload serving Certificate (issuerRef
             # below), distributes the CA public cert per namespace (read from
-            # its own mount), and renders INTELLIGENCE at the ModelGateway
-            # over https (absolute trailing-dot FQDN so no DNS search list can
-            # capture it; keyless — identity is source-IP attestation there).
+            # its own mount). INTELLIGENCE is rendered directly from the bound
+            # ModelPool (see the modelpools RBAC above); the agent dials the
+            # provider keyless over https.
             {{- if .Values.certManager.enabled }}
             - name: AGENTCTL_ISSUER_REF
               value: {{ include "agentctl.issuerRefEnv" . | quote }}
             - name: AGENTCTL_CA_FILE
               value: /etc/agentctl/ca/ca.crt
-            {{- end }}
-            {{- if .Values.modelgateway.enabled }}
-            - name: AGENTCTL_MODELGATEWAY_URL
-              value: {{ .Values.operator.modelgatewayUrl | default (printf "https://agentctl-modelgateway.%s.svc.cluster.local." $ns) | quote }}
-            {{- end }}
-            {{- if .Values.mcpgateway.enabled }}
-            # The MCPGateway URL rendered into each bound MCP server's --mcp flag
-            # (absolute trailing-dot FQDN, keyless dial).
-            - name: AGENTCTL_MCPGATEWAY_URL
-              value: {{ .Values.operator.mcpgatewayUrl | default (printf "https://agentctl-mcpgateway.%s.svc.cluster.local." $ns) | quote }}
             {{- end }}
             {{- with .Values.operator.defaultAgentImage }}
             # Default agent image: rendered into an Agent/AgentFleet pod when the

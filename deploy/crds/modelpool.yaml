@@ -23,12 +23,6 @@ spec:
       name: Endpoint
       priority: 1
       type: string
-    - jsonPath: .spec.budget.maxTokens
-      name: Budget
-      type: integer
-    - jsonPath: .status.usedTokens
-      name: Used
-      type: integer
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -42,34 +36,28 @@ spec:
         properties:
           spec:
             description: |-
-              A pool of model access (the intelligence plane). Agents hold **NO provider
-              secrets**; they dial the control plane keyless, and the control plane supplies
-              model access through a credential-injecting, metering, budget-enforcing proxy
-              (the `ModelGateway`) configured by this CRD. The pool names the
-              provider, its endpoint, the `Secret` holding the provider API key, the
-              allowed models, and an optional total token budget.
+              A named model endpoint the intelligence plane dials **directly** (no broker).
+              The pool records the provider, its endpoint, and the allowed models; an
+              `Agent` binds it via `spec.model.pool` and the operator renders
+              `INTELLIGENCE=<endpoint>` straight into the pod. The preferred authentication
+              is the agent's own **AAuth** identity (`spec.identity.aauth`), so the pod
+              holds no provider secret. For a key-authenticated provider,
+              `credentialSecretRef` is mounted onto the agent as its `INTELLIGENCE_TOKEN`
+              env-secret (the agent then holds that key — there is no off-pod broker).
             properties:
-              budget:
-                description: Total token budget for the pool (enforced by the gateway).
-                nullable: true
-                properties:
-                  maxTokens:
-                    description: Maximum total tokens the pool may consume.
-                    format: int64
-                    type: integer
-                required:
-                - maxTokens
-                type: object
               credentialSecretRef:
                 description: |-
-                  Reference to the `Secret` holding the provider API key. The gateway
-                  injects it; the agent never sees it.
+                  OPTIONAL provider API-key `Secret`. Present ⇒ the operator mounts it onto
+                  the agent as its `INTELLIGENCE_TOKEN` env-secret (the agent holds the
+                  key — there is no off-pod broker). Absent ⇒ the agent authenticates by
+                  its AAuth identity (the secret-free path).
+                nullable: true
                 properties:
                   key:
-                    description: The key within the `Secret`'s data holding the provider API key.
+                    description: The key within the `Secret`'s data holding the credential.
                     type: string
                   name:
-                    description: The `Secret` name (same namespace as the `ModelPool`).
+                    description: The `Secret` name (same namespace as the referencing resource).
                     type: string
                 required:
                 - key
@@ -80,7 +68,9 @@ spec:
                 nullable: true
                 type: string
               endpoint:
-                description: Provider base URL, e.g. `http://mock-provider.default:8080`.
+                description: |-
+                  Provider base URL the agent dials directly, e.g.
+                  `https://api.anthropic.com` — rendered into the pod as `INTELLIGENCE`.
                 type: string
               models:
                 description: Allowed model ids for this pool.
@@ -91,17 +81,11 @@ spec:
                 description: Provider id, e.g. `"mock"` | `"anthropic"` | `"openai"` (free string).
                 type: string
             required:
-            - credentialSecretRef
             - endpoint
             - provider
             type: object
-            x-kubernetes-validations:
-            - message: budget.maxTokens must be > 0
-              rule: '!has(self.budget) || self.budget.maxTokens > 0'
-            - message: credentialSecretRef.name is required
-              rule: self.credentialSecretRef.name != ''
           status:
-            description: '`ModelPool.status` — running meter against the pool''s budget.'
+            description: '`ModelPool.status` — health of the model binding.'
             nullable: true
             properties:
               conditions:
@@ -135,11 +119,6 @@ spec:
                   - type
                   type: object
                 type: array
-              usedTokens:
-                description: Total tokens consumed against the pool so far.
-                format: int64
-                nullable: true
-                type: integer
             type: object
         required:
         - spec

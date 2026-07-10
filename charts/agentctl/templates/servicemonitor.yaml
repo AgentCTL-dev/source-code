@@ -14,8 +14,6 @@ returns 404.
   (dict "comp" "operator"     "enabled" true                         "port" "http"  "scheme" "http")
   (dict "comp" "apiserver"    "enabled" .Values.apiserver.enabled    "port" "https" "scheme" "https")
   (dict "comp" "gateway"      "enabled" .Values.gateway.enabled      "port" "http"  "scheme" "http")
-  (dict "comp" "modelgateway" "enabled" .Values.modelgateway.enabled "port" "http"  "scheme" "http")
-  (dict "comp" "mcpgateway"   "enabled" .Values.mcpgateway.enabled   "port" "http"  "scheme" "http")
   (dict "comp" "admission"    "enabled" .Values.admission.enabled    "port" "https" "scheme" "https")
   (dict "comp" "coordination" "enabled" .Values.coordination.enabled "port" "http"  "scheme" "http")
   (dict "comp" "scaler"       "enabled" .Values.scaler.enabled       "port" "http"  "scheme" "http")

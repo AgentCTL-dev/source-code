@@ -11,17 +11,16 @@
 //! real for agent pods (label `app.kubernetes.io/name: agent`):
 //!
 //! 1. **`agent-default-deny`** — deny all ingress AND egress by default;
-//! 2. **`agent-allow-controlplane-and-dns`** — re-open egress ONLY to DNS and the
-//!    control-plane GATEWAYS (ModelGateway / MCPGateway / A2A gateway /
-//!    coordination), scoped by pod selector so a tenant agent cannot reach e.g.
-//!    the admission webhook or another tenant;
+//! 2. **`agent-allow-controlplane-and-dns`** — re-open egress to DNS and the
+//!    remaining control-plane components (the A2A gateway + coordination),
+//!    scoped by pod selector so a tenant agent cannot reach e.g. the admission
+//!    webhook or another tenant;
 //! 3. **`agent-ingress-controlplane-only`** — accept ingress only from the
 //!    control-plane namespace (no cross-tenant pod-to-pod traffic);
-//! 4. **`agent-aauth-internet-egress`** — for **identity-provisioned (AAuth)**
-//!    agents only (selected by [`AAUTH_POD_LABEL`], RFC 0024): HTTPS to PUBLIC
-//!    address space (private/link-local/CGNAT carved out), so direct signed
-//!    dials work while lateral movement stays default-denied. Inert in a
-//!    namespace with no AAuth agents.
+//! 4. **`agent-internet-egress`** — since agents dial LLM providers + remote
+//!    MCP servers **directly** (no gateway), every agent gets HTTPS egress to
+//!    PUBLIC address space (private/link-local/CGNAT carved out); lateral
+//!    movement into cluster/private space stays default-denied.
 //!
 //! All four are server-side-applied (idempotent, drift-corrected) namespace
 //! singletons carrying NO owner reference — they gate EVERY agent pod in the
@@ -59,22 +58,14 @@ const AGENT_POD_NAME: &str = "agent";
 const P_DEFAULT_DENY: &str = "agent-default-deny";
 const P_ALLOW_CP_DNS: &str = "agent-allow-controlplane-and-dns";
 const P_INGRESS_CP_ONLY: &str = "agent-ingress-controlplane-only";
-const P_AAUTH_EGRESS: &str = "agent-aauth-internet-egress";
+const P_INTERNET_EGRESS: &str = "agent-internet-egress";
 
-/// Pod label the renderer stamps on identity-provisioned (AAuth) agent pods —
-/// the selector key of [`P_AAUTH_EGRESS`], so the internet-egress hole opens
-/// for exactly those pods and no other agent.
-pub const AAUTH_POD_LABEL: &str = "agentctl.dev/aauth";
-
-/// The control-plane gateway app names an agent is permitted to egress to — and
+/// The control-plane component app names an agent is permitted to egress to — and
 /// ONLY these (a bare namespaceSelector would also expose the admission webhook /
-/// apiserver to a tenant agent).
-const GATEWAY_APP_NAMES: [&str; 4] = [
-    "agentctl-modelgateway",
-    "agentctl-mcpgateway",
-    "agentctl-gateway",
-    "agentctl-coordination",
-];
+/// apiserver to a tenant agent). After the gateway removal these are the A2A
+/// gateway (delegation) and the coordination server (the claim-mode work fabric);
+/// intelligence + MCP are dialed DIRECTLY (see [`agent_internet_egress`]).
+const CONTROL_PLANE_APP_NAMES: [&str; 2] = ["agentctl-gateway", "agentctl-coordination"];
 
 /// Operator-side wiring for the per-namespace agent NetworkPolicies. Read once at
 /// startup ([`NetPolConfig::from_env`]) and carried on the reconcile context.
@@ -150,16 +141,15 @@ pub async fn ensure_agent_netpols(
 }
 
 /// The four agent NetworkPolicy bodies (pure) for an agent namespace, with the
-/// egress/ingress rules pointed at the control-plane namespace `cp_ns`. The
-/// aauth internet-egress policy is always rendered — it selects only pods the
-/// renderer labels [`AAUTH_POD_LABEL`], so it is inert in a namespace with no
-/// identity-provisioned agents.
+/// egress/ingress rules pointed at the control-plane namespace `cp_ns`. Every
+/// agent gets public-HTTPS egress (direct provider/MCP dials) via
+/// [`agent_internet_egress`].
 pub fn agent_network_policies(cp_ns: &str) -> Vec<NetworkPolicy> {
     vec![
         default_deny(),
         allow_controlplane_and_dns(cp_ns),
         ingress_controlplane_only(cp_ns),
-        aauth_internet_egress(),
+        agent_internet_egress(),
     ]
 }
 
@@ -177,9 +167,10 @@ fn default_deny() -> NetworkPolicy {
     }
 }
 
-/// `agent-allow-controlplane-and-dns`: egress ONLY to DNS and the control-plane
-/// gateways (scoped by pod selector), nothing else — not the internet, not other
-/// tenants, not other control-plane pods.
+/// `agent-allow-controlplane-and-dns`: egress to DNS and the control-plane
+/// gateways (scoped by pod selector), nothing else in-cluster — not other
+/// control-plane pods, not other tenants. (Public-HTTPS egress for direct
+/// provider/MCP dials is a separate policy, [`agent_internet_egress`].)
 fn allow_controlplane_and_dns(cp_ns: &str) -> NetworkPolicy {
     let dns = NetworkPolicyEgressRule {
         to: Some(vec![NetworkPolicyPeer {
@@ -195,9 +186,10 @@ fn allow_controlplane_and_dns(cp_ns: &str) -> NetworkPolicy {
             pod_selector: Some(gateway_pod_selector()),
             ..Default::default()
         }]),
-        // 443: the v2 HTTPS listeners (Model/MCP gateways) agents dial keyless;
-        // 8080: coordination / legacy plaintext.
-        ports: Some(vec![port("TCP", 443), port("TCP", 8080)]),
+        // 8080: the A2A gateway (delegation-out) + the coordination server
+        // (claims), both plaintext HTTP. Intelligence + MCP are dialed DIRECTLY
+        // over public HTTPS (see `agent_internet_egress`), not through here.
+        ports: Some(vec![port("TCP", 8080)]),
     };
     NetworkPolicy {
         metadata: meta(P_ALLOW_CP_DNS),
@@ -210,16 +202,14 @@ fn allow_controlplane_and_dns(cp_ns: &str) -> NetworkPolicy {
     }
 }
 
-/// `agent-aauth-internet-egress`: the RFC 0024 baseline egress tier for
-/// identity-provisioned agents — HTTPS to **public** address space only
-/// (`0.0.0.0/0`/`::/0` minus private/link-local/CGNAT ranges), selected by the
-/// [`AAUTH_POD_LABEL`] the renderer stamps. Direct signed dials to remote
-/// AAuth resources (and a public Agent Provider) work; lateral movement into
-/// cluster/private space stays blocked by the default-deny. Vanilla
-/// NetworkPolicy cannot express per-FQDN egress — this is the honest coarse
-/// tier; DNS-aware CNIs (Cilium/Calico) can tighten it to the declared
-/// endpoints (documented, not rendered).
-fn aauth_internet_egress() -> NetworkPolicy {
+/// `agent-internet-egress`: since agents dial LLM providers + remote MCP
+/// servers **directly** (no gateway), every agent gets HTTPS egress to
+/// **public** address space (`0.0.0.0/0`/`::/0` minus private/link-local/CGNAT
+/// ranges). Lateral movement into cluster/private space stays blocked by the
+/// default-deny. Vanilla NetworkPolicy cannot express per-FQDN egress — this is
+/// the honest coarse tier; DNS-aware CNIs (Cilium/Calico) can tighten it to the
+/// declared endpoints.
+fn agent_internet_egress() -> NetworkPolicy {
     let v4 = NetworkPolicyPeer {
         ip_block: Some(IPBlock {
             cidr: "0.0.0.0/0".to_string(),
@@ -241,9 +231,9 @@ fn aauth_internet_egress() -> NetworkPolicy {
         ..Default::default()
     };
     NetworkPolicy {
-        metadata: meta(P_AAUTH_EGRESS),
+        metadata: meta(P_INTERNET_EGRESS),
         spec: Some(NetworkPolicySpec {
-            pod_selector: Some(aauth_pod_selector()),
+            pod_selector: Some(agent_pod_selector()),
             policy_types: Some(vec!["Egress".to_string()]),
             egress: Some(vec![NetworkPolicyEgressRule {
                 to: Some(vec![v4, v6]),
@@ -287,17 +277,6 @@ fn meta(name: &str) -> ObjectMeta {
     }
 }
 
-/// Selector matching only identity-provisioned (AAuth) agent pods.
-fn aauth_pod_selector() -> LabelSelector {
-    LabelSelector {
-        match_labels: Some(BTreeMap::from([(
-            AAUTH_POD_LABEL.to_string(),
-            "true".to_string(),
-        )])),
-        ..Default::default()
-    }
-}
-
 /// Selector matching every agent pod in the namespace.
 fn agent_pod_selector() -> LabelSelector {
     LabelSelector {
@@ -316,7 +295,12 @@ fn gateway_pod_selector() -> LabelSelector {
         match_expressions: Some(vec![LabelSelectorRequirement {
             key: "app.kubernetes.io/name".to_string(),
             operator: "In".to_string(),
-            values: Some(GATEWAY_APP_NAMES.iter().map(|s| s.to_string()).collect()),
+            values: Some(
+                CONTROL_PLANE_APP_NAMES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
         }]),
         ..Default::default()
     }
@@ -386,7 +370,7 @@ mod tests {
                 P_DEFAULT_DENY,
                 P_ALLOW_CP_DNS,
                 P_INGRESS_CP_ONLY,
-                P_AAUTH_EGRESS
+                P_INTERNET_EGRESS
             ]
         );
     }
@@ -426,7 +410,8 @@ mod tests {
         assert!(dns_ports.contains(&("TCP".to_string(), 53)));
 
         // Gateway rule: scoped to the control-plane namespace AND the gateway pods,
-        // ports 443 + 8080.
+        // port 8080 only (the surviving A2A gateway + coordination serve plaintext
+        // there; the removed Model/MCP gateways' 443 HTTPS listeners are gone).
         let gw = &egress[1];
         let peer = &gw.to.as_ref().unwrap()[0];
         assert_eq!(
@@ -447,34 +432,38 @@ mod tests {
             .unwrap()[0];
         assert_eq!(req.operator, "In");
         let vals = req.values.as_ref().unwrap();
-        for g in GATEWAY_APP_NAMES {
+        for g in CONTROL_PLANE_APP_NAMES {
             assert!(vals.contains(&g.to_string()), "gateway {g} must be allowed");
         }
         // The admission webhook / apiserver are NOT reachable.
         assert!(!vals.contains(&"agentctl-admission".to_string()));
         assert!(!vals.contains(&"agentctl-apiserver".to_string()));
         let gw_ports: Vec<i32> = gw.ports.as_ref().unwrap().iter().map(int_port).collect();
-        assert!(gw_ports.contains(&443) && gw_ports.contains(&8080));
+        assert_eq!(
+            gw_ports,
+            vec![8080],
+            "only 8080 survives the gateway removal"
+        );
     }
 
     #[test]
-    fn aauth_egress_opens_public_https_only_for_labeled_pods() {
+    fn internet_egress_opens_public_https_for_all_agents() {
         // Rendered as the fourth policy of the set.
         let all = agent_network_policies("agentctl-system");
         assert_eq!(all.len(), 4);
         let p = &all[3];
-        assert_eq!(p.metadata.name.as_deref(), Some(P_AAUTH_EGRESS));
+        assert_eq!(p.metadata.name.as_deref(), Some(P_INTERNET_EGRESS));
 
         let spec = p.spec.as_ref().unwrap();
-        // Selects ONLY identity-provisioned pods — inert for every other agent.
+        // Selects EVERY agent pod — all agents dial providers/MCP directly now.
         assert_eq!(
             spec.pod_selector
                 .as_ref()
                 .unwrap()
                 .match_labels
                 .as_ref()
-                .unwrap()[AAUTH_POD_LABEL],
-            "true"
+                .unwrap()["app.kubernetes.io/name"],
+            "agent"
         );
         assert_eq!(
             spec.policy_types.as_ref().unwrap(),

@@ -5,8 +5,9 @@
 #   1. Control plane (release namespace {{ $ns }}): a namespace-wide
 #      default-deny-ingress + narrow allows for the sanctioned flows.
 #   2. Data plane (each of .Values.networkPolicies.agentNamespaces): agent pods
-#      get a default-deny + sanctioned egress (DNS + control-plane gateways) and
-#      ingress (control plane only) — the tenancy boundary.
+#      get a default-deny + sanctioned egress (DNS + control-plane gateways +
+#      public HTTPS for direct provider/MCP dials) and ingress (control plane
+#      only) — the tenancy boundary.
 # NOTE: enforced ONLY by a NetworkPolicy-capable CNI (Calico/Cilium). kind's
 # default kindnet does NOT enforce these — they render correctly but are inert
 # there, and take effect on a real policy cluster.
@@ -86,42 +87,16 @@ spec:
 {{- end }}
 # NOTE: agents SERVE their mTLS surface on :8443 in TENANT namespaces and are
 # reached directly by the apiserver + A2A gateway. The per-tenant-namespace agent
-# policies below (default-deny + gateway/DNS egress + control-plane-only ingress)
-# are the tenancy boundary. They are rendered here for the STATICALLY listed
+# policies below (default-deny + gateway/DNS egress + public-HTTPS egress +
+# control-plane-only ingress) are the tenancy boundary. They are rendered here for the STATICALLY listed
 # .Values.networkPolicies.agentNamespaces AND — for namespaces created after
 # install — reconciled dynamically by the operator into each Agent/Fleet's own
 # namespace (crate netpol; gated by the same networkPolicies.enabled). The two use
 # identical bodies + names, so they co-own rather than conflict.
-{{- if .Values.modelgateway.enabled }}
----
-# ModelGateway: the inference proxy on :8080, reached by agent pods in the tenant
-# namespaces (agents hold no provider credential; the proxy injects it).
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: agentctl-modelgateway-ingress
-  namespace: {{ $ns }}
-  labels:
-    {{- include "agentctl.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: agentctl-modelgateway
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        {{- range $agentNamespaces }}
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ . }}
-        {{- end }}
-      ports:
-        - { protocol: TCP, port: 8080 }
-{{- end }}
 {{- if eq .Values.postgres.mode "bundled" }}
 ---
-# Postgres (durable task / usage store): reached only by the gateway + modelgateway
-# (both in the control-plane namespace) on :5432.
+# Postgres (durable task / usage store): reached only by the A2A gateway
+# (in the control-plane namespace) on :5432.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -139,18 +114,15 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agentctl-gateway
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: agentctl-modelgateway
       ports:
         - { protocol: TCP, port: 5432 }
 {{- end }}
 # -----------------------------------------------------------------------------
-# Data plane: per-tenant-namespace agent isolation. An agent pod
-# may egress ONLY to DNS and the control-plane GATEWAYS — the ModelGateway
-# (intelligence), the MCPGateway (tools), the A2A gateway (delegation-out), and
-# the coordination server (claims) — never the internet or other tenants — and
-# accepts ingress only from the control plane (which reaches its mTLS :8443).
+# Data plane: per-tenant-namespace agent isolation. An agent pod may egress to
+# DNS, the control-plane services it needs — the A2A gateway (delegation-out) and
+# the coordination server (claims) — and PUBLIC HTTPS (direct LLM-provider + MCP
+# dials), but NEVER into private/cluster space or other tenants — and accepts
+# ingress only from the control plane (which reaches its mTLS :8443).
 # The operator reconciles these SAME policies (identical names + bodies) into any
 # agent namespace not listed here, so dynamic tenant namespaces are covered too.
 {{- range $agentNs := $agentNamespaces }}
@@ -192,8 +164,10 @@ spec:
     # The control-plane GATEWAYS ONLY, scoped to those specific pods
     # (podSelector) — NOT any control-plane pod. Defense in depth under hostile
     # multi-tenancy: a bare namespaceSelector would also let a tenant agent reach
-    # e.g. the admission webhook; the podSelector forbids that. Ports 443 (the
-    # HTTPS listeners the agent dials keyless) + 8080 (coordination, plaintext).
+    # e.g. the admission webhook; the podSelector forbids that. Port 8080 only:
+    # the A2A gateway (delegation-out) + the coordination server (claims), both
+    # plaintext HTTP. Intelligence + MCP are dialed DIRECTLY over public HTTPS
+    # (the agent-internet-egress policy below), not through the control plane.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -202,10 +176,9 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: ["agentctl-modelgateway", "agentctl-mcpgateway", "agentctl-gateway", "agentctl-coordination"]
+                values: ["agentctl-gateway", "agentctl-coordination"]
       ports:
-        - { protocol: TCP, port: 443 }   # ModelGateway + MCPGateway (HTTPS)
-        - { protocol: TCP, port: 8080 }  # coordination (plaintext)
+        - { protocol: TCP, port: 8080 }  # A2A gateway + coordination (plaintext)
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane
 # (no cross-tenant pod-to-pod traffic).
@@ -227,25 +200,24 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ns }}
 ---
-# RFC 0024 baseline egress tier for identity-provisioned (AAuth) agents:
-# HTTPS to PUBLIC address space only — direct signed dials to remote AAuth
-# resources (and a public Agent Provider) work, while private/link-local/CGNAT
-# ranges stay carved out (lateral movement remains default-denied). Selects
-# ONLY pods the operator labels agentctl.dev/aauth=true, so it is inert in a
-# namespace with no identity-provisioned agents. Vanilla NetworkPolicy cannot
-# express per-FQDN egress — this is the honest coarse tier; a DNS-aware CNI
-# (Cilium/Calico) can tighten it to the declared endpoints.
+# Direct-dial egress tier: since agents dial LLM providers + remote MCP servers
+# DIRECTLY (no gateway), EVERY agent pod gets HTTPS egress to PUBLIC address
+# space only — private/link-local/CGNAT ranges stay carved out, so lateral
+# movement into cluster/private space remains default-denied. Vanilla
+# NetworkPolicy cannot express per-FQDN egress — this is the honest coarse tier;
+# a DNS-aware CNI (Cilium/Calico) can tighten it to the declared endpoints.
+# Byte-identical to the operator's `agent-internet-egress` so the two co-own it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: agent-aauth-internet-egress
+  name: agent-internet-egress
   namespace: {{ $agentNs }}
   labels:
     {{- include "agentctl.labels" $ | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      agentctl.dev/aauth: "true"
+      app.kubernetes.io/name: agent
   policyTypes: ["Egress"]
   egress:
     - to:

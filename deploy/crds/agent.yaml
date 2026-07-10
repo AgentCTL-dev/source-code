@@ -185,8 +185,9 @@ spec:
                       bounded `once` run exhaustion folds into `EXIT_BUDGET(7)`; a
                       `reactive`/`loop`/`schedule` daemon stops accepting new reactions and
                       drains cleanly (exit 0 by default, operator-tunable via the agent's
-                      `--budget-exit-code`). Fleet members each get their own lifetime box;
-                      the fleet-aggregate cap is `AgentFleet.spec.budget` at the modelgateway.
+                      `--budget-exit-code`). Each instance (fleet member included) gets its own
+                      lifetime box — the harness is the only token-budget enforcement point now
+                      that the metering gateway is gone.
                     format: uint64
                     minimum: 0.0
                     nullable: true
@@ -224,11 +225,68 @@ spec:
                 type: object
               mcpServers:
                 description: |-
-                  The reusable MCP tool-server bundles this agent binds, by `MCPServerSet`
-                  name (same namespace). The MCPGateway scopes the agent to exactly these
-                  servers and injects each one's credential off-pod.
+                  The remote MCP tool servers this agent dials **directly** (inline; no
+                  broker). Each names its endpoint + auth (`aauth` = the agent signs
+                  itself, secret-free; `staticToken` = a bearer mounted onto the pod).
                 items:
-                  type: string
+                  description: |-
+                    One remote MCP tool server the agent dials **directly** (Streamable HTTP).
+                    Declared inline on `Agent.spec.mcpServers`; there is no gateway facade.
+                    Preferred auth is the agent's own **AAuth** identity (`mode: aauth`, the
+                    secret-free path); `staticToken` mounts a bearer onto the agent pod for a
+                    server that only takes a key.
+                  properties:
+                    auth:
+                      description: 'How the agent authenticates to the server (default: `none`).'
+                      nullable: true
+                      properties:
+                        header:
+                          description: 'Header name to carry the token (default `Authorization: Bearer <value>`).'
+                          nullable: true
+                          type: string
+                        mode:
+                          default: none
+                          description: |-
+                            Auth mode: `none` | `staticToken` (a bearer mounted onto the agent) |
+                            `aauth` (the agent signs its own requests — secret-free).
+                          enum:
+                          - none
+                          - staticToken
+                          - aauth
+                          type: string
+                        tokenSecretRef:
+                          description: |-
+                            The bearer for `staticToken` mode: a `Secret` key the operator mounts
+                            onto the agent, which attaches it upstream. (The agent holds the key —
+                            there is no off-pod broker.)
+                          nullable: true
+                          properties:
+                            key:
+                              description: The key within the `Secret`'s data holding the credential.
+                              type: string
+                            name:
+                              description: The `Secret` name (same namespace as the referencing resource).
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      type: object
+                    endpoint:
+                      description: The remote MCP server URL (Streamable HTTP transport) the agent dials.
+                      type: string
+                    name:
+                      description: Server name — the agent's `--mcp <name>=<endpoint>` key. Unique per Agent.
+                      type: string
+                    tags:
+                      description: Per-tool trifecta capability tags (the Rule-of-Two admission check).
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - endpoint
+                  - name
+                  type: object
                 type: array
               mode:
                 description: The run shape. Determines the rendered workload kind.

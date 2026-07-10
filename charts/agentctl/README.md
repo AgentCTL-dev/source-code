@@ -39,7 +39,7 @@ kubectl get pods -n cert-manager
 
 ### Control-plane components
 
-All components are Deployments. The chart ships eight control-plane container images.
+All components are Deployments. The chart ships six control-plane container images.
 
 | Component | Purpose | Value block | Default |
 | --- | --- | --- | --- |
@@ -47,11 +47,9 @@ All components are Deployments. The chart ships eight control-plane container im
 | **apiserver** | Aggregated API serving the management verbs (`drain`, `lame-duck`, `cancel`, `pause`, `resume`) under `management.agentctl.dev`; authorizes each via `SubjectAccessReview` and dials the target agent pod(s) directly over mTLS. | `apiserver` | `enabled: true` |
 | **admission** | Validating webhook (image-registry allow-list, lethal-trifecta gate, ModelPool existence, OIDC-policy shape) and mutating webhook (secure defaults). | `admission` | `enabled: true` |
 | **gateway** | The public agent-to-agent (A2A) surface: projects and signs Agent Cards, serves `message/send` and `message/stream` (SSE), persists tasks in Postgres, delivers SSRF-guarded push webhooks, and enforces inbound auth. | `gateway` | `enabled: true` |
-| **modelgateway** | Intelligence broker: attests the caller, selects the `ModelPool`, injects the provider credential off-pod, meters tokens, and enforces budgets. | `modelgateway` | `enabled: true` |
-| **mcpgateway** | Tools broker: attests the caller, scopes the call to the agent's bound `MCPServerSet`, injects the tool-server credential off-pod, and forwards MCP. | `mcpgateway` | `enabled: true` |
 | **coordination** | Work-distribution backbone: an MCP server exposing `work.*` with exactly-one-owner claim leasing, a result channel, dead-lettering, and an in-memory or durable-Postgres store. Its backlog is the scale-from-zero signal. | `coordination` | `enabled: false` |
 | **scaler** | KEDA external scaler that reads the coordination backlog so claim fleets scale from zero. | `scaler` | `enabled: false` |
-| **postgres** (bundled) | Durable store for the gateway, modelgateway, and (optionally) coordination. | `postgres` | Rendered when `postgres.mode: bundled` |
+| **postgres** (bundled) | Durable store for the gateway and (optionally) coordination. | `postgres` | Rendered when `postgres.mode: bundled` |
 
 The chart also renders, as needed: cert-manager `Issuer`/`Certificate` objects and the
 CA bundle; the `APIService` registration and webhook configurations (with caBundle
@@ -66,9 +64,8 @@ The CRDs live in `charts/agentctl/crds/` and are installed automatically on firs
 | Kind | Plural | Short names | Purpose |
 | --- | --- | --- | --- |
 | `Agent` | `agents` | `agent`, `agents` | One agent workload. Renders to a Job (`once`/`workflow`), a CronJob (`schedule`), or a Deployment (`loop`/`reactive`). |
-| `AgentFleet` | `agentfleets` | `afleet`, `afleets` | A replicated, autoscaled worker set with an optional coordinator, per-fleet budget, and work policy. Claim mode renders a KEDA-scaled Deployment; shard mode renders a StatefulSet of N hash partitions. |
-| `ModelPool` | `modelpools` | `mp` | A pool of model access for the intelligence plane (provider endpoint, credential Secret, allowed models, optional budget). |
-| `MCPServerSet` | `mcpserversets` | `mcpset` | A reusable bundle of MCP tool servers for the tools plane (per-server endpoint, Secret-held auth, capability tags, optional budget). |
+| `AgentFleet` | `agentfleets` | `afleet`, `afleets` | A replicated, autoscaled worker set with an optional coordinator and work policy. Claim mode renders a KEDA-scaled Deployment; shard mode renders a StatefulSet of N hash partitions. |
+| `ModelPool` | `modelpools` | `mp` | A thin registry of model access for the intelligence plane (provider endpoint, allowed models, optional `credentialSecretRef`) that the agent dials directly — via a keyless AAuth-signed dial or a mounted `INTELLIGENCE_TOKEN`. |
 
 > **Helm and CRDs:** Helm installs the `crds/` directory on first install but never
 > upgrades or deletes it. See [Upgrading the CRDs](#upgrading-the-crds) and
@@ -192,14 +189,10 @@ common knobs `replicas`, `logLevel` (maps to `RUST_LOG`), `resources`, `nodeSele
 | Key | Default | Description |
 | --- | --- | --- |
 | `operator.replicas` | `1` | Operator replicas (leader-elected; raise for HA). |
-| `operator.modelgatewayUrl` | `""` | Override the ModelGateway URL rendered into agent pods (empty = in-cluster Service DNS). |
-| `operator.mcpgatewayUrl` | `""` | Override the MCPGateway URL rendered into agent pods (empty = in-cluster Service DNS). |
 | `apiserver.enabled` | `true` | Deploy the aggregated management apiserver + `APIService`. |
 | `gateway.enabled` | `true` | Deploy the A2A gateway. |
-| `modelgateway.enabled` | `true` | Deploy the intelligence broker. |
-| `mcpgateway.enabled` | `true` | Deploy the tools broker. |
 | `admission.enabled` | `true` | Deploy the admission webhooks. |
-| `<component>.autoscaling.enabled` | `false` | HPA for `apiserver`, `gateway`, `modelgateway`, `admission` (CPU-target). |
+| `<component>.autoscaling.enabled` | `false` | HPA for `apiserver`, `gateway`, `admission` (CPU-target). |
 | `<component>.pdb.enabled` | `false` | PodDisruptionBudget for a component. |
 
 ### Security gates
@@ -207,11 +200,8 @@ common knobs `replicas`, `logLevel` (maps to `RUST_LOG`), `resources`, `nodeSele
 | Key | Default | Description |
 | --- | --- | --- |
 | `admission.allowedRegistries` | `agentd:,mock-agent,agentctl/,gcr.io/,registry.k8s.io/,ghcr.io/` | CSV image-prefix allow-list the validating webhook enforces (empty = allow all). |
-| `modelgateway.attestIdentity` | `true` | Derive the agent namespace from the caller's attested source IP instead of a spoofable header. Set `false` only for a trusted single-tenant install. |
-| `modelgateway.secretsNamespaces` | `[]` | Namespaces the ModelGateway may read provider-credential Secrets in (empty = cluster-wide get/list; scope this in production). |
-| `mcpgateway.secretsNamespaces` | `[]` | Namespaces the MCPGateway may read tool-server credential Secrets in (empty = cluster-wide get/list). |
 | `coordination.attestIdentity` | `true` | Bind each work claim to the caller's attested source IP so a tenant cannot ack/release another tenant's claim (takes effect only when `coordination.enabled`). |
-| `apiToken.enabled` | `false` | Require an `Authorization: Bearer <token>` on the coordination server, ModelGateway, A2A gateway, and scaler (token kept in the `agentctl-api-token` Secret). |
+| `apiToken.enabled` | `false` | Require an `Authorization: Bearer <token>` on the coordination server, A2A gateway, and scaler (token kept in the `agentctl-api-token` Secret). |
 | `apiToken.value` | `""` | Fixed/managed token value (empty = chart generates and keeps a random one). |
 | `trustedProxy.enabled` | `false` | Open a second mTLS listener on the gateway (`:8443`) that only a trusted fronting proxy may use, forwarding a verified caller identity via headers. |
 | `trustedProxy.allowedNames` | `["apisix"]` | Client-cert CN/SANs accepted on the trusted-proxy listener. |
@@ -287,12 +277,11 @@ slate:
 
 ```bash
 # CRDs (Helm never deletes crds/) — this also deletes all Agent/AgentFleet/
-# ModelPool/MCPServerSet objects in the cluster:
+# ModelPool objects in the cluster:
 kubectl delete crd \
   agents.agentctl.dev \
   agentfleets.agentctl.dev \
-  modelpools.agentctl.dev \
-  mcpserversets.agentctl.dev
+  modelpools.agentctl.dev
 
 # The API token Secret is retained via a keep policy (only if apiToken was enabled):
 kubectl -n agentctl-system delete secret agentctl-api-token --ignore-not-found

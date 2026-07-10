@@ -42,7 +42,7 @@ use crate::store::{
     WorkStatus,
 };
 
-/// Pool size — mirrors the gateway/modelgateway stores.
+/// Pool size — mirrors the gateway store.
 const POOL_MAX_SIZE: usize = 8;
 /// Worker threads on the dedicated DB runtime.
 const DB_WORKER_THREADS: usize = 4;

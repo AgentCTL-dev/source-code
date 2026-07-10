@@ -12,7 +12,7 @@ permissively licensed so that ANY agent vendor or integrator can implement and
 use them freely (the contract must be open to be a standard):
 
   - contract/                      (the Agent Control Contract: schemas + fixtures + spec)
-  - crates/agent-api               (Agent / AgentFleet / ModelPool / MCPServerSet CRD types)
+  - crates/agent-api               (Agent / AgentFleet / ModelPool CRD types)
   - crates/agent-contract-client   (the typed contract client / SDK)
   - crates/agentctl-cli            (the CLI / kubectl plugin)
   - crates/agentctl-crdgen         (CRD YAML generator)
@@ -30,8 +30,6 @@ Grant.
   - crates/agentctl-operator
   - crates/agentctl-apiserver
   - crates/agentctl-gateway
-  - crates/agentctl-modelgateway
-  - crates/agentctl-mcpgateway
   - crates/agentctl-admission
   - crates/agentctl-coordination
   - crates/agentctl-scaler

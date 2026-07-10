@@ -16,17 +16,22 @@ classes with different roots of trust:
   cert-manager-issued **mTLS client certificate** that identifies them as the
   single **Management** origin. Management access through the aggregated API is
   additionally gated by Kubernetes RBAC (SubjectAccessReview) per verb.
-- **Data-plane utility path — attested and network-isolated.** Agents dial the
-  gateways (intelligence, tools, coordination) **keyless**; the gateway derives
-  the caller's tenant from its **attested source IP** (the pod IP, resolved to a
-  pod through the Kubernetes API), and NetworkPolicies confine which pods can
-  reach which surface at all.
+- **Data-plane utility path — direct-dial and network-isolated.** Agents dial
+  model providers and MCP servers **directly**, authenticating themselves (an
+  AAuth signature, or a key mounted onto the pod); the only in-cluster data-plane
+  hop is the **coordination** work fabric, which derives the caller's tenant from
+  its **attested source IP** (the pod IP, resolved to a pod through the Kubernetes
+  API). NetworkPolicies confine which pods can reach which surface at all.
 
 Two properties hold across both classes:
 
-- **Agents are secret-free.** An agent pod never holds a provider API key or an
-  MCP tool credential; the gateways inject those off-pod. The only key material
-  on the pod is its own rotatable serving key plus the public CA bundle.
+- **Secret-free with AAuth.** An agent given a portable AAuth identity holds no
+  provider or tool credential — it signs each direct request itself. For a
+  key-authenticated provider or server the operator mounts the key onto the agent
+  (`INTELLIGENCE_TOKEN`, or an MCP `staticToken`); the agent holds it, because
+  there is no off-pod broker. Beyond any such mounted key, the only key material
+  on the pod is its own rotatable serving + identity keys plus the public CA
+  bundle.
 - **Agent pods are confined.** Nonroot, no privilege escalation, all Linux
   capabilities dropped, read-only root filesystem, no auto-mounted ServiceAccount
   token, `RuntimeDefault` seccomp — satisfying the `restricted` Pod Security
@@ -44,16 +49,14 @@ Two properties hold across both classes:
                                  │ dial pod directly, mTLS  :8443
                                  ▼
                         ┌──────────────────────┐
-   agent  ── keyless ──▶│  tenant agent pod    │◀── ingress: control plane only
-   dial (source-IP      │  (secret-free, hard- │
-   attested) :443/:8080 │   ened, netpol'd)    │──▶ egress: DNS + gateways only
-                        └──────────┬───────────┘
-                                   │ keyless, source-IP attested
-                 ┌─────────────────┼──────────────────┐
-                 ▼                 ▼                   ▼
-          modelgateway        mcpgateway          coordination
-        (injects provider  (injects tool-      (work.* claim
-         credential)        server credential)  leasing)
+   providers + MCP  ◀───│  tenant agent pod    │◀── ingress: control plane only
+   direct dial (AAuth   │  (hardened, netpol'd,│
+   sig or mounted key)  │   AAuth-signing)     │──▶ egress: DNS + control plane
+                        └──────────┬───────────┘        + public HTTPS
+                                   │ work.* : source-IP attested
+                                   ▼
+                             coordination
+                           (work.* claim leasing)
 ```
 
 ## Identity model
@@ -90,21 +93,28 @@ Both dial the target pod **directly** over mTLS using the shared client cert
 is a certificate, there is no bearer token on the agent pod to steal, and no
 network position confers Management authority — only the private key does.
 
-### Outbound from an agent — attested source-IP identity
+### Outbound from an agent — two paths
 
-An agent dials the gateways **keyless**: it holds no credential and asserts its
-own identity. In the hardened default the gateways do not trust that assertion.
-Instead they read the **kernel-set source IP** of the TCP connection — the pod's
-own IP, which the pod cannot forge — and resolve it to the calling pod through the
-Kubernetes API. The pod's **namespace is the authoritative tenant** used to select
-the ModelPool, meter tokens, scope tool access, and enforce budgets.
+An agent's outbound traffic splits in two:
 
-This attestation is enabled by default (`modelgateway.attestIdentity: true`; the
-MCPGateway is always attested). It is robust precisely because agent pods are
-confined: with `capabilities.drop: ["ALL"]` a tenant pod has no `CAP_NET_RAW` and
-cannot craft raw packets to spoof a source IP, so the kernel-attributed source IP
-is a trustworthy tenant identity. A tenant therefore cannot bill or borrow another
-namespace's model pool or tool set.
+- **To model providers and MCP servers — direct, self-authenticated.** The agent
+  dials the provider/server itself and proves who it is: it signs each request
+  with its portable **AAuth** identity (the server verifies against the Agent
+  Provider's JWKS), or presents a key the operator mounted onto the pod. No
+  control-plane component sits on this path.
+- **To the coordination work fabric — attested by source IP.** For the in-cluster
+  `work.*` hop the coordination server does not trust any self-asserted identity.
+  Instead it reads the **kernel-set source IP** of the TCP connection — the pod's
+  own IP, which the pod cannot forge — and resolves it to the calling pod through
+  the Kubernetes API. The pod's **namespace is the authoritative tenant**, binding
+  each work claim to its owner.
+
+Source-IP attestation is enabled by default (`coordination.attestIdentity: true`).
+It is robust precisely because agent pods are confined: with
+`capabilities.drop: ["ALL"]` a tenant pod has no `CAP_NET_RAW` and cannot craft raw
+packets to spoof a source IP, so the kernel-attributed source IP is a trustworthy
+tenant identity. A tenant therefore cannot ack or release another namespace's work
+claim.
 
 If a request also carries an advisory `X-Agent-Namespace` header that disagrees
 with the attested namespace, **the attested namespace always wins** and the
@@ -125,36 +135,33 @@ The source-IP → pod resolution is a small, cache-backed lookup:
    from one pod does not hammer the API server, while a deleted-and-recycled IP is
    re-attested quickly.
 
-Because a freshly scheduled pod may issue its first dial before its `status.podIP`
-has propagated into the gateway's watch cache, the resolution retries briefly
-before failing closed — a startup-timing accommodation, not a relaxation of trust.
-An IP that resolves to no pod is **rejected**; the gateways never fall back to the
-spoofable header.
+Because a freshly scheduled pod may issue its first claim before its `status.podIP`
+has propagated into the coordination server's watch cache, the resolution retries
+briefly before failing closed — a startup-timing accommodation, not a relaxation of
+trust. An IP that resolves to no pod is **rejected**; the coordination server never
+falls back to the spoofable header.
 
-The same source-IP attestation optionally guards work-claim ownership on the
-coordination server (`coordination.attestIdentity: true`), binding each claim's
-lifecycle to the attested caller so one tenant cannot ack or release another
-tenant's claim.
+This attestation guards work-claim ownership on the coordination server
+(`coordination.attestIdentity: true`), binding each claim's lifecycle to the
+attested caller so one tenant cannot ack or release another tenant's claim.
 
-## Secret-free agents and credential injection
+## Agent credentials: AAuth-direct or a mounted key
 
-No agent pod holds a provider or tool credential. Credentials live in Kubernetes
-Secrets that only the brokering gateway can read, and are injected on the wire,
-off the pod:
+There is no credential-brokering gateway. An agent authenticates to a provider or
+MCP server on one of two paths, chosen per binding:
 
-| Plane | Broker | Where the credential lives | How it is injected |
-|---|---|---|---|
-| Intelligence | **modelgateway** | `ModelPool.spec.credentialSecretRef` (Secret + key) | Attest caller → select the pool → attach the provider key on the upstream request → meter tokens → enforce the budget |
-| Tools | **mcpgateway** | `MCPServerSet` server `auth.tokenSecretRef` (`staticToken` mode) | Attest caller → scope to the agent's bound `MCPServerSet` → attach the server token (`Authorization: Bearer …`, or a custom header) on the upstream MCP call |
+| Path | How the agent authenticates | Where the credential lives |
+|---|---|---|
+| **AAuth (preferred, secret-free)** | The agent signs each request with its portable AAuth identity (RFC 9421); the remote verifies against the Agent Provider's JWKS. | Nowhere shared — the pod holds only its own Ed25519 identity key (used to sign), provisioned by the operator. |
+| **Mounted key** | The operator mounts the key onto the **agent**, which attaches it on each direct request. | Intelligence: `ModelPool.spec.credentialSecretRef` → `INTELLIGENCE_TOKEN` on the pod. Tools: an `mcpServers[].auth.tokenSecretRef` (`staticToken`) → the `Authorization` bearer (or a custom `header`) on the pod. |
 
-The gateways' Secret access is RBAC-scoped. In production, set
-`modelgateway.secretsNamespaces` and `mcpgateway.secretsNamespaces` to the
-namespaces that actually hold the credential Secrets; the chart then drops the
-cluster-wide `secrets get/list` grant and renders a namespaced Role + RoleBinding
-in each listed namespace instead. Left empty, the gateways get a broad
-cluster-wide `secrets get/list` (a dev default with a large blast radius).
+The honest trade-off: **AAuth-direct keeps the pod secret-free; a mounted key does
+not** — with `staticToken`/`credentialSecretRef` the agent holds that key, because
+there is no off-pod broker to hold it instead. Prefer AAuth for untrusted or
+multi-tenant workloads (see
+[Portable agent identity](architecture.md#portable-agent-identity-aauth)).
 
-A `ModelPool` and its credential Secret:
+A key-authenticated `ModelPool` and its Secret (mounted onto the agent):
 
 ```yaml
 apiVersion: v1
@@ -164,7 +171,7 @@ metadata:
   namespace: default
 type: Opaque
 stringData:
-  api-key: sk-...                     # only the ModelGateway ever reads this
+  api-key: sk-...                     # mounted onto the agent as INTELLIGENCE_TOKEN
 ---
 apiVersion: agentctl.dev/v1alpha1
 kind: ModelPool
@@ -174,13 +181,11 @@ metadata:
 spec:
   provider: mock
   endpoint: http://mock-provider.default:8080
-  credentialSecretRef:
+  credentialSecretRef:                # OPTIONAL — omit for the AAuth (secret-free) path
     name: provider-credentials
     key: api-key
   models: ["mock-model-v1"]
   defaultModel: mock-model-v1
-  budget:
-    maxTokens: 150                    # pool-wide token cap (see Token budgets)
 ```
 
 ## Pod and workload hardening
@@ -211,8 +216,9 @@ Supporting facts:
   writable location is an `emptyDir` mounted at `/tmp`. The serving cert
   (`/etc/agentctl/tls`) and CA bundle (`/etc/agentctl/ca`) are read-only mounts.
 - **No borrowed and no ambient credentials.** `automountServiceAccountToken: false`
-  keeps the namespace default ServiceAccount token off the pod; combined with the
-  secret-free model, the pod carries only its own serving key and the public CA.
+  keeps the namespace default ServiceAccount token off the pod; on the AAuth path
+  the pod carries only its own serving + AAuth identity keys and the public CA (a
+  `staticToken`/`INTELLIGENCE_TOKEN` binding additionally mounts that one key).
 - **No privileged component.** Nothing in the control plane requires `hostPath`,
   `hostPID`, or privileged mode. The control-plane namespace and tenant namespaces
   run at the `baseline` Pod Security level (`namespace.podSecurity: baseline`),
@@ -224,33 +230,31 @@ Supporting facts:
 ## Tenant network isolation
 
 Tenant isolation is enforced by four NetworkPolicies applied in every agent
-namespace. The first three select agent pods by the label
-`app.kubernetes.io/name: agent`; the fourth selects **only**
-identity-provisioned (AAuth) agent pods by `agentctl.dev/aauth: "true"` and is
-inert in a namespace with none.
+namespace. All four select agent pods by the label `app.kubernetes.io/name: agent`.
 
 | Policy | Type | Effect |
 |---|---|---|
 | `agent-default-deny` | Ingress + Egress | Deny all traffic in and out by default (no rules). |
-| `agent-allow-controlplane-and-dns` | Egress | Re-open egress **only** to DNS (UDP/TCP 53, any namespace) and to the control-plane **gateway pods** — ModelGateway, MCPGateway, A2A gateway, coordination — on TCP 443 and TCP 8080. |
+| `agent-allow-controlplane-and-dns` | Egress | Re-open egress **only** to DNS (UDP/TCP 53, any namespace) and to the remaining control-plane **pods** — the A2A gateway (delegation-out) and coordination (work claims) — on TCP 443 and TCP 8080. |
 | `agent-ingress-controlplane-only` | Ingress | Accept ingress **only** from the control-plane namespace (the apiserver + A2A gateway reaching the agent's mTLS 8443). No cross-tenant pod-to-pod traffic. |
-| `agent-aauth-internet-egress` | Egress | For **AAuth identity-provisioned agents only** (RFC 0024): HTTPS (TCP 443) to **public** address space — `0.0.0.0/0` / `::/0` minus private, link-local, and CGNAT ranges — so direct signed dials to remote AAuth resources (and a public Agent Provider) work while lateral movement into cluster/private space stays default-denied. Vanilla NetworkPolicy cannot express per-FQDN egress; this is the honest coarse tier — a DNS-aware CNI (Cilium/Calico) can tighten it to the declared endpoints. |
+| `agent-internet-egress` | Egress | HTTPS (TCP 443) to **public** address space — `0.0.0.0/0` / `::/0` minus private, link-local, and CGNAT ranges — so every agent can reach its model provider and MCP servers by direct dial (and a public Agent Provider for AAuth) while lateral movement into cluster/private space stays default-denied. Vanilla NetworkPolicy cannot express per-FQDN egress; this is the honest coarse tier — a DNS-aware CNI (Cilium/Calico) can tighten it to the declared endpoints. |
 
 Design points worth noting for review:
 
-- **Egress is pod-scoped, not namespace-scoped.** The egress allow uses a
-  `namespaceSelector` (the control-plane namespace) **and** a `podSelector`
-  matching only the four gateway app names. A bare namespace selector would also
-  expose the admission webhook and the aggregated apiserver to a tenant agent; the
-  pod selector forbids that. The apiserver and admission app names are explicitly
-  not in the allow set.
-- **No internet, no other tenants — unless identity-provisioned.** For a plain
-  agent the only permitted egress is DNS and those gateway pods; there is no
-  allow for the public internet or for peer tenant namespaces. An **AAuth**
-  agent (labeled `agentctl.dev/aauth: "true"` by the operator) additionally
-  gets public-HTTPS egress via `agent-aauth-internet-egress` — the declared,
-  admission-gated (`capabilities.egress`) exception for direct signed dials,
-  still excluding every private range.
+- **Control-plane egress is pod-scoped, not namespace-scoped.** That egress allow
+  uses a `namespaceSelector` (the control-plane namespace) **and** a `podSelector`
+  matching only the A2A gateway and coordination app names. A bare namespace
+  selector would also expose the admission webhook and the aggregated apiserver to
+  a tenant agent; the pod selector forbids that. The apiserver and admission app
+  names are explicitly not in the allow set.
+- **Internet egress is deliberate, but public-only.** Because agents dial
+  providers and MCP servers directly, every agent gets public-HTTPS egress via
+  `agent-internet-egress` — but only to **public** address space; every private,
+  link-local, and CGNAT range is carved out, so a compromised pod still cannot
+  reach cluster-internal or peer-tenant services, and there is no allow for
+  pod-to-pod traffic into another tenant's namespace. (Admission additionally
+  requires `identity.aauth` + `capabilities.egress: true` for any `auth.mode: aauth`
+  MCP binding, matching declared intent to the signed dial.)
 
 ### Shipped by the chart AND reconciled by the operator
 
@@ -317,19 +321,22 @@ the field being absent so it never clobbers an author's explicit value:
 
 ## Token budgets
 
-Token consumption is metered and capped at the ModelGateway, which is the only
-component that sees inference traffic:
+With no gateway on the inference path, token budgets are **harness-tracked** — the
+agent counts its own usage and stops itself. There is no pool-wide or per-fleet
+gateway budget, and no `429`-on-budget.
 
-- **Pool-wide budget** — `ModelPool.spec.budget.maxTokens` caps total consumption
-  across every agent that uses the pool.
-- **Per-fleet budget** — an `AgentFleet.spec.budget` caps the fleet's own token
-  consumption, enforced alongside the pool budget so a single fleet cannot exhaust
-  a shared pool.
+- **Per-instance lifetime budget** — `spec.limits.lifetimeTokens` caps cumulative
+  consumption across every run/reaction of one instance (RFC 0025). On a bounded
+  `once` run exhaustion folds into `EXIT_BUDGET(7)`; a `reactive`/`loop`/`schedule`
+  daemon stops accepting new reactions and drains cleanly. Each instance (fleet
+  member included) carries its own lifetime box.
+- **Per-run bound** — `spec.limits.maxTokens` bounds a single run/reaction; the
+  companion `maxDepth`/`maxSteps` bound recursion and tool-call loops.
 
-The gateway attests the caller (source-IP identity above), meters tokens against
-the selected pool and, for a fleet worker, against the fleet, and enforces the cap
-with an atomic reserve-then-reconcile so the limit holds under concurrent
-requests. A request that would exceed a budget is rejected.
+The operator renders these as the agent's `--budget-tokens-lifetime` / `--max-tokens`
+flags; enforcement and the exit-code/gauge behaviour are the agent's, per the Agent
+Control Contract. A key-authenticated provider may of course also rate-limit or bill
+on its own — that is outside agentctl.
 
 ## TLS and PKI (cert-manager)
 
@@ -345,8 +352,6 @@ agentctl-ca (Certificate, isCA) ──► agentctl-ca (ClusterIssuer)
         │
         ├─ agentctl-apiserver-tls          aggregated apiserver serving
         ├─ agentctl-admission-tls          admission webhook serving
-        ├─ agentctl-modelgateway-tls       ModelGateway serving
-        ├─ agentctl-mcpgateway-tls         MCPGateway serving
         ├─ agentctl-client-tls             mTLS CLIENT cert (CN agentctl-control-plane)
         │                                    = the Management origin into agents
         └─ <workload>-serving-tls          PER-AGENT serving cert (operator-issued)
@@ -371,9 +376,11 @@ namespace:
   to the CR so garbage collection reclaims it.
 - the `agentctl-ca` ConfigMap (key `ca.crt`) carrying the cluster CA **public**
   certificate. The pod mounts it as its client-CA (to authenticate Management
-  callers) and as its outbound trust anchor (to verify the gateways). It is
+  callers) and as its trust anchor for the in-cluster control-plane hops it dials
+  (the coordination server, and the A2A gateway for A2A delegation-out). It is
   namespace-shared and deliberately un-owned, so deleting one agent never removes
-  the namespace's trust anchor.
+  the namespace's trust anchor. Model providers and remote MCP servers, dialed
+  directly over the internet, are verified against the public web PKI, not this CA.
 
 All leaves are pure-Rust rustls/`ring` (no OpenSSL/aws-lc). Public OIDC issuers,
 by contrast, are reached over the internet using the bundled Mozilla trust anchors
@@ -416,7 +423,7 @@ Reading the access policy fails **closed**: a hard error fetching the CR returns
 ### Coarse bearer token (`AGENTCTL_API_TOKEN`)
 
 An optional shared in-cluster gate (`apiToken.enabled`, default off). When set,
-the coordination server, ModelGateway, A2A gateway, and scaler require
+the coordination server, A2A gateway, and scaler require
 `Authorization: Bearer <token>`; the compare is constant-time. The chart mints a
 lookup-stable Secret (`agentctl-api-token`) kept across upgrades, wires it into
 those services, and the operator injects the same `secretKeyRef` into agent pods
@@ -506,12 +513,11 @@ default CN `apisix`) off the agentctl CA; its CN/SAN must be on `allowedNames`.
 ## Operator-hardening checklist
 
 - [ ] **cert-manager installed** and healthy (required — all control-plane TLS).
-- [ ] **Scope gateway Secret access**: set `modelgateway.secretsNamespaces` and
-  `mcpgateway.secretsNamespaces` to the credential namespaces to drop the
-  cluster-wide `secrets` grant.
-- [ ] **Keep source-IP attestation on** (`modelgateway.attestIdentity: true`,
-  `coordination.attestIdentity: true`); disable only for a trusted single-tenant
-  install.
+- [ ] **Prefer AAuth for untrusted workloads** so no provider/tool key is mounted
+  on the pod; a `credentialSecretRef`/`staticToken` binding puts that one key on
+  the agent (there is no off-pod broker).
+- [ ] **Keep work-fabric attestation on** (`coordination.attestIdentity: true`);
+  disable only for a trusted single-tenant install.
 - [ ] **Enable NetworkPolicies** (`networkPolicies.enabled: true`) **and** confirm
   a policy-enforcing CNI (Calico/Cilium); list tenant namespaces in
   `networkPolicies.agentNamespaces` (dynamic namespaces are also covered by the

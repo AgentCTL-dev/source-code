@@ -64,8 +64,8 @@ kubectl get apiservice v1alpha1.management.agentctl.dev  # AVAILABLE`}
       <H2>3 · run an agent</H2>
       <P>
         Declare an <C>Agent</C>. The operator renders a restricted-PSS pod that serves mTLS{" "}
-        <C>:8443/mcp</C>, dials intelligence keyless, and mounts the per-namespace CA — no
-        credential on the pod.
+        <C>:8443/mcp</C> and dials its bound provider directly — secret-free with AAuth, so no
+        credential need land on the pod.
       </P>
       <CodeBlock
         lang="agent.yaml"
@@ -76,8 +76,8 @@ spec:
   image: ${AGENTD_IMAGE}
   mode: reactive
   surfaces: { a2a: true }     # reachable over the A2A gateway (its wake source)
-  # model: { pool: gpt }      # keyless intelligence (ModelGateway holds the key)
-  # mcpServers: [tools] # brokered tools (MCPGateway injects the credential)`}
+  # model: { pool: gpt }      # agent dials the pool's provider directly (AAuth or a mounted INTELLIGENCE_TOKEN)
+  # mcpServers: [{ name: tools, endpoint: https://…, auth: { mode: aauth } }] # dialed directly`}
       />
       <CodeBlock lang="bash" code={`kubectl apply -f agent.yaml
 kubectl get agents -n team-a    # READY=True`} />

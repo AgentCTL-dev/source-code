@@ -133,48 +133,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentctl-mcpgateway"
-version = "1.2.0"
-dependencies = [
- "agent-api",
- "agentctl-telemetry",
- "axum",
- "axum-server",
- "k8s-openapi",
- "kube",
- "reqwest",
- "rustls",
- "rustls-pemfile",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "agentctl-modelgateway"
-version = "1.2.0"
-dependencies = [
- "agent-api",
- "agentctl-telemetry",
- "axum",
- "axum-server",
- "deadpool-postgres",
- "k8s-openapi",
- "kube",
- "reqwest",
- "rustls",
- "rustls-pemfile",
- "serde_json",
- "subtle",
- "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
- "tracing",
- "webpki-roots",
-]
-
-[[package]]
 name = "agentctl-operator"
 version = "1.2.0"
 dependencies = [

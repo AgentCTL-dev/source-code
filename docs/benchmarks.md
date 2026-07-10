@@ -45,15 +45,14 @@ agent bound to an MCP tool server, all `Ready` (Rust components, distroless nonr
 
 | Component | CPU (m) | Mem (MiB) | | Component | CPU (m) | Mem (MiB) |
 |---|---|---|---|---|---|---|
-| operator | 1 | 3 | | modelgateway | 1 | 2 |
-| apiserver | 1 | 4 | | mcpgateway | 1 | 1 |
-| gateway | 1 | 2 | | admission | 1 | 4 |
-| coordination | 3 | 7 | | scaler | 1 | 2 |
+| operator | 1 | 3 | | admission | 1 | 4 |
+| apiserver | 1 | 4 | | coordination | 3 | 7 |
+| gateway | 1 | 2 | | scaler | 1 | 2 |
 | postgres | 8 | 54 | | | | |
 
-The whole control plane idles at **~18 millicores and ~79 MiB** across nine pods —
-Postgres is the single largest line; the eight Rust components together are ~10m /
-~25 MiB. Because the control plane runs no per-node component, an N-agent, M-node
+The whole control plane idles at **~16 millicores and ~76 MiB** across seven pods —
+Postgres is the single largest line; the six Rust components together are ~8m /
+~22 MiB. Because the control plane runs no per-node component, an N-agent, M-node
 fleet pays no per-node tax, and the agent pod itself is unchanged in weight
 regardless of fleet size. These are point-in-time readings of one idle agent, not a
 density sweep — the sweeps below quantify how the numbers move with scale.
@@ -141,10 +140,10 @@ production configuration).
 ## Functional coverage (real `agentd`)
 
 The harness exercises every plane against the real agent. Scenarios cover
-provisioning; the management path (drain / lame-duck / cancel through the aggregated
-apiserver, plus an RBAC-denied 403); intelligence (an inference call through the
-modelgateway to a mock provider, with token metering and a budget-exceeded 429);
-claim-mode work distribution (atomic grant, dedupe, lease expiry, KEDA
+provisioning (including a once-mode `agentd` agent that dials its bound model pool's
+provider DIRECTLY to complete its work — no broker, no metering gateway); the
+management path (drain / lame-duck / cancel through the aggregated apiserver, plus an
+RBAC-denied 403); claim-mode work distribution (atomic grant, dedupe, lease expiry, KEDA
 scale-from-zero); shard-mode partitioning; A2A (Agent Card JWS verification and
 `message/send` / `message/stream`); conformance (exit codes and metric-registry
 membership); and the security gates (OIDC, trusted-proxy, attested identity,

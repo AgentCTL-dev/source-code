@@ -415,7 +415,7 @@ fn manifest() -> Value {
 mod tests {
     use super::*;
 
-    // The transport (mTLS axum-server) mirrors the proven coordination/mcpgateway
+    // The transport (mTLS axum-server) mirrors the proven coordination
     // patterns and is validated end-to-end in the kind e2e (a pod, not a local
     // listener — this sandbox kills bound listeners). These tests cover the pure
     // dispatch + manifest logic, which is where a wire bug would actually live.

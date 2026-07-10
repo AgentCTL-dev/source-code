@@ -94,19 +94,4 @@ spec:
               The admission webhook deny rate has exceeded 1/s for 10m
               (current {{`{{ $value | printf "%.2f" }}`}}/s). Inspect rejected Agent/AgentFleet
               submissions (registry allow-list, lethal-trifecta gate, missing ModelPool).
-
-        # The ModelGateway is rejecting inference on ModelPool token budgets. Any
-        # sustained rate means tenants are hitting their cap and losing inference
-        # — raise the budget or investigate runaway consumption.
-        - alert: AgentctlBudgetRejections
-          expr: sum(rate(agentctl_modelgateway_budget_rejections_total[5m])) > 0
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: "agentctl ModelGateway is rejecting inference on budget"
-            description: >-
-              The ModelGateway has been rejecting inference on ModelPool token budgets
-              for 15m (current {{`{{ $value | printf "%.3f" }}`}}/s). Tenants are hitting
-              their maxTokens cap; raise the budget or investigate consumption.
 {{- end }}

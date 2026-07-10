@@ -4,8 +4,7 @@
 #     -n agentctl-system --create-namespace -f values-ghcr.yaml
 #
 # This pulls ghcr.io/agentctl-dev/<comp>:1.2.0 for each control-plane component
-# (operator, apiserver, gateway, modelgateway, mcpgateway, admission,
-# coordination, scaler).
+# (operator, apiserver, gateway, admission, coordination, scaler).
 image:
   registry: ghcr.io/agentctl-dev
   tag: 1.2.0
@@ -15,6 +14,5 @@ image:
   #     operator: sha256:...
   #     apiserver: sha256:...
   #     gateway: sha256:...
-  #     modelgateway: sha256:...
   #     admission: sha256:...
   digests: {}

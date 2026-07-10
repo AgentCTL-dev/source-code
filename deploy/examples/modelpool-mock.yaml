@@ -1,7 +1,8 @@
 # A ModelPool wired to the mock provider, plus the provider-credential Secret it
-# references. The ModelGateway reads this Secret and injects the key on each
-# request — the agent never holds it (the agent stays secret-free). budget caps
-# the pool at 150 tokens (the mock returns 100/call → the 3rd call is rejected).
+# references. The operator renders INTELLIGENCE=<endpoint> into the agent and
+# mounts this Secret onto the agent as its INTELLIGENCE_TOKEN (the agent dials
+# the provider directly — there is no off-pod broker). Drop credentialSecretRef
+# to use the agent's AAuth identity instead (the secret-free path).
 apiVersion: v1
 kind: Secret
 metadata:
@@ -26,5 +27,3 @@ spec:
     key: api-key
   models: ["mock-model-v1"]
   defaultModel: mock-model-v1
-  budget:
-    maxTokens: 150

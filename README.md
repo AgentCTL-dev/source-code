@@ -22,9 +22,13 @@ implemented in Rust.
 - **Declarative agents.** Describe an agent's run shape, intelligence, tools,
   instructions, and exposure in a single `Agent` resource; the operator renders
   the right Kubernetes workload and reconciles it.
-- **Secret-free by construction.** Agents never hold a model-provider or
-  tool-server credential. Gateways attest the caller and inject credentials
-  off-pod, then meter and budget every call.
+- **Direct dial, secret-free with AAuth.** Agents reach model providers and MCP
+  servers *directly*. An agent given a portable AAuth identity
+  (`spec.identity.aauth`) authenticates by signing each request, so no provider
+  or tool credential ever lands on the pod. For a key-authenticated provider or
+  server the key is mounted onto the agent
+  (`ModelPool.credentialSecretRef` → `INTELLIGENCE_TOKEN`; MCP `staticToken`) —
+  the agent holds it, because there is no off-pod broker to hold it instead.
 - **Fleets that scale from zero.** An `AgentFleet` is an autoscaled worker pool —
   elastic *claim* fleets (KEDA-driven from the work backlog) or fixed-partition
   *shard* fleets — optionally fronted by a coordinator "main agent".
@@ -44,9 +48,10 @@ implemented in Rust.
 
 ## Architecture
 
-agentctl is a set of Deployments (eight container images) that turn Custom
-Resources into managed agent workloads and broker every privileged interaction
-those workloads have with the outside world.
+agentctl is a set of Deployments (six container images) that turn Custom
+Resources into managed agent workloads, front their agent-to-agent surface, and
+coordinate their work. Agents reach model providers and MCP tools themselves, by
+direct dial — there is no credential-brokering gateway on that path.
 
 ```mermaid
 flowchart TB
@@ -55,22 +60,20 @@ flowchart TB
     apiserver["apiserver<br/>management verbs (aggregated API)"]
     admission["admission<br/>validating + mutating webhooks"]
     gateway["gateway<br/>A2A: Agent Cards · message/send · push"]
-    modelgateway["modelgateway<br/>intelligence broker"]
-    mcpgateway["mcpgateway<br/>tools broker"]
     coordination["coordination<br/>work.* claim hub"]
     scaler["scaler<br/>KEDA external scaler"]
   end
 
   user["kubectl / clients"] --> apiserver
-  crs["Agent · AgentFleet · ModelPool · MCPServerSet"] --> operator
+  crs["Agent · AgentFleet · ModelPool"] --> operator
   operator --> workloads["Job · CronJob · Deployment · StatefulSet"]
 
   a2a["external A2A callers"] --> gateway
   gateway -- mTLS (Management) --> agents["agent pods"]
   apiserver -- mTLS (Management) --> agents
 
-  agents -- attested source IP --> modelgateway --> providers["model providers"]
-  agents -- attested source IP --> mcpgateway --> mcpservers["remote MCP servers"]
+  agents -- "direct dial · AAuth or mounted key" --> providers["model providers"]
+  agents -- "direct dial · AAuth or staticToken" --> mcpservers["remote MCP servers"]
   agents -- work.* --> coordination
   scaler -- backlog --> coordination
 ```
@@ -83,8 +86,6 @@ flowchart TB
 | **apiserver** | A Kubernetes aggregated API that serves management verbs (drain, lame-duck, cancel, pause, resume) under `management.agentctl.dev`; authorizes each via `SubjectAccessReview`; dials the target agent pod(s) over mTLS. Fleet verbs fan out to all replicas. |
 | **admission** | A validating webhook (image-registry allow-list, lethal-trifecta gate, `ModelPool` existence, OIDC-policy well-formedness) and a mutating webhook (secure defaults: labels, mode, minimal surfaces). |
 | **gateway** | The public A2A surface: projects and signs each agent's/fleet's Agent Card, serves `message/send` and `message/stream` (SSE), persists tasks, delivers SSRF-guarded push webhooks, and enforces inbound auth. Reaches agents by dialing the pod over mTLS as the **Management** origin. |
-| **modelgateway** | The intelligence broker: attests the caller, selects the `ModelPool`, injects the pool's provider credential, forwards to the provider, meters tokens, and enforces budgets with an atomic reserve→reconcile. |
-| **mcpgateway** | The tools broker: attests the caller, scopes the call to the agent's bound `MCPServerSet`, injects each server's credential off-pod, and forwards MCP. |
 | **coordination** | The work-distribution backbone — an MCP server exposing `work.*` (submit, claim, renew, ack, release, stats, result, deadletter) with exactly-one-owner claim leasing, a result/correlation channel, dead-lettering, and an in-memory or durable-Postgres store. Its backlog is the scale-from-zero signal. |
 | **scaler** | A KEDA external scaler that reads the coordination backlog so claim fleets scale from zero. |
 
@@ -95,8 +96,8 @@ Each capability is a *plane* built on the components above.
 | Plane | Built on | What it does |
 |---|---|---|
 | **Provisioning** | operator + CRDs | Renders and reconciles agents into workloads. |
-| **Intelligence** | modelgateway + `ModelPool` | Secret-free, metered, budgeted model access. |
-| **Tools** | mcpgateway + `MCPServerSet` | Secret-free, scoped MCP tool access. |
+| **Intelligence** | `ModelPool` (direct dial) | The agent dials the pool's provider endpoint itself — authenticated by its AAuth identity (secret-free) or a mounted provider key. |
+| **Tools** | inline `spec.mcpServers` (direct dial) | The agent dials each declared MCP server itself — AAuth-signed (secret-free), a mounted `staticToken`, or unauthenticated. |
 | **Scaling** | coordination + scaler + KEDA | Elastic claim fleets; StatefulSet partitioning for shard fleets. |
 | **A2A** | gateway | Agents and fleets as authenticated A2A endpoints; agent-to-agent delegation. |
 | **Management** | apiserver | drain / lame-duck / cancel / pause / resume via `kubectl`, RBAC-gated. |
@@ -112,8 +113,7 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 |---|---|---|
 | **Agent** | `agent`, `agents` | One agent workload. |
 | **AgentFleet** | `afleet`, `afleets` | A replicated, autoscaled set — with optional coordinator + work-fabric orchestration. |
-| **ModelPool** | `mp` | A pool of model access for the intelligence plane. |
-| **MCPServerSet** | `mcpset` | A reusable bundle of MCP tool servers for the tools plane. |
+| **ModelPool** | `mp` | A thin direct-dial model endpoint registry (provider, endpoint, optional key, models). |
 
 ### Agent
 
@@ -123,11 +123,11 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 | `image` | The conformant-agent image to run. Optional when the operator has a default agent image configured (`operator.defaultAgentImage`); an explicit value overrides it. |
 | `instruction` | The agent's task instruction (required for non-reactive modes). |
 | `model.pool` | The `ModelPool` this agent binds for model access (admission-validated). |
-| `mcpServers` | The `MCPServerSet`s (by name) whose tools the agent may call. |
+| `mcpServers` | Inline list of remote MCP tool servers the agent dials directly — `[{name, endpoint, auth?, tags}]`. |
 | `subscribe` / `loop` / `schedule` / `workflow` | Mode-specific inputs (reactive subscriptions, loop cadence, cron, workflow graph). |
 | `surfaces` | Which control-plane surfaces to expose: `management`, `metrics`, `a2a`. |
 | `access` | A2A access policy: `oidc` (JWT verification + claim-based authz). |
-| `limits` | Per-agent budgets (`maxTokens`, `maxDepth`, `maxSteps`). |
+| `limits` | Per-agent bounds: `lifetimeTokens` (cumulative, harness-tracked), `maxTokens` (per-run), `maxDepth`, `maxSteps`. |
 | `capabilities.exec` / `capabilities.egress` / `capabilities.secrets` | Declared privileged capabilities. Together they form the **lethal trifecta** the admission webhook gates. |
 | `identity.aauth` | *(experimental)* Opt into an operator-provisioned portable AAuth identity for direct, self-authenticated access to remote resources. |
 
@@ -145,7 +145,6 @@ All CRDs live in the API group `agentctl.dev/v1alpha1`.
 | `scaling.target` | Claim-mode autoscaling metric (e.g. `pending_events`) and per-replica target value. |
 | `work.source` | The shared work source the workers claim from. |
 | `coordinator` | An optional **main agent** — its own `AgentSpec`, `replicas`, and `distribution` (`queue` or `a2a`). Renders an additional Deployment and becomes the fleet's A2A front door + work producer. |
-| `budget.maxTokens` | Per-fleet model budget, enforced *in addition to* the pool budget. |
 | `work` | Work-fabric policy: dead-letter threshold `work.maxAttempts` and lease TTL `work.claimTtl` (a Go-duration string like "30s"). |
 
 **Rendered workload by scaling mode:** `claim` → a **Deployment** (KEDA owns
@@ -154,23 +153,26 @@ partitions. A `coordinator`, when set, renders an additional Deployment.
 
 ### ModelPool
 
+A thin direct-dial registry: the agent dials `endpoint` itself (the operator
+renders it into the pod as `INTELLIGENCE`). The pool is not on the data path —
+there is no budget and no meter.
+
 | Field | Meaning |
 |---|---|
-| `provider` / `endpoint` | Provider id and base URL. |
-| `credentialSecretRef` | `{name, key}` of the `Secret` holding the provider API key. The gateway injects it; the agent never sees it. |
+| `provider` / `endpoint` | Provider id and the base URL the agent dials directly. |
+| `credentialSecretRef` | *(optional)* `{name, key}` of the `Secret` holding the provider API key. When set, the operator mounts it onto the **agent** as `INTELLIGENCE_TOKEN`; when omitted, the agent authenticates by its AAuth identity (secret-free). |
 | `models` / `defaultModel` | Allowed model ids and the default. |
-| `budget.maxTokens` | Total token budget for the pool, enforced by the modelgateway. `status.usedTokens` is the running meter. |
 
-### MCPServerSet
+### Inline MCP servers (`Agent.spec.mcpServers`)
 
-Each entry in `servers[]` names a remote MCP server:
+MCP tool servers are declared inline on the agent — there is no `MCPServerSet`
+kind. The agent dials each entry directly:
 
 | Field | Meaning |
 |---|---|
-| `name` / `endpoint` | Server name and its remote MCP URL. The agent dials the gateway, never this endpoint. |
-| `auth` | How the gateway authenticates upstream: `mode` (`none` or `staticToken`), `tokenSecretRef`, optional `header`. The credential lives in a `Secret` at the gateway, never on the pod. |
+| `name` / `endpoint` | Server name (the agent's `--mcp` key) and its remote MCP URL, dialed directly. |
+| `auth` | How the agent authenticates: `mode` (`none` / `staticToken` / `aauth`), `tokenSecretRef`, optional `header`. `staticToken` mounts the bearer onto the agent pod; `aauth` signs each request with the agent's own identity (secret-free). |
 | `tags` | Per-server trifecta capability tags. |
-| `budget.maxTokens` | Optional per-server call budget. |
 
 ---
 
@@ -220,9 +222,9 @@ kubectl get apiservice v1alpha1.management.agentctl.dev  # AVAILABLE=True
 ```
 
 A default install brings up the **core** control plane (no dependency beyond
-cert-manager): `operator`, `apiserver`, `gateway`, `modelgateway`, `mcpgateway`,
-`admission`, and bundled `postgres`. The `coordination` and `scaler` planes are
-opt-in — enable them (and install KEDA) for elastic claim fleets:
+cert-manager): `operator`, `apiserver`, `gateway`, `admission`, and bundled
+`postgres`. The `coordination` and `scaler` planes are opt-in — enable them (and
+install KEDA) for elastic claim fleets:
 
 ```console
 helm upgrade agentctl ./charts/agentctl -n agentctl-system --reuse-values \
@@ -234,9 +236,10 @@ helm upgrade agentctl ./charts/agentctl -n agentctl-system --reuse-values \
 
 ### 3. Your first Agent
 
-Give the agent a `ModelPool` to bind (the modelgateway holds the provider
-credential; the agent stays secret-free), then run a one-shot agent against it.
-The bundled examples wire a mock provider end-to-end:
+Give the agent a `ModelPool` to bind (the pool's `endpoint` is what the agent
+dials directly; the mock pool ships a key in a `Secret` that the operator mounts
+onto the agent), then run a one-shot agent against it. The bundled examples wire
+a mock provider end-to-end:
 
 ```console
 kubectl apply -f deploy/examples/mock-provider.yaml    # a stand-in model provider
@@ -310,21 +313,23 @@ than failing the workload. More manifests live in
 
 ## Capabilities
 
-### Secret-free, budgeted intelligence
+### Direct-dial intelligence
 
-Agents dial the **modelgateway** keyless. The gateway attests the caller by its
-pod source IP, resolves the bound `ModelPool`, injects the pool's provider
-credential (held in a `Secret` the agent never mounts), forwards to the provider,
-and meters tokens. Budgets are enforced with an atomic reserve→reconcile that
-holds the cap under concurrency — pool-wide, and per-fleet when an `AgentFleet`
-sets its own `budget`.
+Agents dial the model provider **directly**. The operator renders the bound
+`ModelPool`'s `endpoint` into the pod as `INTELLIGENCE`; the agent authenticates
+either by signing each request with its own AAuth identity (secret-free) or with
+a provider key the operator mounts as `INTELLIGENCE_TOKEN` from the pool's
+`credentialSecretRef`. There is no broker on the path, so the only token budget is
+the harness-tracked kind — `spec.limits.lifetimeTokens` (cumulative per instance)
+and the per-run `spec.limits.maxTokens`.
 
-### Secret-free, scoped tools
+### Direct-dial tools
 
-The **mcpgateway** is the tools-plane analog. It attests the caller, scopes the
-call to the servers of the `MCPServerSet`s the agent binds, injects each server's
-credential off-pod, and forwards MCP. The agent dials the gateway, never the
-remote tool server.
+MCP tool servers are declared inline on `spec.mcpServers`, and the agent dials
+each one **directly** (`--mcp <name>=<endpoint>`). Per-server `auth` picks how it
+authenticates: `aauth` signs each request with the agent's own identity
+(secret-free), `staticToken` attaches a bearer the operator mounts onto the pod,
+or `none` for an unauthenticated server. There is no tools gateway and no facade.
 
 ### Elastic claim fleets and fixed shard fleets
 
@@ -361,17 +366,21 @@ Identity is cryptographic:
 - **Inbound to an agent** — a verified mTLS client certificate authenticating the
   caller as the **Management** origin, the only origin allowed to drive
   management/A2A on the agent.
-- **Outbound from an agent** — the agent's **attested source IP** (its pod IP,
-  resolved to the pod via the Kubernetes API). Confined tenant pods cannot spoof
-  it, so one tenant cannot bill or borrow another's pool.
-- **Secret-free agents** — agents never hold a provider or tool credential; the
-  gateways inject credentials off-pod.
+- **Outbound to the work fabric** — the agent's **attested source IP** (its pod
+  IP, resolved to the pod via the Kubernetes API). Confined tenant pods cannot
+  spoof it, so on the coordination server one tenant cannot ack or release
+  another's work claim.
+- **Secret-free with AAuth** — an AAuth-authenticated agent holds no provider or
+  tool credential and signs each request itself. A key-authenticated provider or
+  server means the agent holds that key on-pod (mounted by the operator); there
+  is no off-pod broker.
 - **Hardened pods** — nonroot, no privilege escalation, all capabilities
   dropped, read-only root filesystem, no auto-mounted ServiceAccount token,
   restricted PodSecurity.
-- **Tenant isolation** — default-deny NetworkPolicies (egress only to DNS and the
-  control-plane gateways; ingress only from the control-plane namespace), shipped
-  by the chart and reconciled per-namespace by the operator.
+- **Tenant isolation** — default-deny NetworkPolicies (egress only to DNS, the
+  control plane, and public-HTTPS to providers + MCP; ingress only from the
+  control-plane namespace), shipped by the chart and reconciled per-namespace by
+  the operator.
 - **Admission** — an image-registry allow-list, plus a gate that requires an
   explicit annotation before an agent may hold the **lethal trifecta**
   (`capabilities.exec` + `capabilities.egress` + `capabilities.secrets` together).
@@ -383,8 +392,8 @@ See [`docs/security.md`](docs/security.md) for the full model.
 ### Observability
 
 Every component and agent exposes a Prometheus `/metrics` endpoint, scraped
-directly (`agentctl_operator_*`, `agentctl_gateway_*`, `agentctl_modelgateway_*`,
-`agentctl_admission_*`, and the agents' `agent_*` series). The chart can emit
+directly (`agentctl_operator_*`, `agentctl_gateway_*`, `agentctl_admission_*`,
+and the agents' `agent_*` series). The chart can emit
 `ServiceMonitor`s, a Grafana dashboard, and a `PrometheusRule` (all off by
 default). OTLP tracing is emitted when configured.
 

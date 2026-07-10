@@ -64,7 +64,7 @@ down: ## Delete the kind cluster (no-op when SKIP_BRINGUP=1).
 	  kind delete cluster --name "$(CLUSTER)"; \
 	fi
 
-images: ## Build/load agentd, mock-agent, the 8 control-plane images + the bridge.
+images: ## Build/load agentd, mock-agent, and the 6 control-plane images.
 	bash $(E2E_DIR)/images.sh
 
 install: ## helm install/upgrade agentctl with values/e2e-base.yaml (+ $(OVERLAYS)).

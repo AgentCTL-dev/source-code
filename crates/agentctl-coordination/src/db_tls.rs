@@ -16,7 +16,7 @@
 //! scoped in-cluster Service; CA-verifying (`verify-full`) the bundled cert is
 //! not implemented — for a verified DSN, point at an external managed
 //! Postgres. Built on rustls 0.23 with the **ring** provider (no aws-lc-rs, no C
-//! toolchain — the SAME stack the gateway/modelgateway use for their stores).
+//! toolchain — the SAME stack the gateway uses for its store).
 
 use std::sync::Arc;
 

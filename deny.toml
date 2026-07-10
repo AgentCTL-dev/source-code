@@ -48,8 +48,6 @@ exceptions = [
     { allow = ["BUSL-1.1"], crate = "agentctl-operator" },
     { allow = ["BUSL-1.1"], crate = "agentctl-apiserver" },
     { allow = ["BUSL-1.1"], crate = "agentctl-gateway" },
-    { allow = ["BUSL-1.1"], crate = "agentctl-modelgateway" },
-    { allow = ["BUSL-1.1"], crate = "agentctl-mcpgateway" },
     { allow = ["BUSL-1.1"], crate = "agentctl-admission" },
     { allow = ["BUSL-1.1"], crate = "agentctl-coordination" },
     { allow = ["BUSL-1.1"], crate = "agentctl-scaler" },

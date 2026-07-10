@@ -1,7 +1,7 @@
 # CRD & API design notes
 
 A running design review of the agentctl Custom Resources (`agentctl.dev/v1alpha1`:
-`Agent`, `AgentFleet`, `ModelPool`, `MCPServerSet`). It records what has been
+`Agent`, `AgentFleet`, `ModelPool`). It records what has been
 applied and the recommendations still open, so the API can be tightened while it
 is still `v1alpha1` and pre-adoption (breaking changes are cheap now, expensive
 later).
@@ -9,8 +9,8 @@ later).
 The guiding principles:
 
 - **One obvious place for each thing** — no near-duplicate fields.
-- **Name a binding after the kind it references** — `model.pool` ↔ `ModelPool`,
-  `mcpServers` ↔ `MCPServerSet`.
+- **Name a binding after the kind it references** — `model.pool` ↔ `ModelPool`.
+  (`mcpServers` needs no kind — the tool servers are declared inline on it.)
 - **Bare names for same-namespace references** (strings); objects only when a
   reference needs more than a name.
 - **Ship only wired fields** — no phantom references or documentation-only flags
@@ -36,7 +36,7 @@ fields by concern, and make documented invariants machine-checked.
 | **Remove `spec.intelligenceRef`** | Vestigial: a `LocalRef` to a non-existent `IntelligenceService`, consumed nowhere. The real binding is `spec.model.pool`. |
 | **Remove `spec.classRef` + the `LocalRef` type** | Vestigial: there is no `AgentClass` CRD and no resolver. `LocalRef` had no remaining users after the `mcpServers` flatten. |
 | **Remove `spec.limits.treeTokenBudget`** | Declared but **never emitted** to the agent. A silent no-op field is a versioning liability. (Unrelated to the agent's *reported* `tree_token_budget` in the capabilities manifest, which stays — that is the contract, not the CRD.) |
-| **`spec.mcpServerSetRefs` → `spec.mcpServers`** | Was `[]LocalRef{name}`; now `[]string` — a bare list of `MCPServerSet` names. |
+| **`spec.mcpServerSetRefs` → `spec.mcpServers`** | Tool servers are now declared **inline** on the Agent — `spec.mcpServers` is a list of `{name, endpoint, auth?, tags}` objects the agent dials directly. There is no `MCPServerSet` kind and no gateway facade. |
 
 ### Pass 2 — grouping, latent-bug fixes, observability
 
@@ -49,9 +49,9 @@ fields by concern, and make documented invariants machine-checked.
 | **`substrate` honesty** | The enum keeps all three tiers (`stock-unix` is the locked direction alongside Kata), but the field/variant docs now say plainly that **only `stock-unix` is rendered today** — `kata-hybrid`/`sidecar-emptydir` are declared roadmap tiers, rejected at render. The misleading "hostile tenancy forces `kata-hybrid`" default story is gone. |
 | **CEL invariants for requiredness** | Two rules added to `Agent`/`template`: `instruction` is required for `once`/`loop`/`schedule`; a `reactive` agent must carry a wake source — `subscribe`, a `workflow`, or `surfaces.a2a` (the last covers an A2A-driven coordinator that has neither `subscribe` nor `workflow`). |
 | **Remove `access.public`** | An unenforced `public: true` that gated nothing (a safe-by-default footgun). Real exposure is governed by `surfaces.a2a` + `access.oidc`. |
-| **`ModelPool` / `MCPServerSet` status `conditions` + `Ready` column** | All four kinds now share one health idiom (a `conditions` array + a `Ready` printer column). |
+| **`ModelPool` status `conditions` + `Ready` column** | All three kinds now share one health idiom (a `conditions` array + a `Ready` printer column). |
 | **Agent printer columns point at the binding** | The default-wide columns are now `Pool` (`.spec.model.pool`, the real binding) and `Model` (`.spec.model.id`), instead of the single decorative `.spec.model`. |
-| **Shared `agentctl` category on all four kinds** | `kubectl get agentctl` lists Agents/AgentFleets/ModelPools/MCPServerSets together (as cert-manager does with its `cert-manager` category). |
+| **Shared `agentctl` category on all three kinds** | `kubectl get agentctl` lists Agents/AgentFleets/ModelPools together (as cert-manager does with its `cert-manager` category). |
 
 **Illustrative target `Agent.spec`, grouped by concern:**
 
@@ -61,10 +61,11 @@ spec:
   image: ghcr.io/agentd-dev/agentd:1.0.0   # optional — operator default fills it
   instruction: "…"
   model: { pool: gpt, id: gpt-4o-mini }    # the binding + the model id
-  mcpServers: [tools]                       # MCPServerSet names
+  mcpServers:                               # inline; the agent dials each directly
+    - { name: tools, endpoint: https://tools.example/mcp, auth: { mode: aauth } }
   subscribe: ["queue://jobs"]               # a wake source (CEL-required for reactive)
   surfaces: { a2a: true, metrics: true }
-  limits: { maxTokens: 20000 }
+  limits: { lifetimeTokens: 2000000, maxTokens: 20000 }  # cumulative + per-run
   capabilities: { exec: false, egress: true, secrets: [db-creds] }  # trifecta, admission-gated
   access: { oidc: { … } }
 ```
@@ -82,11 +83,12 @@ or a judgment call the current flat form already serves well.
   form + the `shards`-requiredness CEL rule works; deferred as a larger change.
 - **Trifecta end-to-end wiring.** `capabilities.exec`/`egress`/`secrets` gate
   admission; **`egress` is now partially wired** (RFC 0024): binding an
-  `auth.mode: aauth` MCP server requires `capabilities.egress: true` at
-  admission, and the operator then renders the `agent-aauth-internet-egress`
-  NetworkPolicy (public-HTTPS egress for that agent). `exec` and `secrets`
-  remain admission-only — mounting the named `Secret`s and passing `exec`
-  end-to-end is the residual open item.
+  `auth.mode: aauth` MCP server requires `identity.aauth` + `capabilities.egress: true`
+  at admission. Public-HTTPS egress itself is no longer AAuth-specific — since
+  agents dial providers and MCP directly, the operator renders the
+  `agent-internet-egress` NetworkPolicy for every agent namespace. `exec` and
+  `secrets` remain admission-only — mounting the named `Secret`s and passing
+  `exec` end-to-end is the residual open item.
 - **Cosmetic Rust-type renames** (wire keys unchanged): `DesiredSurfaces` →
   `Surfaces`, `LoopParams` → `Loop`. Pure internal tidy; deferred.
 - **Discriminated `trigger`/`run` union** keyed by `mode` (folding `subscribe` /

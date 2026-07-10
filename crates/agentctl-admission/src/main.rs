@@ -49,7 +49,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use serde_json::{json, Map, Value};
 
-use agent_api::{MCPServerSet, McpAuthMode, ModelPool};
+use agent_api::ModelPool;
 
 mod metrics;
 
@@ -281,7 +281,6 @@ async fn evaluate_view(
     is_template: bool,
 ) -> Result<(), String> {
     let model_pool_exists = resolve_model_pool(&state.client, view, namespace).await;
-    let bound_aauth_server = resolve_aauth_servers(&state.client, view, namespace).await;
     evaluate(
         view,
         annotations,
@@ -290,7 +289,6 @@ async fn evaluate_view(
         namespace,
         state.aauth_default_provider,
         is_template,
-        bound_aauth_server,
     )
 }
 
@@ -352,39 +350,17 @@ async fn mutate(State(state): State<AppState>, Json(review): Json<Value>) -> Jso
     Json(mutation_response(&uid, &patch))
 }
 
-/// Whether any `MCPServerSet` the view binds (`spec.mcpServers`) carries an
-/// `auth.mode: aauth` server. `Some(false)` when none do (or nothing is bound),
-/// `Some(true)` when at least one does, `None` when a lookup errors (fail-open,
-/// mirroring [`resolve_model_pool`] — a transient apiserver hiccup must not
-/// block otherwise-valid admissions). Dangling set refs check nothing (the
-/// operator logs-and-skips them at render).
-async fn resolve_aauth_servers(client: &Client, spec: &Value, namespace: &str) -> Option<bool> {
-    let names: Vec<&str> = spec
-        .get("mcpServers")
+/// Whether the view carries an inline `mcpServers[]` entry with
+/// `auth.mode: aauth` (a direct signed dial). Pure — the servers are inline on
+/// the Agent now, so no cross-object lookup.
+fn bound_aauth_server(spec: &Value) -> bool {
+    spec.get("mcpServers")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    if names.is_empty() {
-        return Some(false);
-    }
-    let api: Api<MCPServerSet> = Api::namespaced(client.clone(), namespace);
-    let mut any = false;
-    for n in names {
-        match api.get_opt(n).await {
-            Ok(Some(set)) => {
-                if set.spec.servers.iter().any(|s| {
-                    s.auth
-                        .as_ref()
-                        .is_some_and(|a| a.mode == McpAuthMode::Aauth)
-                }) {
-                    any = true;
-                }
-            }
-            Ok(None) => {}
-            Err(_) => return None,
-        }
-    }
-    Some(any)
+        .is_some_and(|servers| {
+            servers
+                .iter()
+                .any(|s| s.pointer("/auth/mode").and_then(Value::as_str) == Some("aauth"))
+        })
 }
 
 /// If `spec.model.pool` names a pool, look it up in `namespace`: `Some(true)` if
@@ -456,10 +432,10 @@ fn parse_registries(csv: Option<String>) -> Vec<String> {
 /// 7. `identity.aauth.provider` / `.personServer`, when set, are not
 ///    `https://` URLs (the operator's own default is its config, not re-checked
 ///    here; a spec-level override travels the cluster and must be verifiable).
-/// 8. An `auth.mode: aauth` MCP server is bound (`bound_aauth_server ==
-///    Some(true)`) without `identity.aauth` + `capabilities.egress: true` —
-///    the direct signed dial (RFC 0024) needs both: an identity to sign with,
-///    and the declared-intent egress that will carry it.
+/// 8. An inline `auth.mode: aauth` MCP server (`bound_aauth_server`) without
+///    `identity.aauth` + `capabilities.egress: true` — the direct signed dial
+///    (RFC 0024) needs both: an identity to sign with, and the declared-intent
+///    egress that will carry it.
 #[allow(clippy::too_many_arguments)] // a pure verdict fn over pre-resolved facts
 fn evaluate(
     spec: &Value,
@@ -469,7 +445,6 @@ fn evaluate(
     namespace: &str,
     aauth_default_provider: bool,
     is_template: bool,
-    bound_aauth_server: Option<bool>,
 ) -> Result<(), String> {
     // 1. Image registry allow-list.
     if !allowed_registries.is_empty() {
@@ -561,9 +536,8 @@ fn evaluate(
     }
 
     // 8. Direct-dial (aauth) MCP servers need an identity to sign with and the
-    // declared egress that will carry the dial (RFC 0024). Lookup failures
-    // arrive as None (fail-open, like the ModelPool check).
-    if bound_aauth_server == Some(true) {
+    // declared egress that will carry the dial (RFC 0024).
+    if bound_aauth_server(spec) {
         let has_identity = spec
             .pointer("/identity/aauth")
             .filter(|v| !v.is_null())
@@ -771,7 +745,7 @@ mod tests {
     #[test]
     fn clean_agent_is_allowed() {
         let spec = json!({ "mode": "once", "image": "ghcr.io/acme/agent:v1" });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -780,8 +754,7 @@ mod tests {
             "mode": "loop",
             "capabilities": { "exec": true, "egress": true, "secrets": ["db-password"] }
         });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("lethal trifecta"));
         assert!(!err.is_empty());
     }
@@ -793,7 +766,7 @@ mod tests {
             "capabilities": { "exec": true, "egress": true, "secrets": ["db-password"] }
         });
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "true" }));
-        assert!(evaluate(&spec, &anns, &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &anns, &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -827,8 +800,7 @@ mod tests {
             }}
         });
         let coord = coordinator_spec_view("AgentFleet", &fleet).unwrap();
-        let err =
-            evaluate(coord, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(coord, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(
             err.contains("lethal trifecta"),
             "coordinator trifecta must be denied: {err}"
@@ -842,17 +814,17 @@ mod tests {
         });
         // Any value other than "true" does not open the gate.
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "yes" }));
-        assert!(evaluate(&spec, &anns, &[], None, "default", false, false, None).is_err());
+        assert!(evaluate(&spec, &anns, &[], None, "default", false, false).is_err());
     }
 
     #[test]
     fn two_of_three_trifecta_legs_is_allowed() {
         // exec + egress but no secrets ⇒ not the full trifecta ⇒ no gate.
         let spec = json!({ "capabilities": { "exec": true, "egress": true } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
         // exec + egress with an empty secrets array is still only two legs.
         let spec = json!({ "capabilities": { "exec": true, "egress": true, "secrets": [] } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -867,7 +839,6 @@ mod tests {
             "default",
             false,
             false,
-            None,
         )
         .unwrap_err();
         assert!(err.contains("not from an allowed registry"));
@@ -887,7 +858,6 @@ mod tests {
             "default",
             false,
             false,
-            None
         )
         .is_ok());
     }
@@ -895,23 +865,14 @@ mod tests {
     #[test]
     fn empty_registry_list_allows_any_image() {
         let spec = json!({ "image": "quay.io/whatever:1" });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn missing_model_pool_is_denied() {
         let spec = json!({ "model": { "pool": "shared" } });
-        let err = evaluate(
-            &spec,
-            &Map::new(),
-            &[],
-            Some(false),
-            "team-a",
-            false,
-            false,
-            None,
-        )
-        .unwrap_err();
+        let err =
+            evaluate(&spec, &Map::new(), &[], Some(false), "team-a", false, false).unwrap_err();
         assert!(err.contains("shared"));
         assert!(err.contains("team-a"));
         assert!(!err.is_empty());
@@ -920,17 +881,7 @@ mod tests {
     #[test]
     fn present_model_pool_is_allowed() {
         let spec = json!({ "model": { "pool": "shared" } });
-        assert!(evaluate(
-            &spec,
-            &Map::new(),
-            &[],
-            Some(true),
-            "team-a",
-            false,
-            false,
-            None
-        )
-        .is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], Some(true), "team-a", false, false,).is_ok());
     }
 
     #[test]
@@ -945,7 +896,6 @@ mod tests {
             "default",
             false,
             false,
-            None
         )
         .is_ok());
     }
@@ -963,7 +913,7 @@ mod tests {
                 "forwardIdentity": true
             }}
         });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -975,27 +925,26 @@ mod tests {
                 "audiences": ["agentctl-a2a"]
             }}
         });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn oidc_absent_or_public_only_access_is_allowed() {
         // No access block at all.
         let spec = json!({ "mode": "once" });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
         // access present but only the doc-only `public` flag, no oidc.
         let spec = json!({ "access": { "public": true } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
         // explicit null oidc is treated as absent.
         let spec = json!({ "access": { "oidc": null } });
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn oidc_missing_issuer_is_denied() {
         let spec = json!({ "access": { "oidc": { "audiences": ["a"] } } });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
         assert!(!err.is_empty());
     }
@@ -1003,8 +952,7 @@ mod tests {
     #[test]
     fn oidc_empty_issuer_is_denied() {
         let spec = json!({ "access": { "oidc": { "issuer": "", "audiences": ["a"] } } });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
     }
 
@@ -1013,8 +961,7 @@ mod tests {
         let spec = json!({
             "access": { "oidc": { "issuer": "http://idp.example.com", "audiences": ["a"] } }
         });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
         assert!(err.contains("https://"));
     }
@@ -1023,22 +970,19 @@ mod tests {
     fn oidc_empty_audiences_is_denied() {
         // Missing audiences.
         let spec = json!({ "access": { "oidc": { "issuer": "https://idp.example.com" } } });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("audiences"));
         // Present but empty array.
         let spec = json!({
             "access": { "oidc": { "issuer": "https://idp.example.com", "audiences": [] } }
         });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("audiences"));
         // Present but only a blank string ⇒ still effectively empty.
         let spec = json!({
             "access": { "oidc": { "issuer": "https://idp.example.com", "audiences": [""] } }
         });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("audiences"));
     }
 
@@ -1051,8 +995,7 @@ mod tests {
                 "jwksUri": "http://idp.example.com/keys"
             }}
         });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("jwksUri"));
         assert!(err.contains("https://"));
     }
@@ -1070,8 +1013,7 @@ mod tests {
         });
         let empty = Value::Object(Map::new());
         let view = agent_spec_view("AgentFleet", &spec, &empty);
-        let err =
-            evaluate(view, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(view, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("issuer"));
     }
 
@@ -1088,8 +1030,7 @@ mod tests {
     #[test]
     fn deny_message_is_non_empty() {
         let spec = json!({ "capabilities": { "exec": true, "egress": true, "secrets": ["x"] } });
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(!err.trim().is_empty());
     }
 
@@ -1100,8 +1041,8 @@ mod tests {
         let spec = json!({ "identity": { "aauth": {} } });
         // The SAME spec passes as an Agent (with a default provider) but is
         // denied as a template view — replicas would alias one identity.
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", true, false, None).is_ok());
-        let err = evaluate(&spec, &Map::new(), &[], None, "default", true, true, None).unwrap_err();
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", true, false).is_ok());
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", true, true).unwrap_err();
         assert!(err.contains("fleet templates"), "got: {err}");
     }
 
@@ -1109,134 +1050,63 @@ mod tests {
     fn aauth_without_any_provider_is_denied() {
         let spec = json!({ "identity": { "aauth": {} } });
         // No spec provider + no operator default ⇒ deny with a pointed message.
-        let err =
-            evaluate(&spec, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(&spec, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("requires a provider"), "got: {err}");
         // Operator default configured ⇒ the empty opt-in is fine.
-        assert!(evaluate(&spec, &Map::new(), &[], None, "default", true, false, None).is_ok());
+        assert!(evaluate(&spec, &Map::new(), &[], None, "default", true, false).is_ok());
         // A spec-level provider also satisfies it (no default needed).
         let with = json!({ "identity": { "aauth": { "provider": "https://ap.example" } } });
-        assert!(evaluate(&with, &Map::new(), &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(&with, &Map::new(), &[], None, "default", false, false).is_ok());
     }
 
     #[test]
     fn aauth_urls_must_be_https() {
         let plaintext = json!({ "identity": { "aauth": { "provider": "http://ap.example" } } });
-        let err = evaluate(
-            &plaintext,
-            &Map::new(),
-            &[],
-            None,
-            "default",
-            false,
-            false,
-            None,
-        )
-        .unwrap_err();
+        let err =
+            evaluate(&plaintext, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("https://"), "got: {err}");
 
         let bad_ps = json!({ "identity": { "aauth": {
             "provider": "https://ap.example",
             "personServer": "http://ps.example"
         } } });
-        let err = evaluate(
-            &bad_ps,
-            &Map::new(),
-            &[],
-            None,
-            "default",
-            false,
-            false,
-            None,
-        )
-        .unwrap_err();
+        let err = evaluate(&bad_ps, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("personServer"), "got: {err}");
     }
 
     #[test]
     fn aauth_mode_server_binding_requires_identity_and_egress() {
-        // Bound aauth server + no identity ⇒ deny naming the missing piece.
-        let bare = json!({ "mcpServers": ["tools"] });
-        let err = evaluate(
-            &bare,
-            &Map::new(),
-            &[],
-            None,
-            "default",
-            true,
-            false,
-            Some(true),
-        )
-        .unwrap_err();
+        // An inline aauth-mode MCP server + no identity ⇒ deny.
+        let aauth_srv = json!([{ "name": "secure",
+            "endpoint": "https://mcp.secure/mcp", "auth": { "mode": "aauth" } }]);
+        let bare = json!({ "mcpServers": aauth_srv });
+        let err = evaluate(&bare, &Map::new(), &[], None, "default", true, false).unwrap_err();
         assert!(err.contains("identity.aauth"), "got: {err}");
 
         // Identity but no declared egress ⇒ deny on the egress leg.
-        let no_egress = json!({
-            "mcpServers": ["tools"],
-            "identity": { "aauth": {} }
-        });
-        let err = evaluate(
-            &no_egress,
-            &Map::new(),
-            &[],
-            None,
-            "default",
-            true,
-            false,
-            Some(true),
-        )
-        .unwrap_err();
+        let no_egress = json!({ "mcpServers": aauth_srv, "identity": { "aauth": {} } });
+        let err = evaluate(&no_egress, &Map::new(), &[], None, "default", true, false).unwrap_err();
         assert!(err.contains("capabilities.egress"), "got: {err}");
 
         // Identity + egress ⇒ admitted.
         let full = json!({
-            "mcpServers": ["tools"],
+            "mcpServers": aauth_srv,
             "identity": { "aauth": {} },
             "capabilities": { "egress": true }
         });
-        assert!(evaluate(
-            &full,
-            &Map::new(),
-            &[],
-            None,
-            "default",
-            true,
-            false,
-            Some(true)
-        )
-        .is_ok());
+        assert!(evaluate(&full, &Map::new(), &[], None, "default", true, false).is_ok());
 
-        // No aauth servers bound (or a failed lookup) ⇒ rule 8 is inert.
-        assert!(evaluate(
-            &bare,
-            &Map::new(),
-            &[],
-            None,
-            "default",
-            true,
-            false,
-            Some(false)
-        )
-        .is_ok());
-        assert!(evaluate(&bare, &Map::new(), &[], None, "default", true, false, None).is_ok());
+        // A non-aauth server (none/staticToken) ⇒ rule 8 is inert.
+        let none_srv = json!({ "mcpServers": [{ "name": "x", "endpoint": "https://x/mcp" }] });
+        assert!(evaluate(&none_srv, &Map::new(), &[], None, "default", true, false).is_ok());
     }
 
     #[test]
     fn absent_or_null_identity_is_ignored() {
         let absent = json!({ "mode": "once" });
-        assert!(evaluate(
-            &absent,
-            &Map::new(),
-            &[],
-            None,
-            "default",
-            false,
-            false,
-            None
-        )
-        .is_ok());
+        assert!(evaluate(&absent, &Map::new(), &[], None, "default", false, false,).is_ok());
         let null = json!({ "identity": { "aauth": null } });
-        assert!(evaluate(&null, &Map::new(), &[], None, "default", false, true, None).is_ok());
+        assert!(evaluate(&null, &Map::new(), &[], None, "default", false, true).is_ok());
     }
 
     #[test]
@@ -1298,8 +1168,7 @@ mod tests {
         });
         let empty = Value::Object(Map::new());
         let view = agent_spec_view("AgentFleet", &spec, &empty);
-        let err =
-            evaluate(view, &Map::new(), &[], None, "default", false, false, None).unwrap_err();
+        let err = evaluate(view, &Map::new(), &[], None, "default", false, false).unwrap_err();
         assert!(err.contains("lethal trifecta"));
     }
 
@@ -1313,7 +1182,7 @@ mod tests {
         let view = agent_spec_view("AgentFleet", &spec, &empty);
         // The override annotation rides on the AgentFleet object's metadata.
         let anns = annotations(json!({ "agentctl.dev/allow-trifecta": "true" }));
-        assert!(evaluate(view, &anns, &[], None, "default", false, false, None).is_ok());
+        assert!(evaluate(view, &anns, &[], None, "default", false, false).is_ok());
     }
 
     #[test]
@@ -1333,7 +1202,6 @@ mod tests {
             "default",
             false,
             false,
-            None,
         )
         .unwrap_err();
         assert!(err.contains("not from an allowed registry"));

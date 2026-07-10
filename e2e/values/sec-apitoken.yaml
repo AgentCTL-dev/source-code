@@ -1,7 +1,7 @@
 # Security gate: in-cluster bearer-token auth (AGENTCTL_API_TOKEN).
 # Flips charts/agentctl/values.yaml `apiToken.enabled`. The chart creates the
 # lookup-stable agentctl-api-token Secret and wires the token into the
-# coordination server, ModelGateway, A2A gateway, and scaler — those services
+# coordination server, A2A gateway, and scaler — those services
 # then require `Authorization: Bearer <token>`. Scenario: 401 without / 200 with.
 apiToken:
   enabled: true

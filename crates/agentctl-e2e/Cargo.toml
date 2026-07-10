@@ -53,7 +53,7 @@ agent-api = { path = "../agent-api" }
 # Contract manifest parsing/validation (capabilities manifest, version negotiate).
 agent-contract-client = { path = "../agent-contract-client" }
 # HTTP client for: /metrics scrapes over a port-forward, the A2A gateway card/RPC/
-# SSE surface, the ModelGateway, and the coordination /mcp throughput load-gen.
+# SSE surface, and the coordination /mcp throughput load-gen.
 # `rustls-tls` is ring-backed in reqwest 0.12 (→ no aws-lc-rs, no C toolchain).
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",

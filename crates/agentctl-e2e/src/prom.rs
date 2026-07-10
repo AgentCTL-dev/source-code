@@ -3,8 +3,8 @@
 //!
 //! Every control-plane component serves `GET /metrics` in the hand-rendered text
 //! format. This module turns that into queryable samples so a
-//! scenario can assert an oracle like "`agentctl_modelgateway_tokens_total` rose by
-//! 100" or "`agentctl_apiserver_verb_denied_total{} == 1`".
+//! scenario can assert an oracle like "`agentctl_coordination_claims_granted_total`
+//! rose by 3" or "`agentctl_apiserver_verb_denied_total{} == 1`".
 //!
 //! Two scrape paths — via the kube apiserver proxy or a port-forward:
 //!   * [`scrape_proxy`] — `kubectl get --raw` of the apiserver Service proxy path
@@ -238,8 +238,8 @@ mod tests {
 # HELP agentctl_coordination_claims_granted_total Claims granted.
 # TYPE agentctl_coordination_claims_granted_total counter
 agentctl_coordination_claims_granted_total 7
-agentctl_modelgateway_tokens_total{token_type="in"} 90
-agentctl_modelgateway_tokens_total{token_type="out"} 10
+agentctl_coordination_acked_total{shard="0"} 90
+agentctl_coordination_acked_total{shard="1"} 10
 agentctl_apiserver_verb_denied_total{verb="drain"} 1 1700000000000
 "#;
 
@@ -251,12 +251,9 @@ agentctl_apiserver_verb_denied_total{verb="drain"} 1 1700000000000
             Some(7.0)
         );
         // label-partitioned sum
-        assert_eq!(m.sum("agentctl_modelgateway_tokens_total"), 100.0);
+        assert_eq!(m.sum("agentctl_coordination_acked_total"), 100.0);
         assert_eq!(
-            m.get(
-                "agentctl_modelgateway_tokens_total",
-                &[("token_type", "out")]
-            ),
+            m.get("agentctl_coordination_acked_total", &[("shard", "1")]),
             Some(10.0)
         );
         // trailing timestamp is dropped
@@ -270,10 +267,10 @@ agentctl_apiserver_verb_denied_total{verb="drain"} 1 1700000000000
     fn names_and_map_are_canonical() {
         let m = Metrics::parse(SAMPLE);
         let names = m.names();
-        assert!(names.contains("agentctl_modelgateway_tokens_total"));
+        assert!(names.contains("agentctl_coordination_acked_total"));
         let map = m.to_map();
         assert_eq!(
-            map.get("agentctl_modelgateway_tokens_total{token_type=\"in\"}"),
+            map.get("agentctl_coordination_acked_total{shard=\"0\"}"),
             Some(&90.0)
         );
     }

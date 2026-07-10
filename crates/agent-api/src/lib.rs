@@ -88,11 +88,11 @@ pub struct AgentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
 
-    /// The reusable MCP tool-server bundles this agent binds, by `MCPServerSet`
-    /// name (same namespace). The MCPGateway scopes the agent to exactly these
-    /// servers and injects each one's credential off-pod.
+    /// The remote MCP tool servers this agent dials **directly** (inline; no
+    /// broker). Each names its endpoint + auth (`aauth` = the agent signs
+    /// itself, secret-free; `staticToken` = a bearer mounted onto the pod).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<String>,
+    pub mcp_servers: Vec<McpServer>,
 
     /// Substrate tier. Absent ⇒ `stock-unix`, which is the **only** tier the
     /// operator renders today. `kata-hybrid` / `sidecar-emptydir` are declared
@@ -381,8 +381,9 @@ pub struct Limits {
     /// bounded `once` run exhaustion folds into `EXIT_BUDGET(7)`; a
     /// `reactive`/`loop`/`schedule` daemon stops accepting new reactions and
     /// drains cleanly (exit 0 by default, operator-tunable via the agent's
-    /// `--budget-exit-code`). Fleet members each get their own lifetime box;
-    /// the fleet-aggregate cap is `AgentFleet.spec.budget` at the modelgateway.
+    /// `--budget-exit-code`). Each instance (fleet member included) gets its own
+    /// lifetime box — the harness is the only token-budget enforcement point now
+    /// that the metering gateway is gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime_tokens: Option<u64>,
 }
@@ -550,12 +551,6 @@ pub struct AgentFleetSpec {
     /// directly by the A2A gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<Coordinator>,
-
-    /// Per-fleet model budget, enforced by the ModelGateway IN ADDITION to the
-    /// `ModelPool` budget. Isolates one fleet's spend from another's even when
-    /// they share a pool. Absent ⇒ only the pool cap applies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget: Option<FleetBudget>,
 }
 
 /// The fleet's coordinator ("main agent"). A normal conformant agent,
@@ -595,17 +590,6 @@ pub enum Distribution {
     Queue,
     /// Point-to-point delegation through the gateway PEP (`a2a.delegate`).
     A2a,
-}
-
-/// Per-fleet model budget (the intelligence plane).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct FleetBudget {
-    /// Total tokens this fleet may consume against its `ModelPool`, across all
-    /// members. Enforced by the ModelGateway reservation path keyed by
-    /// `(namespace, pool, fleet)`, IN ADDITION to the pool-wide cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<i64>,
 }
 
 /// The fleet's shared work fabric: the work source plus the redelivery/lease
@@ -715,12 +699,14 @@ pub struct AgentFleetStatus {
 // ModelPool
 // ===========================================================================
 
-/// A pool of model access (the intelligence plane). Agents hold **NO provider
-/// secrets**; they dial the control plane keyless, and the control plane supplies
-/// model access through a credential-injecting, metering, budget-enforcing proxy
-/// (the `ModelGateway`) configured by this CRD. The pool names the
-/// provider, its endpoint, the `Secret` holding the provider API key, the
-/// allowed models, and an optional total token budget.
+/// A named model endpoint the intelligence plane dials **directly** (no broker).
+/// The pool records the provider, its endpoint, and the allowed models; an
+/// `Agent` binds it via `spec.model.pool` and the operator renders
+/// `INTELLIGENCE=<endpoint>` straight into the pod. The preferred authentication
+/// is the agent's own **AAuth** identity (`spec.identity.aauth`), so the pod
+/// holds no provider secret. For a key-authenticated provider,
+/// `credentialSecretRef` is mounted onto the agent as its `INTELLIGENCE_TOKEN`
+/// env-secret (the agent then holds that key — there is no off-pod broker).
 #[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[kube(
     group = "agentctl.dev",
@@ -732,32 +718,24 @@ pub struct AgentFleetStatus {
     category = "agentctl",
     printcolumn = r#"{"name":"Provider","type":"string","jsonPath":".spec.provider"}"#,
     printcolumn = r#"{"name":"Endpoint","type":"string","jsonPath":".spec.endpoint","priority":1}"#,
-    printcolumn = r#"{"name":"Budget","type":"integer","jsonPath":".spec.budget.maxTokens"}"#,
-    printcolumn = r#"{"name":"Used","type":"integer","jsonPath":".status.usedTokens"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
-#[schemars(extend("x-kubernetes-validations" = [
-    {
-        "rule": "!has(self.budget) || self.budget.maxTokens > 0",
-        "message": "budget.maxTokens must be > 0"
-    },
-    {
-        "rule": "self.credentialSecretRef.name != ''",
-        "message": "credentialSecretRef.name is required"
-    }
-]))]
 pub struct ModelPoolSpec {
     /// Provider id, e.g. `"mock"` | `"anthropic"` | `"openai"` (free string).
     pub provider: String,
 
-    /// Provider base URL, e.g. `http://mock-provider.default:8080`.
+    /// Provider base URL the agent dials directly, e.g.
+    /// `https://api.anthropic.com` — rendered into the pod as `INTELLIGENCE`.
     pub endpoint: String,
 
-    /// Reference to the `Secret` holding the provider API key. The gateway
-    /// injects it; the agent never sees it.
-    pub credential_secret_ref: SecretKeyRef,
+    /// OPTIONAL provider API-key `Secret`. Present ⇒ the operator mounts it onto
+    /// the agent as its `INTELLIGENCE_TOKEN` env-secret (the agent holds the
+    /// key — there is no off-pod broker). Absent ⇒ the agent authenticates by
+    /// its AAuth identity (the secret-free path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_secret_ref: Option<SecretKeyRef>,
 
     /// Allowed model ids for this pool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -766,31 +744,19 @@ pub struct ModelPoolSpec {
     /// Default model id, used when a request does not pin one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-
-    /// Total token budget for the pool (enforced by the gateway).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget: Option<Budget>,
 }
 
 /// A reference to a specific key within a namespace-local `Secret`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretKeyRef {
-    /// The `Secret` name (same namespace as the `ModelPool`).
+    /// The `Secret` name (same namespace as the referencing resource).
     pub name: String,
-    /// The key within the `Secret`'s data holding the provider API key.
+    /// The key within the `Secret`'s data holding the credential.
     pub key: String,
 }
 
-/// A total token budget for a `ModelPool`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Budget {
-    /// Maximum total tokens the pool may consume.
-    pub max_tokens: i64,
-}
-
-/// `ModelPool.status` — running meter against the pool's budget.
+/// `ModelPool.status` — health of the model binding.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPoolStatus {
@@ -798,104 +764,51 @@ pub struct ModelPoolStatus {
     /// idiom with `Agent`/`AgentFleet`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
-    /// Total tokens consumed against the pool so far.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub used_tokens: Option<i64>,
 }
 
 // ===========================================================================
-// MCPServerSet
+// MCP servers (inline on the Agent — no broker CRD)
 // ===========================================================================
 
-/// A reusable, namespaced bundle of MCP tool servers an `Agent`/`AgentFleet`
-/// binds via `spec.mcpServers`. Agents hold **NO tool-server
-/// credentials**: they never hold a tool server's token. The
-/// control plane brokers every remote MCP server through a credential-injecting,
-/// attesting, policy-enforcing proxy (the `MCPGateway`, the tool-plane analog of
-/// the `ModelGateway`) configured by this CRD. Each server names its remote
-/// endpoint, its auth (a `Secret`-backed token held at the gateway, never the
-/// pod), its per-tool trifecta tags, and an optional call budget.
-#[derive(CustomResource, Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
-#[kube(
-    group = "agentctl.dev",
-    version = "v1alpha1",
-    kind = "MCPServerSet",
-    namespaced,
-    status = "MCPServerSetStatus",
-    shortname = "mcpset",
-    category = "agentctl",
-    printcolumn = r#"{"name":"Servers","type":"integer","jsonPath":".status.serverCount"}"#,
-    printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
-    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
-)]
-#[serde(rename_all = "camelCase")]
-#[schemars(extend("x-kubernetes-validations" = [
-    {
-        "rule": "self.servers.all(s, s.name != '')",
-        "message": "every server needs a non-empty name"
-    },
-    {
-        "rule": "self.servers.all(s, s.endpoint.startsWith('https://') || s.endpoint.startsWith('http://'))",
-        "message": "each server endpoint must be an http(s):// URL"
-    },
-    {
-        // aauth = the AGENT authenticates itself: no credential exists to hold,
-        // and the dial is direct — plaintext would strip the signature's value.
-        "rule": "self.servers.all(s, !has(s.auth) || s.auth.mode != 'aauth' || (!has(s.auth.tokenSecretRef) && s.endpoint.startsWith('https://')))",
-        "message": "an aauth-mode server takes no tokenSecretRef and its endpoint must be https://"
-    }
-]))]
-pub struct MCPServerSetSpec {
-    /// The MCP tool servers this set bundles.
-    pub servers: Vec<McpServer>,
-}
-
-/// One remote MCP tool server, brokered by the MCPGateway.
+/// One remote MCP tool server the agent dials **directly** (Streamable HTTP).
+/// Declared inline on `Agent.spec.mcpServers`; there is no gateway facade.
+/// Preferred auth is the agent's own **AAuth** identity (`mode: aauth`, the
+/// secret-free path); `staticToken` mounts a bearer onto the agent pod for a
+/// server that only takes a key.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServer {
-    /// Server name — the key an `Agent` references and the gateway facade path
-    /// segment (`/s/<name>`). Unique within the resolved `Agent` union.
+    /// Server name — the agent's `--mcp <name>=<endpoint>` key. Unique per Agent.
     pub name: String,
 
-    /// The remote MCP server URL (Streamable HTTP transport). The AGENT never
-    /// dials this — it dials the gateway, which dials this.
+    /// The remote MCP server URL (Streamable HTTP transport) the agent dials.
     pub endpoint: String,
 
-    /// How the gateway authenticates to the remote server. The credential lives
-    /// in a `Secret` the gateway reads; it is NEVER placed on the agent pod.
+    /// How the agent authenticates to the server (default: `none`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<McpAuth>,
 
-    /// Per-tool trifecta capability tags the operator declares for the
-    /// Rule-of-Two check. A bare list is shorthand for the `*` glob.
+    /// Per-tool trifecta capability tags (the Rule-of-Two admission check).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-
-    /// Optional per-server call budget (enforced by the gateway).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget: Option<Budget>,
 }
 
-/// How the MCPGateway authenticates to a remote MCP server. The `staticToken`
-/// bearer (a long-lived credential held off-pod at the gateway) is currently
-/// supported; OAuth client-credentials / EMA tiers extend this enum.
+/// How the agent authenticates to a remote MCP server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAuth {
-    /// Auth mode. `none` (unauthenticated server) | `staticToken` (a bearer the
-    /// gateway attaches upstream).
+    /// Auth mode: `none` | `staticToken` (a bearer mounted onto the agent) |
+    /// `aauth` (the agent signs its own requests — secret-free).
     #[serde(default)]
     pub mode: McpAuthMode,
 
-    /// The bearer credential for `staticToken` mode: a `Secret` key the gateway
-    /// reads and attaches as `Authorization: Bearer <value>` on the upstream
-    /// hop. Required iff `mode == staticToken`. NEVER placed on the agent pod.
+    /// The bearer for `staticToken` mode: a `Secret` key the operator mounts
+    /// onto the agent, which attaches it upstream. (The agent holds the key —
+    /// there is no off-pod broker.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_secret_ref: Option<SecretKeyRef>,
 
-    /// Header name to carry the token (default `Authorization` as
-    /// `Bearer <value>`). A custom header (e.g. `X-API-Key`) sends the raw value.
+    /// Header name to carry the token (default `Authorization: Bearer <value>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
 }
@@ -907,33 +820,13 @@ pub enum McpAuthMode {
     /// The remote server needs no credential.
     #[default]
     None,
-    /// A `Secret`-backed bearer the gateway attaches upstream (off-pod).
+    /// A `Secret`-backed bearer the operator mounts onto the agent.
     StaticToken,
-    /// The **agent authenticates itself** (AAuth, RFC 0024): the server
-    /// verifies the agent's signed requests against its Agent Provider — no
-    /// credential exists to hold. The operator renders a **direct dial** to
-    /// `endpoint` (the MCPGateway facade is bypassed: a rewriting proxy cannot
-    /// preserve RFC 9421 signatures, which cover `@authority`/`@path`).
-    /// Requires the binding Agent to carry `identity.aauth` and declare
-    /// `capabilities.egress` (admission-enforced).
+    /// The **agent authenticates itself** (AAuth): the server verifies the
+    /// agent's RFC 9421-signed requests against its Agent Provider — no
+    /// credential exists to hold. Requires the Agent to carry `identity.aauth`
+    /// and declare `capabilities.egress` (admission-enforced).
     Aauth,
-}
-
-/// `MCPServerSet.status` — resolution + per-server broker health.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct MCPServerSetStatus {
-    /// Health conditions (`Ready`, …); shares the `conditions` + `Ready`-column
-    /// idiom with `Agent`/`AgentFleet`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<Condition>,
-    /// Number of servers in the set (printer column).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_count: Option<i64>,
-    /// The union of trifecta tags across all servers (informational; the
-    /// Agent-level union is the gate).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tag_union: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1000,56 +893,33 @@ mod tests {
     }
 
     #[test]
-    fn mcpserverset_crd_generates() {
-        let crd = MCPServerSet::crd();
-        assert_eq!(crd.spec.group, "agentctl.dev");
-        assert_eq!(crd.spec.names.kind, "MCPServerSet");
-        assert!(crd
-            .spec
-            .names
-            .short_names
-            .as_ref()
-            .unwrap()
-            .contains(&"mcpset".to_string()));
-        let v = &crd.spec.versions[0];
-        assert!(v
-            .subresources
-            .as_ref()
-            .and_then(|s| s.status.as_ref())
-            .is_some());
-    }
-
-    #[test]
-    fn mcpserverset_roundtrips_with_static_token_auth() {
-        // A server with a Secret-backed bearer + tags parses back to the same spec.
-        let spec = MCPServerSetSpec {
-            servers: vec![McpServer {
-                name: "github".into(),
-                endpoint: "https://mcp.example.com/mcp".into(),
-                auth: Some(McpAuth {
-                    mode: McpAuthMode::StaticToken,
-                    token_secret_ref: Some(SecretKeyRef {
-                        name: "gh-mcp-token".into(),
-                        key: "token".into(),
-                    }),
-                    header: None,
+    fn inline_mcp_server_roundtrips_with_static_token_and_aauth() {
+        // staticToken (bearer mounted on the agent) round-trips.
+        let s = McpServer {
+            name: "github".into(),
+            endpoint: "https://mcp.example.com/mcp".into(),
+            auth: Some(McpAuth {
+                mode: McpAuthMode::StaticToken,
+                token_secret_ref: Some(SecretKeyRef {
+                    name: "gh-mcp-token".into(),
+                    key: "token".into(),
                 }),
-                tags: vec!["untrusted_input".into(), "egress".into()],
-                budget: Some(Budget { max_tokens: 1000 }),
-            }],
+                header: None,
+            }),
+            tags: vec!["untrusted_input".into(), "egress".into()],
         };
-        let json = serde_json::to_value(&spec).unwrap();
-        assert_eq!(json["servers"][0]["auth"]["mode"], "staticToken");
-        assert_eq!(
-            json["servers"][0]["auth"]["tokenSecretRef"]["name"],
-            "gh-mcp-token"
-        );
-        let back: MCPServerSetSpec = serde_json::from_value(json).unwrap();
-        assert_eq!(back.servers[0].name, "github");
-        assert_eq!(
-            back.servers[0].auth.as_ref().unwrap().mode,
-            McpAuthMode::StaticToken
-        );
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["auth"]["mode"], "staticToken");
+        assert_eq!(json["auth"]["tokenSecretRef"]["name"], "gh-mcp-token");
+        let back: McpServer = serde_json::from_value(json).unwrap();
+        assert_eq!(back.auth.unwrap().mode, McpAuthMode::StaticToken);
+        // aauth (agent signs itself) — no token.
+        let a: McpServer = serde_json::from_value(serde_json::json!({
+            "name": "secure", "endpoint": "https://mcp.secure/mcp",
+            "auth": { "mode": "aauth" }
+        }))
+        .unwrap();
+        assert_eq!(a.auth.unwrap().mode, McpAuthMode::Aauth);
     }
 
     #[test]

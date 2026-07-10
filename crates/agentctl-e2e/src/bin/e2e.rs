@@ -29,8 +29,7 @@ use clap::Parser;
 use serde_json::{json, Value};
 
 use agent_api::{
-    Agent, AgentFleet, AgentFleetSpec, AgentSpec, Mode, ModelBinding, ScaleMode, ScaleTarget,
-    Scaling, Work,
+    Agent, AgentFleet, AgentFleetSpec, AgentSpec, Mode, ScaleMode, ScaleTarget, Scaling, Work,
 };
 use agentctl_e2e::{contract, kube_helpers as kh, prom, shell, Ctx};
 
@@ -57,7 +56,6 @@ fn examples_dir() -> String {
 
 const SVC_COORDINATION: &str = "agentctl-coordination";
 const SVC_GATEWAY: &str = "agentctl-gateway";
-const SVC_MODELGATEWAY: &str = "agentctl-modelgateway";
 const SVC_APISERVER: &str = "agentctl-apiserver";
 
 // --- control-plane Service ports (the chart's Service.port, NOT the container
@@ -125,9 +123,6 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("mgmt-cancel", "management", mgmt_cancel),
         scenario!("mgmt-rbac-403", "management", mgmt_rbac_403),
         scenario!("mgmt-pause-resume", "management", mgmt_pause_resume),
-        // intelligence
-        scenario!("intel-infer", "intelligence", intel_once_infer),
-        scenario!("intel-budget-429", "intelligence", intel_budget_429),
         // claim-mode
         scenario!("claim-atomic", "claim", claim_atomic_single_grant),
         scenario!("claim-dedupe", "claim", claim_dedupe),
@@ -149,7 +144,6 @@ fn catalogue() -> Vec<Scenario> {
         // security overlays
         scenario!("sec-oidc", "security", sec_oidc),
         scenario!("sec-trusted-proxy", "security", sec_trusted_proxy),
-        scenario!("sec-mg-attest", "security", sec_mg_attest),
         scenario!("sec-coord-attest", "security", sec_coord_attest),
         scenario!("sec-coord-mtls", "security", sec_coord_mtls),
         scenario!("sec-apitoken", "security", sec_apitoken),
@@ -251,11 +245,11 @@ fn scrape(ctx: &Ctx, svc: &str, port: u16, scheme: &str) -> Result<prom::Metrics
     prom::scrape_proxy(&ctx.cfg.system_ns, svc, port, scheme, "/metrics")
 }
 
-/// Build an agentd-backed `Agent` CR in the scenario namespace. The operator always
-/// renders a keyless `INTELLIGENCE=https://<modelgateway>…` endpoint and mounts
-/// the per-namespace CA. agentd validates the intelligence endpoint at boot in every
-/// mode (`once` infers immediately; a reactive/shard daemon dials it only when it does
-/// work), so a bound `model.pool` is enough.
+/// Build an agentd-backed `Agent` CR in the scenario namespace. The operator resolves
+/// the bound `model.pool` and renders a direct `INTELLIGENCE=<provider endpoint>` the
+/// agent dials itself, plus the per-namespace CA. agentd validates the intelligence
+/// endpoint at boot in every mode (`once` infers immediately; a reactive/shard daemon
+/// dials it only when it does work), so a bound `model.pool` is enough.
 fn agentd_agent(ctx: &Ctx, name: &str, mode: Mode, instruction: &str) -> Agent {
     let mut a = Agent::new(
         name,
@@ -375,10 +369,9 @@ fn expect_denied(res: Result<String>) -> Result<()> {
 // Provisioning
 // ===========================================================================
 
-/// `mode: once` → the operator renders a Job; the agent does its work through the
-/// secretless keyless-dial path (to the headroom mock pool via the ModelGateway),
-/// runs to a terminal status, and the pod exits with a clean, contract-known
-/// `complete` exit code.
+/// `mode: once` → the operator renders a Job; the agent does its work by dialing its
+/// bound model pool's provider directly (the headroom mock pool), runs to a terminal
+/// status, and the pod exits with a clean, contract-known `complete` exit code.
 async fn prov_once_ready_exit(ctx: &Ctx) -> Result<Outcome> {
     // agentd once-mode REQUIRES intelligence and infers immediately; give it the
     // headroom mock pool so the run reaches a clean completion (exit 0).
@@ -554,157 +547,6 @@ async fn mgmt_pause_resume(ctx: &Ctx) -> Result<Outcome> {
         return Ok(pause);
     }
     run_mgmt_verb(ctx, "resume").await
-}
-
-// ===========================================================================
-// Intelligence (secretless infer + budgets)
-// ===========================================================================
-
-/// Once-mode inference (keyless dial + source-IP attest): the ModelGateway meters
-/// tokens + requests and injects the pool credential (the agent never holds a key).
-async fn intel_once_infer(ctx: &Ctx) -> Result<Outcome> {
-    let dir = examples_dir();
-    apply_mock_provider(ctx, &dir)?;
-    apply_example(&dir, "modelpool-mock.yaml")?;
-
-    // Counters are monotonic + cumulative across runs, so assert the DELTA over
-    // this scenario rather than a fixed absolute.
-    let before = scrape(ctx, SVC_MODELGATEWAY, PORT_HTTP, "http").ok();
-    let req0 = before
-        .as_ref()
-        .map(|m| m.sum("agentctl_modelgateway_infer_requests_total"))
-        .unwrap_or(0.0);
-    let tok0 = before
-        .as_ref()
-        .map(|m| m.sum("agentctl_modelgateway_tokens_total"))
-        .unwrap_or(0.0);
-
-    let name = "e2e-infer";
-    let mut agent = agentd_agent(ctx, name, Mode::Once, "summarize: hello world");
-    agent.spec.model = Some(ModelBinding {
-        pool: Some("mockpool".to_string()),
-        id: None,
-    });
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
-    // The Agent's Ready can flip true before the Job pod actually infers; wait for
-    // the once pod to TERMINATE (its work — the inference — is then done) before
-    // reading the gateway counters.
-    wait_pod_exit_code(ctx, name, READY_TIMEOUT).await?;
-
-    let m = scrape(ctx, SVC_MODELGATEWAY, PORT_HTTP, "http")?;
-    if m.sum("agentctl_modelgateway_infer_requests_total") <= req0 {
-        bail!("ModelGateway saw no infer request from the routed agent");
-    }
-    if m.sum("agentctl_modelgateway_tokens_total") <= tok0 {
-        bail!("ModelGateway metered no tokens (provider may not have returned 200)");
-    }
-
-    cleanup_agent(ctx, name).await?;
-    delete_example(&dir, "modelpool-mock.yaml");
-    delete_example(&dir, "mock-provider.yaml");
-    pass()
-}
-
-/// The pool budget (150 tok, 100/call) rejects an inference once the pool is over
-/// budget with a budget 429.
-///
-/// Driven from an IN-CLUSTER probe pod, not a harness port-forward: with
-/// ModelGateway attest ON (the e2e base), the gateway derives the
-/// caller's identity from its SOURCE IP (a kube pod lookup), and a port-forwarded
-/// request owns no pod so it fails closed. A curl pod in `ns` has a real pod IP, so
-/// it attests as `Direct(ns)`; it loops `/v1/infer` POSTs (selecting the pool via
-/// `X-Model-Pool`) on the modelgateway's plaintext :8080 (the same app serves the
-/// TLS :8443 the agent dials) until the gateway returns a budget 429. The pool's
-/// token usage is cumulative, so we assert the rejection COUNTER increased rather
-/// than a fixed absolute (robust to usage already on the pool from intel-infer).
-async fn intel_budget_429(ctx: &Ctx) -> Result<Outcome> {
-    let dir = examples_dir();
-    apply_mock_provider(ctx, &dir)?;
-    apply_example(&dir, "modelpool-budget.yaml")?;
-
-    let before = scrape(ctx, SVC_MODELGATEWAY, PORT_HTTP, "http")
-        .map(|m| m.sum("agentctl_modelgateway_budget_rejections_total"))
-        .unwrap_or(0.0);
-
-    // The probe targets the LOW-budget pool explicitly by name (`X-Model-Pool`) so
-    // the rejection is the budget, not pool ambiguity. It dials the ModelGateway by
-    // ABSOLUTE FQDN (trailing dot) — a non-absolute Service name is < ndots:5 and
-    // leaks through the resolver `search` list to a host wildcard (an external 404).
-    // 8 calls × 100 tok against a 150-tok cap guarantees a budget 429; a small
-    // inter-call sleep lets the gateway's source-IP→pod attestation cache settle.
-    let url = format!(
-        "http://{}.{}.svc.cluster.local./v1/infer",
-        SVC_MODELGATEWAY, ctx.cfg.system_ns
-    );
-    let script = format!(
-        "for i in 1 2 3 4 5 6 7 8; do \
-           code=$(curl -s -o /dev/null -w '%{{http_code}}' -X POST {url} \
-             -H 'content-type: application/json' -H 'x-model-pool: mockpool-budget' \
-             -d '{{\"model\":\"mock-model-v1\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'); \
-           echo \"call$i=$code\"; sleep 1; \
-         done"
-    );
-    // Run a PERSISTENT probe pod and wait for it Ready BEFORE issuing requests: a
-    // `kubectl run --rm` one-shot fires before its pod IP propagates to the
-    // gateway's pod cache, so the source-IP attestation fails closed (403). With
-    // the pod Ready first, its IP is registered and it attests as Direct(ns).
-    let probe = "e2e-budget-probe";
-    let _ = shell::kubectl(&[
-        "delete",
-        "pod",
-        probe,
-        "-n",
-        &ctx.cfg.ns,
-        "--ignore-not-found",
-        "--wait=true",
-    ]);
-    shell::kubectl(&[
-        "run",
-        probe,
-        "-n",
-        &ctx.cfg.ns,
-        "--image=curlimages/curl:8.8.0",
-        "--restart=Never",
-        "--command",
-        "--",
-        "sleep",
-        "120",
-    ])
-    .context("start budget probe pod")?;
-    let ready = shell::kubectl(&[
-        "wait",
-        "--for=condition=Ready",
-        &format!("pod/{probe}"),
-        "-n",
-        &ctx.cfg.ns,
-        "--timeout=60s",
-    ]);
-    let out = ready.and_then(|_| {
-        shell::kubectl(&["exec", probe, "-n", &ctx.cfg.ns, "--", "sh", "-c", &script])
-    });
-    // Best-effort cleanup of the probe pod regardless of the loop outcome.
-    let _ = shell::kubectl(&[
-        "delete",
-        "pod",
-        probe,
-        "-n",
-        &ctx.cfg.ns,
-        "--ignore-not-found",
-        "--wait=false",
-    ]);
-    let out = out.context("run budget probe loop")?;
-    if !out.contains("=429") {
-        bail!("probe never observed a budget 429 (pool budget not enforced):\n{out}");
-    }
-    let after = scrape(ctx, SVC_MODELGATEWAY, PORT_HTTP, "http")?
-        .sum("agentctl_modelgateway_budget_rejections_total");
-    if after <= before {
-        bail!("budget rejection counter did not increase ({before} -> {after})");
-    }
-
-    delete_example(&dir, "modelpool-budget.yaml");
-    delete_example(&dir, "mock-provider.yaml");
-    pass()
 }
 
 // ===========================================================================
@@ -1289,43 +1131,6 @@ async fn sec_trusted_proxy(ctx: &Ctx) -> Result<Outcome> {
     }
 
     cleanup_agent(ctx, name).await?;
-    pass()
-}
-
-/// ModelGateway attest anti-spoof: identity is the caller's SOURCE IP, never a header.
-/// A caller whose source IP owns no pod (and who self-asserts an
-/// identity header anyway) is counted as a spoof and rejected — the header does not
-/// help.
-async fn sec_mg_attest(ctx: &Ctx) -> Result<Outcome> {
-    apply_overlay(ctx, "sec-mg-attest")?;
-    let _g = OverlayGuard { ctx };
-
-    let dir = examples_dir();
-    apply_mock_provider(ctx, &dir)?;
-    apply_example(&dir, "modelpool-mock.yaml")?;
-
-    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_MODELGATEWAY, PORT_HTTP, 18099)?;
-    // The harness reaches the gateway via a port-forward, so its source IP owns no
-    // tenant pod and cannot be attested; the self-asserted identity headers are
-    // ignored and the unattestable request is rejected (a spoof).
-    let resp = ctx
-        .http
-        .post(format!("{}/v1/infer", pf.base_url()))
-        .header("x-agentctl-namespace", &ctx.cfg.ns)
-        .header("x-agentctl-agent", "i-am-someone-else")
-        .json(&json!({ "model": "mock-model-v1", "messages": [] }))
-        .send()
-        .await?;
-    if resp.status().is_success() {
-        bail!("ModelGateway accepted a spoofed (unattestable) identity");
-    }
-    let m = scrape(ctx, SVC_MODELGATEWAY, PORT_HTTP, "http")?;
-    if m.sum("agentctl_modelgateway_identity_spoof_total") < 1.0 {
-        bail!("no identity spoof was recorded");
-    }
-
-    delete_example(&dir, "modelpool-mock.yaml");
-    delete_example(&dir, "mock-provider.yaml");
     pass()
 }
 

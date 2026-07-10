@@ -1,18 +1,17 @@
 # e2e mock model provider (OpenAI chat/completions shape).
 #
-# Same role as deploy/examples/mock-provider.yaml — it REQUIRES an Authorization
-# header (proving the ModelGateway injected the pool credential; the agent never
-# sends one) and reports token usage so the gateway meters/budgets — but it
-# answers in the **OpenAI `chat/completions`** envelope (`choices[].message` +
-# `usage`). That matters for the intelligence scenarios driven by the REAL
-# agentd: agentd dials its `INTELLIGENCE` endpoint as an OpenAI-compatible
-# provider (it POSTs `/v1/chat/completions` and parses `choices[0].message`), so
-# a bare `{content,usage}` body (the deploy/examples mock) lets the gateway meter
-# but makes agentd's run fail to parse a result. This shape lets a once-mode
-# agentd COMPLETE (exit 0) while still carrying `usage.total_tokens` for metering.
-# Dev/test only. Served on the same Service name/namespace as the example mock so
-# e2e/manifests/modelpool-mock.yaml (endpoint http://mock-provider.default:8080)
-# binds it unchanged.
+# Same role as deploy/examples/mock-provider.yaml — the agent dials it DIRECTLY
+# and presents the pool credential, so it REQUIRES an Authorization header (a
+# request with no credential 401s) and reports token usage — but it answers in the
+# **OpenAI `chat/completions`** envelope (`choices[].message` + `usage`). That
+# matters for the intelligence scenarios driven by the REAL agentd: agentd dials
+# its `INTELLIGENCE` endpoint as an OpenAI-compatible provider (it POSTs
+# `/v1/chat/completions` and parses `choices[0].message`), so a bare
+# `{content,usage}` body (the deploy/examples mock) makes agentd's run fail to
+# parse a result. This shape lets a once-mode agentd COMPLETE (exit 0) while still
+# carrying `usage.total_tokens` in the response. Dev/test only. Served on the same
+# Service name/namespace as the example mock so e2e/manifests/modelpool-mock.yaml
+# (endpoint http://mock-provider.default:8080) binds it unchanged.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -58,7 +57,7 @@ spec:
                               user = c if isinstance(c, str) else json.dumps(c)
                       # OpenAI chat/completions envelope so a real agent (agentd)
                       # parses a final assistant message and COMPLETES; usage is
-                      # kept so the ModelGateway meters/budgets (100 tok/call).
+                      # kept so the response carries token counts (100 tok/call).
                       resp = {
                           "id": "mock-cmpl-1",
                           "object": "chat.completion",

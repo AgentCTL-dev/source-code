@@ -12,8 +12,7 @@ image:
   pullSecrets: []
   # Digest pins (require image.registry set). Map comp -> sha256:... ; a non-empty
   # entry renders "<registry>/<comp>@<digest>" instead of the :tag for that comp.
-  # Comps: operator, apiserver, admission, gateway, modelgateway, mcpgateway,
-  #   coordination, scaler.
+  # Comps: operator, apiserver, admission, gateway, coordination, scaler.
   #   digests:
   #     operator: sha256:...
   digests: {}
@@ -84,7 +83,7 @@ certManager:
   # --cluster-resource-namespace). Only used when caIssuerRef is unset.
   clusterResourceNamespace: "cert-manager"
 
-# Durable store for the gateway + modelgateway (tasks, push configs, token usage).
+# Durable store for the gateway's durable A2A state (tasks, push configs).
 postgres:
   mode: bundled               # bundled | external
   bundled:
@@ -103,13 +102,13 @@ postgres:
     #     agentctl-postgres.<ns>.svc[.cluster.local], signed by the chart CA;
     #   - mounts that secret at /tls (defaultMode 0640; fsGroup=runAsUser so the
     #     key is group-readable by the postgres uid) and runs postgres ssl=on;
-    #   - sets DATABASE_URL sslmode=require, so the gateway/modelgateway rustls
+    #   - sets DATABASE_URL sslmode=require, so the gateway rustls
     #     client encrypts the hop WITHOUT CA verification (see operations.md).
     tls:
       enabled: false
       # CA-pinned, hostname-verified Postgres hop. Requires tls.enabled. When ALSO
       # true the chart: mounts the chart CA (ca.crt from the agentctl-postgres-tls
-      # secret) at /etc/agentctl-pg-ca in the gateway + modelgateway (and the
+      # secret) at /etc/agentctl-pg-ca in the gateway (and the
       # coordination server when coordination.store=postgres); sets DB_CA_FILE +
       # PGSSLROOTCERT to /etc/agentctl-pg-ca/ca.crt; and flips DATABASE_URL to
       # sslmode=verify-full against the .svc host (which the cert SANs cover). The
@@ -135,12 +134,6 @@ postgres:
 operator:
   replicas: 1                  # leader-elected: safe to raise for HA (1 active + standbys)
   logLevel: info               # -> RUST_LOG
-  # Override the ModelGateway URL rendered into agent pods (INTELLIGENCE,
-  # keyless https dial). Empty => https://agentctl-modelgateway.<ns>.svc.cluster.local.
-  modelgatewayUrl: ""
-  # Override the MCPGateway URL rendered into agent --mcp flags.
-  # Empty => https://agentctl-mcpgateway.<ns>.svc.cluster.local.
-  mcpgatewayUrl: ""
   # Default agent image. When set, an Agent / AgentFleet whose template omits
   # `spec.image` renders with THIS image; a per-resource `spec.image` always
   # overrides it. Empty (default) => `spec.image` is required, as before.
@@ -184,9 +177,7 @@ operator:
     minAvailable: 1
 
 # Management verbs, intelligence, A2A, and MCP tool calls all reach agents directly
-# over their mTLS HTTPS surface or through the gateways; agents are ordinary pods on
-# the pod network. Outbound agent identity is established by source-IP attestation at
-# the ModelGateway / MCPGateway (modelgateway.attestIdentity).
+# over their mTLS HTTPS surface; agents are ordinary pods on the pod network.
 
 apiserver:
   enabled: true
@@ -267,73 +258,6 @@ trustedProxy:
   # X-Forwarded-User). Empty keys keep the prefix-derived name. Leave {} to use the
   # prefix. -> TRUSTED_PROXY_IDENTITY_HEADERS
   identityHeaders: {}
-
-# MCPGateway: the tool-plane broker. Agents hold NO tool-server credential;
-# this gateway attests the calling agent by source IP,
-# scopes it to the servers of the MCPServerSets its Agent binds, injects each
-# server's credential (from a Secret, off-pod), and forwards MCP.
-mcpgateway:
-  enabled: true
-  replicas: 1
-  logLevel: info               # -> RUST_LOG
-  # Namespaces the MCPGateway may read tool-server credential Secrets in. Empty =
-  # cluster-wide secrets get/list (dev default). Scope in production.
-  secretsNamespaces: []
-  resources:
-    requests: { cpu: 25m, memory: 32Mi }
-    limits: { cpu: 500m, memory: 128Mi }
-
-modelgateway:
-  enabled: true
-  replicas: 1
-  logLevel: info               # -> RUST_LOG
-  # Namespaces the ModelGateway may read provider-credential Secrets in (the
-  # credentials it injects so agents never hold them). Empty = a cluster-wide
-  # secrets get/list ClusterRole (back-compat dev default; broad blast radius).
-  # RECOMMENDED for production: list the namespaces that hold the ModelPool
-  # credential Secrets — the chart then drops the cluster-wide secrets rule and
-  # renders a namespaced Role + RoleBinding (secrets get/list) in each instead.
-  secretsNamespaces: []
-  # Attested agent identity: when true the ModelGateway derives the agent namespace
-  # from the caller's source IP (a kube pod lookup keyed on pod status.podIP)
-  # instead of trusting the spoofable X-Agent-Namespace request header. Robust
-  # because confined tenant pods drop CAP_NET_RAW and so cannot spoof their source
-  # IP, so a tenant cannot impersonate another namespace's ModelPool/budget.
-  # Requires the cluster-wide pods get/list grant (always present in the ClusterRole).
-  # DEFAULT TRUE (fail-closed): the header path lets any in-cluster pod set
-  # `X-Agent-Namespace: <victim>` to bill/borrow another tenant's pool, so it must be
-  # a deliberate single-tenant/dev opt-out — matching the MCPGateway, which is always
-  # attested. Set false ONLY for a trusted single-tenant install.
-  attestIdentity: true
-  # Extra CA bundle (PEM path IN the modelgateway pod) trusted for UPSTREAM
-  # provider dials, on top of the always-trusted webpki public roots. Use for
-  # https providers behind a private/org CA; for one whose cert chains to the
-  # cluster CA, the bundle is already mounted — set
-  # providerCaFile: /etc/agentctl/tls/ca.crt. Empty = public roots only.
-  providerCaFile: ""
-  # Inference proxy: small footprint (was resources.small).
-  resources:
-    requests: { cpu: 25m, memory: 32Mi }
-    limits: { cpu: 500m, memory: 256Mi }
-  nodeSelector: {}
-  affinity: {}
-  tolerations: []
-  topologySpreadConstraints: []
-  priorityClassName: ""
-  podAnnotations: {}
-  podLabels: {}
-  extraEnv: []
-  envFrom: []
-  serviceAccount:
-    annotations: {}
-  pdb:
-    enabled: false
-    minAvailable: 1
-  autoscaling:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 80
 
 admission:
   enabled: true
@@ -486,8 +410,8 @@ scaler:
 # default so a stock install runs the data-plane utility paths open (unchanged).
 # When apiToken.enabled=true the chart creates a lookup-stable Secret
 # (agentctl-api-token, key AGENTCTL_API_TOKEN, helm.sh/resource-policy: keep) and
-# wires that token into the coordination server, ModelGateway, A2A gateway, and
-# scaler; the code on those services then requires `Authorization: Bearer <token>`.
+# wires that token into the coordination server, A2A gateway, and scaler; the code
+# on those services then requires `Authorization: Bearer <token>`.
 # The operator also injects it into rendered agent pods, but ONLY for agents in
 # the control-plane namespace (a secretKeyRef cannot cross namespaces). Agents in
 # other namespaces, and any external A2A client / producer, must obtain the token
@@ -525,8 +449,8 @@ identity:
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the
 # sanctioned flows (aggregator->apiserver, webhook->admission, A2A ingress->gateway,
-# apiserver/gateway->agent pods over mTLS, agents->modelgateway, gateway+
-# modelgateway->postgres); and (b) per-agent-namespace data-plane policies
+# apiserver/gateway->agent pods over mTLS, gateway->postgres); and (b)
+# per-agent-namespace data-plane policies
 # (default-deny + sanctioned egress/ingress) for each entry in agentNamespaces.
 networkPolicies:
   enabled: false

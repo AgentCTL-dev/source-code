@@ -24,7 +24,7 @@
 //! This module holds the **pure** logic — the env gate, pod→identity derivation,
 //! IP→pod matching, the TTL cache, and the per-call holder-binding/holder-check
 //! decisions — so it is unit-testable without a cluster. The kube lookups live in
-//! `main.rs` as I/O glue (mirrors the ModelGateway's `attest.rs`).
+//! `main.rs` as I/O glue.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use k8s_openapi::api::core::v1::Pod;
 
-/// The operator-set label carrying an agent's name on its pod (matches the
-/// ModelGateway).
+/// The operator-set label carrying an agent's name on its pod (set by the
+/// operator on every rendered agent pod).
 pub const AGENT_LABEL: &str = "agentctl.dev/agent";
 
 /// Default TTL for cached `ip → identity` resolutions: short, so a pod that is

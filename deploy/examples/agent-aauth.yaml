@@ -16,20 +16,6 @@
 # against the Agent Provider's JWKS). See docs/security.md and RFC 0024.
 ---
 apiVersion: agentctl.dev/v1alpha1
-kind: MCPServerSet
-metadata:
-  name: partner-tools
-  namespace: default
-spec:
-  servers:
-    - name: partner
-      # The REAL remote endpoint the agent dials directly (must be https).
-      endpoint: https://mcp.partner.example/mcp
-      # auth.mode: aauth ⇒ the AGENT signs; no tokenSecretRef, no facade.
-      auth: { mode: aauth }
-      tags: ["egress"]
----
-apiVersion: agentctl.dev/v1alpha1
 kind: Agent
 metadata:
   name: aauth-demo
@@ -38,13 +24,20 @@ spec:
   mode: once
   image: ghcr.io/agentd-dev/agentd:1.0.0
   instruction: "List the partner tools and summarize what they do."
-  mcpServers: ["partner-tools"]
+  # MCP servers are declared INLINE and dialed directly (no gateway).
+  mcpServers:
+    - name: partner
+      # The REAL remote endpoint the agent dials directly (must be https).
+      endpoint: https://mcp.partner.example/mcp
+      # auth.mode: aauth ⇒ the AGENT signs its own requests; no token on the pod.
+      auth: { mode: aauth }
+      tags: ["egress"]
   # Opt into a provisioned AAuth identity. Empty {} = use the operator's
   # configured default provider; set `provider:` here to override per-agent.
   identity:
     aauth: {}
   # Required for an aauth-mode server: the direct dial leaves the cluster, and
   # admission enforces this declared-intent egress (which the operator renders
-  # as the agent-aauth-internet-egress NetworkPolicy).
+  # as the agent-internet-egress NetworkPolicy).
   capabilities:
     egress: true

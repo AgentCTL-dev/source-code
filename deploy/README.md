@@ -7,7 +7,7 @@ each object in isolation.
 > **For a production install, use the Helm chart: [`charts/agentctl`](../charts/agentctl/README.md).**
 > One `helm install` brings up every control-plane component and issues all TLS
 > (the aggregated APIServer serving cert, the admission webhook cert, each
-> agent's serving identity, and the gateways' certs) through **cert-manager**
+> agent's serving identity, and the A2A gateway's cert) through **cert-manager**
 > with automatic `caBundle` injection and rotation.
 
 ## Layout
@@ -18,7 +18,6 @@ deploy/
     agent.yaml
     agentfleet.yaml
     modelpool.yaml
-    mcpserverset.yaml
   operator/                # in-cluster operator install (namespace + RBAC + Deployment)
     namespace.yaml
     rbac.yaml              # ServiceAccount + least-privilege ClusterRole(+Binding)
@@ -28,12 +27,10 @@ deploy/
   apiserver/               # aggregated APIServer (management verbs): Deployment + RBAC + APIService
   admission/               # validating + mutating webhooks: Deployment + RBAC + webhook config
   gateway/                 # A2A gateway: Deployment + RBAC + signing Secret
-  modelgateway/            # intelligence broker: Deployment + RBAC
-  mcpgateway/              # tools broker (Dockerfile)
   coordination/            # work-distribution MCP server (Dockerfile)
   scaler/                  # KEDA external scaler (Dockerfile)
-  postgres/                # bundled durable store for gateway/modelgateway/coordination
-  hardening/               # NetworkPolicies (default-deny + control-plane allow) + mTLS helper
+  postgres/                # bundled durable store for gateway/coordination
+  hardening/               # NetworkPolicies (default-deny + control-plane/DNS + internet egress) + mTLS helper
   examples/                # sample CRs: Agent, AgentFleet, ModelPool, and mock fixtures
 ```
 
@@ -63,7 +60,7 @@ kubectl logs -n agentctl-system deploy/agentctl-operator
 ```
 
 The `deploy/operator/` overlay is the only self-contained Kustomize install here.
-The other components (`apiserver/`, `admission/`, `gateway/`, `modelgateway/`,
+The other components (`apiserver/`, `admission/`, `gateway/`, `coordination/`,
 `postgres/`, `hardening/`) carry raw manifests you can apply individually, but
 they depend on cert-manager-issued TLS Secrets and shared configuration that the
 Helm chart wires for you. For a complete control plane, install the chart.

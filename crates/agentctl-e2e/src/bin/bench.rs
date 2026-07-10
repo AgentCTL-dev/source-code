@@ -607,7 +607,7 @@ fn scale_idle(ctx: &Ctx, name: &str, replicas: u32) -> Result<()> {
          \x20       - name: agentd\n\
          \x20         image: {image}\n\
          \x20         imagePullPolicy: IfNotPresent\n\
-         \x20         args: [\"--mode\",\"reactive\",\"--instruction\",\"idle\",\"--subscribe\",\"file:///tmp/inbox\",\"--intelligence\",\"https://agentctl-modelgateway.agentctl-system.svc.cluster.local./\"]\n",
+         \x20         args: [\"--mode\",\"reactive\",\"--instruction\",\"idle\",\"--subscribe\",\"file:///tmp/inbox\",\"--intelligence\",\"https://api.anthropic.com/\"]\n",
         name = name,
         ns = ctx.cfg.ns,
         replicas = replicas,

@@ -106,8 +106,8 @@ impl Config {
 pub struct Ctx {
     /// Typed kube-rs client (CR apply/watch/status).
     pub client: kube::Client,
-    /// HTTP client for `/metrics` (port-forward), the A2A gateway, the
-    /// ModelGateway, and the coordination `/mcp` load-gen.
+    /// HTTP client for `/metrics` (port-forward), the A2A gateway, and the
+    /// coordination `/mcp` load-gen.
     pub http: reqwest::Client,
     /// Resolved configuration.
     pub cfg: Config,
