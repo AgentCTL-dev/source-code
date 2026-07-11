@@ -1,5 +1,7 @@
 # agentctl RFC 0020: Instruction source & live delivery — the `instructionSource` union, the resolver, and hot-reloadable instructions
 
+> ⚠️ **Update (2026-07-10).** The `instructionSource` union and resolver are unchanged, but this RFC's `mcpResource` source composed with **RFC 0019's MCP broker**, which was **removed** (along with the `MCPServerSet` CRD). An `mcpResource` instruction is now authenticated by the agent's **own direct MCP dial** (keyless AAuth per [RFC 0024](0024-aauth-delegation-remote-resources.md), or a mounted token) against an inline `Agent.spec.mcpServers` entry — not an off-pod broker. References below to "the broker" / `MCPServerSet` describe the pre-removal design.
+
 **Status:** Proposed (agentctl tools/identity track)
 **Author:** Andrii Tsok
 **Date:** 2026-07-01

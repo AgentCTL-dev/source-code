@@ -1,5 +1,7 @@
 # agentctl RFC 0022: Fleet orchestration — coordinator/worker topology, the work fabric, and the fleet as an addressable endpoint
 
+> ⚠️ **Update (2026-07-10).** The **per-fleet budget** (`FleetBudget`) enforced via the ModelGateway was **removed** along with the gateways; budget is now harness-tracked per instance (`spec.limits.lifetimeTokens`, [RFC 0025](0025-harness-tracked-budgets.md)). The coordinator/worker topology, the work fabric, and the fleet-as-endpoint design are unchanged and shipped.
+
 **Status:** Implemented (agentctl plane track; extends 0003/0011/0013/0014; amends 0012)
 **Author:** Andrii Tsok
 **Date:** 2026-07-03

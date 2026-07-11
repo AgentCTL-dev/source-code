@@ -1,5 +1,7 @@
 # agentctl RFC 0023: AAuth agent identity — provisioning the house
 
+> ⚠️ **Update (2026-07-10).** The AAuth **house-provisioning** design here is unchanged, but the passages that contrast it with the **modelgateway/mcpgateway** metering posture describe the pre-removal design: both egress gateways were **removed** (agents dial providers/MCP directly, budgets are harness-tracked — [RFC 0025](0025-harness-tracked-budgets.md)). AAuth is now the *only* outbound-identity mechanism, not a companion to the brokers.
+
 **Status:** Proposed (identity/delegation track; extends 0021's "identity is the boundary" beyond the cluster; composes with 0019; companions: 0024 delegation, 0025 budgets)
 **Author:** Andrii Tsok
 **Date:** 2026-07-09

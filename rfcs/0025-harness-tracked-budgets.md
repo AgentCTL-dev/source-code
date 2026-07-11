@@ -1,5 +1,7 @@
 # agentctl RFC 0025: Harness-tracked budgets — budget as a property of the agent
 
+> ⚠️ **Update (2026-07-10).** Harness-tracked budgets (this RFC's core) **shipped** and are now the *only* budget mechanism: the adversarial in-path **gateway/pool/fleet budgets were removed** with the ModelGateway. The "Deferred" note below about admission requiredness "gated on modelgateway-inbound AAuth" is moot — there is no modelgateway; any `ModelPool`/MCP `auth.mode: aauth` requiredness keys on the direct-dial posture instead.
+
 **Status:** Partially implemented (identity/delegation track; standalone value beyond it;
 unblocks 0024 §7.2; extends 0012's cost governance and 0022's per-fleet budget with a
 third enforcement point)

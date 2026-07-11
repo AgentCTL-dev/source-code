@@ -1,5 +1,7 @@
 # agentctl RFC 0024: AAuth delegation — direct-dial remote MCP, and the intelligence posture
 
+> ⚠️ **Update (2026-07-10) — partially realized; the modelgateway is gone entirely.** This RFC's **direct-dial `auth.mode: aauth` MCP** design (agents dial remote MCP servers directly, no facade) shipped. But its *intelligence posture* — "the modelgateway stays for budgets, gaining AAuth inbound" — did **not**: the **ModelGateway was removed**, so agents dial the model provider directly too, and budgets are harness-tracked ([RFC 0025](0025-harness-tracked-budgets.md)), not gateway-metered. References below to the modelgateway/mcpgateway "facade" describe the pre-removal design.
+
 **Status:** Proposed (identity/delegation track; requires 0023; composes with 0019 — the
 third auth mode beside its broker tiers; amends 0021 §MCP-egress for aauth-mode servers;
 budget coupling via 0025)

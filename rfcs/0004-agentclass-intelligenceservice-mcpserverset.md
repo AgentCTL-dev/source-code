@@ -1,5 +1,7 @@
 # agentctl RFC 0004: AgentClass, IntelligenceService (ModelPool) & MCPServerSet — the ops/dev decoupling CRDs
 
+> ⚠️ **Partially superseded (2026-07-10).** Of the three CRDs proposed here, only **`ModelPool`** (the `IntelligenceService` endpoint registry) shipped and survives. **`AgentClass`** was never built. **`MCPServerSet`** shipped but was **removed** — MCP servers are now declared **inline** on `Agent.spec.mcpServers` and dialed directly (the `MCPServerSet` CRD and the MCP broker were deleted along with RFC 0019). `ModelPool` is now a thin endpoint registry the agent dials directly (keyless AAuth or a mounted token); the egress-proxy / zero-secret-via-broker framing below no longer applies.
+
 **Status:** Proposed (agentctl foundational track)
 **Author:** Andrii Tsok
 **Date:** 2026-06-27

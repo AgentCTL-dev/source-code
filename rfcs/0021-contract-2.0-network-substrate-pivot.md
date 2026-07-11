@@ -1,5 +1,7 @@
 # agentctl RFC 0021: Contract 2.0 — the network is the substrate
 
+> ⚠️ **Update (2026-07-10) — the intelligence + tools gateways this pivot realized were removed.** RFC 0021 realized the **ModelGateway** (§7) and **MCPGateway** (§9) as standalone TLS Deployments the agent dials keyless. Both were **removed**: agents now dial model providers and MCP servers **directly** — keyless AAuth ([RFC 0024](0024-aauth-delegation-remote-resources.md)) or a mounted key — and budgets are harness-tracked ([RFC 0025](0025-harness-tracked-budgets.md)). The mTLS-serve, cryptographic-identity, and retired-node-agent substrate of this RFC are unchanged; only the two egress brokers are gone.
+
 **Status:** Proposed (agentctl pivot track; supersedes-in-part 0002/0008/0009/0010/0012/0013/0015/0019)
 **Author:** Andrii Tsok
 **Date:** 2026-07-03
