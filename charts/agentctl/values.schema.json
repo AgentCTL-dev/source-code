@@ -426,7 +426,7 @@
     "identity": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Portable agent identity (AAuth, RFC 0023) - experimental, default-off.",
+      "description": "Identity plane: identity.aauth (portable AGENT identity wiring for the operator) and identity.service (the agentctl-identity SERVICE: federated OIDC, device-flow login, principal minting, the AAuth provider role).",
       "properties": {
         "aauth": {
           "type": "object",
@@ -445,6 +445,103 @@
                 },
                 "key": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "The agentctl-identity service (RFC 0028).",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "replicas": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "store": {
+              "type": "string",
+              "enum": [
+                "memory",
+                "postgres"
+              ]
+            },
+            "providers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "issuer",
+                  "client_id"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "issuer": {
+                    "type": "string",
+                    "pattern": "^https?://"
+                  },
+                  "client_id": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "issuerCa": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "secretName": {
+                  "type": "string"
+                },
+                "configMapName": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                }
+              }
+            },
+            "sealKeySecret": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                }
+              }
+            },
+            "aauth": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "tokenTtl": {
+                  "type": "integer",
+                  "minimum": 60
+                },
+                "seedSecret": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }

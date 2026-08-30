@@ -1,0 +1,26 @@
+# DEV profile: everything on one kind/minikube cluster, no external
+# dependencies beyond cert-manager (and optionally KEDA for claim fleets).
+#   helm install agentctl charts/agentctl -f charts/agentctl/profiles/dev.yaml
+# Brings up the FULL P1+P2 stack: operator + apiserver + admission (multi-
+# version CRDs + conversion + policy ladder) + gateway (org routes) +
+# identity (device-flow login, principal minting, the AAuth provider role) +
+# bundled Postgres. The api-token Secret is rendered for identity's admin
+# channel; the coarse data-plane gate stays OFF for easy poking.
+postgres:
+  mode: bundled
+identity:
+  service:
+    enabled: true
+    store: postgres
+    # Add your IdP here to log in (Keycloak/Auth0/Okta/…):
+    #   providers:
+    #     - name: keycloak
+    #       issuer: https://keycloak.dev.svc/realms/dev
+    #       client_id: agentctl-cli
+    aauth:
+      enabled: true
+  aauth:
+    provider: "http://agentctl-identity.agentctl-system"
+    adminTokenSecret:
+      name: agentctl-api-token
+      key: AGENTCTL_API_TOKEN

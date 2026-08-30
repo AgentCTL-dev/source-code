@@ -2,9 +2,14 @@ apiVersion: v2
 name: agentctl
 description: >-
   The Kubernetes control plane for fleets of conformant agents — operator,
-  aggregated apiserver, admission webhook, A2A gateway, work-coordination
-  server, and KEDA scaler.
+  aggregated apiserver, admission webhook (multi-version CRDs + conversion +
+  policy ladder), A2A gateway (tenant org routes), identity service (federated
+  OIDC + AAuth provider role), work-coordination server, and KEDA scaler.
   Installs the Agent Control Contract CRDs and wires all TLS via cert-manager.
+  Profiles under profiles/ (dev, enterprise). The tenant mcpg gateway installs
+  from the sibling mcpg chart (no hard dependency: mcpg publishes no chart
+  repository yet — the operator's tenant-mcpg wiring lands in the capability
+  plane wave and will consume whichever mcpg release is installed).
 type: application
 version: 1.3.0            # chart version
 appVersion: "1.3.0"

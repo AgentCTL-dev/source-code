@@ -1,0 +1,43 @@
+# ENTERPRISE profile: the hardened posture on a policy-enforcing cluster.
+#   helm install agentctl charts/agentctl -f charts/agentctl/profiles/enterprise.yaml \
+#     --set postgres.external.dsnSecretName=<your-dsn-secret>
+# Assumes: an external Postgres (HA), a policy-enforcing CNI (Calico/Cilium)
+# for the NetworkPolicies, cert-manager, and a real IdP wired under
+# identity.service.providers. Pin images by digest via image.digests.
+postgres:
+  mode: external
+  external:
+    dsnSecretName: ""        # REQUIRED: Secret holding DATABASE_URL
+    dsnSecretKey: DATABASE_URL
+apiToken:
+  enabled: true              # the coarse in-cluster gate ON
+networkPolicies:
+  enabled: true              # default-deny + sanctioned flows
+identity:
+  service:
+    enabled: true
+    replicas: 2
+    store: postgres
+    providers: []            # REQUIRED: your IdP(s)
+    sealKeySecret:
+      name: ""               # RECOMMENDED: a managed 32-byte seal key
+      key: IDENTITY_SEAL_KEY
+    aauth:
+      enabled: true
+      seedSecret:
+        name: ""             # RECOMMENDED: pin the provider signing key
+        key: IDENTITY_AAUTH_SEED
+  aauth:
+    provider: "http://agentctl-identity.agentctl-system"
+    adminTokenSecret:
+      name: agentctl-api-token
+      key: AGENTCTL_API_TOKEN
+coordination:
+  enabled: true
+  store: postgres
+  attestIdentity: true
+operator:
+  replicas: 2                # leader-elected HA
+metrics:
+  serviceMonitor:
+    enabled: true            # needs the Prometheus-Operator CRDs

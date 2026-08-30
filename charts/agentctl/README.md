@@ -301,3 +301,28 @@ are removed with the namespace.
 - Operations: [`../../docs/operations.md`](../../docs/operations.md)
 - Security model: [`../../docs/security.md`](../../docs/security.md)
 - Example manifests: [`../../deploy/examples/`](../../deploy/examples/)
+
+## Profiles
+
+Two curated value profiles ship with the chart:
+
+- `profiles/dev.yaml` — the full stack on one kind/minikube cluster: bundled
+  Postgres, the identity service (device-flow login, per-user principal
+  minting, the AAuth Agent-Provider role) armed, the operator's
+  house-provisioning pointed at it. Add your IdP under
+  `identity.service.providers` to log in.
+- `profiles/enterprise.yaml` — the hardened posture: external Postgres,
+  NetworkPolicies (needs a policy-enforcing CNI), the coarse in-cluster
+  bearer gate, HA operator/identity replicas, ServiceMonitors, and the
+  managed seal/signing keys you should pin in production.
+
+```
+helm install agentctl charts/agentctl -f charts/agentctl/profiles/dev.yaml
+```
+
+Multi-version CRDs: `Agent`/`AgentFleet` serve v1alpha1 AND v1alpha2 with a
+conversion webhook (storage v1alpha2). Helm installs `crds/` on FIRST install
+only — on upgrades apply `deploy/crds/` yourself. The conversion stanza pins
+the default `agentctl-system` namespace (Helm does not template `crds/`); a
+custom-namespace install must patch the CRDs' `spec.conversion.webhook`
+service ref and `cert-manager.io/inject-ca-from` annotation.
