@@ -2,7 +2,8 @@
 # DIRECTLY (RFC 0023 + RFC 0024 phase 0).
 #
 #   - identity.aauth {} — opt in; the provider comes from the operator default
-#     (values/aauth.yaml → http://apd.default.svc.cluster.local). The operator
+#     (values/aauth.yaml → agentctl-identity, the fleet's Agent Provider,
+#     RFC 0028 §5). The operator
 #     provisions the key Secret, pre-registers its thumbprint (allowlist), and
 #     the agent self-enrolls at boot (aauth.ready) before doing anything else.
 #   - mcpServers [aauth-tools] + auth.mode aauth on the server ⇒ the operator
@@ -19,7 +20,7 @@ metadata:
   namespace: default
 spec:
   mode: once
-  image: agentd:1.0.0
+  image: agentd:1.3.1
   instruction: "Say hello in one short sentence."
   model:
     pool: mockpool

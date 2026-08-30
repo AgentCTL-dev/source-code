@@ -20,6 +20,7 @@
 //! deliberately the smallest crown jewel: strictest NetworkPolicy, no value
 //! ever logged, every secret column sealed.
 
+pub mod aauth;
 pub mod config;
 pub mod http;
 pub mod oidc;

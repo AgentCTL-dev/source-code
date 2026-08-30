@@ -502,6 +502,19 @@ identity:
       secretName: ""
       configMapName: ""
       key: ca.crt
+    # The AAuth Agent Provider role (RFC 0028 §5): when enabled, THIS service
+    # is the fleet's Agent Provider — agents enroll their Ed25519 workload
+    # keys here (operator-preregistered thumbprints) and obtain short-lived
+    # signed-egress tokens. Wire identity.aauth.provider (the operator's
+    # house-provisioning knob) at http://agentctl-identity.<namespace> to use
+    # it. seedSecret pins the provider signing key (32-byte base64 Ed25519
+    # seed); empty = ephemeral per-pod key with a loud warning.
+    aauth:
+      enabled: false
+      tokenTtl: 3600
+      seedSecret:
+        name: ""
+        key: IDENTITY_AAUTH_SEED
     resources:
       requests: { cpu: 25m, memory: 32Mi }
       limits: { cpu: 300m, memory: 128Mi }

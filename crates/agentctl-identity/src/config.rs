@@ -67,6 +67,17 @@ pub struct Config {
     /// Extra PEM root CA file for issuer TLS (`IDENTITY_ISSUER_CA`) — for
     /// IdPs serving from a private CA. Adds to (never replaces) webpki.
     pub issuer_ca: Option<String>,
+    /// AAuth Agent Provider role (RFC 0028 §5): the provider URL agents dial
+    /// (`IDENTITY_AAUTH_ISSUER` — must equal the operator's
+    /// `AGENTCTL_AAUTH_PROVIDER` and the rendered `security.aauth.provider`;
+    /// the shipped agent validates the token `iss` against it). Unset ⇒ the
+    /// AAuth surfaces are not served.
+    pub aauth_issuer: Option<String>,
+    /// 32-byte Ed25519 seed (base64) for the provider signing key
+    /// (`IDENTITY_AAUTH_SEED`). Unset ⇒ ephemeral with a loud warning.
+    pub aauth_seed: Option<[u8; 32]>,
+    /// Agent-token lifetime seconds (`IDENTITY_AAUTH_TOKEN_TTL`, default 3600).
+    pub aauth_token_ttl: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +153,26 @@ impl Config {
             .ok()
             .filter(|p| !p.trim().is_empty());
 
+        let aauth_issuer = std::env::var("IDENTITY_AAUTH_ISSUER")
+            .ok()
+            .map(|u| u.trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty());
+        let aauth_seed = match std::env::var("IDENTITY_AAUTH_SEED") {
+            Ok(b64) if !b64.trim().is_empty() => {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64.trim())
+                    .map_err(|_| ConfigError::SealKey)?;
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| ConfigError::SealKey)?;
+                Some(arr)
+            }
+            _ => None,
+        };
+        let aauth_token_ttl = std::env::var("IDENTITY_AAUTH_TOKEN_TTL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
+
         Ok(Config {
             bind,
             providers,
@@ -149,6 +180,9 @@ impl Config {
             seal_key,
             admin_token,
             issuer_ca,
+            aauth_issuer,
+            aauth_seed,
+            aauth_token_ttl,
         })
     }
 

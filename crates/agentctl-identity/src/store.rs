@@ -46,6 +46,32 @@ pub struct PrincipalRecord {
     pub created_unix: i64,
 }
 
+/// An operator-registered enrollment allowlist entry (AAuth, RFC 0028 §5):
+/// the agent key thumbprint the operator pre-registered, before the agent's
+/// first signed dial.
+#[derive(Debug, Clone)]
+pub struct AllowedKey {
+    /// RFC 7638 thumbprint (base64url).
+    pub jkt: String,
+    /// `<namespace>/<name>` (the operator's registration label).
+    pub label: String,
+    pub expires_unix: i64,
+}
+
+/// An enrolled AAuth agent.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AauthAgent {
+    /// The `<local>` half of the agent id (admin revoke path key).
+    pub local: String,
+    /// Full id: `aauth:<local>@<domain>`.
+    pub agent: String,
+    pub jkt: String,
+    pub label: String,
+    /// `active` | `revoked`.
+    pub status: String,
+    pub created_unix: i64,
+}
+
 /// SHA-256 → base64url, the bearer-hash convention.
 pub fn bearer_hash(secret: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, secret.as_bytes());
@@ -65,6 +91,19 @@ pub trait Store: Send + Sync {
         namespace: &str,
         agent: &str,
     ) -> Result<Vec<PrincipalRecord>, StoreError>;
+
+    // -- AAuth provider custody (RFC 0028 §5) -------------------------------
+    /// Upsert by jkt (re-registration refreshes label/ttl).
+    async fn put_allowed_key(&self, k: AllowedKey) -> Result<(), StoreError>;
+    async fn find_allowed_key(&self, jkt: &str) -> Result<AllowedKey, StoreError>;
+    /// Ok(true) deleted; Ok(false) was absent (admin DELETE is idempotent).
+    async fn delete_allowed_key(&self, jkt: &str) -> Result<bool, StoreError>;
+    /// Upsert by local (re-enrollment of the same key is a no-op refresh).
+    async fn put_aauth_agent(&self, a: AauthAgent) -> Result<(), StoreError>;
+    async fn find_aauth_agent_by_jkt(&self, jkt: &str) -> Result<AauthAgent, StoreError>;
+    async fn list_aauth_agents(&self) -> Result<Vec<AauthAgent>, StoreError>;
+    /// Ok(true) revoked; Ok(false) unknown local.
+    async fn revoke_aauth_agent(&self, local: &str) -> Result<bool, StoreError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +114,8 @@ pub trait Store: Send + Sync {
 pub struct MemoryStore {
     devices: Mutex<HashMap<String, DeviceSession>>,
     principals: Mutex<HashMap<String, PrincipalRecord>>, // key ns/agent/subject
+    allowed_keys: Mutex<HashMap<String, AllowedKey>>,    // key jkt
+    aauth_agents: Mutex<HashMap<String, AauthAgent>>,    // key local
 }
 
 #[async_trait::async_trait]
@@ -123,6 +164,59 @@ impl Store for MemoryStore {
             .cloned()
             .collect())
     }
+
+    async fn put_allowed_key(&self, k: AllowedKey) -> Result<(), StoreError> {
+        self.allowed_keys.lock().unwrap().insert(k.jkt.clone(), k);
+        Ok(())
+    }
+
+    async fn find_allowed_key(&self, jkt: &str) -> Result<AllowedKey, StoreError> {
+        self.allowed_keys
+            .lock()
+            .unwrap()
+            .get(jkt)
+            .cloned()
+            .ok_or(StoreError::NotFound)
+    }
+
+    async fn delete_allowed_key(&self, jkt: &str) -> Result<bool, StoreError> {
+        Ok(self.allowed_keys.lock().unwrap().remove(jkt).is_some())
+    }
+
+    async fn put_aauth_agent(&self, a: AauthAgent) -> Result<(), StoreError> {
+        self.aauth_agents.lock().unwrap().insert(a.local.clone(), a);
+        Ok(())
+    }
+
+    async fn find_aauth_agent_by_jkt(&self, jkt: &str) -> Result<AauthAgent, StoreError> {
+        self.aauth_agents
+            .lock()
+            .unwrap()
+            .values()
+            .find(|a| a.jkt == jkt)
+            .cloned()
+            .ok_or(StoreError::NotFound)
+    }
+
+    async fn list_aauth_agents(&self) -> Result<Vec<AauthAgent>, StoreError> {
+        Ok(self
+            .aauth_agents
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn revoke_aauth_agent(&self, local: &str) -> Result<bool, StoreError> {
+        match self.aauth_agents.lock().unwrap().get_mut(local) {
+            Some(a) => {
+                a.status = "revoked".into();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +247,20 @@ CREATE TABLE IF NOT EXISTS identity_principals (
     PRIMARY KEY (namespace, agent, subject)
 );
 CREATE INDEX IF NOT EXISTS identity_principals_hash ON identity_principals (bearer_hash);
+CREATE TABLE IF NOT EXISTS identity_allowed_keys (
+    jkt          TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    expires_unix BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS identity_aauth_agents (
+    local        TEXT PRIMARY KEY,
+    agent        TEXT NOT NULL,
+    jkt          TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    created_unix BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_aauth_agents_jkt ON identity_aauth_agents (jkt);
 "#;
 
 impl PgStore {
@@ -289,6 +397,127 @@ impl Store for PgStore {
                 created_unix: row.get(3),
             })
             .collect())
+    }
+
+    async fn put_allowed_key(&self, k: AllowedKey) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO identity_allowed_keys (jkt, label, expires_unix)
+                 VALUES ($1,$2,$3)
+                 ON CONFLICT (jkt) DO UPDATE SET label=$2, expires_unix=$3",
+                &[&k.jkt, &k.label, &k.expires_unix],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(())
+    }
+
+    async fn find_allowed_key(&self, jkt: &str) -> Result<AllowedKey, StoreError> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT label, expires_unix FROM identity_allowed_keys WHERE jkt = $1",
+                &[&jkt],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?
+            .ok_or(StoreError::NotFound)?;
+        Ok(AllowedKey {
+            jkt: jkt.to_string(),
+            label: row.get(0),
+            expires_unix: row.get(1),
+        })
+    }
+
+    async fn delete_allowed_key(&self, jkt: &str) -> Result<bool, StoreError> {
+        let n = self
+            .client()
+            .await?
+            .execute("DELETE FROM identity_allowed_keys WHERE jkt = $1", &[&jkt])
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(n > 0)
+    }
+
+    async fn put_aauth_agent(&self, a: AauthAgent) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO identity_aauth_agents (local, agent, jkt, label, status, created_unix)
+                 VALUES ($1,$2,$3,$4,$5,$6)
+                 ON CONFLICT (local) DO UPDATE SET agent=$2, jkt=$3, label=$4, status=$5",
+                &[
+                    &a.local,
+                    &a.agent,
+                    &a.jkt,
+                    &a.label,
+                    &a.status,
+                    &a.created_unix,
+                ],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(())
+    }
+
+    async fn find_aauth_agent_by_jkt(&self, jkt: &str) -> Result<AauthAgent, StoreError> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT local, agent, label, status, created_unix
+                 FROM identity_aauth_agents WHERE jkt = $1",
+                &[&jkt],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?
+            .ok_or(StoreError::NotFound)?;
+        Ok(AauthAgent {
+            local: row.get(0),
+            agent: row.get(1),
+            jkt: jkt.to_string(),
+            label: row.get(2),
+            status: row.get(3),
+            created_unix: row.get(4),
+        })
+    }
+
+    async fn list_aauth_agents(&self) -> Result<Vec<AauthAgent>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT local, agent, jkt, label, status, created_unix FROM identity_aauth_agents",
+                &[],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| AauthAgent {
+                local: row.get(0),
+                agent: row.get(1),
+                jkt: row.get(2),
+                label: row.get(3),
+                status: row.get(4),
+                created_unix: row.get(5),
+            })
+            .collect())
+    }
+
+    async fn revoke_aauth_agent(&self, local: &str) -> Result<bool, StoreError> {
+        let n = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE identity_aauth_agents SET status = 'revoked' WHERE local = $1",
+                &[&local],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(n > 0)
     }
 }
 

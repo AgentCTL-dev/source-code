@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
@@ -35,6 +36,17 @@ pub struct AppState {
     pub federation: Federation,
     pub store: Arc<dyn Store>,
     pub admin_token: Option<String>,
+    /// The AAuth Agent Provider role (RFC 0028 §5). `None` ⇒ those surfaces
+    /// answer 404 (the role is opt-in via `IDENTITY_AAUTH_ISSUER`).
+    pub aauth: Option<Arc<AauthState>>,
+}
+
+/// Provider-role state: the signing key, the issuer URL agents validate
+/// `iss` against, and the token lifetime.
+pub struct AauthState {
+    pub key: crate::aauth::ProviderKey,
+    pub issuer: String,
+    pub token_ttl: i64,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -46,6 +58,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/introspect", post(introspect))
         .route("/v1/principals/mint", post(principal_mint))
         .route("/v1/principals/verify", post(principal_verify))
+        // -- AAuth Agent Provider role (RFC 0028 §5; agentd 1.3.1 wire) -----
+        // Agent-facing paths are hard-coded root-relative in the client (no
+        // discovery); the well-known + JWKS are the resource servers' trust
+        // root and are public by design.
+        .route("/.well-known/aauth-agent.json", get(aauth_well_known))
+        .route("/aauth-jwks.json", get(aauth_jwks))
+        .route("/enroll", post(aauth_enroll))
+        .route("/agent-token", post(aauth_agent_token))
+        .route("/admin/allowed-keys", post(admin_allowed_keys_post))
+        .route(
+            "/admin/allowed-keys/{jkt}",
+            axum::routing::delete(admin_allowed_keys_delete),
+        )
+        .route("/admin/agents", get(admin_agents_get))
+        .route("/admin/agents/{local}/revoke", post(admin_agent_revoke))
         .with_state(state)
 }
 
@@ -233,6 +260,268 @@ async fn principal_verify(
     }
 }
 
+// -- AAuth Agent Provider role (RFC 0028 §5) --------------------------------
+
+fn aauth_state(state: &AppState) -> Result<&Arc<AauthState>, ApiError> {
+    state.aauth.as_ref().ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "the AAuth provider role is not enabled (IDENTITY_AAUTH_ISSUER)",
+        )
+    })
+}
+
+async fn aauth_well_known(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let aauth = aauth_state(&state)?;
+    Ok(Json(json!({
+        "issuer": aauth.issuer,
+        "jwks_uri": format!("{}/aauth-jwks.json", aauth.issuer),
+        "enrollment_endpoint": format!("{}/enroll", aauth.issuer),
+        "agent_token_endpoint": format!("{}/agent-token", aauth.issuer),
+    })))
+}
+
+async fn aauth_jwks(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(aauth_state(&state)?.key.jwks()))
+}
+
+/// Verify the RFC 9421 `hwk` request signature on an agent-facing call.
+/// `@authority` is the received Host header verbatim (lowercased) — the agent
+/// covers exactly what it sends. Failures carry the detail in an
+/// `aauth-error` header (where the 1.3.1 client looks) as well as the body.
+fn verify_agent_call(
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+) -> Result<crate::aauth::SignedCaller, ApiError> {
+    let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let authority = get("host").unwrap_or_default().to_ascii_lowercase();
+    let (Some(input), Some(sig), Some(key)) = (
+        get("signature-input"),
+        get("signature"),
+        get("signature-key"),
+    ) else {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "missing RFC 9421 signature headers (signature-input/signature/signature-key)",
+        ));
+    };
+    crate::aauth::verify_signed_request(
+        "POST",
+        &authority,
+        path,
+        &crate::aauth::SignatureHeaders {
+            signature_input: input,
+            signature: sig,
+            signature_key: key,
+            content_digest: get("content-digest"),
+        },
+        body,
+    )
+    .map_err(|e| err(StatusCode::UNAUTHORIZED, e))
+}
+
+async fn aauth_enroll(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let aauth = match aauth_state(&state) {
+        Ok(a) => a.clone(),
+        Err(e) => return e.into_response(),
+    };
+    let caller = match verify_agent_call(&headers, "/enroll", &body) {
+        Ok(c) => c,
+        Err(e) => return with_aauth_error(e),
+    };
+
+    // Idempotent by thumbprint: the shipped client re-enrolls on every first
+    // signed dial after a restart.
+    match state.store.find_aauth_agent_by_jkt(&caller.jkt).await {
+        Ok(existing) if existing.status == "active" => {
+            return Json(json!({ "agent": existing.agent })).into_response();
+        }
+        Ok(_) => {
+            return with_aauth_error(err(StatusCode::FORBIDDEN, "this key has been revoked"));
+        }
+        Err(_) => {}
+    }
+
+    // Gate: the operator-registered key allowlist. (The federated
+    // `enrollment_assertion` leg is accepted on the wire but not yet wired —
+    // the renderer does not project SA tokens; recorded in the PLAN.)
+    let allowed = match state.store.find_allowed_key(&caller.jkt).await {
+        Ok(k) if k.expires_unix > now_unix() => k,
+        Ok(_) => {
+            return with_aauth_error(err(
+                StatusCode::FORBIDDEN,
+                "key registration expired; re-register the thumbprint",
+            ));
+        }
+        Err(_) => {
+            return with_aauth_error(err(
+                StatusCode::FORBIDDEN,
+                "key is not registered for enrollment (allowlist)",
+            ));
+        }
+    };
+
+    let agent = crate::aauth::agent_id(&aauth.issuer, &caller.jkt);
+    let local = crate::aauth::agent_local(&agent)
+        .expect("agent_id always carries a local part")
+        .to_string();
+    let record = crate::store::AauthAgent {
+        local,
+        agent: agent.clone(),
+        jkt: caller.jkt.clone(),
+        label: allowed.label,
+        status: "active".into(),
+        created_unix: now_unix(),
+    };
+    if let Err(e) = state.store.put_aauth_agent(record).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+    Json(json!({ "agent": agent })).into_response()
+}
+
+async fn aauth_agent_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let aauth = match aauth_state(&state) {
+        Ok(a) => a.clone(),
+        Err(e) => return e.into_response(),
+    };
+    let caller = match verify_agent_call(&headers, "/agent-token", &body) {
+        Ok(c) => c,
+        Err(e) => return with_aauth_error(e),
+    };
+    let agent = match state.store.find_aauth_agent_by_jkt(&caller.jkt).await {
+        Ok(a) if a.status == "active" => a,
+        Ok(_) => return with_aauth_error(err(StatusCode::FORBIDDEN, "agent is revoked")),
+        Err(_) => {
+            return with_aauth_error(err(
+                StatusCode::UNAUTHORIZED,
+                "key is not enrolled; enroll first",
+            ));
+        }
+    };
+    let token = aauth.key.mint_agent_token(
+        &aauth.issuer,
+        &agent.agent,
+        &caller.x_b64url,
+        aauth.token_ttl,
+    );
+    Json(json!({
+        "agent_token": token,
+        "expires_in": aauth.token_ttl,
+        "agent": agent.agent,
+    }))
+    .into_response()
+}
+
+/// Attach the error detail as the `aauth-error` header the 1.3.1 client
+/// surfaces, alongside the JSON body.
+fn with_aauth_error(e: ApiError) -> Response {
+    let detail = e.1["error"].as_str().unwrap_or("aauth error").to_string();
+    let mut resp = e.into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&detail) {
+        resp.headers_mut().insert("aauth-error", v);
+    }
+    resp
+}
+
+// -- AAuth admin (operator channel) -----------------------------------------
+
+async fn admin_allowed_keys_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    aauth_state(&state)?;
+    let jkt = body
+        .get("jkt")
+        .and_then(Value::as_str)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "jkt is required"))?;
+    let label = body.get("label").and_then(Value::as_str).unwrap_or("");
+    let ttl = body.get("ttl").and_then(Value::as_i64).unwrap_or(86_400);
+    state
+        .store
+        .put_allowed_key(crate::store::AllowedKey {
+            jkt: jkt.to_string(),
+            label: label.to_string(),
+            expires_unix: now_unix() + ttl,
+        })
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn admin_allowed_keys_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(jkt): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    require_admin(&state, &headers)?;
+    aauth_state(&state)?;
+    let existed = state
+        .store
+        .delete_allowed_key(&jkt)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(if existed {
+        Json(json!({ "ok": true })).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "unknown thumbprint").into_response()
+    })
+}
+
+async fn admin_agents_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    aauth_state(&state)?;
+    let agents = state
+        .store
+        .list_aauth_agents()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let rows: Vec<Value> = agents
+        .iter()
+        .map(|a| {
+            json!({
+                "label": a.label,
+                "local": a.local,
+                "agent": a.agent,
+                "status": a.status,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "agents": rows })))
+}
+
+async fn admin_agent_revoke(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(local): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    require_admin(&state, &headers)?;
+    aauth_state(&state)?;
+    let existed = state
+        .store
+        .revoke_aauth_agent(&local)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(if existed {
+        Json(json!({ "ok": true })).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "unknown agent").into_response()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +547,11 @@ mod tests {
             ),
             store: Arc::new(MemoryStore::default()),
             admin_token: admin.map(str::to_string),
+            aauth: Some(Arc::new(AauthState {
+                key: crate::aauth::ProviderKey::from_seed(&[3u8; 32]).unwrap(),
+                issuer: "http://identity.test".into(),
+                token_ttl: 300,
+            })),
         })
     }
 

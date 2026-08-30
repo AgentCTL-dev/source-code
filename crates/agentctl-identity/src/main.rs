@@ -75,10 +75,37 @@ async fn main() {
         }
         None => outbound_client(),
     };
+    // AAuth Agent Provider role (RFC 0028 §5): opt-in via IDENTITY_AAUTH_ISSUER.
+    let aauth = match &cfg.aauth_issuer {
+        Some(issuer) => {
+            let key = match cfg.aauth_seed {
+                Some(seed) => match agentctl_identity::aauth::ProviderKey::from_seed(&seed) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        eprintln!("identity config error: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                None => {
+                    warn!("IDENTITY_AAUTH_SEED not set — EPHEMERAL provider key (agent tokens die with this pod; resource servers will refuse after a restart)");
+                    agentctl_identity::aauth::ProviderKey::ephemeral()
+                }
+            };
+            info!(issuer, kid = %key.kid, "AAuth provider role armed");
+            Some(Arc::new(agentctl_identity::http::AauthState {
+                key,
+                issuer: issuer.clone(),
+                token_ttl: cfg.aauth_token_ttl,
+            }))
+        }
+        None => None,
+    };
+
     let state = Arc::new(AppState {
         federation: Federation::new(outbound, cfg.providers.clone()),
         store,
         admin_token: cfg.admin_token.clone(),
+        aauth,
     });
 
     info!(bind = %cfg.bind, providers = cfg.providers.len(), "agentctl-identity serving");

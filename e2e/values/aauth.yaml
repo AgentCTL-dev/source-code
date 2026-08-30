@@ -1,11 +1,14 @@
-# AAuth house-provisioning overlay (RFC 0023 phase 0): point the operator +
-# admission at the e2e Agent Provider (e2e/manifests/apd.yaml) and hand the
-# operator the admin channel. The scenario creates the apd-admin-token Secret
-# (same fixture value as apd's ConfigMap) in the control-plane namespace
-# before applying this overlay, and reverts to base afterwards.
+# AAuth overlay (RFC 0028 §5): agentctl-identity IS the Agent Provider. The
+# operator's house-provisioning channel points at the identity service and
+# authenticates with the shared control-plane admin token; the identity
+# service arms its provider role (enroll/agent-token/JWKS surfaces). Layered
+# on e2e-base (which already arms identity.service + postgres custody).
 identity:
   aauth:
-    provider: "http://apd.default.svc.cluster.local"
+    provider: "http://agentctl-identity.agentctl-system"
     adminTokenSecret:
-      name: apd-admin-token
-      key: token
+      name: agentctl-api-token
+      key: AGENTCTL_API_TOKEN
+  service:
+    aauth:
+      enabled: true

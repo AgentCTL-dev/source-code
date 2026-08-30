@@ -1797,65 +1797,25 @@ async fn sec_netpol(ctx: &Ctx) -> Result<Outcome> {
 /// learns `status.identity.aauth`, the once-run completes cleanly, and the
 /// mock server counted only SIGNED calls (never an unsigned/bad-sig accept).
 async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
-    // Prereq: the Agent Provider image must be loaded (built from the sibling
-    // agentprovider checkout by images.sh). Absent ⇒ SKIP with a reason.
-    if !aauth_image_present() {
-        return skip(
-            "apd:e2e image not loaded — build the sibling agentprovider (APD_SRC) via images.sh",
-        );
-    }
-    // The July-era apd fixture predates the 1.3.1 agent's AAuth protocol
-    // (enrollment never completes: the agent never learns status.identity).
-    // The whole seam is re-founded in P1-6 — agentctl-identity becomes the
-    // fleet's Agent Provider with secret-free FEDERATED enrollment (projected
-    // ServiceAccount tokens; RFC 0028 §5) — so the legacy-apd path is a
-    // documented skip, forced only for archaeology.
-    if std::env::var("AGENTCTL_E2E_LEGACY_APD").is_err() {
-        return skip(
-            "legacy apd fixture predates the 1.3.1 AAuth protocol; superseded by P1-6 \
-             (agentctl-identity as the Agent Provider, federated enrollment)",
-        );
-    }
+    // agentctl-identity IS the Agent Provider (RFC 0028 §5, P1-6): the
+    // overlay points the operator's house-provisioning at the identity
+    // service (admin channel = the shared control-plane token) and arms the
+    // provider role (enroll/agent-token/JWKS). No sibling apd image, no
+    // fixture admin token.
     let dir = examples_dir();
 
-    // The operator's admin channel to apd: the SAME fixture token apd's
-    // ConfigMap carries, as a Secret in the control-plane namespace. Created
-    // before the overlay so the operator mounts it on upgrade. (Delete-first
-    // keeps it idempotent across re-runs without a client-side apply.)
-    let _ = shell::kubectl(&[
-        "delete",
-        "secret",
-        "apd-admin-token",
-        "-n",
-        &ctx.cfg.system_ns,
-        "--ignore-not-found",
-    ]);
-    shell::kubectl(&[
-        "create",
-        "secret",
-        "generic",
-        "apd-admin-token",
-        "-n",
-        &ctx.cfg.system_ns,
-        "--from-literal=token=e2e-apd-admin-token-0123456789abcdef",
-    ])
-    .context("create apd-admin-token Secret")?;
-
-    // The house + the remote resource + the mock ModelPool/provider.
-    apply_example(&dir, "apd.yaml")?;
+    // The remote signed resource + the mock ModelPool/provider.
     apply_example(&dir, "mock-aauth-mcp.yaml")?;
     apply_mock_provider(ctx, &dir)?;
     apply_example(&dir, "modelpool-mock.yaml")?;
-    for (kind, name) in [("deployment", "apd"), ("deployment", "mock-aauth-mcp")] {
-        shell::kubectl(&[
-            "rollout",
-            "status",
-            &format!("{kind}/{name}"),
-            "-n",
-            "default",
-            "--timeout=120s",
-        ])?;
-    }
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/mock-aauth-mcp",
+        "-n",
+        "default",
+        "--timeout=120s",
+    ])?;
 
     // Point the operator + admission at the house, then clean up on return.
     apply_overlay(ctx, "aauth")?;
@@ -1911,31 +1871,6 @@ async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
     pass()
 }
 
-/// Whether the Agent Provider image is available for the scenario.
-///
-/// `AGENTCTL_E2E_AAUTH=1` forces the scenario to run (the caller asserts apd is
-/// loaded). Otherwise we consult `node.status.images` as a best-effort signal —
-/// but the kubelet only reports images already referenced by a pod / above a
-/// size floor, so a freshly `kind load`ed-but-unused image often does NOT
-/// appear there. That means the auto-detect can only turn the scenario ON (a
-/// positive hit is reliable), never confidently SKIP a genuinely-present image;
-/// use the env override when you've loaded apd out of band.
-fn aauth_image_present() -> bool {
-    if std::env::var("AGENTCTL_E2E_AAUTH")
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    shell::kubectl(&[
-        "get",
-        "nodes",
-        "-o",
-        "jsonpath={.items[*].status.images[*].names}",
-    ])
-    .map(|out| out.contains("apd:e2e"))
-    .unwrap_or(false)
-}
 
 /// Read the mock AAuth MCP server's `/stats` from inside the cluster (a
 /// throwaway curl pod), avoiding a CA-trust dance on the harness side — the
@@ -1981,17 +1916,9 @@ impl Drop for AauthCleanup<'_> {
     fn drop(&mut self) {
         delete_example(self.dir, "aauth-agent.yaml");
         delete_example(self.dir, "mock-aauth-mcp.yaml");
-        delete_example(self.dir, "apd.yaml");
         delete_example(self.dir, "modelpool-mock.yaml");
         delete_example(self.dir, "mock-provider.yaml");
-        let _ = shell::kubectl(&[
-            "delete",
-            "secret",
-            "apd-admin-token",
-            "-n",
-            &self.ctx.cfg.system_ns,
-            "--ignore-not-found",
-        ]);
+        let _ = self.ctx; // ctx kept for parity with other cleanup guards
     }
 }
 

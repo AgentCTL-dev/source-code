@@ -109,6 +109,21 @@ spec:
             - name: IDENTITY_ISSUER_CA
               value: /etc/agentctl-issuer-ca/{{ $id.issuerCa.key }}
             {{- end }}
+            {{- if $id.aauth.enabled }}
+            # AAuth Agent Provider role: the issuer URL agents dial and
+            # validate `iss` against (must equal identity.aauth.provider).
+            - name: IDENTITY_AAUTH_ISSUER
+              value: http://agentctl-identity.{{ $ns }}
+            - name: IDENTITY_AAUTH_TOKEN_TTL
+              value: {{ $id.aauth.tokenTtl | quote }}
+            {{- if $id.aauth.seedSecret.name }}
+            - name: IDENTITY_AAUTH_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $id.aauth.seedSecret.name }}
+                  key: {{ $id.aauth.seedSecret.key }}
+            {{- end }}
+            {{- end }}
           {{- with $id.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
