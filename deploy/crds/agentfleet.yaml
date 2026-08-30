@@ -45,6 +45,30 @@ spec:
               [`AgentSpec`]; scaling/work/coordinator carry over from v1alpha1
               unchanged (their v2 evolution is the P6 fleets wave).
             properties:
+              budget:
+                description: |-
+                  Per-fleet budget window (RFC 0034 §5, P6-6): breach PAUSES intake —
+                  the operator scales the pool to zero for the rest of the window and
+                  surfaces `BudgetExceeded`; the work fabric's redelivery makes the
+                  pause loss-free for leased items. v2-only (stash-preserved).
+                nullable: true
+                properties:
+                  kind:
+                    description: |-
+                      The metering kind counted (e.g. `a2a_requests`; `tokens` once its
+                      source lands — the vocabulary is `agentctl-metering`'s).
+                    type: string
+                  maxUnits:
+                    format: int64
+                    type: integer
+                  windowSeconds:
+                    format: int64
+                    type: integer
+                required:
+                - kind
+                - maxUnits
+                - windowSeconds
+                type: object
               coordinator:
                 nullable: true
                 properties:

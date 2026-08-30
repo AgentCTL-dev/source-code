@@ -228,6 +228,7 @@ fn merge_v2_only(mut fresh: Value, stash: &Value) -> Value {
         "expose",
         // Fleet-level v2-only surface (RFC 0034).
         "partitioning",
+        "budget",
     ];
     if let (Some(f), Some(s)) = (fresh.as_object_mut(), stash.as_object()) {
         for key in V2_ONLY {

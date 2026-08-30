@@ -151,6 +151,12 @@ rules:
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Fleet budget windows (P6-6): the operator reads the platform's OWN
+  # metering export (the aggregated management API; SAR maps the export to
+  # resource `metering`, subresource `export`, verb create).
+  - apiGroups: ["management.agentctl.dev"]
+    resources: ["metering", "metering/export"]
+    verbs: ["get", "create"]
   # Leader election (operator HA): contend for the coordination.k8s.io Lease
   # named "agentctl-operator" so only one replica runs the reconcile loop.
   - apiGroups: ["coordination.k8s.io"]

@@ -1188,6 +1188,47 @@ async fn ensure_peer_bearers_secret(
     Ok(())
 }
 
+/// This fleet's metered units in the trailing budget window, read through
+/// the platform's OWN export (the aggregated management API, as the
+/// operator's SA — SAR-gated like any caller). Fail-open: billing-plane
+/// unavailability must not pause workloads.
+async fn fleet_budget_used(
+    client: &Client,
+    ns: &str,
+    fleet: &str,
+    b: &agent_api::v1alpha2::FleetBudget,
+) -> Result<i64, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let path = format!(
+        "/apis/management.agentctl.dev/v1alpha1/metering/export?from={}&to={}",
+        now - b.window_seconds,
+        now + 1
+    );
+    let req = http::Request::get(path)
+        .body(Vec::new())
+        .map_err(|e| e.to_string())?;
+    let doc: serde_json::Value = client
+        .request(req)
+        .await
+        .map_err(|e| format!("metering export: {e}"))?;
+    Ok(doc["rows"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| {
+                    r["namespace"] == serde_json::json!(ns)
+                        && r["workload"] == serde_json::json!(fleet)
+                        && r["kind"] == serde_json::json!(b.kind)
+                })
+                .filter_map(|r| r["total"].as_i64())
+                .sum()
+        })
+        .unwrap_or(0))
+}
+
 /// Compose a STATIC fleet's shared worker document from the v2 template
 /// (P6-1): trigger compiler + singleton arming; per-member variation lives
 /// entirely in the vars overlays ([`member_overlay_keys`]). Grants
@@ -1696,6 +1737,34 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
         })
     });
     let static_members = static_ctx.as_ref().map(|(_, _, n)| *n);
+
+    // Per-fleet budget window (P6-6): count this fleet's metered units for
+    // the trailing window via the platform's own export; a breach pauses
+    // intake (the pool scales to zero, KEDA paused) for the window's
+    // remainder — leased items redeliver when it resumes, so the pause is
+    // loss-free by the fabric's own semantics.
+    let budget = v2_view.as_ref().and_then(|f| f.spec.budget.clone());
+    let budget_exceeded = match &budget {
+        Some(b) if b.window_seconds > 0 && b.max_units > 0 => {
+            match fleet_budget_used(&ctx.client, ns, &name, b).await {
+                Ok(used) => {
+                    if used >= b.max_units {
+                        info!(fleet = %name, used, max = b.max_units, kind = %b.kind,
+                              "fleet budget window breached; pausing intake");
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(e) => {
+                    warn!(fleet = %name, error = %e,
+                          "fleet budget readback failed; NOT pausing (fail-open on metering)");
+                    false
+                }
+            }
+        }
+        _ => false,
+    };
     let member_keys: Vec<(String, String)> = static_ctx
         .as_ref()
         .map(|(_, st, members)| member_overlay_keys(st, *members))
@@ -1729,7 +1798,32 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
         );
         wiring.member_overlays = static_members.is_some();
         render_fleet(&fleet, &ctx.render, &wiring, static_members)
-            .map(|rendered| (doc, rendered))
+            .map(|mut rendered| {
+                if budget_exceeded {
+                    match &mut rendered {
+                        crate::render::Rendered::Deployment(d) => {
+                            if let Some(spec) = d.spec.as_mut() {
+                                spec.replicas = Some(0);
+                            }
+                            // Claim fleets: KEDA owns replicas — pin it too.
+                            d.metadata
+                                .annotations
+                                .get_or_insert_with(Default::default)
+                                .insert(
+                                    "autoscaling.keda.sh/paused-replicas".to_string(),
+                                    "0".to_string(),
+                                );
+                        }
+                        crate::render::Rendered::StatefulSet(sts) => {
+                            if let Some(spec) = sts.spec.as_mut() {
+                                spec.replicas = Some(0);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                (doc, rendered)
+            })
             .map_err(|e| e.to_string())
     });
     let (condition, replicas, selector, scaler_condition) = match composed {
@@ -1806,9 +1900,24 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 };
             // Fold the coordinator's readiness in: a not-ready coordinator holds the
             // whole fleet Progressing (the front door is down even if workers are up).
-            let condition = match coordinator_ready {
-                Some(false) => coordinator_progressing_condition(observed),
-                _ => worker_condition,
+            let condition = if budget_exceeded {
+                Condition {
+                    type_: "Ready".to_string(),
+                    status: "False".to_string(),
+                    reason: Some("BudgetExceeded".to_string()),
+                    message: Some(format!(
+                        "budget window breached ({} per {}s) — intake paused for the window",
+                        budget.as_ref().map(|b| b.max_units).unwrap_or(0),
+                        budget.as_ref().map(|b| b.window_seconds).unwrap_or(0),
+                    )),
+                    observed_generation: observed,
+                    last_transition_time: None,
+                }
+            } else {
+                match coordinator_ready {
+                    Some(false) => coordinator_progressing_condition(observed),
+                    _ => worker_condition,
+                }
             };
             (
                 condition,
@@ -1863,11 +1972,22 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // stuck for the whole 300s resync). A not-yet-ready fleet re-reads in
     // seconds; a settled one keeps the long resync.
     let converging = matches!((ready_replicas, desired_replicas), (Some(r), Some(d)) if r < d);
-    Ok(Action::requeue(if converging {
+    let mut leash = if converging {
         std::time::Duration::from_secs(10)
     } else {
         requeue_after()
-    }))
+    };
+    // Budget windows sweep on half the window (floored 10s): breach detection
+    // AND recovery both ride the ordinary reconcile.
+    if let Some(b) = &budget {
+        if b.window_seconds > 0 {
+            leash = std::cmp::min(
+                leash,
+                std::time::Duration::from_secs(((b.window_seconds / 2).max(10)) as u64),
+            );
+        }
+    }
+    Ok(Action::requeue(leash))
 }
 
 /// Render + apply the fleet's **coordinator** workload when one is

@@ -758,7 +758,9 @@ async fn api_resources() -> Json<Value> {
             { "name": "agentfleets/lame-duck", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
             { "name": "agentfleets/cancel", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
             { "name": "agentfleets/pause", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
-            { "name": "agentfleets/resume", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] }
+            { "name": "agentfleets/resume", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
+            { "name": "metering", "singularName": "", "namespaced": false, "kind": "Metering", "verbs": ["get"] },
+            { "name": "metering/export", "singularName": "", "namespaced": false, "kind": "Metering", "verbs": ["get", "create"] }
         ],
     }))
 }

@@ -227,6 +227,7 @@ dependencies = [
  "agentctl-telemetry",
  "axum",
  "futures",
+ "http",
  "k8s-openapi",
  "kube",
  "reqwest",

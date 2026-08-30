@@ -582,6 +582,25 @@ pub struct AgentFleetSpec {
     /// the v1 `scaling.mode` behavior stands unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partitioning: Option<Partitioning>,
+    /// Per-fleet budget window (RFC 0034 §5, P6-6): breach PAUSES intake —
+    /// the operator scales the pool to zero for the rest of the window and
+    /// surfaces `BudgetExceeded`; the work fabric's redelivery makes the
+    /// pause loss-free for leased items. v2-only (stash-preserved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<FleetBudget>,
+}
+
+/// The enforceable window: `maxUnits` of metering `kind` per `windowSeconds`,
+/// read from the platform's own metering aggregation (attributed to this
+/// fleet's workload name).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetBudget {
+    /// The metering kind counted (e.g. `a2a_requests`; `tokens` once its
+    /// source lands — the vocabulary is `agentctl-metering`'s).
+    pub kind: String,
+    pub max_units: i64,
+    pub window_seconds: i64,
 }
 
 /// RFC 0034 §3 — the partitioning strategy family. v2-only (stash-preserved
@@ -1107,9 +1126,10 @@ pub mod convert {
                 work: v1.work.clone(),
                 replicas: v1.replicas,
                 coordinator,
-                // v1 has no partitioning surface; the stash (or a v2 write)
-                // is the only source.
+                // v1 has no partitioning/budget surface; the stash (or a
+                // v2 write) is the only source.
                 partitioning: None,
+                budget: None,
             },
             warnings,
         )
@@ -1121,6 +1141,13 @@ pub mod convert {
         if v2.partitioning.is_some() {
             warnings.push(
                 "spec.partitioning is v1alpha2-only and is not represented in v1alpha1 \
+                 (preserved via the conversion stash)"
+                    .into(),
+            );
+        }
+        if v2.budget.is_some() {
+            warnings.push(
+                "spec.budget is v1alpha2-only and is not represented in v1alpha1 \
                  (preserved via the conversion stash)"
                     .into(),
             );

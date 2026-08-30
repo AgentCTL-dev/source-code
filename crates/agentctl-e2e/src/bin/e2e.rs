@@ -184,7 +184,79 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
         scenario!("metering-export", "billing", metering_export),
+        // fleet budget window: breach pauses intake, window passes, resumes (P6-6)
+        scenario!("fleet-budget", "billing", fleet_budget),
     ]
+}
+
+/// P6-6: a fleet budget window breach PAUSES intake. A static fleet carries
+/// `budget: {kind: a2a_requests, maxUnits: 3, windowSeconds: 75}`; four
+/// fleet-route requests (metered at the gateway chokepoint) breach it — the
+/// operator's sweep scales the pool to ZERO with `Ready=False/BudgetExceeded`
+/// — and once the window slides past, the fleet resumes on its own.
+async fn fleet_budget(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let name = "fleet-billed";
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  replicas: 2\n  scaling: {{ mode: shard, shards: 2 }}\n  budget: {{ kind: a2a_requests, maxUnits: 3, windowSeconds: 75 }}\n  partitioning:\n    strategy: static\n  template:\n    shape: daemon\n    runtime: {{ image: \"agentd:1.3.1\" }}\n    instruction: {{ text: \"answer briefly\" }}\n    expose: {{ a2a: true }}\n"
+    ))?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "2")
+    })
+    .await
+    .context("billed fleet 2/2 ready")?;
+
+    // Breach the window: 4 fleet-route requests (metering counts them at
+    // the gateway entry regardless of the upstream outcome).
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18117)?;
+    for i in 0..4u32 {
+        let _ = ctx
+            .http
+            .post(format!("{}/fleets/{ns}/{name}", pf.base_url()))
+            .json(&json!({ "jsonrpc": "2.0", "id": i, "method": "SendMessage",
+                "params": { "message": { "role": "ROLE_USER",
+                    "messageId": format!("bill-{i}"), "parts": [{ "text": "hi" }] } } }))
+            .send()
+            .await;
+    }
+    drop(pf);
+
+    // The sweep pauses intake: zero replicas + the named condition.
+    kh::poll_until(Duration::from_secs(120), Duration::from_secs(5), || async {
+        let replicas = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o", "jsonpath={.spec.replicas}",
+        ])
+        .unwrap_or_default();
+        let reason = shell::kubectl(&[
+            "get", "agentfleet", "-n", ns, name,
+            "-o", r#"jsonpath={.status.conditions[?(@.type=="Ready")].reason}"#,
+        ])
+        .unwrap_or_default();
+        Ok(replicas.trim() == "0" && reason.contains("BudgetExceeded"))
+    })
+    .await
+    .context("budget breach never paused intake")?;
+
+    // The window slides past → the fleet resumes without any operator input.
+    kh::poll_until(Duration::from_secs(180), Duration::from_secs(10), || async {
+        let out = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "2")
+    })
+    .await
+    .context("fleet never resumed after the window")?;
+
+    shell::kubectl(&["delete", "agentfleet", "-n", ns, name, "--wait=false"]).ok();
+    pass()
 }
 
 /// P7-4: an invoice is computable from the export ALONE. Drive one org's
