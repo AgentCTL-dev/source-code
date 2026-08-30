@@ -155,7 +155,164 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("a2a-principals-gate", "tenancy", a2a_principals_gate),
         // org routes + identity authn + principal injection (P1-5)
         scenario!("org-route-user", "tenancy", org_route_user),
+        // accessPolicies enforcement + RBAC mirror (P1-8)
+        scenario!("org-access-policy", "tenancy", org_access_policy),
     ]
+}
+
+/// The RFC 0033 §2.1 worked example, red/green at the gateway (P1-8):
+/// engineering operates `team: engineering` agents, is refused on marketing;
+/// marketing may VIEW its own team's tasks but not converse; admins do
+/// everything. Also asserts the operator's RBAC mirror landed (per-namespace
+/// role ladder + exact-group bindings).
+async fn org_access_policy(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str, groups: &[&str]| {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({
+                "iss": "https://mock-idp:8443", "aud": "agentctl-cli",
+                "sub": sub, "groups": groups, "exp": exp,
+            }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-policy";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    let spec: OrganizationSpec = serde_json::from_value(json!({
+        "displayName": "E2E Policy",
+        "accessPolicies": [
+            { "match": { "groups": ["mock:eng-*"] }, "role": "operator",
+              "selector": { "matchLabels": { "team": "engineering" } } },
+            { "match": { "groups": ["mock:marketing"] }, "role": "viewer",
+              "selector": { "matchLabels": { "team": "marketing" } } },
+            { "match": { "groups": ["mock:admins"] }, "role": "admin" },
+        ],
+    }))?;
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(org, spec)),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    // The RBAC mirror: role ladder + exact-group admin binding in the ns.
+    let mirror = shell::kubectl(&[
+        "get",
+        "rolebinding",
+        "agentctl-org-admin",
+        "-n",
+        &ns,
+        "-o",
+        "jsonpath={.subjects[*].name}",
+    ])
+    .context("RBAC mirror rolebinding")?;
+    if !mirror.contains("mock:admins") {
+        bail!("RBAC mirror admin binding lacks the exact group (got {mirror:?})");
+    }
+
+    // Two labeled agents (no principals — the policy check precedes them).
+    for (name, team) in [("eng-bot", "engineering"), ("mkt-bot", "marketing")] {
+        let mut agent = agentd_agent(ctx, name, Mode::Reactive, "idle");
+        agent.spec.instruction = None;
+        agent.spec.surfaces = Some(agent_api::DesiredSurfaces {
+            a2a: true,
+            ..Default::default()
+        });
+        agent.metadata.namespace = Some(ns.clone());
+        agent
+            .metadata
+            .labels
+            .get_or_insert_with(Default::default)
+            .insert("team".into(), team.into());
+        kh::apply(&ctx.client, &ns, name, &agent).await?;
+    }
+    for name in ["eng-bot", "mkt-bot"] {
+        kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+            Ok(!first_pod(&ns, &agent_label(name)).unwrap_or_default().is_empty())
+        })
+        .await?;
+        let pod = first_pod(&ns, &agent_label(name))?;
+        kh::wait_pod_running(&ctx.client, &ns, &pod, READY_TIMEOUT).await?;
+    }
+
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18096)?;
+    let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+        "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-pol", "parts": [{ "text": "ping" }] } } });
+    let call = |token: String, name: &str, body: Value| {
+        let http = ctx.http.clone();
+        let url = format!("{}/orgs/{org}/agents/{name}", pf.base_url());
+        async move {
+            let resp = http.post(&url).bearer_auth(token).json(&body).send().await?;
+            anyhow::Ok(resp.status().as_u16())
+        }
+    };
+
+    let eng = sign("eng-user", &["mock:eng-platform"]);
+    let mkt = sign("mkt-user", &["mock:marketing"]);
+    let admin = sign("root", &["mock:admins"]);
+
+    // GREEN: engineering operates engineering.
+    let s = call(eng.clone(), "eng-bot", rpc.clone()).await?;
+    if s != 200 {
+        bail!("eng → eng-bot SendMessage got {s} (want 200)");
+    }
+    // RED: engineering refused on marketing — even for viewing.
+    let s = call(eng.clone(), "mkt-bot", rpc.clone()).await?;
+    if s != 403 {
+        bail!("eng → mkt-bot SendMessage got {s} (want 403)");
+    }
+    let tasks_list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tasks/list", "params": {} });
+    let s = call(eng, "mkt-bot", tasks_list.clone()).await?;
+    if s != 403 {
+        bail!("eng → mkt-bot tasks/list got {s} (want 403)");
+    }
+    // Marketing VIEWS its team (viewer-grade method)…
+    let s = call(mkt.clone(), "mkt-bot", tasks_list.clone()).await?;
+    if s != 200 {
+        bail!("marketing → mkt-bot tasks/list got {s} (want 200)");
+    }
+    // …but cannot converse (operator-grade), even with its own team.
+    let s = call(mkt, "mkt-bot", rpc.clone()).await?;
+    if s != 403 {
+        bail!("marketing → mkt-bot SendMessage got {s} (want 403)");
+    }
+    // Admin sees all: operates BOTH teams.
+    for name in ["eng-bot", "mkt-bot"] {
+        let s = call(admin.clone(), name, rpc.clone()).await?;
+        if s != 200 {
+            bail!("admin → {name} SendMessage got {s} (want 200)");
+        }
+    }
+
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
 }
 
 /// The whole P1-5 chain, live: `/orgs/<org>/agents/<name>` resolves the

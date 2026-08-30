@@ -425,8 +425,8 @@ async fn org_card_common(
     headers: HeaderMap,
 ) -> Response {
     state.metrics.inc_card();
-    let ns = match resolve_org_namespace(&state, &org).await {
-        Ok(ns) => ns,
+    let ns = match resolve_org(&state, &org).await {
+        Ok((_, ns)) => ns,
         Err(resp) => return *resp,
     };
     let base_url = base_url(&headers);
@@ -509,8 +509,8 @@ async fn org_rpc_common(
     req: Value,
 ) -> Response {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let ns = match resolve_org_namespace(&state, &org).await {
-        Ok(ns) => ns,
+    let (org_cr, ns) = match resolve_org(&state, &org).await {
+        Ok(v) => v,
         Err(resp) => return *resp,
     };
     // Org routes REQUIRE identity-service authn — no coarse-token or open
@@ -558,6 +558,21 @@ async fn org_rpc_common(
         }
     };
     state.metrics.inc_oidc_allow();
+
+    // Org access policy (P1-8): roles over label selectors, resolved from the
+    // caller's groups, BEFORE any principal/bearer work — "engineering
+    // operates engineering, marketing is refused, admins see all".
+    let labels = target_labels(&state, &ns, &name).await;
+    let role = required_role(
+        req.get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    if let Err(resp) = enforce_org_policy(&org_cr, &user, &labels, role) {
+        state.metrics.inc_oidc_deny();
+        return *resp;
+    }
+
     handle_a2a(
         state,
         ns,
@@ -571,17 +586,23 @@ async fn org_rpc_common(
     .await
 }
 
-/// Resolve an org name to its primary managed namespace: the Organization
-/// CR's `status.namespaces[0]` when reconciled, else the `org-<name>`
-/// convention. An absent CR is a 404 (org routes never guess).
-async fn resolve_org_namespace(state: &AppState, org: &str) -> Result<String, Box<Response>> {
+/// Resolve an org name to its CR + primary managed namespace
+/// (`status.namespaces[0]` when reconciled, else the `org-<name>`
+/// convention). An absent CR is a 404 (org routes never guess).
+async fn resolve_org(
+    state: &AppState,
+    org: &str,
+) -> Result<(agent_api::Organization, String), Box<Response>> {
     let orgs: Api<agent_api::Organization> = Api::all(state.client.clone());
     match orgs.get_opt(org).await {
-        Ok(Some(o)) => Ok(o
-            .status
-            .as_ref()
-            .and_then(|s| s.namespaces.first().cloned())
-            .unwrap_or_else(|| agent_api::org::org_namespace(org))),
+        Ok(Some(o)) => {
+            let ns = o
+                .status
+                .as_ref()
+                .and_then(|s| s.namespaces.first().cloned())
+                .unwrap_or_else(|| agent_api::org::org_namespace(org));
+            Ok((o, ns))
+        }
         Ok(None) => Err(Box::new(
             (
                 StatusCode::NOT_FOUND,
@@ -597,6 +618,73 @@ async fn resolve_org_namespace(state: &AppState, org: &str) -> Result<String, Bo
                 .into_response(),
         )),
     }
+}
+
+/// The org-policy role a gateway-forwarded A2A method needs (RFC 0029 §3):
+/// conversing and cancelling mutate (operator); reads/subscriptions are
+/// viewer-grade. Unknown methods require operator (fail toward the stronger
+/// role, never the weaker).
+fn required_role(spec_method: &str) -> agent_api::org::Role {
+    use agent_api::org::Role;
+    match spec_method {
+        "tasks/get" | "tasks/list" | "GetTask" | "ListTasks" | "SubscribeToTask"
+        | "SubscribeToEvents" | "tasks/resubscribe" => Role::Viewer,
+        _ => Role::Operator,
+    }
+}
+
+/// Enforce the Organization's accessPolicies for `user` over the target's
+/// labels (RFC 0033 §2.1; the pure engine is `agent_api::org::access`). An
+/// org with NO policies declared imposes no role scoping (org-membership
+/// authn only — policies restrict once stated). Refusals name the role, not
+/// the caller's groups.
+fn enforce_org_policy(
+    org_cr: &agent_api::Organization,
+    user: &identity::OrgUser,
+    labels: &std::collections::BTreeMap<String, String>,
+    role: agent_api::org::Role,
+) -> Result<(), Box<Response>> {
+    use agent_api::org::access;
+    if org_cr.spec.access_policies.is_empty() {
+        return Ok(());
+    }
+    let facts = access::PrincipalFacts {
+        groups: user.groups.clone(),
+        claims: Default::default(),
+    };
+    let grants = access::resolve(&facts, &org_cr.spec.access_policies);
+    if access::permits(&grants, role, labels) {
+        Ok(())
+    } else {
+        Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": format!(
+                    "access policy refuses {role:?}-level access to this agent for your groups"
+                ) })),
+            )
+                .into_response(),
+        ))
+    }
+}
+
+/// The target CR's labels (Agent first, AgentFleet fallback) — what
+/// accessPolicies selectors match on. A missing CR yields empty labels (the
+/// pod resolve later 404s properly).
+async fn target_labels(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let agents: Api<Agent> = Api::namespaced(state.client.clone(), ns);
+    if let Ok(Some(a)) = agents.get_opt(name).await {
+        return a.metadata.labels.unwrap_or_default();
+    }
+    let fleets: Api<AgentFleet> = Api::namespaced(state.client.clone(), ns);
+    if let Ok(Some(f)) = fleets.get_opt(name).await {
+        return f.metadata.labels.unwrap_or_default();
+    }
+    Default::default()
 }
 
 /// The shared A2A RPC handler for both an agent (`is_fleet=false`) and a fleet

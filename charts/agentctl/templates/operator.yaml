@@ -51,6 +51,14 @@ rules:
   - apiGroups: [""]
     resources: ["resourcequotas"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # RBAC mirror (RFC 0033 §2.1): the operator projects each Organization's
+  # accessPolicies as per-namespace Roles + RoleBindings (the kubectl role
+  # ladder). `escalate`+`bind` are required by Kubernetes' escalation
+  # prevention: the admin mirror role grants `*` on agentctl.dev, which the
+  # operator does not hold itself.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "escalate", "bind"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

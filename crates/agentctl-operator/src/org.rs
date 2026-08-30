@@ -22,6 +22,7 @@ use std::sync::Arc;
 use agent_api::org::{org_namespace, NamespaceMode, Organization, OrganizationStatus};
 use agent_api::Condition;
 use k8s_openapi::api::core::v1::{Namespace, ResourceQuota, ResourceQuotaSpec};
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role as RbacRole, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::api::{Api, Patch, PatchParams};
@@ -97,6 +98,116 @@ pub fn desired_quota(namespace: &str, agents: Option<i64>) -> Option<ResourceQuo
     })
 }
 
+/// The RBAC MIRROR (RFC 0033 §2.1): project the org's accessPolicies as
+/// Kubernetes Roles + RoleBindings in each managed namespace so direct
+/// `kubectl` users get the same role ladder. Two honest limits, both
+/// documented at the CRD: (1) K8s RBAC has no label selectors — a
+/// selector-scoped grant widens to the whole namespace here (precise
+/// label scoping is enforced at the gateway); (2) only EXACT group names
+/// mirror (a glob like `okta:eng-*` cannot be a K8s Group subject).
+pub fn desired_org_roles(ns: &str) -> Vec<RbacRole> {
+    let role = |name: &str, rules: Vec<PolicyRule>| RbacRole {
+        metadata: ObjectMeta {
+            name: Some(format!("agentctl-org-{name}")),
+            namespace: Some(ns.to_string()),
+            ..Default::default()
+        },
+        rules: Some(rules),
+    };
+    let read = PolicyRule {
+        api_groups: Some(vec!["agentctl.dev".into()]),
+        resources: Some(vec![
+            "agents".into(),
+            "agents/status".into(),
+            "agentfleets".into(),
+            "agentfleets/status".into(),
+            "modelpools".into(),
+        ]),
+        verbs: vec!["get".into(), "list".into(), "watch".into()],
+        ..Default::default()
+    };
+    // The aggregated management verbs: POST /…/agents/<name>/<verb> is RBAC
+    // resource `agents/<verb>`, verb `create`.
+    let mgmt_verbs: Vec<String> = ["drain", "lame-duck", "pause", "resume", "cancel"]
+        .iter()
+        .flat_map(|v| [format!("agents/{v}"), format!("agentfleets/{v}")])
+        .collect();
+    let manage = PolicyRule {
+        api_groups: Some(vec!["management.agentctl.dev".into()]),
+        resources: Some(mgmt_verbs),
+        verbs: vec!["create".into()],
+        ..Default::default()
+    };
+    let full = PolicyRule {
+        api_groups: Some(vec![
+            "agentctl.dev".into(),
+            "management.agentctl.dev".into(),
+        ]),
+        resources: Some(vec!["*".into()]),
+        verbs: vec!["*".into()],
+        ..Default::default()
+    };
+    vec![
+        role("viewer", vec![read.clone()]),
+        role("operator", vec![read, manage]),
+        role("admin", vec![full]),
+    ]
+}
+
+/// The mirror bindings: one per role, subjects = the union of EXACT group
+/// names from policies granting that role (glob patterns are skipped — they
+/// cannot name a K8s Group). Always all three objects, deterministically:
+/// a role no policy grants gets an EMPTY subject list, which grants nothing
+/// and prunes stale subjects on policy change (SSA replaces the object).
+pub fn desired_role_bindings(
+    ns: &str,
+    policies: &[agent_api::org::AccessPolicy],
+) -> Vec<RoleBinding> {
+    use agent_api::org::Role;
+    let groups_for = |role: Role| -> Vec<String> {
+        let mut groups: Vec<String> = policies
+            .iter()
+            .filter(|p| p.role == role)
+            .flat_map(|p| p.match_.groups.iter())
+            .filter(|g| !g.contains('*'))
+            .cloned()
+            .collect();
+        groups.sort();
+        groups.dedup();
+        groups
+    };
+    [
+        (Role::Viewer, "viewer"),
+        (Role::Operator, "operator"),
+        (Role::Admin, "admin"),
+    ]
+    .into_iter()
+    .map(|(role, name)| RoleBinding {
+        metadata: ObjectMeta {
+            name: Some(format!("agentctl-org-{name}")),
+            namespace: Some(ns.to_string()),
+            ..Default::default()
+        },
+        role_ref: RoleRef {
+            api_group: Some("rbac.authorization.k8s.io".into()),
+            kind: "Role".into(),
+            name: format!("agentctl-org-{name}"),
+        },
+        subjects: Some(
+            groups_for(role)
+                .into_iter()
+                .map(|g| Subject {
+                    api_group: Some("rbac.authorization.k8s.io".into()),
+                    kind: "Group".into(),
+                    name: g,
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+    })
+    .collect()
+}
+
 /// The Ready condition for a fully-applied org.
 pub fn org_ready_condition(observed_generation: Option<i64>, namespaces: usize) -> Condition {
     Condition {
@@ -126,6 +237,20 @@ pub async fn reconcile_org(org: Arc<Organization>, ctx: Arc<Ctx>) -> Result<Acti
     for ns in &namespaces {
         let desired = desired_namespace(ns, &org_name, owner.clone());
         ns_api.patch(ns, &pp, &Patch::Apply(&desired)).await?;
+
+        // RBAC mirror: the role ladder + group bindings for kubectl users.
+        let roles_api: Api<RbacRole> = Api::namespaced(ctx.client.clone(), ns);
+        for role in desired_org_roles(ns) {
+            let name = role.metadata.name.clone().expect("named role");
+            roles_api.patch(&name, &pp, &Patch::Apply(&role)).await?;
+        }
+        let bindings_api: Api<RoleBinding> = Api::namespaced(ctx.client.clone(), ns);
+        for binding in desired_role_bindings(ns, &org.spec.access_policies) {
+            let name = binding.metadata.name.clone().expect("named binding");
+            bindings_api
+                .patch(&name, &pp, &Patch::Apply(&binding))
+                .await?;
+        }
 
         let quota_api: Api<ResourceQuota> = Api::namespaced(ctx.client.clone(), ns);
         match desired_quota(ns, org.spec.quotas.as_ref().and_then(|q| q.agents)) {
@@ -218,6 +343,49 @@ mod tests {
             Some(true),
             "GC cascades on org delete"
         );
+    }
+
+    #[test]
+    fn rbac_mirror_roles_ladder_and_exact_group_bindings() {
+        let roles = desired_org_roles("org-acme");
+        assert_eq!(roles.len(), 3);
+        // operator = read + the aggregated management verbs as `create`.
+        let operator = &roles[1];
+        let rules = operator.rules.as_ref().unwrap();
+        assert!(rules[1]
+            .resources
+            .as_ref()
+            .unwrap()
+            .contains(&"agents/drain".to_string()));
+        assert_eq!(rules[1].verbs, vec!["create"]);
+
+        let o = org(
+            "acme",
+            r#"
+accessPolicies:
+  - match: { groups: ["okta:eng-*"] }
+    role: operator
+    selector: { matchLabels: { team: engineering } }
+  - match: { groups: ["okta:platform-admins", "okta:sre"] }
+    role: admin
+"#,
+        );
+        let bindings = desired_role_bindings("org-acme", &o.spec.access_policies);
+        assert_eq!(
+            bindings.len(),
+            3,
+            "always all three (prunes stale subjects)"
+        );
+        // The glob group cannot be a K8s Group subject → operator has none.
+        assert!(bindings[1].subjects.as_ref().unwrap().is_empty());
+        let admin_subjects: Vec<&str> = bindings[2]
+            .subjects
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(admin_subjects, vec!["okta:platform-admins", "okta:sre"]);
     }
 
     #[test]
