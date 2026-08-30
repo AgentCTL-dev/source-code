@@ -2,20 +2,828 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: agentctl-system/agentctl-admission
   name: agents.agentctl.dev
 spec:
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: agentctl-admission
+          namespace: agentctl-system
+          path: /convert
+          port: 443
+      conversionReviewVersions:
+      - v1
   group: agentctl.dev
   names:
     categories:
     - agentctl
     kind: Agent
     plural: agents
-    shortNames:
-    - agent
-    - agents
+    shortNames: []
     singular: agent
   scope: Namespaced
   versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.shape
+      name: Shape
+      type: string
+    - jsonPath: .spec.class
+      name: Class
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha2
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for AgentSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              One logical agent, provisioning-v2 shape: an instruction + typed triggers
+              + scoped bindings, rendered to the workload `shape` dictates.
+            properties:
+              access:
+                description: Per-agent access policy (named principals, per-agent OIDC).
+                nullable: true
+                properties:
+                  oidc:
+                    description: OIDC/JWT authentication + authorization for inbound A2A calls.
+                    nullable: true
+                    properties:
+                      audiences:
+                        description: Accepted `aud` (audience) claims.
+                        items:
+                          type: string
+                        type: array
+                      forwardIdentity:
+                        description: Inject the caller's `sub`/`email`/`groups` identity to the agent.
+                        nullable: true
+                        type: boolean
+                      issuer:
+                        description: |-
+                          OIDC issuer URL. JWKS is auto-discovered from
+                          `issuer/.well-known/openid-configuration` unless `jwks_uri` is set.
+                        type: string
+                      jwksUri:
+                        description: Explicit JWKS URI override (skips OIDC discovery when set).
+                        nullable: true
+                        type: string
+                      requiredClaims:
+                        description: 'Authorization: ALL listed claim requirements must hold for the caller.'
+                        items:
+                          description: A single claim-based authorization requirement.
+                          properties:
+                            anyOf:
+                              description: The caller's claim (array contains OR scalar equals) must be one of these.
+                              items:
+                                type: string
+                              type: array
+                            claim:
+                              description: The claim name, e.g. `"groups"` or `"email"`.
+                              type: string
+                          required:
+                          - claim
+                          type: object
+                        nullable: true
+                        type: array
+                    required:
+                    - issuer
+                    type: object
+                  principals:
+                    description: |-
+                      Named A2A principals (RFC 0028 §6): user subjects
+                      (`<provider>:<sub>`) whose per-(user,agent) bearers the operator mints
+                      via the identity service, projects into the `<name>-principals` Secret,
+                      and binds in the agent's `a2a.principals[]`. The gateway injects the
+                      caller's bearer per session, so the agent answers ONLY named users.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              approval:
+                description: Approval / HITL policy.
+                nullable: true
+                properties:
+                  hitl:
+                    description: HITL channels (`slack:#support-approvals`).
+                    items:
+                      type: string
+                    type: array
+                  policy:
+                    description: '`ask` (gate to the acting human) | `auto` | `deny`.'
+                    nullable: true
+                    type: string
+                type: object
+              capabilities:
+                description: Dangerous-capability legs (trifecta gating at admission).
+                nullable: true
+                properties:
+                  egress:
+                    description: |-
+                      The agent requests outbound network egress. Declared intent; gated at
+                      admission (a trifecta leg), never wired by the operator.
+                    nullable: true
+                    type: boolean
+                  exec:
+                    description: |-
+                      The agent requests in-sandbox command execution. Declared intent; gated at
+                      admission (a privileged trifecta leg), never wired by the operator.
+                    nullable: true
+                    type: boolean
+                  secrets:
+                    description: |-
+                      The namespace-local `Secret` names the agent may read. Declared intent;
+                      each name is validated at admission (a trifecta leg); the operator does
+                      not itself mount them.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                type: object
+              class:
+                description: |-
+                  The `AgentClass` this agent resolves defaults/floors through
+                  (RFC 0032 scope chain). Absent ⇒ the org's `default` class.
+                nullable: true
+                type: string
+              displayName:
+                description: Human-facing display name.
+                nullable: true
+                type: string
+              expose:
+                description: What the gateway exposes for this agent.
+                nullable: true
+                properties:
+                  a2a:
+                    default: false
+                    description: Route this agent at the gateway (`/orgs/<org>/agents/<handle>`).
+                    type: boolean
+                  webhooks:
+                    description: Webhook routes exposed on the hooks host (RFC 0029 §5).
+                    items:
+                      properties:
+                        auth:
+                          nullable: true
+                          type: string
+                        path:
+                          type: string
+                      required:
+                      - path
+                      type: object
+                    type: array
+                type: object
+              handle:
+                description: Org-unique @handle (DNS-1123; defaults to the CR name).
+                nullable: true
+                type: string
+              identity:
+                description: Workload identity + delegation posture.
+                nullable: true
+                properties:
+                  aauth:
+                    description: AAuth workload identity (RFC 0028 §5; provider from class/operator).
+                    nullable: true
+                    properties:
+                      personServer:
+                        description: |-
+                          RESERVED (AAuth Case C, user-scoped access via a Person Server). Not
+                          rendered in v1; accepted so specs written for the roadmap stay valid.
+                        nullable: true
+                        type: string
+                      provider:
+                        description: |-
+                          The Agent Provider issuer URL (`https://…`). Absent ⇒ the operator's
+                          configured default (`AGENTCTL_AAUTH_PROVIDER`). The admission webhook
+                          denies the opt-in when neither is set.
+                        nullable: true
+                        type: string
+                    type: object
+                  actingForRequired:
+                    description: Refuse autonomous runs that would need user grants.
+                    nullable: true
+                    type: boolean
+                  autonomousAs:
+                    description: The service subject autonomous runs act as.
+                    nullable: true
+                    type: string
+                type: object
+              instruction:
+                description: The instruction document (prose or agentd directive document).
+                nullable: true
+                properties:
+                  configMapRef:
+                    description: A ConfigMap key holding the instruction.
+                    nullable: true
+                    properties:
+                      key:
+                        description: The key within the `ConfigMap`'s data holding the workflow JSON.
+                        type: string
+                      name:
+                        description: The `ConfigMap` name (same namespace as the `Agent`).
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  text:
+                    description: Inline instruction text (prose or an agentd directive document).
+                    nullable: true
+                    type: string
+                type: object
+              intelligence:
+                description: Intelligence binding (pool + tier/model + budget).
+                nullable: true
+                properties:
+                  budget:
+                    description: Token budget (lifetime + windows; narrows the class ceiling).
+                    nullable: true
+                    properties:
+                      lifetimeTokens:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      windows:
+                        items:
+                          properties:
+                            per:
+                              description: '`hour` | `day` | `week` | `month`.'
+                              type: string
+                            tokens:
+                              format: int64
+                              type: integer
+                          required:
+                          - per
+                          - tokens
+                          type: object
+                        type: array
+                    type: object
+                  model:
+                    description: Explicit model id (wins over tier).
+                    nullable: true
+                    type: string
+                  pool:
+                    description: The `ModelPool` binding.
+                    nullable: true
+                    type: string
+                  tier:
+                    description: Model tier within the pool (`small` | `large` | pool-defined).
+                    nullable: true
+                    type: string
+                type: object
+              lifecycle:
+                description: Lifecycle knobs (explicit run_until; declarative pause).
+                nullable: true
+                properties:
+                  drainTimeout:
+                    nullable: true
+                    type: string
+                  paused:
+                    default: false
+                    description: Declarative pause (parity with the `pause` verb).
+                    type: boolean
+                  runUntil:
+                    description: '`drained` (daemons) | `idle` (jobs); ALWAYS rendered explicitly.'
+                    nullable: true
+                    type: string
+                type: object
+              limits:
+                description: Run/step/token ceilings (narrowing over class).
+                nullable: true
+                properties:
+                  lifetimeTokens:
+                    description: |-
+                      Per-INSTANCE lifetime token budget — cumulative across every run/reaction
+                      of this instance (RFC 0025). Renders `--budget-tokens-lifetime`. On a
+                      bounded `once` run exhaustion folds into `EXIT_BUDGET(7)`; a
+                      `reactive`/`loop`/`schedule` daemon stops accepting new reactions and
+                      drains cleanly (exit 0 by default, operator-tunable via the agent's
+                      `--budget-exit-code`). Each instance (fleet member included) gets its own
+                      lifetime box — the harness is the only token-budget enforcement point now
+                      that the metering gateway is gone.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxDepth:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxSteps:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxTokens:
+                    description: Per-RUN token box (each once-run / each reaction). Renders `--max-tokens`.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              mcpServers:
+                description: |-
+                  Inline direct-dial MCP servers — the v1 compatibility spelling.
+                  DEPRECATED in v2: prefer an `MCPService` + `services[]` grant.
+                items:
+                  description: |-
+                    One remote MCP tool server the agent dials **directly** (Streamable HTTP).
+                    Declared inline on `Agent.spec.mcpServers`; there is no gateway facade.
+                    Preferred auth is the agent's own **AAuth** identity (`mode: aauth`, the
+                    secret-free path); `staticToken` mounts a bearer onto the agent pod for a
+                    server that only takes a key.
+                  properties:
+                    auth:
+                      description: 'How the agent authenticates to the server (default: `none`).'
+                      nullable: true
+                      properties:
+                        header:
+                          description: 'Header name to carry the token (default `Authorization: Bearer <value>`).'
+                          nullable: true
+                          type: string
+                        mode:
+                          default: none
+                          description: |-
+                            Auth mode: `none` | `staticToken` (a bearer mounted onto the agent) |
+                            `aauth` (the agent signs its own requests — secret-free).
+                          enum:
+                          - none
+                          - staticToken
+                          - aauth
+                          type: string
+                        tokenSecretRef:
+                          description: |-
+                            The bearer for `staticToken` mode: a `Secret` key the operator mounts
+                            onto the agent, which attaches it upstream. (The agent holds the key —
+                            there is no off-pod broker.)
+                          nullable: true
+                          properties:
+                            key:
+                              description: The key within the `Secret`'s data holding the credential.
+                              type: string
+                            name:
+                              description: The `Secret` name (same namespace as the referencing resource).
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      type: object
+                    endpoint:
+                      description: The remote MCP server URL (Streamable HTTP transport) the agent dials.
+                      type: string
+                    name:
+                      description: Server name — the agent's `--mcp <name>=<endpoint>` key. Unique per Agent.
+                      type: string
+                    tags:
+                      description: Per-tool trifecta capability tags (the Rule-of-Two admission check).
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - endpoint
+                  - name
+                  type: object
+                type: array
+              peers:
+                description: East-west peer wiring (same-org agent handles).
+                items:
+                  properties:
+                    agent:
+                      description: Same-org agent handle.
+                      type: string
+                  required:
+                  - agent
+                  type: object
+                type: array
+              priority:
+                description: Scheduling priority band.
+                enum:
+                - low
+                - normal
+                - high
+                - null
+                nullable: true
+                type: string
+              runtime:
+                description: |-
+                  Runtime selection (agentd version/digest via class; explicit image
+                  wins — the v1 `spec.image` compatibility path).
+                nullable: true
+                properties:
+                  image:
+                    description: Explicit image reference (wins over version resolution).
+                    nullable: true
+                    type: string
+                  version:
+                    description: Runtime version tag (resolved to a digest via class policy).
+                    nullable: true
+                    type: string
+                type: object
+              schedule:
+                description: 'Cron expression for `shape: cron` (the external-CronJob path).'
+                nullable: true
+                type: string
+              services:
+                description: |-
+                  Service GRANTS: `MCPService` references with per-agent narrowing
+                  (allow lists shrink the registry entry's ceiling, never widen).
+                items:
+                  description: |-
+                    A grant against a registry `MCPService`: the agent may narrow the entry's
+                    ceilings (allow ⊆ registry allow), never widen — the P2-2 resolver and
+                    admission both enforce it.
+                  properties:
+                    allow:
+                      description: Tool-name patterns this agent may call (narrows the entry's allow).
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: The `MCPService` name (scope-chain resolved).
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              shape:
+                default: daemon
+                description: |-
+                  The rendered workload shape — ALWAYS explicit after defaulting
+                  (inference per RFC 0033 §2.2: any long-lived trigger ⇒ daemon;
+                  once/manual only ⇒ job; a sole schedule trigger ⇒ cron).
+                enum:
+                - daemon
+                - job
+                - cron
+                type: string
+              skills:
+                description: Skill bundle references (SkillSet names; P2-3 projects the folder).
+                items:
+                  properties:
+                    setRef:
+                      type: string
+                  required:
+                  - setRef
+                  type: object
+                type: array
+              store:
+                description: |-
+                  Durable-state class (`managed` = the state service; `local` = PVC;
+                  `ephemeral` = emptyDir). Absent ⇒ class default (ephemeral).
+                nullable: true
+                properties:
+                  class:
+                    default: ephemeral
+                    description: '`managed` (state service) | `local` (PVC) | `ephemeral` (emptyDir).'
+                    enum:
+                    - ephemeral
+                    - local
+                    - managed
+                    type: string
+                  retention:
+                    description: Retention window for `delete` (`720h`).
+                    nullable: true
+                    type: string
+                type: object
+              substrate:
+                description: Substrate tier. Names are the canonical tier ids.
+                enum:
+                - stock-unix
+                - kata-hybrid
+                - sidecar-emptydir
+                nullable: true
+                type: string
+              triggers:
+                description: |-
+                  Typed triggers over agentd's ten start kinds (RFC 0033 §2.2); the
+                  renderer compiles each into a generated `main-<kind>` workflow.
+                  Bounded (CEL rule-cost budget needs a maxItems).
+                items:
+                  description: |-
+                    One trigger — a typed union over agentd's ten start kinds. EXACTLY ONE
+                    member is set (CEL-enforced); the renderer compiles it into a
+                    `main-<kind>` start-node workflow.
+                  properties:
+                    a2aCommand:
+                      nullable: true
+                      properties:
+                        command:
+                          description: The typed command name registered on the A2A listener.
+                          type: string
+                        roles:
+                          description: Principal roles that may invoke it.
+                          items:
+                            type: string
+                          type: array
+                        schema:
+                          description: JSON-schema for the command's DataPart payload.
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - command
+                      type: object
+                    event:
+                      nullable: true
+                      properties:
+                        filter:
+                          nullable: true
+                          type: string
+                        name:
+                          description: |-
+                            A runtime event from agentd's closed vocabulary. Named `name` (not the
+                            RFC's original `on`): YAML 1.1 parses a bare `on:` key as boolean
+                            `true`, which corrupts both the CRD schema and every user manifest
+                            (the GitHub-Actions trap). RFC 0033 §2.2 updated to match.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    loop:
+                      nullable: true
+                      properties:
+                        interval:
+                          description: Cadence (`30s`, `5m`, …).
+                          type: string
+                        until:
+                          description: Optional stop condition (deadline duration).
+                          nullable: true
+                          type: string
+                      required:
+                      - interval
+                      type: object
+                    manual:
+                      nullable: true
+                      type: object
+                    once:
+                      nullable: true
+                      type: object
+                    schedule:
+                      nullable: true
+                      properties:
+                        cron:
+                          description: Cron expression (`0 7 * * 1-5`).
+                          nullable: true
+                          type: string
+                        every:
+                          description: Interval sugar (`1h`) — compiled to cron.
+                          nullable: true
+                          type: string
+                        runtime:
+                          description: |-
+                            Where the schedule runs: `external` (CronJob — the default for a sole
+                            schedule trigger) or `internal` (an agentd schedule start in a daemon).
+                          enum:
+                          - external
+                          - internal
+                          - null
+                          nullable: true
+                          type: string
+                        tz:
+                          description: Timezone (default UTC).
+                          nullable: true
+                          type: string
+                      type: object
+                    signal:
+                      nullable: true
+                      properties:
+                        filter:
+                          nullable: true
+                          type: string
+                        name:
+                          description: Signal name (`SIGUSR1`, or an agentd-defined logical signal).
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    stream:
+                      nullable: true
+                      properties:
+                        from:
+                          nullable: true
+                          type: string
+                        rate:
+                          nullable: true
+                          type: string
+                        stream:
+                          description: The declared stream name.
+                          type: string
+                        subject:
+                          nullable: true
+                          type: string
+                      required:
+                      - stream
+                      type: object
+                    subscribe:
+                      nullable: true
+                      properties:
+                        debounce:
+                          nullable: true
+                          type: string
+                        filter:
+                          nullable: true
+                          type: string
+                        service:
+                          description: |-
+                            The granted `MCPService` the resource lives on (admission refuses a
+                            subscribe against an ungranted service).
+                          type: string
+                        uri:
+                          description: The MCP resource URI to watch.
+                          type: string
+                      required:
+                      - service
+                      - uri
+                      type: object
+                    webhook:
+                      nullable: true
+                      properties:
+                        auth:
+                          description: '`hmac` | `bearer` | `none` (none only for cluster-internal exposure).'
+                          nullable: true
+                          type: string
+                        idempotency:
+                          description: Idempotency-key header name.
+                          nullable: true
+                          type: string
+                        methods:
+                          items:
+                            type: string
+                          type: array
+                        path:
+                          description: Listener path (`/zendesk`).
+                          type: string
+                        rate:
+                          description: '`<burst>/<per>` arrival rate.'
+                          nullable: true
+                          type: string
+                      required:
+                      - path
+                      type: object
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one trigger kind must be set
+                    rule: (has(self.once)?1:0) + (has(self.manual)?1:0) + (has(self.__loop__)?1:0) + (has(self.schedule)?1:0) + (has(self.webhook)?1:0) + (has(self.subscribe)?1:0) + (has(self.stream)?1:0) + (has(self.signal)?1:0) + (has(self.event)?1:0) + (has(self.a2aCommand)?1:0) == 1
+                maxItems: 32
+                type: array
+              workflows:
+                description: Explicit workflow documents (compose WITH trigger sugar).
+                items:
+                  properties:
+                    configMapRef:
+                      description: A ConfigMap key holding a workflow document.
+                      nullable: true
+                      properties:
+                        key:
+                          description: The key within the `ConfigMap`'s data holding the workflow JSON.
+                          type: string
+                        name:
+                          description: The `ConfigMap` name (same namespace as the `Agent`).
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                    inline:
+                      description: An inline dialect-3 workflow document.
+                      x-kubernetes-preserve-unknown-fields: true
+                    setRef:
+                      description: A WorkflowSet bundle reference.
+                      nullable: true
+                      type: string
+                  type: object
+                type: array
+            type: object
+            x-kubernetes-validations:
+            - message: 'a daemon needs a wake source: triggers[] or expose.a2a'
+              rule: self.shape != 'daemon' || (has(self.triggers) && self.triggers.size() > 0) || (has(self.expose) && has(self.expose.a2a) && self.expose.a2a)
+            - message: cron shape needs spec.schedule or a schedule trigger
+              rule: self.shape != 'cron' || has(self.schedule) || (has(self.triggers) && self.triggers.exists(t, has(t.schedule)))
+          status:
+            nullable: true
+            properties:
+              bundles:
+                additionalProperties:
+                  type: string
+                description: Per-bundle content hashes (workflows/skills/context).
+                type: object
+              conditions:
+                items:
+                  description: A status condition. Mirrors `metav1.Condition` shape.
+                  properties:
+                    lastTransitionTime:
+                      description: An ISO 8601 / UTC timestamp.
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`"True"` | `"False"` | `"Unknown"`.'
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              contract:
+                description: Negotiated-contract facts (v1 compatibility; carried by conversion).
+                nullable: true
+                properties:
+                  agentVersion:
+                    nullable: true
+                    type: string
+                  contractVersion:
+                    nullable: true
+                    type: string
+                  mode:
+                    nullable: true
+                    type: string
+                  operatorTools:
+                    description: The operator tools the live agent advertises (read, never assumed).
+                    items:
+                      type: string
+                    type: array
+                  served:
+                    description: Served-surface summary (true ⇒ advertised + served).
+                    nullable: true
+                    properties:
+                      a2a:
+                        default: false
+                        type: boolean
+                      events:
+                        default: false
+                        type: boolean
+                      management:
+                        default: false
+                        type: boolean
+                      metrics:
+                        default: false
+                        type: boolean
+                    type: object
+                type: object
+              identity:
+                description: Workload identity facts (v1 compatibility; carried by conversion).
+                nullable: true
+                properties:
+                  aauth:
+                    description: The enrolled AAuth identity as learned from the Agent Provider.
+                    nullable: true
+                    properties:
+                      agent:
+                        description: The stable agent identifier, e.g. `aauth:k7q3p9n2@ap.example`.
+                        nullable: true
+                        type: string
+                      enrolledAt:
+                        description: RFC 3339 time the operator first observed the enrollment.
+                        nullable: true
+                        type: string
+                      provider:
+                        description: The Agent Provider issuer URL the identity is enrolled at.
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                nullable: true
+                type: string
+              renderedHash:
+                description: Content hash of the rendered configuration (diffable rollouts).
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Agent
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
   - additionalPrinterColumns:
     - jsonPath: .spec.mode
       name: Mode
@@ -539,6 +1347,6 @@ spec:
         title: Agent
         type: object
     served: true
-    storage: true
+    storage: false
     subresources:
       status: {}

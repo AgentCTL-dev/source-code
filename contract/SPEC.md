@@ -33,8 +33,9 @@ exercising schedule / webhook / subscribe / a2a-command / stream starts —
 
 - **Invocation** is config-document based: `agentd -c <file> [-c <file>…]`
   (layers merge RFC 7396: objects merge, **lists replace**), plus the
-  conventional folders (`workflows/ skills/ subagents/ context/`) beside each
-  config file, adopted only-when-absent. Flags are reserved for process intent
+  conventional folders (`workflows/ skills/ subagents/ context/`) beside the
+  LAST config file only (upstream configuration.md §folders — a services.yaml
+  layered before agentd.yml contributes no folders), adopted only-when-absent. Flags are reserved for process intent
   (`--metrics-addr`, `--drain-timeout`, probes). The 1.x execution-mode and
   clustering flags (`--mode`, `--shard`, `--claim`, `--subscribe`, …) are
   **removed upstream and exit 2** — nothing may render them.

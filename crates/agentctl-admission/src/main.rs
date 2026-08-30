@@ -51,6 +51,7 @@ use serde_json::{json, Map, Value};
 
 use agent_api::ModelPool;
 
+mod convert;
 mod metrics;
 
 /// Where the serving cert + key are mounted (a TLS `Secret` volume).
@@ -128,6 +129,9 @@ async fn main() {
         .route("/metrics", get(serve_metrics))
         .route("/validate", post(validate))
         .route("/mutate", post(mutate))
+        // CRD conversion (P2-1b): the multi-version Agent/AgentFleet CRDs
+        // point their spec.conversion webhook here.
+        .route("/convert", post(convert_handler))
         .with_state(AppState {
             client,
             allowed_registries: allowed_registries.clone(),
@@ -237,6 +241,12 @@ async fn serve_metrics(
 /// `spec.template` for `AgentFleet`), and returns an `AdmissionReview` verdict
 /// (`allowed` + a denial message).
 #[tracing::instrument(name = "admission.validate", skip_all)]
+/// `POST /convert` — ConversionReview for the multi-version CRDs. Pure and
+/// synchronous; the heavy lifting is `agent_api::v1alpha2::convert`.
+async fn convert_handler(Json(review): Json<Value>) -> Json<Value> {
+    Json(convert::convert_review(&review))
+}
+
 async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> Json<Value> {
     let request = &review["request"];
     let uid = request["uid"].as_str().unwrap_or_default().to_string();
@@ -294,7 +304,16 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     }
     state.metrics.record(verdict.is_ok());
 
-    Json(admission_response(&uid, verdict))
+    // Deprecation notices for v1alpha1 writers (the DoD's "convert with
+    // warnings": conversion is lossless, the author still hears about it).
+    let warnings = if request["requestKind"]["version"].as_str() == Some("v1alpha1")
+        || object["apiVersion"].as_str() == Some("agentctl.dev/v1alpha1")
+    {
+        v1_deprecation_warnings(&kind, spec)
+    } else {
+        Vec::new()
+    };
+    Json(admission_response_with_warnings(&uid, verdict, warnings))
 }
 
 /// Run the full policy (registry + trifecta + model.pool existence) against ONE
@@ -685,20 +704,65 @@ async fn resolve_model_pool(client: &Client, spec: &Value, namespace: &str) -> O
 
 /// Build the `AdmissionReview` response carrying the verdict. A denial puts the
 /// reason in `status.message` (surfaced to the user by the apiserver).
+#[cfg(test)]
 fn admission_response(uid: &str, verdict: Result<(), String>) -> Value {
+    admission_response_with_warnings(uid, verdict, Vec::new())
+}
+
+/// AdmissionReview response with optional client-visible warnings — the
+/// channel the v1alpha1 deprecation notices ride (ConversionReview has none).
+fn admission_response_with_warnings(
+    uid: &str,
+    verdict: Result<(), String>,
+    warnings: Vec<String>,
+) -> Value {
     let (allowed, code, message) = match verdict {
         Ok(()) => (true, 200u16, String::new()),
         Err(msg) => (false, 403u16, msg),
     };
+    let mut resp = json!({
+        "uid": uid,
+        "allowed": allowed,
+        "status": { "code": code, "message": message }
+    });
+    if !warnings.is_empty() {
+        resp["warnings"] = json!(warnings);
+    }
     json!({
         "apiVersion": "admission.k8s.io/v1",
         "kind": "AdmissionReview",
-        "response": {
-            "uid": uid,
-            "allowed": allowed,
-            "status": { "code": code, "message": message }
-        }
+        "response": resp
     })
+}
+
+/// The v1alpha1→v1alpha2 migration notices for a spec written at v1alpha1
+/// (the conversion itself is lossless; these tell the author what to update).
+fn v1_deprecation_warnings(kind: &str, spec: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match kind {
+        "Agent" => {
+            if let Ok(v1) = serde_json::from_value::<agent_api::AgentSpec>(spec.clone()) {
+                let (_, warnings) = agent_api::v1alpha2::convert::agent_v1_to_v2(&v1);
+                out.extend(
+                    warnings
+                        .into_iter()
+                        .map(|w| format!("agentctl.dev/v1alpha1 is deprecated: {w}")),
+                );
+            }
+        }
+        "AgentFleet" => {
+            if let Ok(v1) = serde_json::from_value::<agent_api::AgentFleetSpec>(spec.clone()) {
+                let (_, warnings) = agent_api::v1alpha2::convert::fleet_v1_to_v2(&v1);
+                out.extend(
+                    warnings
+                        .into_iter()
+                        .map(|w| format!("agentctl.dev/v1alpha1 is deprecated: {w}")),
+                );
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 // --- decision logic (pure) -------------------------------------------------

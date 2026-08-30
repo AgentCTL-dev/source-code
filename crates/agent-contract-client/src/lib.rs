@@ -612,9 +612,14 @@ mod unit {
             restart_only::is_restart_only("a2a", &entries),
             "whole-object replace covers a2a.tls"
         );
+        // a2a.principals is NOT in RESTART_ONLY_PATHS — but it is
+        // reload-HOSTILE anyway (Resolver::build resolves bearer_refs once at
+        // startup; see restart-only.json $comment_principals). The vendored
+        // table is agentd's own list; the operator's classifier must
+        // special-case principals as restart-only ON TOP of this table.
         assert!(
             !restart_only::is_restart_only("a2a.principals", &entries),
-            "principals hot-reload"
+            "not in agentd's own RESTART_ONLY_PATHS (the operator special-cases it anyway)"
         );
         assert!(!restart_only::is_restart_only(
             "intelligence.endpoints",

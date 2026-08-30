@@ -134,7 +134,7 @@ alongside any explicit `workflows:` the spec carries.
 | `subscribe: {service, uri, debounce?, window?, filter?}` | `subscribe` | the `MCPService` grant (admission refuses a subscribe against an ungrated service) | Deployment |
 | `stream: {stream, subject?, from?, rate?}` | `stream` | the `streams:` declaration | Deployment |
 | `signal: {name, filter?}` | `signal` | — | Deployment |
-| `event: {on, filter?}` | `event` | closed runtime-event vocabulary validated | Deployment |
+| `event: {name, filter?}` | `event` | closed runtime-event vocabulary validated | Deployment |
 | `a2aCommand: {command, schema?, roles?}` | `a2a` | `a2a.listen` (already on) — registers a typed command on the listener | Deployment |
 
 **Shape is inferred but always rendered explicit.** Any long-lived trigger ⇒
