@@ -26,9 +26,23 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
 rules:
+  # `create` on agents: the Supervisor controller renders each Supervisor
+  # into an Agent CR (SSA create-or-patch, owner-referenced).
   - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets"]
+    verbs: ["get", "list", "watch", "update", "patch", "create"]
+  # Supervisors (RFC 0027): watch + status. The supervisor reconciler also
+  # reads the per-namespace `supervisor` AgentClass for its profile
+  # (instruction/services/budget) — read-only.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["supervisors"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["agentctl.dev"]
+    resources: ["agentclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agentctl.dev"]
+    resources: ["supervisors/status"]
+    verbs: ["get", "update", "patch"]
   - apiGroups: ["agentctl.dev"]
     resources: ["agents/status", "agentfleets/status"]
     verbs: ["get", "update", "patch"]
@@ -278,6 +292,13 @@ spec:
             # `queue` distribution.
             - name: AGENTCTL_GATEWAY_URL
               value: {{ .Values.operator.gatewayUrl | default (printf "http://agentctl-gateway.%s.svc.cluster.local.:8080" $ns) | quote }}
+            {{- end }}
+            {{- if .Values.state.enabled }}
+            # Managed state service (P3): the checkpointer endpoint rendered as
+            # the synthetic `state` MCP binding for `store.class: managed`
+            # agents (trailing-dot FQDN — dodges search-domain capture).
+            - name: AGENTCTL_STATE_URL
+              value: {{ printf "http://agentctl-state.%s.svc.cluster.local.:8787/mcp" $ns | quote }}
             {{- end }}
             {{- if .Values.identity.aauth.provider }}
             # AAuth house-provisioning (RFC 0023): the default Agent Provider

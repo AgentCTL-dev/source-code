@@ -42,6 +42,17 @@ metrics:
   serviceMonitor:
     enabled: true
 
+# Platform default agent image (P4): platform-rendered agents (supervisors)
+# carry no spec.image — the operator renders them with this. The tag is the
+# kind-loaded agentd built by images-quick.sh.
+operator:
+  defaultAgentImage: "agentd:1.3.1"
+
+# Managed state service (P3): the mcpg-backed checkpointer for
+# store.class: managed agents (durability + SIGKILL/restore scenarios).
+state:
+  enabled: true
+
 # Identity plane (P1): the identity service (federated OIDC + principal
 # minting) with durable custody in the bundled Postgres. The api-token Secret
 # is rendered for its ADMIN channel (identity + operator minting) without

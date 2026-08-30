@@ -47,6 +47,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
+  # Supervisor auto-ensure (RFC 0027): /orgs/<org>/supervisor finds the
+  # caller's Supervisor CR by spec.user (list) and creates it on first touch.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["supervisors"]
+    verbs: ["get", "list", "create"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -148,6 +148,10 @@ async fn main() {
             get(org_agent_card),
         )
         .route("/orgs/{org}/fleets/{name}", post(org_fleet_rpc))
+        // The caller's OWN supervisor (RFC 0027/0029): resolved by the
+        // authenticated subject; auto-ensured on first touch when the org
+        // policy allows.
+        .route("/orgs/{org}/supervisor", post(org_supervisor_rpc))
         .route(
             "/orgs/{org}/fleets/{name}/.well-known/agent-card.json",
             get(org_fleet_card),
@@ -501,6 +505,181 @@ async fn org_fleet_rpc(
     Json(req): Json<Value>,
 ) -> Response {
     org_rpc_common(state, org, name, true, decision, headers, req).await
+}
+
+/// `POST /orgs/{org}/supervisor` — route to the CALLER's supervisor agent.
+/// The Supervisor CR is looked up by the authenticated subject and
+/// auto-created on first touch (org policy `supervisors: auto`, the
+/// default); while its agent is still coming up the caller gets a retryable
+/// "provisioning" answer, never a hang.
+#[tracing::instrument(skip_all, fields(org = %org))]
+async fn org_supervisor_rpc(
+    State(state): State<AppState>,
+    Path(org): Path<String>,
+    trusted_proxy::TrustedDecision(decision): trusted_proxy::TrustedDecision,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let (org_cr, ns) = match resolve_org(&state, &org).await {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    if !state.identity.ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(rpc_error(
+                id,
+                -32603,
+                "org routes require the identity service (identity.service.enabled)",
+            )),
+        )
+            .into_response();
+    }
+    let Some(token) = bearer_token(&headers).map(str::to_string) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(rpc_error(
+                id,
+                -32001,
+                "a bearer token is required on org routes",
+            )),
+        )
+            .into_response();
+    };
+    let user = match identity::introspect(&state.na, &state.identity, &token).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            state.metrics.inc_oidc_deny();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(rpc_error(id, -32001, "bearer token is not active")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            state.metrics.inc_upstream_error();
+            tracing::warn!(%org, error = %e, "identity introspection failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(rpc_error(id, -32603, "identity introspection failed")),
+            )
+                .into_response();
+        }
+    };
+    state.metrics.inc_oidc_allow();
+
+    let name = match ensure_supervisor(&state, &org_cr, &ns, &user.subject).await {
+        Ok(SupervisorTarget::Ready(name)) => name,
+        Ok(SupervisorTarget::Provisioning) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(rpc_error(
+                    id,
+                    -32603,
+                    "your supervisor is being provisioned — retry in a few seconds",
+                )),
+            )
+                .into_response();
+        }
+        Err(resp) => return *resp,
+    };
+
+    handle_a2a(state, ns, name, false, decision, headers, req, Some(user)).await
+}
+
+enum SupervisorTarget {
+    Ready(String),
+    Provisioning,
+}
+
+/// A DNS-safe supervisor CR name for a subject (`mock:alice` → `sup-mock-alice`).
+fn supervisor_name_for(subject: &str) -> String {
+    let slug: String = subject
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    let mut name = format!("sup-{slug}");
+    name.truncate(63);
+    name.trim_end_matches('-').to_string()
+}
+
+/// Find (or auto-create) the caller's Supervisor and return its agent name
+/// once the rendered agent exists.
+async fn ensure_supervisor(
+    state: &AppState,
+    org_cr: &agent_api::Organization,
+    ns: &str,
+    subject: &str,
+) -> Result<SupervisorTarget, Box<Response>> {
+    use agent_api::v1alpha2::{Supervisor, SupervisorSpec};
+    let mode = org_cr
+        .spec
+        .supervisors
+        .unwrap_or(agent_api::org::SupervisorsMode::Auto);
+    let sups: Api<Supervisor> = Api::namespaced(state.client.clone(), ns);
+    let existing = sups.list(&Default::default()).await.map_err(|e| {
+        Box::new(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("list supervisors: {e}") })),
+            )
+                .into_response(),
+        )
+    })?;
+    if let Some(sup) = existing.items.into_iter().find(|s| s.spec.user == subject) {
+        let agent_ref = sup
+            .status
+            .as_ref()
+            .and_then(|st| st.agent_ref.clone())
+            .unwrap_or_else(|| sup.metadata.name.clone().unwrap_or_default());
+        // The rendered agent must have a Running pod before we forward.
+        return match resolve(&state.client, ns, &agent_ref).await {
+            Ok(_) => Ok(SupervisorTarget::Ready(agent_ref)),
+            Err(_) => Ok(SupervisorTarget::Provisioning),
+        };
+    }
+    match mode {
+        agent_api::org::SupervisorsMode::Disabled => Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "supervisors are disabled for this organization" })),
+            )
+                .into_response(),
+        )),
+        agent_api::org::SupervisorsMode::Manual => Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no supervisor exists for you (org policy: manual) — ask an admin" })),
+            )
+                .into_response(),
+        )),
+        agent_api::org::SupervisorsMode::Auto => {
+            let name = supervisor_name_for(subject);
+            let mut sup = Supervisor::new(
+                &name,
+                SupervisorSpec {
+                    user: subject.to_string(),
+                    paused: false,
+                    instruction_override: None,
+                    budget_override: None,
+                },
+            );
+            sup.metadata.namespace = Some(ns.to_string());
+            let _ = sups
+                .create(&Default::default(), &sup)
+                .await
+                .map_err(|e| tracing::warn!(error = %e, "supervisor auto-create failed (racing?)"));
+            Ok(SupervisorTarget::Provisioning)
+        }
+    }
 }
 
 async fn org_rpc_common(

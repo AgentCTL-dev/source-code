@@ -22,6 +22,7 @@ use agentctl_operator::controller::{
     error_policy, error_policy_fleet, reconcile, reconcile_fleet, ApiTokenConfig, Ctx, ScalerConfig,
 };
 use agentctl_operator::org::{error_policy_org, reconcile_org};
+use agentctl_operator::supervisor::{error_policy_supervisor, reconcile_supervisor};
 use agentctl_operator::{lease, serve, Metrics};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
@@ -261,7 +262,42 @@ async fn main() -> Result<(), kube::Error> {
             .await
     };
 
-    tokio::join!(agent_ctrl, fleet_ctrl, org_ctrl);
+    // Supervisor → its rendered Agent (RFC 0027 §2). Same CRD-presence gate
+    // as the tenancy controller: an upgraded cluster without the CRD keeps a
+    // working operator.
+    let sup_api = Api::<agent_api::v1alpha2::Supervisor>::all(client.clone());
+    let sup_crd_present = sup_api
+        .list(&Default::default())
+        .await
+        .map(|_| true)
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "Supervisor CRD not listable — supervisor controller disabled (install deploy/crds/supervisor.yaml)");
+            false
+        });
+    let sup_ctrl = async {
+        if !sup_crd_present {
+            return;
+        }
+        Controller::new(sup_api, watcher::Config::default())
+            .owns(
+                Api::<agent_api::v1alpha2::Agent>::all(client.clone()),
+                watcher::Config::default(),
+            )
+            .shutdown_on_signal()
+            .run(reconcile_supervisor, error_policy_supervisor, ctx.clone())
+            .for_each(|res| async move {
+                match res {
+                    Ok((obj, action)) => info!(kind = "Supervisor", ?obj, ?action, "reconciled"),
+                    Err(e @ ControllerError::ObjectNotFound(_)) => {
+                        debug!(error = %e, "object gone before reconcile (post-delete race)")
+                    }
+                    Err(e) => error!(error = %e, "reconcile loop error"),
+                }
+            })
+            .await
+    };
+
+    tokio::join!(agent_ctrl, fleet_ctrl, org_ctrl, sup_ctrl);
 
     info!("agentctl-operator controllers stopped");
     Ok(())

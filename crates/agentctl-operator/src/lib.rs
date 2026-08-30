@@ -17,6 +17,7 @@ pub mod pki;
 pub mod reload;
 pub mod render;
 pub mod serve;
+pub mod supervisor;
 
 pub use metrics::Metrics;
 pub use render::{

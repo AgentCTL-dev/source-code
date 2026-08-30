@@ -17,7 +17,9 @@ use crate::auth;
 
 #[derive(Args)]
 pub struct ChatArgs {
-    /// Target as `<org>/<agent>` (or `<org>/fleets/<fleet>`).
+    /// Target as `<org>/<agent>`, `<org>/fleets/<fleet>`, or
+    /// `<org>/supervisor` (your own supervisor; auto-provisioned on first
+    /// contact when the org allows it).
     pub target: String,
     /// The message. Omitted, lines are read from stdin.
     pub message: Vec<String>,
@@ -32,15 +34,33 @@ pub struct ChatArgs {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Target {
     pub org: String,
-    /// `agents` or `fleets`.
+    /// `agents`, `fleets`, or `supervisor` (the caller's own — no name).
     pub resource: &'static str,
     pub name: String,
 }
 
-/// Parse `<org>/<agent>` or `<org>/fleets/<fleet>`.
+impl Target {
+    /// The gateway route path under the base URL.
+    pub fn path(&self) -> String {
+        if self.resource == "supervisor" {
+            format!("/orgs/{}/supervisor", self.org)
+        } else {
+            format!("/orgs/{}/{}/{}", self.org, self.resource, self.name)
+        }
+    }
+}
+
+/// Parse `<org>/<agent>`, `<org>/fleets/<fleet>`, or `<org>/supervisor`.
+/// The literal `supervisor` names the caller's OWN supervisor (RFC 0027) and
+/// shadows any agent handle of the same name — pick a different handle.
 pub fn parse_target(raw: &str) -> Result<Target> {
     let parts: Vec<&str> = raw.split('/').collect();
     match parts.as_slice() {
+        [org, "supervisor"] if !org.is_empty() => Ok(Target {
+            org: org.to_string(),
+            resource: "supervisor",
+            name: String::new(),
+        }),
         [org, name] if !org.is_empty() && !name.is_empty() => Ok(Target {
             org: org.to_string(),
             resource: "agents",
@@ -51,7 +71,9 @@ pub fn parse_target(raw: &str) -> Result<Target> {
             resource: "fleets",
             name: name.to_string(),
         }),
-        _ => bail!("target must be <org>/<agent> or <org>/fleets/<fleet> (got {raw:?})"),
+        _ => bail!(
+            "target must be <org>/<agent>, <org>/fleets/<fleet>, or <org>/supervisor (got {raw:?})"
+        ),
     }
 }
 
@@ -106,11 +128,9 @@ pub fn reply_text(resp: &Value) -> String {
 pub async fn run_chat(args: ChatArgs) -> Result<()> {
     let target = parse_target(&args.target)?;
     let url = format!(
-        "{}/orgs/{}/{}/{}",
+        "{}{}",
         gateway_url(args.gateway_url.as_deref())?,
-        target.org,
-        target.resource,
-        target.name
+        target.path()
     );
     let session = auth::load_session()?;
     let http = auth::api_client()?;
@@ -120,24 +140,40 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         let url = url.clone();
         let token = session.access_token.clone();
         async move {
-            let resp = http
-                .post(&url)
-                .bearer_auth(token)
-                .json(&json!({
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "method": "SendMessage",
-                    "params": { "message": {
-                        "role": "ROLE_USER",
-                        "messageId": format!("cli-{msg_id}"),
-                        "parts": [{ "text": text }],
-                    } },
-                }))
-                .send()
-                .await
-                .context("reach the gateway")?;
-            let status = resp.status();
-            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            // A supervisor's first contact auto-provisions it; the gateway
+            // answers 503 while the agent spins up. Poll through that window.
+            let mut waited = false;
+            let mut tries = 0u32;
+            let (status, body) = loop {
+                let resp = http
+                    .post(&url)
+                    .bearer_auth(token.clone())
+                    .json(&json!({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "method": "SendMessage",
+                        "params": { "message": {
+                            "role": "ROLE_USER",
+                            "messageId": format!("cli-{msg_id}"),
+                            "parts": [{ "text": text }],
+                        } },
+                    }))
+                    .send()
+                    .await
+                    .context("reach the gateway")?;
+                let status = resp.status();
+                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                if status.as_u16() == 503 && tries < 40 {
+                    if !waited {
+                        eprintln!("supervisor is provisioning — waiting…");
+                        waited = true;
+                    }
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                break (status, body);
+            };
             if status.as_u16() == 401 {
                 bail!("session refused (401) — run `agentctl login` again");
             }
@@ -200,6 +236,18 @@ mod tests {
         assert!(parse_target("just-a-name").is_err());
         assert!(parse_target("a/b/c").is_err());
         assert!(parse_target("/x").is_err());
+    }
+
+    #[test]
+    fn supervisor_target_routes_unnamed() {
+        let t = parse_target("acme/supervisor").unwrap();
+        assert_eq!(t.resource, "supervisor");
+        assert_eq!(t.path(), "/orgs/acme/supervisor");
+        // A named form still hits the ordinary agent route.
+        assert_eq!(
+            parse_target("acme/fleets/workers").unwrap().path(),
+            "/orgs/acme/fleets/workers"
+        );
     }
 
     #[test]

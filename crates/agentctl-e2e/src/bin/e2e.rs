@@ -157,10 +157,14 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("org-route-user", "tenancy", org_route_user),
         // accessPolicies enforcement + RBAC mirror (P1-8)
         scenario!("org-access-policy", "tenancy", org_access_policy),
+        // the caller's own supervisor: auto-ensure → render → converse (P4-3/4)
+        scenario!("supervisor-route", "tenancy", supervisor_route),
         // registry floors + tag-laundering guard (P2-4)
         scenario!("policy-ladder", "tenancy", policy_ladder),
         // trigger sugar over the ten start kinds (P2-8)
         scenario!("trigger-matrix", "triggers", trigger_matrix),
+        // managed state service: checkpointer contract + SIGKILL/restore (P3)
+        scenario!("state-durability", "durability", state_durability),
     ]
 }
 
@@ -720,6 +724,407 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
         .await
         .ok();
     orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P4-3/P4-4: the caller's OWN supervisor, end to end. First touch on
+/// `POST /orgs/<org>/supervisor` auto-creates the Supervisor CR (org policy
+/// `supervisors: auto`, the default) and answers a retryable 503; the
+/// operator renders it into an owner-referenced v2 Agent whose ONLY named
+/// principal is the caller, with the layered instruction; once the pod runs,
+/// the same call converses. No token stays 401.
+async fn supervisor_route(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use agent_api::v1alpha2 as v2;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str| {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({
+                "iss": "https://mock-idp:8443",
+                "aud": "agentctl-cli",
+                "sub": sub,
+                "email": format!("{sub}@example.test"),
+                "groups": ["eng"],
+                "exp": exp,
+            }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-sup";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({ "displayName": "E2E Sup" }))?,
+        )),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18099)?;
+    let url = format!("{}/orgs/{org}/supervisor", pf.base_url());
+    let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+        "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-sup-1", "parts": [{ "text": "who am I to you?" }] } } });
+
+    // No token → 401 (the supervisor route never falls open).
+    let resp = ctx.http.post(&url).json(&rpc).send().await?;
+    if resp.status().as_u16() != 401 {
+        bail!("unauthenticated supervisor call got {} (want 401)", resp.status());
+    }
+
+    // First authenticated touch: provisioning (503) + the CR appears.
+    let resp = ctx
+        .http
+        .post(&url)
+        .bearer_auth(sign("carol"))
+        .json(&rpc)
+        .send()
+        .await?;
+    if resp.status().as_u16() != 503 {
+        bail!(
+            "first supervisor touch got {} (want 503 provisioning)",
+            resp.status()
+        );
+    }
+    let sups: Api<v2::Supervisor> = Api::namespaced(ctx.client.clone(), &ns);
+    let sup_name = "sup-mock-carol";
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(sups.get_opt(sup_name).await?.is_some())
+    })
+    .await
+    .context("auto-created Supervisor CR")?;
+    let sup = sups.get(sup_name).await?;
+    if sup.spec.user != "mock:carol" {
+        bail!("Supervisor spec.user = {:?}, want mock:carol", sup.spec.user);
+    }
+
+    // The rendered v2 Agent: owner-scoped to the CR, addressed ONLY to carol,
+    // instruction layered from the platform default.
+    let agents: Api<v2::Agent> = Api::namespaced(ctx.client.clone(), &ns);
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(agents.get_opt(sup_name).await?.is_some())
+    })
+    .await
+    .context("rendered supervisor Agent")?;
+    let rendered = agents.get(sup_name).await?;
+    let principals = rendered
+        .spec
+        .access
+        .as_ref()
+        .map(|a| a.principals.clone())
+        .unwrap_or_default();
+    if principals != vec!["mock:carol".to_string()] {
+        bail!("supervisor principals {principals:?}, want exactly [mock:carol]");
+    }
+    if !rendered
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|o| o.kind == "Supervisor")
+    {
+        bail!("rendered supervisor agent is not owner-referenced to its Supervisor CR");
+    }
+
+    // Poll the SAME call until the supervisor answers as carol (the pod must
+    // come up, the gateway resolve it, and the principal bearer converse).
+    let last = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let last = last.clone();
+        let url = url.clone();
+        let rpc = rpc.clone();
+        let token = sign("carol");
+        async move {
+            let resp = ctx.http.post(&url).bearer_auth(token).json(&rpc).send().await?;
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            *last.lock().unwrap() = format!("status {status}: {body}");
+            Ok(status.is_success() && body.get("result").is_some())
+        }
+    })
+    .await
+    .with_context(|| format!("supervisor never answered; last: {}", last.lock().unwrap()))?;
+
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P3: the managed state service honors the agentd checkpointer profile
+/// (contract/schemas/store.profile.json) and survives a SIGKILL.
+/// Leg 1 drives the four tools DIRECTLY over MCP: absent-get null, seq-CAS
+/// accept/refuse, byte-identical replay idempotence, list, delete.
+/// Leg 2 renders a `store.class: managed` agent, waits for its checkpoint
+/// keys under orgs/<ns>/<name>, hard-kills the pod, and requires a clean
+/// restore (fresh pod Running, zero restarts, keys intact).
+async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
+    let sys = &ctx.cfg.system_ns;
+    let ready = shell::kubectl(&[
+        "get",
+        "deploy",
+        "-n",
+        sys,
+        "agentctl-state",
+        "-o",
+        "jsonpath={.status.readyReplicas}",
+    ])
+    .unwrap_or_default();
+    if ready.trim().is_empty() || ready.trim() == "0" {
+        return skip(
+            "state service not Ready — blessed mcpg image cannot dlopen backend-sql:protocol-1 \
+             (GLIBC mismatch; mcpg re-blessing the pairing). Unskips by itself once the pin lands.",
+        );
+    }
+
+    let pf = shell::PortForward::service(sys, "agentctl-state", 8787, 18100)?;
+    let mcp = format!("{}/mcp", pf.base_url());
+
+    // Minimal MCP streamable-HTTP client: initialize → session id → calls.
+    let post = |body: Value, session: Option<String>| {
+        let mcp = mcp.clone();
+        async move {
+            let mut req = ctx
+                .http
+                .post(&mcp)
+                .header("accept", "application/json, text/event-stream")
+                .json(&body);
+            if let Some(s) = &session {
+                req = req.header("mcp-session-id", s.clone());
+            }
+            let resp = req.send().await.context("reach state /mcp")?;
+            let session = resp
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let text = resp.text().await.unwrap_or_default();
+            let body: Value = if ct.starts_with("text/event-stream") {
+                text.lines()
+                    .find_map(|l| l.strip_prefix("data:"))
+                    .and_then(|d| serde_json::from_str(d.trim()).ok())
+                    .unwrap_or(Value::Null)
+            } else {
+                serde_json::from_str(&text).unwrap_or(Value::Null)
+            };
+            anyhow::Ok((body, session))
+        }
+    };
+
+    let (init, session) = post(
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if init.get("result").is_none() {
+        bail!("state MCP initialize failed: {init}");
+    }
+    let _ = post(
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        session.clone(),
+    )
+    .await;
+    let call = |id: u64, tool: &str, args: Value| {
+        let tool = tool.to_string();
+        let session = session.clone();
+        let post = &post;
+        async move {
+            let (resp, _) = post(
+                json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                        "params": { "name": tool, "arguments": args } }),
+                session,
+            )
+            .await?;
+            if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
+                bail!("tools/call {tool} refused: {err}");
+            }
+            anyhow::Ok(resp["result"].clone())
+        }
+    };
+
+    // Contract conformance, straight off store.profile.json.
+    let key = format!("orgs/{}/e2e-probe/agent/state", ctx.cfg.ns);
+    let sc = |r: &Value| r["structuredContent"].clone();
+    let envl = json!({ "v": 1, "note": "first checkpoint" });
+
+    let r = call(1, "state.get", json!({ "key": key })).await?;
+    if !sc(&r).is_null() && !sc(&r)["state"].is_null() {
+        // Leftover from a prior run — clear and re-read.
+        call(2, "state.delete", json!({ "key": key })).await?;
+    }
+    let r = call(3, "state.put", json!({ "key": key, "seq": 1, "state": envl })).await?;
+    if sc(&r)["ok"] != json!(true) || !sc(&r)["latest"].is_null() {
+        bail!("first put refused: {r}");
+    }
+    // Byte-identical replay of the accepted write stays accepted (the binding
+    // self-idempotates; agentd's _meta idempotency never reaches SQL).
+    let r = call(4, "state.put", json!({ "key": key, "seq": 1, "state": envl })).await?;
+    if sc(&r)["ok"] != json!(true) {
+        bail!("idempotent replay refused: {r}");
+    }
+    // A DIVERGENT write at the same seq is the split-brain fence: refuse + latest.
+    let r = call(
+        5,
+        "state.put",
+        json!({ "key": key, "seq": 1, "state": { "v": 1, "note": "divergent" } }),
+    )
+    .await?;
+    if sc(&r)["ok"] != json!(false) || sc(&r)["latest"] != json!(1) {
+        bail!("divergent same-seq write not fenced: {r}");
+    }
+    // The successor seq advances; a stale successor refuses with the latest.
+    let r = call(
+        6,
+        "state.put",
+        json!({ "key": key, "seq": 2, "state": { "v": 2 } }),
+    )
+    .await?;
+    if sc(&r)["ok"] != json!(true) {
+        bail!("seq-2 CAS refused: {r}");
+    }
+    let r = call(
+        7,
+        "state.put",
+        json!({ "key": key, "seq": 4, "state": { "v": 4 } }),
+    )
+    .await?;
+    if sc(&r)["ok"] != json!(false) || sc(&r)["latest"] != json!(2) {
+        bail!("gap write (seq 4 over 2) not refused with latest: {r}");
+    }
+    let r = call(8, "state.get", json!({ "key": key })).await?;
+    if sc(&r)["state"]["v"] != json!(2) || sc(&r)["seq"] != json!(2) {
+        bail!("read-back after CAS: {r}");
+    }
+    let r = call(
+        9,
+        "state.list",
+        json!({ "prefix": format!("orgs/{}/e2e-probe/", ctx.cfg.ns) }),
+    )
+    .await?;
+    let keys = sc(&r)["keys"].as_array().cloned().unwrap_or_default();
+    if !keys.iter().any(|k| k["key"] == json!(key)) {
+        bail!("list missed the written key: {r}");
+    }
+    call(10, "state.delete", json!({ "key": key })).await?;
+    let r = call(11, "state.get", json!({ "key": key })).await?;
+    if !sc(&r).is_null() && !sc(&r)["state"].is_null() {
+        bail!("get after delete not absent: {r}");
+    }
+
+    // Leg 2: a managed-store agent checkpoints through the SAME service and
+    // survives kill -9.
+    let ns = &ctx.cfg.ns;
+    let name = "state-probe";
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge ticks in one line\" }}\n  expose: {{ a2a: true }}\n  store: {{ class: managed }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
+    ))?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(!first_pod(ns, &agent_label(name)).unwrap_or_default().is_empty())
+    })
+    .await
+    .context("state-probe pod")?;
+    let pod = first_pod(ns, &agent_label(name))?;
+    kh::wait_pod_running(&ctx.client, ns, &pod, READY_TIMEOUT).await?;
+
+    // The agent's checkpoints appear under ITS operator-rendered prefix.
+    let prefix = format!("orgs/{ns}/{name}");
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let prefix = prefix.clone();
+        let call = &call;
+        async move {
+            let r = call(12, "state.list", json!({ "prefix": prefix })).await?;
+            Ok(r["structuredContent"]["keys"]
+                .as_array()
+                .is_some_and(|k| !k.is_empty()))
+        }
+    })
+    .await
+    .context("agent checkpoints under its prefix")?;
+
+    // Hard kill (no grace): the replacement must restore, not split-brain.
+    shell::kubectl(&[
+        "delete",
+        "pod",
+        "-n",
+        ns,
+        &pod,
+        "--grace-period=0",
+        "--force",
+    ])?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || {
+        let old = pod.clone();
+        async move {
+            let now = first_pod(ns, &agent_label(name)).unwrap_or_default();
+            Ok(!now.is_empty() && now != old)
+        }
+    })
+    .await
+    .context("replacement pod after SIGKILL")?;
+    let pod2 = first_pod(ns, &agent_label(name))?;
+    kh::wait_pod_running(&ctx.client, ns, &pod2, READY_TIMEOUT).await?;
+    // Hold for a restore window: still Running, zero restarts (a store
+    // Conflict on an owned key is fatal split-brain — it would crash-loop).
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let restarts = shell::kubectl(&[
+        "get",
+        "pod",
+        "-n",
+        ns,
+        &pod2,
+        "-o",
+        "jsonpath={.status.containerStatuses[0].restartCount}",
+    ])?;
+    if restarts.trim() != "0" {
+        bail!("restored agent restarted {restarts} times (split-brain or store outage?)");
+    }
+    let r = call(13, "state.list", json!({ "prefix": prefix.clone() })).await?;
+    if !r["structuredContent"]["keys"]
+        .as_array()
+        .is_some_and(|k| !k.is_empty())
+    {
+        bail!("checkpoints vanished across the SIGKILL: {r}");
+    }
+
+    drop(pf);
+    kh::api::<agent_api::v1alpha2::Agent>(&ctx.client, ns)
+        .delete(name, &Default::default())
+        .await
+        .ok();
     pass()
 }
 
