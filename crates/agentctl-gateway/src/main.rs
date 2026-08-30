@@ -931,7 +931,7 @@ async fn ensure_supervisor(
                 .status
                 .as_ref()
                 .and_then(|st| st.last_conversation.as_deref())
-                .and_then(|t| httpdate_unix(t))
+                .and_then(httpdate_unix)
                 .map(|t| now.saturating_sub(t) > 30)
                 .unwrap_or(true);
             stale.then(|| unix_to_rfc3339(now))
