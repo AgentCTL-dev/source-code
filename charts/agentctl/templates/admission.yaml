@@ -38,6 +38,12 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets"]
     verbs: ["get", "list"]
+  # Policy ladder (RFC 0032, P2-4): the scope chain (AgentClass parents) and
+  # the registry slice (MCPServices) resolve at admission; the tag-laundering
+  # guard lists Agents to find live consumers.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["agentclasses", "mcpservices"]
+    verbs: ["get", "list"]
   # Referenced-Secret EXISTENCE check (rung 3b): a dangling
   # credentialSecretRef/tokenSecretRef is not caught by --validate-config
   # (upstream-confirmed) and would surface as a pod that cannot start. The
@@ -248,10 +254,21 @@ webhooks:
         path: /validate
         port: 443
     rules:
+      # v1alpha2 is the WEBHOOK's view (matchPolicy Equivalent, the default,
+      # up-converts v1alpha1 writes losslessly) — the policy ladder must see
+      # the v2-only fields (class, services grants) a v1 view drops.
       - apiGroups: ["agentctl.dev"]
-        apiVersions: ["v1alpha1"]
+        apiVersions: ["v1alpha2"]
         operations: ["CREATE", "UPDATE"]
         resources: ["agents", "agentfleets"]
+        scope: Namespaced
+      # Tag-laundering guard (RFC 0032 §5.3): an MCPService edit that would
+      # widen a live consumer's legs (drop a tag, widen the allow ceiling,
+      # repoint the endpoint) is refused while consumers exist.
+      - apiGroups: ["agentctl.dev"]
+        apiVersions: ["v1alpha2"]
+        operations: ["UPDATE"]
+        resources: ["mcpservices"]
         scope: Namespaced
 ---
 # Registers the DEFAULTING mutating webhook for Agent + AgentFleet CREATE/UPDATE.
@@ -292,7 +309,7 @@ webhooks:
         port: 443
     rules:
       - apiGroups: ["agentctl.dev"]
-        apiVersions: ["v1alpha1"]
+        apiVersions: ["v1alpha2"]
         operations: ["CREATE", "UPDATE"]
         resources: ["agents", "agentfleets"]
         scope: Namespaced

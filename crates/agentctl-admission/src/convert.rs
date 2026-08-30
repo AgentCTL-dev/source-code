@@ -15,6 +15,14 @@
 
 use serde_json::{json, Map, Value};
 
+/// The v2-spec stash annotation: written onto the v1 REPRESENTATION at
+/// down-conversion so a v1-mediated write (the operator's finalizer/status
+/// patches, an old client's update) cannot erase v2-only fields. Storage is
+/// v1alpha2: every v1 write round-trips v2→v1→v2 through this webhook, and
+/// without the stash that round trip silently dropped `class`/`services`/…
+/// (observed live: the operator's status patch erased a stored grant).
+pub const V2_STASH_ANNOTATION: &str = "agentctl.dev/v1alpha2-spec";
+
 /// Handle a ConversionReview: convert every object to `desiredAPIVersion`.
 pub fn convert_review(review: &Value) -> Value {
     let request = &review["request"];
@@ -63,29 +71,83 @@ pub fn convert_object(obj: &Value, desired: &str) -> Result<Value, String> {
     );
 
     let spec = obj.get("spec").cloned().unwrap_or(Value::Null);
+    let mut metadata = obj.get("metadata").cloned().unwrap_or(Value::Null);
+    let stashed: Option<Value> = metadata
+        .get("annotations")
+        .and_then(|a| a.get(V2_STASH_ANNOTATION))
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str(raw).ok());
+
     let converted_spec = match (kind, from, to) {
         ("Agent", "v1alpha1", "v1alpha2") => {
             let v1: agent_api::AgentSpec = serde_json::from_value(spec)
                 .map_err(|e| format!("parse v1alpha1 Agent spec: {e}"))?;
-            let (v2, _warnings) = agent_api::v1alpha2::convert::agent_v1_to_v2(&v1);
-            serde_json::to_value(v2).map_err(|e| e.to_string())?
+            let (fresh, _warnings) = agent_api::v1alpha2::convert::agent_v1_to_v2(&v1);
+            strip_stash(&mut metadata);
+            match stashed {
+                // The stash restores what the v1 view cannot express. When
+                // the v1 writer did NOT touch the v1-visible surface (the
+                // stashed spec's own down-conversion equals the incoming v1),
+                // the stashed v2 spec is returned VERBATIM; otherwise the
+                // fresh conversion wins for the v1-visible fields and the
+                // stashed v2-only fields are merged back on top.
+                Some(stash) => {
+                    match serde_json::from_value::<agent_api::v1alpha2::AgentSpec>(stash.clone()) {
+                        Ok(stashed_v2) => {
+                            let (down, _) =
+                                agent_api::v1alpha2::convert::agent_v2_to_v1(&stashed_v2);
+                            if serde_json::to_value(&down).ok() == serde_json::to_value(&v1).ok() {
+                                stash
+                            } else {
+                                merge_v2_only(
+                                    serde_json::to_value(fresh).map_err(|e| e.to_string())?,
+                                    &stash,
+                                )
+                            }
+                        }
+                        Err(_) => serde_json::to_value(fresh).map_err(|e| e.to_string())?,
+                    }
+                }
+                None => serde_json::to_value(fresh).map_err(|e| e.to_string())?,
+            }
         }
         ("Agent", "v1alpha2", "v1alpha1") => {
-            let v2: agent_api::v1alpha2::AgentSpec = serde_json::from_value(spec)
+            let v2: agent_api::v1alpha2::AgentSpec = serde_json::from_value(spec.clone())
                 .map_err(|e| format!("parse v1alpha2 Agent spec: {e}"))?;
             let (v1, _warnings) = agent_api::v1alpha2::convert::agent_v2_to_v1(&v2);
+            set_stash(&mut metadata, &spec)?;
             serde_json::to_value(v1).map_err(|e| e.to_string())?
         }
         ("AgentFleet", "v1alpha1", "v1alpha2") => {
             let v1: agent_api::AgentFleetSpec = serde_json::from_value(spec)
                 .map_err(|e| format!("parse v1alpha1 AgentFleet spec: {e}"))?;
-            let (v2, _warnings) = agent_api::v1alpha2::convert::fleet_v1_to_v2(&v1);
-            serde_json::to_value(v2).map_err(|e| e.to_string())?
+            let (fresh, _warnings) = agent_api::v1alpha2::convert::fleet_v1_to_v2(&v1);
+            strip_stash(&mut metadata);
+            match stashed {
+                Some(stash) => {
+                    match serde_json::from_value::<agent_api::v1alpha2::AgentFleetSpec>(
+                        stash.clone(),
+                    ) {
+                        Ok(stashed_v2) => {
+                            let (down, _) =
+                                agent_api::v1alpha2::convert::fleet_v2_to_v1(&stashed_v2);
+                            if serde_json::to_value(&down).ok() == serde_json::to_value(&v1).ok() {
+                                stash
+                            } else {
+                                serde_json::to_value(fresh).map_err(|e| e.to_string())?
+                            }
+                        }
+                        Err(_) => serde_json::to_value(fresh).map_err(|e| e.to_string())?,
+                    }
+                }
+                None => serde_json::to_value(fresh).map_err(|e| e.to_string())?,
+            }
         }
         ("AgentFleet", "v1alpha2", "v1alpha1") => {
-            let v2: agent_api::v1alpha2::AgentFleetSpec = serde_json::from_value(spec)
+            let v2: agent_api::v1alpha2::AgentFleetSpec = serde_json::from_value(spec.clone())
                 .map_err(|e| format!("parse v1alpha2 AgentFleet spec: {e}"))?;
             let (v1, _warnings) = agent_api::v1alpha2::convert::fleet_v2_to_v1(&v2);
+            set_stash(&mut metadata, &spec)?;
             serde_json::to_value(v1).map_err(|e| e.to_string())?
         }
         _ => {
@@ -98,10 +160,7 @@ pub fn convert_object(obj: &Value, desired: &str) -> Result<Value, String> {
     let mut out = Map::new();
     out.insert("apiVersion".into(), json!(desired));
     out.insert("kind".into(), json!(kind));
-    out.insert(
-        "metadata".into(),
-        obj.get("metadata").cloned().unwrap_or(Value::Null),
-    );
+    out.insert("metadata".into(), metadata);
     out.insert("spec".into(), converted_spec);
     if let Some(status) = obj.get("status") {
         // v2 status ⊇ v1 status field-for-field; downward, the v2-only keys
@@ -117,6 +176,65 @@ pub fn convert_object(obj: &Value, desired: &str) -> Result<Value, String> {
         out.insert("status".into(), status);
     }
     Ok(Value::Object(out))
+}
+
+/// Write the stash annotation onto a (v1-bound) metadata value.
+fn set_stash(metadata: &mut Value, v2_spec: &Value) -> Result<(), String> {
+    let raw = serde_json::to_string(v2_spec).map_err(|e| e.to_string())?;
+    if metadata.is_null() {
+        *metadata = json!({});
+    }
+    let m = metadata
+        .as_object_mut()
+        .ok_or("metadata is not an object")?;
+    let ann = m.entry("annotations").or_insert_with(|| json!({}));
+    ann.as_object_mut()
+        .ok_or("annotations is not an object")?
+        .insert(V2_STASH_ANNOTATION.into(), json!(raw));
+    Ok(())
+}
+
+/// Drop the stash from a (v2-bound) metadata value — it exists only on the
+/// v1 representation.
+fn strip_stash(metadata: &mut Value) {
+    if let Some(ann) = metadata
+        .get_mut("annotations")
+        .and_then(Value::as_object_mut)
+    {
+        ann.remove(V2_STASH_ANNOTATION);
+    }
+}
+
+/// Overlay the v2-only fields from `stash` onto a fresh v1-derived v2 spec
+/// (the v1 writer changed the v1-visible surface; the fields v1 cannot see
+/// still survive).
+fn merge_v2_only(mut fresh: Value, stash: &Value) -> Value {
+    const V2_ONLY: &[&str] = &[
+        "class",
+        "services",
+        "skills",
+        "store",
+        "peers",
+        "approval",
+        "priority",
+        "lifecycle",
+        "expose",
+    ];
+    if let (Some(f), Some(s)) = (fresh.as_object_mut(), stash.as_object()) {
+        for key in V2_ONLY {
+            if let Some(v) = s.get(*key) {
+                // `expose` exists in both worlds (v1 surfaces map onto it):
+                // the fresh (v1-derived) value wins there; pure v2-only keys
+                // restore from the stash.
+                if *key == "expose" {
+                    f.entry(key.to_string()).or_insert_with(|| v.clone());
+                } else {
+                    f.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+    }
+    fresh
 }
 
 #[cfg(test)]
@@ -193,6 +311,53 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("object 0"));
+    }
+
+    /// The live defect this stash fixes: storage is v2, the operator writes
+    /// through v1 — v2→v1→v2 must NOT erase v2-only fields.
+    #[test]
+    fn v1_mediated_write_preserves_v2_only_fields() {
+        let v2 = json!({
+            "apiVersion": "agentctl.dev/v1alpha2",
+            "kind": "Agent",
+            "metadata": { "name": "ok", "namespace": "d" },
+            "spec": {
+                "shape": "daemon",
+                "class": "guarded",
+                "runtime": { "image": "agentd:1.3.1" },
+                "expose": { "a2a": true },
+                "services": [{ "name": "tickets", "allow": ["ticket_read"] }],
+                "capabilities": { "egress": true },
+            },
+        });
+        // Down to v1 (what a v1 reader/writer sees) — the stash rides along.
+        let down = convert_object(&v2, "agentctl.dev/v1alpha1").unwrap();
+        assert!(down["metadata"]["annotations"][V2_STASH_ANNOTATION].is_string());
+        assert!(
+            down["spec"].get("services").is_none(),
+            "v1 view drops v2-only"
+        );
+
+        // The v1 writer touches nothing v1-visible (a status/finalizer patch)
+        // → back up to v2: the stashed spec returns VERBATIM.
+        let up = convert_object(&down, "agentctl.dev/v1alpha2").unwrap();
+        assert_eq!(up["spec"]["services"][0]["name"], "tickets");
+        assert_eq!(up["spec"]["class"], "guarded");
+        assert!(
+            up["metadata"]["annotations"]
+                .get(V2_STASH_ANNOTATION)
+                .is_none(),
+            "the stash lives only on the v1 representation"
+        );
+
+        // The v1 writer CHANGES the v1-visible surface (new image): the fresh
+        // fields win, the v2-only fields still survive.
+        let mut edited = down.clone();
+        edited["spec"]["image"] = json!("agentd:9.9.9");
+        let up = convert_object(&edited, "agentctl.dev/v1alpha2").unwrap();
+        assert_eq!(up["spec"]["runtime"]["image"], "agentd:9.9.9");
+        assert_eq!(up["spec"]["services"][0]["name"], "tickets");
+        assert_eq!(up["spec"]["class"], "guarded");
     }
 
     #[test]

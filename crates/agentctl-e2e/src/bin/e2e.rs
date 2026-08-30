@@ -157,7 +157,90 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("org-route-user", "tenancy", org_route_user),
         // accessPolicies enforcement + RBAC mirror (P1-8)
         scenario!("org-access-policy", "tenancy", org_access_policy),
+        // registry floors + tag-laundering guard (P2-4)
+        scenario!("policy-ladder", "tenancy", policy_ladder),
     ]
+}
+
+/// The policy ladder red/green (RFC 0032, P2-4): AgentClass floors deny past
+/// requests naming the floor's holder; MCPService ceilings deny widening
+/// grants naming the service; a compliant narrow grant is admitted; and the
+/// tag-laundering guard refuses an MCPService edit that would widen a LIVE
+/// consumer — then allows the same edit once no consumer exists.
+async fn policy_ladder(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: MCPService\nmetadata: {{ name: tickets, namespace: {ns} }}\nspec:\n  kind: mcp\n  endpoint: https://tickets.tools.svc.cluster.local.:8443/mcp\n  tags: [egress]\n  allow: [\"ticket_*\"]\n"
+    ))?;
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: AgentClass\nmetadata: {{ name: guarded, namespace: {ns} }}\nspec:\n  floors:\n    egress: closed\n    budget: {{ windows: [{{ per: day, tokens: 100000 }}] }}\n"
+    ))?;
+
+    let agent_yaml = |name: &str, services: &str, caps: &str| {
+        format!(
+            "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  class: guarded\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  expose: {{ a2a: true }}\n{services}{caps}"
+        )
+    };
+
+    // RED: raw egress under a closed floor, no tagged grant — denied naming
+    // the class.
+    let err = shell::kubectl_apply_stdin(&agent_yaml(
+        "ladder-raw",
+        "",
+        "  capabilities: { egress: true }\n",
+    ))
+    .expect_err("raw egress must be denied");
+    let msg = format!("{err:#}");
+    if !msg.contains("guarded") || !msg.contains("egress") {
+        bail!("denial does not name the floor: {msg}");
+    }
+
+    // RED: widening the registry ceiling — denied naming the MCPService.
+    let err = shell::kubectl_apply_stdin(&agent_yaml(
+        "ladder-wide",
+        "  services: [{ name: tickets, allow: [wipe_all] }]\n",
+        "",
+    ))
+    .expect_err("widened grant must be denied");
+    let msg = format!("{err:#}");
+    if !msg.contains("tickets") || !msg.contains("widens the registry ceiling") {
+        bail!("denial does not name the service ceiling: {msg}");
+    }
+
+    // GREEN: a narrow grant satisfies the closed floor.
+    shell::kubectl_apply_stdin(&agent_yaml(
+        "ladder-ok",
+        "  services: [{ name: tickets, allow: [ticket_read] }]\n",
+        "  capabilities: { egress: true }\n",
+    ))
+    .context("compliant agent should be admitted")?;
+
+    // RED: with a live consumer, dropping the egress tag is tag laundering.
+    let launder = format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: MCPService\nmetadata: {{ name: tickets, namespace: {ns} }}\nspec:\n  kind: mcp\n  endpoint: https://tickets.tools.svc.cluster.local.:8443/mcp\n  allow: [\"ticket_*\"]\n"
+    );
+    let err = shell::kubectl_apply_stdin(&launder)
+        .expect_err("tag drop with a live consumer must be denied");
+    let msg = format!("{err:#}");
+    if !msg.contains("tag-laundering") || !msg.contains("ladder-ok") {
+        bail!("laundering denial does not name the consumer: {msg}");
+    }
+
+    // GREEN: the same edit with no consumers is a plain registry change.
+    shell::kubectl(&["delete", "agent", "ladder-ok", "-n", ns, "--wait=false"])?;
+    kh::poll_until(GC_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(kh::api::<Agent>(&ctx.client, ns)
+            .get_opt("ladder-ok")
+            .await?
+            .is_none())
+    })
+    .await
+    .context("consumer deletion")?;
+    shell::kubectl_apply_stdin(&launder).context("tag drop with no consumers should be admitted")?;
+
+    shell::kubectl(&["delete", "mcpservice", "tickets", "-n", ns, "--ignore-not-found"])?;
+    shell::kubectl(&["delete", "agentclass", "guarded", "-n", ns, "--ignore-not-found"])?;
+    pass()
 }
 
 /// The RFC 0033 §2.1 worked example, red/green at the gateway (P1-8):

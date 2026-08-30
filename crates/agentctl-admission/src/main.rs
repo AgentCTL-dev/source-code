@@ -264,6 +264,20 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     let empty = Value::Object(Map::new());
     let spec = object.get("spec").unwrap_or(&empty);
     let kind = reviewed_kind(request, object);
+
+    // MCPService UPDATE: only the tag-laundering guard applies.
+    if kind == "MCPService" {
+        let name = object["metadata"]["name"].as_str().unwrap_or_default();
+        let verdict =
+            check_tag_laundering(&state, &namespace, name, &request["oldObject"], object).await;
+        match &verdict {
+            Ok(()) => tracing::info!(%uid, %namespace, %kind, "admit"),
+            Err(msg) => tracing::warn!(%uid, %namespace, %kind, deny = %msg, "deny"),
+        }
+        state.metrics.record(verdict.is_ok());
+        return Json(admission_response_with_warnings(&uid, verdict, Vec::new()));
+    }
+
     // The same image/capabilities/model.pool checks apply to an Agent's spec
     // and to an AgentFleet's `spec.template` (itself an AgentSpec), so a fleet
     // template is held to the same policy as a standalone agent.
@@ -285,16 +299,41 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     // fleet is admitted only if BOTH its members pass.
     let is_template = kind == "AgentFleet";
     let name = object["metadata"]["name"].as_str().unwrap_or_default();
+
+    // Normalize the view: the webhook receives v1alpha2 (Equivalent match),
+    // unit fixtures send v1 — the legacy rungs run on the v1 down-view, the
+    // policy ladder on the full v2 spec.
+    let normalized = normalize_view(view);
+    let (v1_view, v2_spec) = match normalized {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(%uid, %namespace, %kind, deny = %e, "deny (unparseable spec)");
+            state.metrics.record(false);
+            return Json(admission_response_with_warnings(&uid, Err(e), Vec::new()));
+        }
+    };
+
     let mut verdict =
         check_handle_uniqueness(&state, &kind, &namespace, name, spec.get("handle")).await;
     if verdict.is_ok() {
-        verdict = evaluate_view(&state, view, annotations, &namespace, is_template).await;
+        // The policy ladder (P2-4): scope-chain floors + registry ceilings,
+        // BEFORE the per-object rungs (a floor denial should lead).
+        verdict = check_policy_ladder(&state, &namespace, &v2_spec).await;
+    }
+    if verdict.is_ok() {
+        verdict = evaluate_view(&state, &v1_view, annotations, &namespace, is_template).await;
     }
     if verdict.is_ok() {
         if let Some(coord) = coordinator_view {
-            verdict = evaluate_view(&state, coord, annotations, &namespace, true)
-                .await
-                .map_err(|m| format!("coordinator.template: {m}"));
+            match normalize_view(coord) {
+                Ok((coord_v1, coord_v2)) => {
+                    verdict = check_policy_ladder(&state, &namespace, &coord_v2)
+                        .await
+                        .and(evaluate_view(&state, &coord_v1, annotations, &namespace, true).await)
+                        .map_err(|m| format!("coordinator.template: {m}"));
+                }
+                Err(e) => verdict = Err(format!("coordinator.template: {e}")),
+            }
         }
     }
 
@@ -306,10 +345,14 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
 
     // Deprecation notices for v1alpha1 writers (the DoD's "convert with
     // warnings": conversion is lossless, the author still hears about it).
+    // Deprecation notices for v1alpha1 writers. The apiserver hands the
+    // webhook the v2 view even for v1 writes, so the notices derive from the
+    // reconstructed v1 down-view (lossless round-trip). Agent-level only —
+    // a fleet's template rides the same reconstruction inside its view.
     let warnings = if request["requestKind"]["version"].as_str() == Some("v1alpha1")
         || object["apiVersion"].as_str() == Some("agentctl.dev/v1alpha1")
     {
-        v1_deprecation_warnings(&kind, spec)
+        v1_deprecation_warnings("Agent", &v1_view)
     } else {
         Vec::new()
     };
@@ -640,6 +683,184 @@ fn reviewed_kind(request: &Value, object: &Value) -> String {
 /// `spec.template`; for `Agent` (and anything else) it is `spec` itself. An
 /// `AgentFleet` missing its (required) `template` falls back to `empty` so the
 /// checks simply find nothing to deny rather than panicking.
+/// Normalize an AgentSpec-shaped view to BOTH versions: the webhook now
+/// receives the v1alpha2 view (matchPolicy Equivalent up-converts v1 writes),
+/// but the render/binary rungs still speak v1, and unit fixtures are
+/// v1-shaped. Detection: a v1 view carries `mode`; a v2 view carries `shape`.
+fn normalize_view(view: &Value) -> Result<(Value, agent_api::v1alpha2::AgentSpec), String> {
+    if view.get("mode").is_some() {
+        let v1: agent_api::AgentSpec = serde_json::from_value(view.clone())
+            .map_err(|e| format!("parse v1alpha1 spec view: {e}"))?;
+        let (v2, _) = agent_api::v1alpha2::convert::agent_v1_to_v2(&v1);
+        Ok((view.clone(), v2))
+    } else {
+        let v2: agent_api::v1alpha2::AgentSpec = serde_json::from_value(view.clone())
+            .map_err(|e| format!("parse v1alpha2 spec view: {e}"))?;
+        let (v1, _) = agent_api::v1alpha2::convert::agent_v2_to_v1(&v2);
+        let v1_view = serde_json::to_value(v1).map_err(|e| e.to_string())?;
+        Ok((v1_view, v2))
+    }
+}
+
+/// The policy ladder (RFC 0032, P2-4): resolve the agent's scope chain
+/// (AgentClass parents, depth-capped) + the namespace registry slice
+/// (MCPServices) and run the pure resolver — every floor violation denies,
+/// naming the floor's holder. Transient cluster reads fail OPEN (the
+/// cross-object posture); a NAMED class that does not exist fails CLOSED.
+async fn check_policy_ladder(
+    state: &AppState,
+    namespace: &str,
+    v2: &agent_api::v1alpha2::AgentSpec,
+) -> Result<(), String> {
+    use agent_api::v1alpha2::{AgentClass, MCPService};
+
+    let classes: kube::Api<AgentClass> = kube::Api::namespaced(state.client.clone(), namespace);
+    // Build the chain root-first by walking parents from the named class.
+    let mut chain_specs: Vec<(String, agent_api::v1alpha2::AgentClassSpec)> = Vec::new();
+    let explicit = v2.class.is_some();
+    let mut cursor = Some(v2.class.clone().unwrap_or_else(|| "default".to_string()));
+    let mut hops = 0;
+    while let Some(name) = cursor.take() {
+        hops += 1;
+        if hops > 5 {
+            return Err("AgentClass parent chain exceeds 5 links (cycle?)".into());
+        }
+        match classes.get_opt(&name).await {
+            Ok(Some(c)) => {
+                cursor = c.spec.parent.clone();
+                chain_specs.push((format!("class {name:?}"), c.spec));
+            }
+            Ok(None) if hops == 1 && !explicit => break, // no implicit default class — no floors
+            Ok(None) => {
+                return Err(format!("AgentClass {name:?} not found in {namespace}"));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "policy ladder class read failed; failing open");
+                return Ok(());
+            }
+        }
+    }
+    chain_specs.reverse(); // walked child→parent; the resolver wants root FIRST
+
+    let services_api: kube::Api<MCPService> =
+        kube::Api::namespaced(state.client.clone(), namespace);
+    let registry: std::collections::BTreeMap<String, agent_api::v1alpha2::MCPServiceSpec> =
+        match services_api.list(&Default::default()).await {
+            Ok(list) => list
+                .items
+                .into_iter()
+                .filter_map(|m| m.metadata.name.clone().map(|n| (n, m.spec)))
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "policy ladder registry read failed; failing open");
+                return Ok(());
+            }
+        };
+
+    let chain: Vec<agent_api::registry::ScopedClass<'_>> = chain_specs
+        .iter()
+        .map(|(scope, spec)| agent_api::registry::ScopedClass {
+            scope: scope.clone(),
+            class: spec,
+        })
+        .collect();
+    match agent_api::registry::resolve(&chain, v2, &registry) {
+        Ok(_) => Ok(()),
+        Err(violations) => {
+            let msgs: Vec<String> = violations.iter().map(|v| v.to_string()).collect();
+            Err(msgs.join("; "))
+        }
+    }
+}
+
+/// Tag-laundering guard (RFC 0032 §5.3): while LIVE consumers exist, an
+/// MCPService edit may not widen what those consumers effectively hold —
+/// dropping a capability tag, widening the allow ceiling, shrinking exclude,
+/// or repointing the endpoint are all refused naming the consumers.
+async fn check_tag_laundering(
+    state: &AppState,
+    namespace: &str,
+    service_name: &str,
+    old: &Value,
+    new: &Value,
+) -> Result<(), String> {
+    let old: agent_api::v1alpha2::MCPServiceSpec = match serde_json::from_value(
+        old.get("spec").cloned().unwrap_or_default(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            // No old spec = a create (nothing to launder). Log it so a
+            // malformed old object can never silently bypass the guard.
+            tracing::info!(service = %service_name, error = %e, "laundering guard: no parseable old spec (create?)");
+            return Ok(());
+        }
+    };
+    let new: agent_api::v1alpha2::MCPServiceSpec =
+        serde_json::from_value(new.get("spec").cloned().unwrap_or_default())
+            .map_err(|e| format!("parse MCPService spec: {e}"))?;
+
+    let mut widenings = Vec::new();
+    for t in &old.tags {
+        if !new.tags.contains(t) {
+            widenings.push(format!("drops the {t:?} capability tag"));
+        }
+    }
+    if !old.allow.is_empty() {
+        if new.allow.is_empty() {
+            widenings.push("removes the allow ceiling entirely".to_string());
+        } else {
+            for pat in &new.allow {
+                let within = old.allow.iter().any(|c| {
+                    c == pat || (!pat.contains('*') && agent_api::org::access::glob_match(c, pat))
+                });
+                if !within {
+                    widenings.push(format!("widens the allow ceiling with {pat:?}"));
+                }
+            }
+        }
+    }
+    for e in &old.exclude {
+        if !new.exclude.contains(e) {
+            widenings.push(format!("removes the {e:?} exclusion"));
+        }
+    }
+    if old.endpoint != new.endpoint {
+        widenings.push(format!(
+            "repoints the endpoint ({:?} → {:?})",
+            old.endpoint, new.endpoint
+        ));
+    }
+    tracing::info!(service = %service_name, widenings = ?widenings, "tag-laundering check");
+    if widenings.is_empty() {
+        return Ok(());
+    }
+
+    // Widening with NO consumers is a plain registry edit — allowed.
+    let agents: kube::Api<agent_api::v1alpha2::Agent> =
+        kube::Api::namespaced(state.client.clone(), namespace);
+    let consumers: Vec<String> = match agents.list(&Default::default()).await {
+        Ok(list) => list
+            .items
+            .into_iter()
+            .filter(|a| a.spec.services.iter().any(|g| g.name == service_name))
+            .filter_map(|a| a.metadata.name)
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "laundering-guard consumer list failed; failing open");
+            return Ok(());
+        }
+    };
+    tracing::info!(service = %service_name, consumers = ?consumers, "tag-laundering consumers");
+    if consumers.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "tag-laundering guard: this edit would widen live consumers ({}): {}",
+        consumers.join(", "),
+        widenings.join("; ")
+    ))
+}
+
 fn agent_spec_view<'a>(kind: &str, spec: &'a Value, empty: &'a Value) -> &'a Value {
     if kind == "AgentFleet" {
         spec.get("template").unwrap_or(empty)
@@ -1065,28 +1286,12 @@ fn build_default_patch(kind: &str, object: &Value) -> Vec<Value> {
         }
     }
 
-    // 2/3. Safe AgentSpec-shaped defaults: /spec/* (Agent) or /spec/template/*
-    // (AgentFleet). Only when the parent container is present.
-    let (view, base) = if kind == "AgentFleet" {
-        (
-            object.get("spec").and_then(|s| s.get("template")),
-            "/spec/template",
-        )
-    } else {
-        (object.get("spec"), "/spec")
-    };
-    if let Some(view) = view {
-        if view.get("mode").is_none() {
-            ops.push(json!({ "op": "add", "path": format!("{base}/mode"), "value": "once" }));
-        }
-        if view.get("surfaces").is_none() {
-            ops.push(json!({
-                "op": "add",
-                "path": format!("{base}/surfaces"),
-                "value": { "management": false, "metrics": false, "a2a": false },
-            }));
-        }
-    }
+    // The v1-era mode/surfaces defaulting is GONE: the webhook receives the
+    // v1alpha2 view (Equivalent match up-converts v1 writes BEFORE mutation),
+    // where `shape` is schema-defaulted and expose is opt-in. Injecting v1
+    // fields into a v2 view corrupted the validate stage's version detection
+    // (observed live: a `mode` key made the ladder see a bare v1 spec and
+    // skip the class floors entirely).
 
     ops
 }
@@ -1652,13 +1857,18 @@ mod tests {
     // --- defaulting / mutate ----------------------------------------------
 
     #[test]
-    fn mutate_defaults_agent_mode_surfaces_and_labels() {
+    fn mutate_defaults_labels_only() {
         let object = json!({
             "kind": "Agent",
             "metadata": { "name": "demo" },
             "spec": { "image": "ghcr.io/acme/a:v1" }
         });
         let ops = build_default_patch("Agent", &object);
+        // No spec-level ops at all any more — labels only.
+        assert!(ops.iter().all(|o| o["path"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("/metadata/labels")));
         // No labels map existed ⇒ one op adds the whole labels object.
         let labels_op = ops
             .iter()
@@ -1669,17 +1879,6 @@ mod tests {
             "agentctl"
         );
         assert_eq!(labels_op["value"]["app.kubernetes.io/name"], "agent");
-        // mode + surfaces defaulted on /spec.
-        assert!(ops
-            .iter()
-            .any(|o| o["path"] == "/spec/mode" && o["value"] == "once"));
-        let surfaces = ops
-            .iter()
-            .find(|o| o["path"] == "/spec/surfaces")
-            .expect("surfaces op");
-        assert_eq!(surfaces["value"]["management"], false);
-        assert_eq!(surfaces["value"]["metrics"], false);
-        assert_eq!(surfaces["value"]["a2a"], false);
     }
 
     #[test]
@@ -1690,11 +1889,11 @@ mod tests {
             "spec": { "template": { "image": "ghcr.io/acme/a:v1" }, "scaling": { "mode": "claim" } }
         });
         let ops = build_default_patch("AgentFleet", &object);
-        // AgentSpec defaults land on /spec/template/*.
-        assert!(ops
+        // The v1-era mode/surfaces defaults are GONE (the webhook sees the
+        // v1alpha2 view where shape is schema-defaulted).
+        assert!(!ops
             .iter()
-            .any(|o| o["path"] == "/spec/template/mode" && o["value"] == "once"));
-        assert!(ops.iter().any(|o| o["path"] == "/spec/template/surfaces"));
+            .any(|o| o["path"].as_str().unwrap_or("").ends_with("/mode")));
         // labels already present ⇒ per-key adds (escaped), never a whole-object add.
         assert!(!ops.iter().any(|o| o["path"] == "/metadata/labels"));
         assert!(ops
@@ -1768,11 +1967,12 @@ mod tests {
         let encoded = resp["response"]["patch"].as_str().unwrap();
         let decoded = BASE64.decode(encoded).unwrap();
         let back: Value = serde_json::from_slice(&decoded).unwrap();
+        // Labels-only defaulting: the decoded patch round-trips as JSON ops.
         assert!(back
             .as_array()
             .unwrap()
             .iter()
-            .any(|o| o["path"] == "/spec/mode"));
+            .all(|o| o["path"].as_str().unwrap_or("").starts_with("/metadata/labels")));
     }
 
     #[test]
