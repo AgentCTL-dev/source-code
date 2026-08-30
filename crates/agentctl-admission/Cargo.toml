@@ -33,3 +33,7 @@ tracing = "0.1"
 # Shared tracing init: fmt-only by default, OTLP export when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set.
 agentctl-telemetry = { path = "../agentctl-telemetry" }
+# Rung 4: compose the exact operator document + run the pinned binary's own
+# --validate-config over it (the shared builder keeps the two views identical).
+agent-config = { path = "../agent-config" }
+tempfile = "3"

@@ -233,6 +233,39 @@ impl ConfigDoc {
         s
     }
 
+    /// Every distinct `{{secret:NAME}}` env name the document references.
+    /// `--validate-config` requires each to RESOLVE from the environment
+    /// (verified against the binary), so a validator must export a placeholder
+    /// for each; the workload layer must mount a real `secretKeyRef` for each
+    /// — this scan is how both stay complete.
+    pub fn secret_refs(&self) -> Vec<String> {
+        fn scan(v: &Value, out: &mut Vec<String>) {
+            match v {
+                Value::String(s) => {
+                    let mut rest = s.as_str();
+                    while let Some(i) = rest.find("{{secret:") {
+                        let tail = &rest[i + "{{secret:".len()..];
+                        if let Some(j) = tail.find("}}") {
+                            let name = tail[..j].to_string();
+                            if !out.contains(&name) {
+                                out.push(name);
+                            }
+                            rest = &tail[j + 2..];
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|v| scan(v, out)),
+                Value::Object(m) => m.values().for_each(|v| scan(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        scan(&self.value, &mut out);
+        out
+    }
+
     /// A short stable hash of the rendered document — the pod-template
     /// annotation that turns config changes into rolling restarts (the safe
     /// interim delivery until upstream ask U1 lands; ADR-0007).
@@ -254,6 +287,48 @@ impl ConfigDoc {
 /// never from agentd's `lifecycle.daemon` manifest hint (unreliable, U3/U4).
 pub fn is_daemon(mode: Mode) -> bool {
     matches!(mode, Mode::Loop | Mode::Reactive)
+}
+
+/// Normalize an in-cluster Service endpoint to its ABSOLUTE (trailing-dot)
+/// FQDN form so pod `ndots`/search-domain resolution can never leak the lookup
+/// to an external wildcard domain (the documented cluster-DNS trap).
+pub fn absolutize_endpoint(endpoint: &str) -> String {
+    let Some(scheme_end) = endpoint.find("://") else {
+        return endpoint.to_string();
+    };
+    let rest = &endpoint[scheme_end + 3..];
+    let host_end = rest.find(['/', ':', '?']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    if host.ends_with(".svc.cluster.local") {
+        let mut out = String::with_capacity(endpoint.len() + 1);
+        out.push_str(&endpoint[..scheme_end + 3]);
+        out.push_str(host);
+        out.push('.');
+        out.push_str(&rest[host_end..]);
+        out
+    } else {
+        endpoint.to_string()
+    }
+}
+
+/// The one compose entrypoint operator AND admission share, so the document
+/// the webhook validates is byte-identical to the one the reconcile mounts.
+/// In-cluster endpoints (intelligence + MCP) are absolutized here.
+pub fn compose_from_spec(
+    spec: &AgentSpec,
+    intelligence: Option<ResolvedIntelligence>,
+    workflow_file: Option<String>,
+    aauth_provider: Option<String>,
+) -> Result<ConfigDoc, ConfigError> {
+    let intelligence = intelligence.map(|mut i| {
+        i.endpoint = absolutize_endpoint(&i.endpoint);
+        i
+    });
+    let mut input = ConfigInput::from_spec(spec, intelligence, workflow_file, aauth_provider);
+    for m in &mut input.mcp {
+        m.endpoint = absolutize_endpoint(&m.endpoint);
+    }
+    build(&input)
 }
 
 /// Compose the document. Pure; the only failure modes are spec defects.
@@ -774,42 +849,89 @@ mod tests {
             },
         ];
         for (n, input) in cases.iter().enumerate() {
+            // The document validates VERBATIM — the binary stats neither the
+            // TLS/CA/store paths nor dials anything at --validate-config
+            // (verified). Only two obligations exist: every `{{secret:…}}`
+            // must resolve from env, and `file:` workflow refs must exist.
             let mut input = input.clone();
-            // The validation run has no mounted PKI/state; point the doc at
-            // paths that exist and a loopback endpoint shape agentd accepts.
-            input.serve_a2a = false;
-            let mut d = build(&input).expect("build");
-            if let Value::Object(m) = &mut d.value {
-                if is_daemon(input.mode) {
-                    let state = dir.path().join("state");
-                    std::fs::create_dir_all(&state).unwrap();
-                    m.insert(
-                        "store".into(),
-                        json!({ "kind": "file", "file": { "path": state } }),
-                    );
-                }
-                m.insert(
-                    "intelligence".into(),
-                    json!({ "endpoints": "http://127.0.0.1:9999/v1", "model": "t" }),
-                );
-                if let Some(sec) = m.get_mut("security").and_then(Value::as_object_mut) {
-                    sec.remove("tls_ca"); // no CA file on the test host
-                }
-            }
+            input.intelligence = Some(ResolvedIntelligence {
+                endpoint: "http://127.0.0.1:9999/v1".into(),
+                model: Some("t".into()),
+                has_token: true,
+            });
+            let d = build(&input).expect("build");
             let path = dir.path().join(format!("case{n}.json"));
             std::fs::write(&path, d.to_json()).unwrap();
-            let out = std::process::Command::new(&bin)
-                .arg("-c")
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("-c")
                 .arg(&path)
                 .arg("--validate-config")
-                .current_dir(dir.path())
-                .output()
-                .expect("run agentd");
+                .current_dir(dir.path());
+            for name in d.secret_refs() {
+                cmd.env(name, "validation-placeholder");
+            }
+            let out = cmd.output().expect("run agentd");
             assert!(
                 out.status.success(),
                 "case {n} refused by the binary:\n{}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }
+    }
+
+    #[test]
+    fn secret_refs_are_scanned_from_the_whole_document() {
+        let mut input = base(Mode::Once);
+        input.intelligence = Some(ResolvedIntelligence {
+            endpoint: "https://llm/v1".into(),
+            model: None,
+            has_token: true,
+        });
+        input.mcp = vec![ResolvedMcp {
+            name: "billing".into(),
+            endpoint: "https://b/mcp".into(),
+            tags: vec![],
+            token_env: Some("AGENT_MCP_BILLING_TOKEN".into()),
+            header: None,
+        }];
+        let d = build(&input).unwrap();
+        let refs = d.secret_refs();
+        assert!(refs.contains(&"INTELLIGENCE_TOKEN".to_string()));
+        assert!(refs.contains(&"AGENT_MCP_BILLING_TOKEN".to_string()));
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn compose_from_spec_absolutizes_cluster_endpoints() {
+        let spec = AgentSpec {
+            mode: Mode::Once,
+            instruction: Some("x".into()),
+            mcp_servers: vec![McpServer {
+                name: "fs".into(),
+                endpoint: "https://fs.tenant.svc.cluster.local:8443/mcp".into(),
+                auth: None,
+                tags: vec![],
+            }],
+            ..Default::default()
+        };
+        let d = compose_from_spec(
+            &spec,
+            Some(ResolvedIntelligence {
+                endpoint: "https://llm.ns.svc.cluster.local/v1".into(),
+                model: None,
+                has_token: false,
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            d.value["intelligence"]["endpoints"],
+            "https://llm.ns.svc.cluster.local./v1"
+        );
+        assert_eq!(
+            d.value["mcp"]["servers"][0]["endpoint"],
+            "https://fs.tenant.svc.cluster.local.:8443/mcp"
+        );
     }
 }

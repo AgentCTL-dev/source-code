@@ -679,27 +679,9 @@ fn owner_ref(kind: &str, name: &str, uid: String) -> OwnerReference {
     }
 }
 
-/// Normalize an in-cluster Service endpoint to its ABSOLUTE (trailing-dot)
-/// FQDN form so pod `ndots`/search-domain resolution can never leak the
-/// lookup to an external wildcard domain.
-pub(crate) fn absolutize_endpoint(endpoint: &str) -> String {
-    let Some(scheme_end) = endpoint.find("://") else {
-        return endpoint.to_string();
-    };
-    let rest = &endpoint[scheme_end + 3..];
-    let host_end = rest.find(['/', ':', '?']).unwrap_or(rest.len());
-    let host = &rest[..host_end];
-    if host.ends_with(".svc.cluster.local") {
-        let mut out = String::with_capacity(endpoint.len() + 1);
-        out.push_str(&endpoint[..scheme_end + 3]);
-        out.push_str(host);
-        out.push('.');
-        out.push_str(&rest[host_end..]);
-        out
-    } else {
-        endpoint.to_string()
-    }
-}
+/// Trailing-dot FQDN normalization — lives in `agent-config` now (the compose
+/// path applies it); re-exported for the AAuth admin client's own dials.
+pub(crate) use agent_config::absolutize_endpoint;
 
 /// Kubernetes downward-API identity env (the ACC env convention):
 /// `AGENT_POD_NAME` is load-bearing — it becomes `agent.name`, the durable

@@ -28,10 +28,10 @@ identity + a minimal P3 state path for the supervisor's own store.)
 
 | ID | Item | Definition of done | Status |
 |---|---|---|---|
-| P0-1 | **ACC v2 contract re-baseline** | `contract/` regenerated per RFC 0026 §3 (schemas, A2A profile, exit-intent table, metrics 1.2, env, store profile); fixtures captured from agentd v1.3.1 | Todo |
-| P0-2 | **agent-contract-client rebuild** | negotiates via config-schema `x-agentd-contract-version` + probes; no `surfaces{}` dependency; version-skew tests | Todo |
-| P0-3 | **Operator: rendered-directory launch path** | flags-era rendering deleted; `-c services.yaml -c agentd.yml` + folders; explicit `run_until`; probes/drain/podFailurePolicy per intent table | Todo |
-| P0-4 | **Admission: binary validation step** | `agentd --validate-config` sandbox job wired; effective surfaces recorded in status | Todo |
+| P0-1 | **ACC v2 contract re-baseline** | `contract/` regenerated per RFC 0026 §3 (schemas, A2A profile, exit-intent table, metrics 1.2, env, store profile); fixtures captured from agentd v1.3.1 | **Done(2026-08-30)** — commit `0254d13`; +restart-only partition, +store checkpointer profile, +known-gap annotations (U3/U4) baked into manifest schema |
+| P0-2 | **agent-contract-client rebuild** | negotiates via config-schema `x-agentd-contract-version` + probes; no `surfaces{}` dependency; version-skew tests | **Done(2026-08-30)** — commit `0254d13`; four-clock negotiation, vendored exit/metrics/restart-only tables compiled in, permissive Manifest reader, pre-rewrite agents identified as unmanageable |
+| P0-3 | **Operator: rendered-directory launch path** | flags-era rendering deleted; `-c services.yaml -c agentd.yml` + folders; explicit `run_until`; probes/drain/podFailurePolicy per intent table | **Done(2026-08-30)** — commit `37af063`; new `agent-config` shared builder (proven via real `--validate-config`), single-document layer for now (the services.yaml catalog layer + conventional folders land with the registry, P2-3); shard fleets keep the guarded resize via the `agentctl.dev/shards` annotation |
+| P0-4 | **Admission: binary validation step** | `agentd --validate-config` sandbox job wired; effective surfaces recorded in status | **Done(2026-08-30)** (rung) — in-webhook spawn_blocking run over the SAME composed document (shared builder), secret-ref placeholders auto-derived, binary's config.invalid diagnosis travels into the deny message; chart `admission.binaryValidation` (staging image needed until U9). Effective-surfaces recording moves to P2-3 (needs the services catalog) |
 | P0-5 | **e2e vs real agentd** | mock-agent retired where possible; `mock:` intelligence used; provision→converse→drain→delete green in kind | Todo |
 | P0-6 | **Upstream asks filed** (U1–U7 below) | issues filed with repro + proposal; tracked links here | Todo |
 
@@ -139,6 +139,7 @@ identity + a minimal P3 state path for the supervisor's own store.)
 | U5 | agentd | published config schema catch-up ($defs Service.kind/methods/breaker, A2aPeer.service); image license label (says Apache-2.0, is AGPL) | Todo |
 | U6 | mcpg | store-profile MCP tool façade upstreamable; sandbox backend (their RFC 0022) offered back | Todo |
 | U7 | aauth/agentd | delegation chains; agentd inbound verification (A2A leg) — carries RFCs 0023–0025 asks forward | Todo |
+| U9 | agentd | a stock-image way to stage the binary for out-of-image use (initContainer `--copy-self <path>` / env-triggered self-install) — today rung-4 admission needs a derived busybox staging image | Todo — asked 2026-08-30 |
 | U8 | agentd | interface composer `@` completion inserted bare `@name`, which never matched the `@skill:` default prefix (skill never preloaded) and collided with conversational agent handles | **Done(2026-08-30)** — fixed upstream on main (`bc203942`, unreleased): composer inserts the full `@skill:<name>`; `docs/interface.md` corrected (it had documented the broken bare form as working). Bare `@name` is formally free for agent handles. **Caveat**: the prefix is hardcoded in the composer (the daemon never sends `skills.reference_prefix` to clients) — agentctl must not project a custom prefix (renderer rule, RFC 0032 §4.6) |
 
 ## Deferred register (decisions consciously not taken now)

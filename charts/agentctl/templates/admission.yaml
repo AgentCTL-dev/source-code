@@ -95,6 +95,25 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      {{- if .Values.admission.binaryValidation.enabled }}
+      # Rung 4 (ground truth): stage the pinned reference-agent binary into a
+      # shared emptyDir so the webhook can run `agentd --validate-config` over
+      # the exact document the operator will mount. NOTE: the upstream image is
+      # FROM scratch (no shell, no cp), so `image` must be one that can emit
+      # the binary — the e2e suite builds `agentd-staging` (binary + busybox)
+      # for exactly this; a stock-image path is upstream ask U9.
+      initContainers:
+        - name: stage-agentd
+          image: {{ required "admission.binaryValidation.image is required when binaryValidation is enabled (an image able to copy /agentd out; the stock scratch image cannot)" .Values.admission.binaryValidation.image }}
+          command: {{ toJson .Values.admission.binaryValidation.command }}
+          volumeMounts:
+            - { name: agentd-bin, mountPath: /agentd-bin }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      {{- end }}
       containers:
         - name: admission
           image: {{ include "agentctl.image" (dict "root" $ "component" "admission") }}
@@ -113,12 +132,21 @@ spec:
             - name: AGENTCTL_AAUTH_PROVIDER
               value: {{ .Values.identity.aauth.provider | quote }}
             {{- end }}
+            {{- if .Values.admission.binaryValidation.enabled }}
+            # Rung 4: the staged reference-agent binary (see initContainers).
+            - name: AGENTCTL_AGENTD_BIN
+              value: /agentd-bin/agentd
+            {{- end }}
           {{- with (index .Values "admission").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
             - { name: tls, mountPath: /etc/agentctl-admission/tls, readOnly: true }
+            {{- if .Values.admission.binaryValidation.enabled }}
+            - { name: agentd-bin, mountPath: /agentd-bin, readOnly: true }
+            - { name: validate-tmp, mountPath: /tmp }
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -138,6 +166,13 @@ spec:
         - name: tls
           secret:
             secretName: agentctl-admission-tls
+        {{- if .Values.admission.binaryValidation.enabled }}
+        - name: agentd-bin
+          emptyDir: {}
+        # Writable scratch for the validation tempdirs (rootfs is read-only).
+        - name: validate-tmp
+          emptyDir: {}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

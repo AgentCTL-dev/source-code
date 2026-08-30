@@ -36,14 +36,13 @@ use kube::{Api, Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
-use crate::render::absolutize_endpoint;
 use crate::{
     config_configmap_name, coordinator_name, fleet_peer_endpoint, fleet_selector_string,
     render_agent, render_coordinator, render_fleet, render_scaled_object, workflow_configmap_name,
     PodWiring, RenderConfig, RenderError, Rendered, SecretEnv, WorkflowMount,
     DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
-use agent_config::{ConfigDoc, ConfigInput, ResolvedIntelligence};
+use agent_config::{ConfigDoc, ResolvedIntelligence};
 
 /// Finalizer key gating `Agent` deletion until cleanup runs.
 const FINALIZER: &str = "agentctl.dev/cleanup";
@@ -647,16 +646,12 @@ fn compose_document(
     aauth_provider: Option<String>,
 ) -> Result<ConfigDoc, String> {
     let intel = intelligence.map(|(endpoint, token)| ResolvedIntelligence {
-        endpoint: absolutize_endpoint(endpoint),
+        endpoint: endpoint.clone(),
         model: spec.model.as_ref().and_then(|m| m.id.clone()),
         has_token: token.is_some(),
     });
-    let mut input =
-        ConfigInput::from_spec(spec, intel, workflow.map(|w| w.file_path()), aauth_provider);
-    for m in &mut input.mcp {
-        m.endpoint = absolutize_endpoint(&m.endpoint);
-    }
-    agent_config::build(&input).map_err(|e| e.to_string())
+    agent_config::compose_from_spec(spec, intel, workflow.map(|w| w.file_path()), aauth_provider)
+        .map_err(|e| e.to_string())
 }
 
 /// The pod-shell wiring matching a composed document: the same resolved facts,

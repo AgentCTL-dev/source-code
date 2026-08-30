@@ -269,6 +269,16 @@ admission:
     limits: { cpu: 500m, memory: 256Mi }
   # Image-registry allow-list the webhook enforces (CSV prefixes; empty = allow all).
   allowedRegistries: "agentd:,mock-agent,agentctl/,gcr.io/,registry.k8s.io/,ghcr.io/"
+  # Rung 4 — ground-truth config validation: compose the exact document the
+  # operator will mount and run the pinned reference agent's own
+  # `--validate-config` over it inside the webhook. Requires an image the
+  # initContainer can copy /agentd out of (the upstream image is FROM scratch
+  # with no shell — upstream ask U9 tracks a stock-image path; until then the
+  # e2e suite builds `agentd-staging`: the binary on busybox).
+  binaryValidation:
+    enabled: false
+    image: ""                       # e.g. agentd-staging:1.3.1
+    command: ["cp", "/agentd", "/agentd-bin/agentd"]
   nodeSelector: {}
   affinity: {}
   tolerations: []

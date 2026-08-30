@@ -68,6 +68,13 @@ const ALLOWED_REGISTRIES_ENV: &str = "ALLOWED_REGISTRIES";
 /// here so the two agree).
 const AAUTH_PROVIDER_ENV: &str = "AGENTCTL_AAUTH_PROVIDER";
 
+/// Path to a pinned agentd binary for the ladder's most authoritative rung:
+/// composing the SAME config document the operator will mount (the shared
+/// `agent-config` builder) and running `agentd --validate-config` over it.
+/// Unset ⇒ the rung is skipped (the chart wires it via an initContainer that
+/// copies the binary out of the agent image).
+const AGENTD_BIN_ENV: &str = "AGENTCTL_AGENTD_BIN";
+
 #[derive(Clone)]
 struct AppState {
     /// kube client for cross-object lookups (does the `ModelPool` exist?).
@@ -77,6 +84,9 @@ struct AppState {
     /// Whether the operator has a default AAuth provider configured
     /// (`AGENTCTL_AAUTH_PROVIDER`) — gates provider-less `identity.aauth`.
     aauth_default_provider: bool,
+    /// The pinned agentd binary for ground-truth config validation (rung 4);
+    /// `None` ⇒ rung skipped.
+    agentd_bin: Option<std::path::PathBuf>,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
 }
@@ -95,6 +105,18 @@ async fn main() {
     let aauth_default_provider = std::env::var(AAUTH_PROVIDER_ENV)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
+    let agentd_bin = std::env::var(AGENTD_BIN_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| {
+            let ok = p.is_file();
+            if !ok {
+                tracing::warn!(path = %p.display(), "AGENTCTL_AGENTD_BIN set but not a file; binary-validation rung disabled");
+            }
+            ok
+        });
 
     let tls = build_tls_config().expect("build TLS server config");
 
@@ -110,6 +132,7 @@ async fn main() {
             client,
             allowed_registries: allowed_registries.clone(),
             aauth_default_provider,
+            agentd_bin,
             metrics: Arc::new(metrics::Metrics::new()),
         });
 
@@ -289,7 +312,159 @@ async fn evaluate_view(
         namespace,
         state.aauth_default_provider,
         is_template,
+    )?;
+    // Rung 4 (ground truth): compose the exact document the operator will
+    // mount and run the pinned binary's own --validate-config over it. Skipped
+    // when no binary is wired; transient cross-object failures fail OPEN (like
+    // the pool lookup) — a spec defect the binary names fails CLOSED.
+    binary_validate_view(state, view, namespace, is_template).await
+}
+
+/// Compose + `agentd --validate-config` for one spec view (rung 4).
+async fn binary_validate_view(
+    state: &AppState,
+    view: &Value,
+    namespace: &str,
+    is_template: bool,
+) -> Result<(), String> {
+    let Some(bin) = state.agentd_bin.clone() else {
+        return Ok(());
+    };
+    // The view is the CRD's camelCase spec JSON; a fleet template composes the
+    // way the operator renders it (coerced Reactive). A view that does not
+    // deserialize is left to the CRD schema rung (fail-open here).
+    let mut view = view.clone();
+    if view.get("mode").is_none() {
+        view["mode"] = json!(if is_template { "reactive" } else { "once" });
+    }
+    let mut spec: agent_api::AgentSpec = match serde_json::from_value(view) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "spec view does not deserialize; skipping binary validation");
+            return Ok(());
+        }
+    };
+    if is_template {
+        spec.mode = agent_api::Mode::Reactive;
+    }
+
+    // Resolve the same facts the operator resolves.
+    let intelligence = match spec.model.as_ref().and_then(|m| m.pool.as_deref()) {
+        Some(pool_name) => {
+            let api: Api<ModelPool> = Api::namespaced(state.client.clone(), namespace);
+            match api.get_opt(pool_name).await {
+                Ok(Some(pool)) => Some(agent_config::ResolvedIntelligence {
+                    endpoint: pool.spec.endpoint,
+                    model: spec.model.as_ref().and_then(|m| m.id.clone()),
+                    has_token: pool.spec.credential_secret_ref.is_some(),
+                }),
+                // Absent pool already denied by rung 3; transient error: skip.
+                _ => None,
+            }
+        }
+        None => None,
+    };
+    let workflow_content: Option<String> = match &spec.workflow {
+        None => None,
+        Some(wf) => {
+            if let Some(inline) = &wf.inline {
+                Some(inline.clone())
+            } else if let Some(r) = &wf.config_map_key_ref {
+                use k8s_openapi::api::core::v1::ConfigMap;
+                let api: Api<ConfigMap> = Api::namespaced(state.client.clone(), namespace);
+                match api.get_opt(&r.name).await {
+                    Ok(Some(cm)) => match cm.data.and_then(|mut d| d.remove(&r.key)) {
+                        Some(content) => Some(content),
+                        None => {
+                            return Err(format!(
+                                "workflow configMapKeyRef: key '{}' not found in ConfigMap '{}'",
+                                r.key, r.name
+                            ))
+                        }
+                    },
+                    Ok(None) => {
+                        return Err(format!(
+                            "workflow configMapKeyRef: ConfigMap '{}' not found in namespace '{namespace}'",
+                            r.name
+                        ))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "workflow ConfigMap lookup failed; skipping binary validation");
+                        return Ok(());
+                    }
+                }
+            } else {
+                None
+            }
+        }
+    };
+
+    // The document references the workflow at a path we choose here; the
+    // blocking half writes the content beside the document under that name.
+    const WORKFLOW_FILE: &str = "workflow.json";
+    let doc = agent_config::compose_from_spec(
+        &spec,
+        intelligence,
+        workflow_content.as_ref().map(|_| WORKFLOW_FILE.to_string()),
+        None,
     )
+    .map_err(|e| format!("config composition: {e}"))?;
+
+    tokio::task::spawn_blocking(move || {
+        run_validate_config(&bin, &doc, workflow_content.as_deref(), WORKFLOW_FILE)
+    })
+    .await
+    .map_err(|e| format!("binary validation task failed: {e}"))?
+}
+
+/// Blocking half: materialize the document (+ optional workflow file) into a
+/// tempdir and run `agentd -c agentd.json --validate-config` with a
+/// placeholder env for every `{{secret:…}}` the document references (the
+/// binary requires them to RESOLVE; validity is not checked at this stage).
+fn run_validate_config(
+    bin: &std::path::Path,
+    doc: &agent_config::ConfigDoc,
+    workflow_content: Option<&str>,
+    workflow_file: &str,
+) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("binary validation tempdir: {e}"))?;
+    let cfg_path = dir.path().join(agent_config::paths::CONFIG_FILE);
+    std::fs::write(&cfg_path, doc.to_json())
+        .map_err(|e| format!("binary validation write: {e}"))?;
+    if let Some(content) = workflow_content {
+        std::fs::write(dir.path().join(workflow_file), content)
+            .map_err(|e| format!("binary validation write workflow: {e}"))?;
+    }
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("-c")
+        .arg(&cfg_path)
+        .arg("--validate-config")
+        .current_dir(dir.path());
+    for name in doc.secret_refs() {
+        cmd.env(name, "admission-placeholder");
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("binary validation exec: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // stderr is NDJSON; surface the config.invalid messages verbatim — the
+    // binary's diagnosis is the most precise text a user will get.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let msgs: Vec<String> = stderr
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v.get("msg").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let detail = if msgs.is_empty() {
+        stderr.trim().to_string()
+    } else {
+        msgs.join("; ")
+    };
+    Err(format!(
+        "agentd --validate-config refused the spec: {detail}"
+    ))
 }
 
 /// The reviewed object's kind, preferring `request.object.kind`, falling back to
@@ -735,6 +910,61 @@ fn mutation_response(uid: &str, patch: &[Value]) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// Ground truth (rung 4), against the REAL pinned binary. Gated on
+    /// AGENTD_BIN so `cargo test` stays hermetic; CI wires the release binary.
+    #[test]
+    fn binary_validation_denies_what_the_binary_refuses_and_admits_the_rest() {
+        let Some(bin) = std::env::var_os("AGENTD_BIN") else {
+            eprintln!("skipping: AGENTD_BIN not set");
+            return;
+        };
+        let bin = std::path::PathBuf::from(bin);
+
+        // A valid once-shaped spec composes + validates clean.
+        let good = agent_api::AgentSpec {
+            mode: agent_api::Mode::Once,
+            instruction: Some("Do the thing.".into()),
+            ..Default::default()
+        };
+        let doc = agent_config::compose_from_spec(
+            &good,
+            Some(agent_config::ResolvedIntelligence {
+                endpoint: "http://127.0.0.1:9999/v1".into(),
+                model: Some("t".into()),
+                has_token: true,
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        super::run_validate_config(&bin, &doc, None, "workflow.json")
+            .expect("a clean spec must validate");
+
+        // A pre-rewrite (dialect 1/2) workflow document is refused BY THE
+        // BINARY, and its diagnosis travels into the deny message verbatim.
+        let bad = agent_api::AgentSpec {
+            mode: agent_api::Mode::Workflow,
+            workflow: Some(agent_api::WorkflowSource {
+                inline: Some(r#"{"start":"a","nodes":{"a":{"kind":"halt"}}}"#.into()),
+                config_map_key_ref: None,
+            }),
+            ..Default::default()
+        };
+        let doc = agent_config::compose_from_spec(&bad, None, Some("workflow.json".into()), None)
+            .unwrap();
+        let err = super::run_validate_config(
+            &bin,
+            &doc,
+            Some(r#"{"start":"a","nodes":{"a":{"kind":"halt"}}}"#),
+            "workflow.json",
+        )
+        .expect_err("an old-dialect workflow must be refused");
+        assert!(
+            err.contains("--validate-config refused"),
+            "deny message names the rung: {err}"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
