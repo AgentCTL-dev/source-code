@@ -94,7 +94,7 @@ identity + a minimal P3 state path for the supervisor's own store.)
 | P5-4 | Connections flow (consent, `connection_required` → HITL card) | user connects a provider once; agent proceeds | Todo |
 | P5-5 | `sandbox.*` backend plugin (K8s Jobs + warm pool, RuntimeClass optional) | code run with caps, no network, artifacts I/O; threat-model doc | Todo — baseline: SELF-HOST CELL with our static build (mcpg governance corollary); upgrade to config-against-blessed mcpg plugin-protocol-0022 if upstream ships pre-P5; shape the interface against their draft's provider abstraction now |
 | P5-6 | HITL fabric (mcpg approvals + agentd gate bridge + channel registry) | gate raised in agentd answered from Slack under the right identity | Todo |
-| P5-7 | `work.*` fabric tools (coordination re-founding) | lease/ack/nack/DLQ + replay e2e | Todo |
+| P5-7 | `work.*` fabric tools (coordination re-founding) | lease/ack/nack/DLQ + replay e2e | **Done(2026-08-30)** — the RFC 0022 fabric stands as the work plane: work.{submit,claim,renew,ack,release,stats,result,deadletter} + `work://pending` / `dlq://items` resources, memory + Postgres stores, source-IP attestation + mTLS lanes (sec-coord-* green). The DoD's lease/ack/nack(release)/DLQ/replay are ALL live: e2e `claim-atomic`/`claim-dedupe`/`claim-lease-expiry`/`claim-scale-zero` + **`work-redelivery`** (crash-mid-lease → exact-unit redelivery → ack → work.result; poison → DLQ → admin requeue(replay) → completes) + the result/deadletter wire tests. CLI dlq verbs folded into P7-5 hardening |
 
 ## P6 — Fleets & scaling v2
 
