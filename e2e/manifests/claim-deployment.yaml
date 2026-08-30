@@ -1,60 +1,21 @@
-# e2e: the REAL agentd<->coordination claim loop (contract 1.0).
+# RETIRED with ACC 2 (kept as a signpost; nothing applies this file).
 #
-# agentd speaks HTTPS MCP natively, so a claim-mode agent dials the coordination
-# server's /mcp DIRECTLY. The coordination server serves
-# work.* on its /mcp endpoint and attests the caller by source IP
-# (coordination.attestIdentity), so the claim is bound to the real pod:
+# The v1 manifest here ran a raw agentd Deployment with the 1.x claim flags
+# (`--mode reactive --mcp coord=… --claim work://pending`). Every one of those
+# flags was removed in the agent rewrite (each exits 2), and agent-side
+# claim/shard semantics no longer exist: a fleet partitions UPSTREAM of the
+# agent (ADR-0009) — via per-replica config overlays, a dispatcher, or the
+# work fabric's own leases (RFC 0034).
 #
-#   agentd  --mode reactive
-#           --mcp coord=http://agentctl-coordination.agentctl-system/mcp
-#           --claim queue://jobs=coord                 (lease before processing)
+# The ACC 2 equivalents:
+#   - operator-managed claim pool:   AgentFleet with scaling.mode: claim
+#     (see the e2e `claim` scenarios — the operator renders the config
+#     document, KEDA owns replicas, the scaler reads the coordination backlog)
+#   - raw (operator-less) daemon:    a ConfigMap holding a config_version "1"
+#     document + a Deployment running `agentd -c /etc/agentctl/config/agentd.json`
+#     (see contract/fixtures/config/full-featured.yml for a document exercising
+#     schedule / webhook / subscribe / a2a-command / stream starts)
 #
-# This is a RAW Deployment (not operator-rendered) — a deliberately minimal claim
-# worker that only DIALS (it serves no management surface), so it needs no serving
-# cert. It runs restricted-PSS (contract 1.0: no hostPath, no privilege). Scenario:
-# submit work over /mcp, assert agentd claims + acks it (atomic single-grant,
-# dedupe, re-offer). The coordination dial is plaintext HTTP /mcp to the
-# coordination server; requires coordination.enabled.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: claim-worker
-  namespace: default
-  labels:
-    app.kubernetes.io/name: claim-worker
-spec:
-  replicas: 2                      # contention: two workers race work.claim
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: claim-worker
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: claim-worker
-    spec:
-      terminationGracePeriodSeconds: 30   # > agentd --drain-timeout (25s default)
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: agentd
-          image: agentd:1.0.0
-          imagePullPolicy: IfNotPresent
-          args:
-            - "--mode"
-            - "reactive"
-            - "--mcp"
-            - "coord=http://agentctl-coordination.agentctl-system/mcp"
-            - "--claim"
-            - "queue://jobs=coord"
-            - "--metrics-addr"
-            - "0.0.0.0:9090"
-          ports:
-            - { containerPort: 9090, name: metrics }
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+# The claim WORK LOOP itself returns as `work.*` MCP tools on the re-founded
+# coordination service (PLAN P5-7), consumed by ordinary agentd workflows
+# (`lease → work → ack`) — not by agent flags.

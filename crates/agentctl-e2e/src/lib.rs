@@ -38,8 +38,8 @@ pub mod shell;
 /// keyless (`build_features`: serve-mcp, serve-https, a2a, shard/cluster, cron,
 /// metrics, …). The e2e builds it from `/root/agentd-dev` to match the exact
 /// source under test; override `AGENTD_IMAGE` to a registry-qualified ref such as
-/// `ghcr.io/agentd-dev/agentd:1.0.0` for a real cluster.
-pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:1.0.0";
+/// `ghcr.io/agentd-dev/agentd:1.3.1` for a real cluster.
+pub const DEFAULT_AGENTD_IMAGE: &str = "agentd:1.3.1";
 /// Default control-plane (Helm release) namespace.
 pub const DEFAULT_SYSTEM_NS: &str = "agentctl-system";
 /// Default workload namespace the scenarios apply CRs into.

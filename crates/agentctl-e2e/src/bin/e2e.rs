@@ -385,15 +385,15 @@ async fn prov_once_ready_exit(ctx: &Ctx) -> Result<Outcome> {
 
     // The Agent's Ready can flip true before the Job pod exits, so wait for the
     // pod to TERMINATE, then assert the contract exit code + `complete` intent.
-    let table = contract::ExitCodeTable::load(&ctx.cfg.contract_dir)?;
+    let table = contract::ExitCodeTable::vendored();
     let code = wait_pod_exit_code(ctx, name, READY_TIMEOUT).await?;
-    if !table.is_known(code) {
+    if !table.is_known(code as i32) {
         bail!("exit code {code} is not in the frozen exit-code table");
     }
-    if table.intent(code) != "complete" {
+    if table.intent(code as i32) != "complete" {
         bail!(
             "once-mode agent exited {code} (intent {}), expected a `complete` code",
-            table.intent(code)
+            table.intent(code as i32)
         );
     }
 
@@ -408,7 +408,10 @@ async fn prov_once_ready_exit(ctx: &Ctx) -> Result<Outcome> {
 async fn prov_reactive_capabilities(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-prov-reactive";
     let mut agent = agentd_agent(ctx, name, Mode::Reactive, "serve the management profile");
-    agent.spec.subscribe = vec!["queue://noop".to_string()];
+    agent.spec.surfaces = Some(agent_api::DesiredSurfaces {
+        a2a: true,
+        ..Default::default()
+    });
     kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
 
     let pod = wait_for_first_pod(ctx, name).await?;
@@ -426,8 +429,13 @@ async fn prov_reactive_capabilities(ctx: &Ctx) -> Result<Outcome> {
     ])?;
     let m = contract::validate_manifest(&manifest)
         .context("reactive agent capabilities manifest failed contract validation")?;
-    if !m.surfaces.management.is_served() {
-        bail!("reactive agent did not advertise a served management surface");
+    // ACC 2: the control surface IS the A2A listener (admin verbs ride it);
+    // there is no served-MCP management profile any more.
+    let Some(a2a) = &m.a2a else {
+        bail!("reactive agent did not advertise a configured A2A listener");
+    };
+    if !a2a.admin.iter().any(|v| v == "a2a.drain") {
+        bail!("A2A listener does not advertise the drain admin verb");
     }
 
     cleanup_agent(ctx, name).await?;
@@ -453,7 +461,10 @@ async fn mgmt_cancel(ctx: &Ctx) -> Result<Outcome> {
 async fn run_mgmt_verb(ctx: &Ctx, verb: &str) -> Result<Outcome> {
     let name = format!("e2e-mgmt-{verb}");
     let mut agent = agentd_agent(ctx, &name, Mode::Reactive, "serve the management profile");
-    agent.spec.subscribe = vec!["queue://noop".to_string()];
+    agent.spec.surfaces = Some(agent_api::DesiredSurfaces {
+        a2a: true,
+        ..Default::default()
+    });
     kh::apply(&ctx.client, &ctx.cfg.ns, &name, &agent).await?;
     let pod = wait_for_first_pod(ctx, &name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
@@ -499,7 +510,10 @@ async fn mgmt_rbac_403(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-rbac";
     let sa = "e2e-unpriv";
     let mut agent = agentd_agent(ctx, name, Mode::Reactive, "serve the management profile");
-    agent.spec.subscribe = vec!["queue://noop".to_string()];
+    agent.spec.surfaces = Some(agent_api::DesiredSurfaces {
+        a2a: true,
+        ..Default::default()
+    });
     kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
@@ -807,14 +821,11 @@ async fn shard_k_of_n(ctx: &Ctx) -> Result<Outcome> {
     .await
     .context("shard StatefulSet did not reach N ready replicas")?;
 
-    // Each replica advertises its K/N shard via its capabilities manifest. agentd
-    // reads its shard from `AGENTD_SHARD=K/N`, which the operator does NOT yet
-    // inject from the StatefulSet ordinal (no shard-env wiring in render.rs, and
-    // the scratch agentd image has no shell to derive K from the pod ordinal), so
-    // `surfaces.shard` is null (agentd defaults to the unsharded 0/1). The
-    // STRUCTURAL guarantee (a StatefulSet at N stable, ready replicas — the
-    // operator's shard-mode rendering) IS verified above; the per-pod K/N identity
-    // is a documented operator gap, reported as a skip rather than a false pass.
+    // ACC 2: agent-side shard identity was REMOVED upstream (clustering is
+    // gone; a fleet partitions upstream of the agent — ADR-0009). Per-member
+    // identity is `agent.name` = the pod name, which each replica must report.
+    // The STRUCTURAL guarantee (a StatefulSet at N stable, ready replicas) is
+    // verified above; partition-overlay semantics land with P6 (RFC 0034).
     let pod0 = format!("{sts}-0");
     let manifest = shell::kubectl(&[
         "exec",
@@ -826,14 +837,12 @@ async fn shard_k_of_n(ctx: &Ctx) -> Result<Outcome> {
         "--capabilities",
     ])?;
     let m = contract::validate_manifest(&manifest)?;
-    let outcome = match m.surfaces.shard.as_deref() {
-        Some(s) if s.ends_with(&format!("/{shards}")) => pass(),
-        Some(other) => bail!("replica 0 shard identity {other:?} did not match K/{shards}"),
-        None => skip(format!(
-            "StatefulSet reached {shards}/{shards} ready (shard-mode rendering verified), but \
-             agentd advertises no shard identity: the operator does not inject AGENTD_SHARD=K/N \
-             from the StatefulSet ordinal yet (operator gap)"
-        )),
+    let outcome = match m.agent.name.as_deref() {
+        Some(n) if n == pod0 => pass(),
+        other => bail!(
+            "replica 0 must take its store-fence identity from AGENT_POD_NAME \
+             (expected agent.name={pod0:?}, got {other:?})"
+        ),
     };
 
     kh::delete_and_wait::<AgentFleet>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await?;
@@ -989,7 +998,7 @@ async fn a2a_message_stream(ctx: &Ctx) -> Result<Outcome> {
 
 /// A once agent's terminal exit code is a member of the frozen exit-code table.
 async fn conf_exit_codes(ctx: &Ctx) -> Result<Outcome> {
-    let table = contract::ExitCodeTable::load(&ctx.cfg.contract_dir)?;
+    let table = contract::ExitCodeTable::vendored();
     let name = "e2e-conf-exit";
     let agent = agentd_agent(ctx, name, Mode::Once, "exit cleanly");
     kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
@@ -1000,10 +1009,10 @@ async fn conf_exit_codes(ctx: &Ctx) -> Result<Outcome> {
     // outcome): with a mock pool present the agent completes (0); without one it
     // exits 4/INTEL_UNAVAILABLE — both are registered codes.
     let code = wait_pod_exit_code(ctx, name, READY_TIMEOUT).await?;
-    if !table.is_known(code) {
+    if !table.is_known(code as i32) {
         bail!(
             "exit code {code} is not a registered contract exit code (v{})",
-            table.version
+            table.version()
         );
     }
 
@@ -1013,10 +1022,9 @@ async fn conf_exit_codes(ctx: &Ctx) -> Result<Outcome> {
 
 /// Every `agent_*` series an agent emits is a registered name in the metrics registry.
 async fn conf_metrics_registry(ctx: &Ctx) -> Result<Outcome> {
-    let registry = contract::MetricsRegistry::load(&ctx.cfg.contract_dir)?;
+    let registry = contract::MetricsRegistry::vendored();
     let name = "e2e-conf-metrics";
     let mut agent = agentd_agent(ctx, name, Mode::Reactive, "serve metrics");
-    agent.spec.subscribe = vec!["queue://noop".to_string()];
     agent.spec.surfaces = Some(agent_api::DesiredSurfaces {
         management: true,
         metrics: true,
@@ -1036,7 +1044,7 @@ async fn conf_metrics_registry(ctx: &Ctx) -> Result<Outcome> {
     drop(pf);
     let outcome = match scraped {
         Ok(metrics) => {
-            let unregistered = registry.unregistered(&metrics.names());
+            let unregistered = registry.unregistered(metrics.names().iter().map(String::as_str));
             if !unregistered.is_empty() {
                 bail!("agent emitted unregistered metric series: {unregistered:?}");
             }
@@ -1486,7 +1494,6 @@ impl Drop for OverlayGuard<'_> {
 /// An A2A-serving reactive agent.
 fn a2a_agent(ctx: &Ctx, name: &str) -> Agent {
     let mut a = agentd_agent(ctx, name, Mode::Reactive, "serve A2A");
-    a.spec.subscribe = vec!["queue://noop".to_string()];
     a.spec.surfaces = Some(agent_api::DesiredSurfaces {
         management: true,
         metrics: false,
@@ -1504,7 +1511,10 @@ fn claim_fleet(ctx: &Ctx, name: &str) -> AgentFleet {
                 mode: Mode::Reactive,
                 image: Some(ctx.cfg.agentd_image.clone()),
                 instruction: Some("claim and process work".to_string()),
-                subscribe: vec!["work://pending".to_string()],
+                surfaces: Some(agent_api::DesiredSurfaces {
+                    a2a: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             scaling: Scaling {
@@ -1544,7 +1554,10 @@ fn shard_fleet(ctx: &Ctx, name: &str, n: u32) -> AgentFleet {
                 mode: Mode::Reactive,
                 image: Some(ctx.cfg.agentd_image.clone()),
                 instruction: Some("process my shard".to_string()),
-                subscribe: vec!["work://pending".to_string()],
+                surfaces: Some(agent_api::DesiredSurfaces {
+                    a2a: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             scaling: Scaling {

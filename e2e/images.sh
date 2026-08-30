@@ -8,11 +8,11 @@
 #                      the chart's image.registry must then point at REGISTRY).
 #
 # Images produced (contract 1.0):
-#   agentd:1.0.0                 the real reference agent (built from
+#   agentd:1.3.1                 the real reference agent (built from
 #                                $AGENTD_SRC/Dockerfile — serves mTLS HTTPS /mcp,
 #                                dials providers/MCP servers directly). Built from
 #                                source to match the exact contract-1.0 build under
-#                                test; the published ghcr.io/agentd-dev/agentd:1.0.0
+#                                test; the published ghcr.io/agentd-dev/agentd:1.3.1
 #                                is used when AGENTD_GHCR is set.
 #   mock-agent:dev               conformant-agent stand-in (mTLS HTTPS self-MCP).
 #   agentctl/<comp>:dev          the 6 control-plane components, each from
@@ -27,8 +27,8 @@ CLUSTER="${CLUSTER:-agentctl-e2e}"
 TAG="${TAG:-dev}"
 REGISTRY="${REGISTRY:-}"                       # empty = kind load; set = push
 AGENTD_SRC="${AGENTD_SRC:-/root/agentd-dev/source-code}"
-AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:1.0.0}"
-AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:1.0.0}"
+AGENTD_IMAGE="${AGENTD_IMAGE:-agentd:1.3.1}"
+AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:1.3.1}"
 
 # The 6 control-plane components (component == deploy/<comp>/Dockerfile dir),
 # matching the release.yml build matrix. Contract 1.0: agents serve HTTPS MCP
@@ -58,15 +58,27 @@ publish() {
   fi
 }
 
-# ---- agentd (contract 1.0) -----------------------------------------------
+# ---- agentd (ACC 2 reference agent) --------------------------------------
 if [ -n "${AGENTD_PULL:-}" ] || [ ! -f "$AGENTD_SRC/Dockerfile" ]; then
   log "pulling $AGENTD_GHCR -> $AGENTD_IMAGE"
   docker pull "$AGENTD_GHCR"
   docker tag "$AGENTD_GHCR" "$AGENTD_IMAGE"
 else
-  build "$AGENTD_IMAGE" "$AGENTD_SRC/Dockerfile" "$AGENTD_SRC"
+  # internal-mocks on top of the shipped feature set: lets scenarios run a
+  # whole agent offline against `mock:` intelligence (debug builds always have
+  # it; the release image needs the feature).
+  build "$AGENTD_IMAGE" "$AGENTD_SRC/Dockerfile" "$AGENTD_SRC" \
+    --build-arg FEATURES="a2a,metrics,cron,otel,hot-reload,config-watch,aauth,oauth,cel,internal-mocks"
 fi
 publish "$AGENTD_IMAGE"
+
+# ---- agentd-staging (rung-4 admission binary) ----------------------------
+# The upstream image is FROM scratch (no shell): stage the binary on busybox
+# so the admission initContainer can `cp` it out (upstream ask U9 tracks a
+# stock-image path). Multi-stage COPY --from works fine against scratch.
+build "agentd-staging:${AGENTD_IMAGE##*:}" "$REPO_ROOT/e2e/agentd-staging.Dockerfile" "$REPO_ROOT/e2e" \
+  --build-arg AGENTD_IMAGE="$AGENTD_IMAGE"
+publish "agentd-staging:${AGENTD_IMAGE##*:}"
 
 # ---- mock-agent:dev ------------------------------------------------------
 # The mock-agent Dockerfile COPYs target/release/mock-agent, so build the host
