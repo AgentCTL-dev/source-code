@@ -807,14 +807,15 @@ fn pod_template(
         mount(TMP_VOLUME, TMP_MOUNT, false),
     ];
 
-    if daemon {
-        volumes.push(Volume {
-            name: STATE_VOLUME.to_string(),
-            empty_dir: Some(EmptyDirVolumeSource::default()),
-            ..Default::default()
-        });
-        mounts.push(mount(STATE_VOLUME, STATE_MOUNT, false));
-    }
+    // Writable state for EVERY shape: the document always declares the file
+    // store (agentd initializes the state dir even on one-shots, and the
+    // XDG-defaulted path is the read-only rootfs).
+    volumes.push(Volume {
+        name: STATE_VOLUME.to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    });
+    mounts.push(mount(STATE_VOLUME, STATE_MOUNT, false));
     if let Some(wf) = &wiring.workflow {
         volumes.push(Volume {
             name: "agentctl-workflow".to_string(),
@@ -1097,10 +1098,10 @@ mod tests {
     }
 
     #[test]
-    fn daemons_get_a_state_volume_jobs_do_not() {
-        let daemon = render_agent(&agent(Mode::Reactive), &cfg(), &wiring()).unwrap();
-        let vols = |r: &Rendered| {
-            pod_of(r)
+    fn every_shape_gets_a_writable_state_volume() {
+        for mode in [Mode::Reactive, Mode::Once, Mode::Schedule] {
+            let r = render_agent(&agent(mode), &cfg(), &wiring()).unwrap();
+            let vols: Vec<String> = pod_of(&r)
                 .spec
                 .as_ref()
                 .unwrap()
@@ -1109,11 +1110,12 @@ mod tests {
                 .unwrap()
                 .iter()
                 .map(|v| v.name.clone())
-                .collect::<Vec<_>>()
-        };
-        assert!(vols(&daemon).contains(&STATE_VOLUME.to_string()));
-        let job = render_agent(&agent(Mode::Once), &cfg(), &wiring()).unwrap();
-        assert!(!vols(&job).contains(&STATE_VOLUME.to_string()));
+                .collect();
+            assert!(
+                vols.contains(&STATE_VOLUME.to_string()),
+                "{mode:?}: the explicit file store needs its emptyDir"
+            );
+        }
     }
 
     #[test]

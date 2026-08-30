@@ -11,6 +11,10 @@
 coordination:
   enabled: true
   store: memory                 # overlay store-postgres.yaml flips this
+  # The claim-fabric scenarios drive work.* DIRECTLY over a port-forward (no
+  # pod behind the source IP), so base runs with attestation off; the
+  # sec-coord-attest overlay flips it back on and asserts the rejection.
+  attestIdentity: false
 
 # Intelligence plane (direct-dial, contract 1.0): there is NO in-cluster broker.
 # The operator resolves an Agent's bound model.pool (a ModelPool) and renders

@@ -1,0 +1,3 @@
+cargo:rerun-if-changed=proto/a2a.proto
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-changed=proto/a2a.proto

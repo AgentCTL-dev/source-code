@@ -314,7 +314,7 @@ async fn build_signed_card(
 /// (contract 1.0; our client cert mints Management). `resources/read` returns
 /// `contents[0].text` = the manifest JSON.
 async fn fetch_capabilities(state: &AppState, pod_ip: &str) -> Result<Value, String> {
-    let url = format!("https://{pod_ip}:8443/mcp");
+    let url = format!("https://{pod_ip}:8443/");
     let read = json!({
         "jsonrpc": "2.0", "id": 1, "method": "resources/read",
         "params": { "uri": "agent://capabilities" }
@@ -486,7 +486,7 @@ async fn handle_a2a(
     }
 
     // Translate spec → reference; unknown method ⇒ -32601 (METHOD_NOT_FOUND).
-    let streaming = spec == "message/stream";
+    let streaming = spec == "message/stream" || spec == "SendStreamingMessage";
     let reference = match translate_method(&spec) {
         Some(m) => m,
         None => {
@@ -532,7 +532,7 @@ async fn handle_a2a(
     // mints Management. Non-streaming AND streaming ride the same endpoint (an
     // SSE reply is negotiated by the streaming method + Accept), so a single URL
     // serves both.
-    let url = format!("https://{pod_ip}:8443/mcp");
+    let url = format!("https://{pod_ip}:8443/");
 
     if streaming {
         // Streaming path: forward and pipe the raw `text/event-stream` body
@@ -943,10 +943,19 @@ fn deliver_push(url: String, token: String, task: Value) {
 /// emit it. `None` ⇒ unsupported (→ JSON-RPC -32601).
 fn translate_method(spec: &str) -> Option<&'static str> {
     match spec {
+        // The public slash binding, translated to the wire dialect…
         "message/send" => Some("SendMessage"),
         "message/stream" => Some("SendStreamingMessage"),
         "tasks/get" => Some("GetTask"),
         "tasks/cancel" => Some("CancelTask"),
+        // …and the native PascalCase wire dialect passed through as-is
+        // (ACC 2: the gateway is a PEP over A2A, not a dialect gate — a
+        // conformant A2A client speaks these directly).
+        "SendMessage" => Some("SendMessage"),
+        "SendStreamingMessage" => Some("SendStreamingMessage"),
+        "GetTask" => Some("GetTask"),
+        "CancelTask" => Some("CancelTask"),
+        "ListTasks" => Some("ListTasks"),
         _ => None,
     }
 }
@@ -1241,7 +1250,8 @@ fn forward_request(
 // --- routing (kube; needs a cluster to run, not to compile/test) -----------
 
 /// Resolve `{ns,name}` → the agent's **Running pod IP** (contract 1.0). The agent
-/// serves its A2A + capabilities surface mTLS-gated on its own `:8443/mcp`; the
+/// serves its A2A surface mTLS-gated on its own `:8443/` (ACC 2: the A2A
+/// listener root — the served-MCP `/mcp` path no longer exists); the
 /// gateway holds the control-plane client cert that mints the `Management` origin
 /// those methods require, so it reaches the pod directly.
 /// (A fleet's pods are labelled the same way, so this resolves a fleet member

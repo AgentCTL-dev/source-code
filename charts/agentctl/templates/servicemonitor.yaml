@@ -8,7 +8,7 @@ NOTE: most components only serve /metrics once the metrics-endpoint code lands i
 a later wave; until then these ServiceMonitors are configured but the scrape
 returns 404.
 */}}
-{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if and .Values.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- $ns := include "agentctl.namespace" . }}
 {{- $targets := list
   (dict "comp" "operator"     "enabled" true                         "port" "http"  "scheme" "http")

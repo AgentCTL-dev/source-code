@@ -39,14 +39,21 @@ spec:
               from http.server import BaseHTTPRequestHandler, HTTPServer
               import json
               class H(BaseHTTPRequestHandler):
+                  # HTTP/1.1 + Content-Length so a rustls client reads the full
+                  # body and never hits the unclean-EOF close (python's ssl
+                  # close sends no close_notify, which rustls reports when it
+                  # reads to EOF: "peer closed connection without close_notify").
+                  protocol_version = 'HTTP/1.1'
                   def do_POST(self):
                       auth = self.headers.get('authorization')
                       n = int(self.headers.get('content-length', 0))
                       body = self.rfile.read(n)
                       if not auth:
                           print('PROVIDER 401 - no credential injected', flush=True)
-                          self.send_response(401); self.send_header('content-type','application/json'); self.end_headers()
-                          self.wfile.write(b'{"error":"missing credential"}'); return
+                          body401 = b'{"error":"missing credential"}'
+                          self.send_response(401); self.send_header('content-type','application/json')
+                          self.send_header('content-length', str(len(body401))); self.end_headers()
+                          self.wfile.write(body401); return
                       try: req = json.loads(body or b'{}')
                       except Exception: req = {}
                       model = req.get('model') or 'mock-model-v1'
@@ -71,12 +78,24 @@ spec:
                       }
                       print('PROVIDER 200 auth=' + auth[:18] + ' model=' + model, flush=True)
                       out = json.dumps(resp).encode()
-                      self.send_response(200); self.send_header('content-type','application/json'); self.end_headers(); self.wfile.write(out)
+                      self.send_response(200); self.send_header('content-type','application/json')
+                      self.send_header('content-length', str(len(out))); self.end_headers(); self.wfile.write(out)
                   def log_message(self, *a): pass
-              print('mock-provider (openai shape) listening on :8080', flush=True)
-              HTTPServer(('', 8080), H).serve_forever()
+              import ssl
+              ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+              ctx.load_cert_chain('/tls/tls.crt', '/tls/tls.key')
+              srv = HTTPServer(('', 8443), H)
+              srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+              print('mock-provider (openai shape) listening on :8443 (tls)', flush=True)
+              srv.serve_forever()
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
           ports:
-            - { containerPort: 8080, name: http }
+            - { containerPort: 8443, name: https }
+      volumes:
+        - name: tls
+          secret:
+            secretName: mock-provider-tls
 ---
 apiVersion: v1
 kind: Service
@@ -89,4 +108,21 @@ spec:
   selector:
     app.kubernetes.io/name: mock-provider
   ports:
-    - { port: 8080, targetPort: 8080, name: http }
+    - { port: 8443, targetPort: 8443, name: https }
+---
+# Serving cert from the chart CA so a REAL agent (security.tls_ca = the
+# agentctl-ca bundle) verifies the provider hop — agentd refuses plaintext
+# non-loopback intelligence endpoints, so the mock must speak https.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mock-provider-tls
+  namespace: default
+spec:
+  secretName: mock-provider-tls
+  issuerRef: { name: agentctl-ca, kind: ClusterIssuer }
+  dnsNames:
+    - mock-provider.default
+    - mock-provider.default.svc
+    - mock-provider.default.svc.cluster.local
+  usages: ["server auth"]

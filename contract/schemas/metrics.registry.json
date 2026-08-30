@@ -1,59 +1,345 @@
 {
-  "$comment": "ACC v2 — the agentd v1.3.1 Prometheus surface (METRICS_SCHEMA 1.2, crates/agentd/src/obs/metrics.rs). Status values: 'live' = written at runtime; 'reserved' = rendered as HELP/TYPE but flat at zero or never written — MUST NOT be targeted by scalers/alerts; 'child_local' = incremented in the re-exec'd child process, so a supervisor scrape under-reports. Additive within the major; rename/removal bumps it.",
+  "$comment": "ACC v2 \u2014 the agentd v1.3.1 Prometheus surface (METRICS_SCHEMA 1.2, crates/agentd/src/obs/metrics.rs). Status values: 'live' = written at runtime; 'reserved' = rendered as HELP/TYPE but flat at zero or never written \u2014 MUST NOT be targeted by scalers/alerts; 'child_local' = incremented in the re-exec'd child process, so a supervisor scrape under-reports. Additive within the major; rename/removal bumps it. RECONCILED 2026-08-30 against the live 1.3.1 exposition (conformance caught 11 emitted-but-unlisted series; the binary is ground truth). The names listed 'reserved' remain HELP/TYPE-only in the live scrape, confirmed.",
   "metrics_schema": "1.2",
   "scaler_guidance": {
     "primary": "agent_inbox_pending",
-    "secondary": ["agent_turns_queued", "agent_runs_active", "agent_pressure_level"],
-    "never_target": ["agent_pending_events", "agent_inflight_reactions", "agent_reaction_lag_ms", "agent_subscriptions_active", "agent_active_subagents", "agent_tree_depth", "agent_tree_breadth"]
+    "secondary": [
+      "agent_turns_queued",
+      "agent_runs_active",
+      "agent_pressure_level"
+    ],
+    "never_target": [
+      "agent_pending_events",
+      "agent_inflight_reactions",
+      "agent_reaction_lag_ms",
+      "agent_subscriptions_active",
+      "agent_active_subagents",
+      "agent_tree_depth",
+      "agent_tree_breadth"
+    ]
   },
   "metrics": [
-    { "name": "agent_up", "type": "gauge", "status": "live" },
-    { "name": "agent_ready", "type": "gauge", "status": "live" },
-    { "name": "agent_inbox_pending", "type": "gauge", "status": "live", "note": "the real reactive-backlog signal" },
-    { "name": "agent_runs_active", "type": "gauge", "status": "live" },
-    { "name": "agent_turns_queued", "type": "gauge", "status": "live" },
-    { "name": "agent_pressure_level", "type": "gauge", "status": "live", "note": "0 ok / 1 warn / 2 shed" },
-    { "name": "agent_disk_free_bytes", "type": "gauge", "status": "live" },
-    { "name": "agent_runs_total", "type": "counter", "labels": ["status"], "status": "live" },
-    { "name": "agent_runs_started_total", "type": "counter", "status": "live" },
-    { "name": "agent_steps_total", "type": "counter", "status": "live" },
-    { "name": "agent_turns_total", "type": "counter", "status": "live" },
-    { "name": "agent_tokens_total", "type": "counter", "labels": ["type"], "status": "live", "note": "the 'model' label is reserved and absent" },
-    { "name": "agent_context_tokens", "type": "gauge", "status": "live" },
-    { "name": "agent_store_ops_total", "type": "counter", "labels": ["result"], "status": "live", "note": "result=conflict is the split-brain alarm" },
-    { "name": "agent_intel_up", "type": "gauge", "status": "live" },
-    { "name": "agent_intel_all_down", "type": "gauge", "status": "live" },
-    { "name": "agent_intel_errors_total", "type": "counter", "labels": ["reason"], "status": "live" },
-    { "name": "agent_intel_calls_total", "type": "counter", "status": "live" },
-    { "name": "agent_mcp_connect_failures_total", "type": "counter", "labels": ["server"], "status": "live" },
-    { "name": "agent_drains_total", "type": "counter", "labels": ["phase"], "status": "live" },
-    { "name": "agent_budget_tokens_remaining", "type": "gauge", "status": "live" },
-    { "name": "agent_config_reload_total", "type": "counter", "labels": ["result"], "status": "live" },
-    { "name": "agent_memory_max_bytes", "type": "gauge", "status": "live", "note": "cgroup-v2 conditional" },
-    { "name": "agent_memory_current_bytes", "type": "gauge", "status": "live", "note": "cgroup-v2 conditional" },
-    { "name": "agent_subagent_stuck_kills_total", "type": "counter", "labels": ["signal"], "status": "live" },
-    { "name": "agent_subagents_spawned_total", "type": "counter", "status": "live", "note": "counts EVERY child incl. turn/think workers — not a subagent-volume metric" },
-    { "name": "agent_subagents_exited_total", "type": "counter", "status": "live", "note": "same caveat as spawned_total" },
-    { "name": "agent_limit_exceeded_total", "type": "counter", "labels": ["limit"], "status": "live", "note": "most legs are child_local; only tree_tokens is supervisor-owned" },
-    { "name": "agent_loop_steps_total", "type": "counter", "status": "child_local" },
-    { "name": "agent_refusals_total", "type": "counter", "status": "child_local" },
-    { "name": "agent_pending_events", "type": "gauge", "status": "reserved" },
-    { "name": "agent_inflight_reactions", "type": "gauge", "status": "reserved" },
-    { "name": "agent_reaction_lag_ms", "type": "gauge", "status": "reserved" },
-    { "name": "agent_subscriptions_active", "type": "gauge", "status": "reserved" },
-    { "name": "agent_active_subagents", "type": "gauge", "status": "reserved" },
-    { "name": "agent_tree_depth", "type": "gauge", "status": "reserved" },
-    { "name": "agent_tree_breadth", "type": "gauge", "status": "reserved" },
-    { "name": "agent_paused", "type": "gauge", "status": "reserved", "note": "rendered, never written — read the A2A status command instead" },
-    { "name": "agent_config_generation", "type": "gauge", "status": "reserved", "note": "rendered, never written — read config.reloaded log / durable manifest" },
-    { "name": "agent_tool_calls_total", "type": "counter", "labels": ["server", "tool", "ok"], "status": "reserved", "note": "derive from tool.result log lines" },
-    { "name": "agent_run_duration_ms", "type": "histogram", "status": "reserved" },
-    { "name": "agent_intel_call_duration_ms", "type": "histogram", "status": "reserved" },
-    { "name": "agent_tool_call_duration_ms", "type": "histogram", "status": "reserved" }
+    {
+      "name": "agent_up",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_ready",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_inbox_pending",
+      "type": "gauge",
+      "status": "live",
+      "note": "the real reactive-backlog signal"
+    },
+    {
+      "name": "agent_runs_active",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_turns_queued",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_pressure_level",
+      "type": "gauge",
+      "status": "live",
+      "note": "0 ok / 1 warn / 2 shed"
+    },
+    {
+      "name": "agent_disk_free_bytes",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_runs_total",
+      "type": "counter",
+      "labels": [
+        "status"
+      ],
+      "status": "live"
+    },
+    {
+      "name": "agent_runs_started_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_steps_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_turns_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_tokens_total",
+      "type": "counter",
+      "labels": [
+        "type"
+      ],
+      "status": "live",
+      "note": "the 'model' label is reserved and absent"
+    },
+    {
+      "name": "agent_context_tokens",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_store_ops_total",
+      "type": "counter",
+      "labels": [
+        "result"
+      ],
+      "status": "live",
+      "note": "result=conflict is the split-brain alarm"
+    },
+    {
+      "name": "agent_intel_up",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_intel_all_down",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_intel_errors_total",
+      "type": "counter",
+      "labels": [
+        "reason"
+      ],
+      "status": "live"
+    },
+    {
+      "name": "agent_intel_calls_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_mcp_connect_failures_total",
+      "type": "counter",
+      "labels": [
+        "server"
+      ],
+      "status": "live"
+    },
+    {
+      "name": "agent_drains_total",
+      "type": "counter",
+      "labels": [
+        "phase"
+      ],
+      "status": "live"
+    },
+    {
+      "name": "agent_budget_tokens_remaining",
+      "type": "gauge",
+      "status": "live"
+    },
+    {
+      "name": "agent_config_reload_total",
+      "type": "counter",
+      "labels": [
+        "result"
+      ],
+      "status": "live"
+    },
+    {
+      "name": "agent_memory_max_bytes",
+      "type": "gauge",
+      "status": "live",
+      "note": "cgroup-v2 conditional"
+    },
+    {
+      "name": "agent_memory_current_bytes",
+      "type": "gauge",
+      "status": "live",
+      "note": "cgroup-v2 conditional"
+    },
+    {
+      "name": "agent_subagent_stuck_kills_total",
+      "type": "counter",
+      "labels": [
+        "signal"
+      ],
+      "status": "live"
+    },
+    {
+      "name": "agent_subagents_spawned_total",
+      "type": "counter",
+      "status": "live",
+      "note": "counts EVERY child incl. turn/think workers \u2014 not a subagent-volume metric"
+    },
+    {
+      "name": "agent_subagents_exited_total",
+      "type": "counter",
+      "status": "live",
+      "note": "same caveat as spawned_total"
+    },
+    {
+      "name": "agent_limit_exceeded_total",
+      "type": "counter",
+      "labels": [
+        "limit"
+      ],
+      "status": "live",
+      "note": "most legs are child_local; only tree_tokens is supervisor-owned"
+    },
+    {
+      "name": "agent_loop_steps_total",
+      "type": "counter",
+      "status": "child_local"
+    },
+    {
+      "name": "agent_refusals_total",
+      "type": "counter",
+      "status": "child_local"
+    },
+    {
+      "name": "agent_pending_events",
+      "type": "gauge",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_inflight_reactions",
+      "type": "gauge",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_reaction_lag_ms",
+      "type": "gauge",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_subscriptions_active",
+      "type": "gauge",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_active_subagents",
+      "type": "gauge",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_tree_depth",
+      "type": "gauge",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_tree_breadth",
+      "type": "gauge",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_paused",
+      "type": "gauge",
+      "status": "reserved",
+      "note": "rendered, never written \u2014 read the A2A status command instead"
+    },
+    {
+      "name": "agent_config_generation",
+      "type": "gauge",
+      "status": "reserved",
+      "note": "rendered, never written \u2014 read config.reloaded log / durable manifest"
+    },
+    {
+      "name": "agent_tool_calls_total",
+      "type": "counter",
+      "labels": [
+        "server",
+        "tool",
+        "ok"
+      ],
+      "status": "reserved",
+      "note": "derive from tool.result log lines"
+    },
+    {
+      "name": "agent_run_duration_ms",
+      "type": "histogram",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_intel_call_duration_ms",
+      "type": "histogram",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_tool_call_duration_ms",
+      "type": "histogram",
+      "status": "reserved"
+    },
+    {
+      "name": "agent_reactions_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_reactor_stalls_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_restarts_total",
+      "type": "counter",
+      "status": "live",
+      "note": "supervisor child-restart count"
+    },
+    {
+      "name": "agent_restarts_tripped_total",
+      "type": "counter",
+      "status": "live",
+      "note": "restart governor trips"
+    },
+    {
+      "name": "agent_runs_completed_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_runs_failed_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_runs_killed_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_store_latency_ms",
+      "type": "summary",
+      "status": "live",
+      "note": "store op latency (sum/count exposition)"
+    },
+    {
+      "name": "agent_subagent_restarts_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_tokens_input_total",
+      "type": "counter",
+      "status": "live"
+    },
+    {
+      "name": "agent_tokens_output_total",
+      "type": "counter",
+      "status": "live"
+    }
   ],
   "endpoints": {
     "metrics": "GET /metrics (text/plain; version=0.0.4)",
-    "healthz": "GET /healthz — reactor heartbeat freshness; an idle reactive agent is healthy; a stuck subagent must not fail pod liveness",
-    "readyz": "GET /readyz — 503 while lame-duck, draining, or intel_all_down"
+    "healthz": "GET /healthz \u2014 reactor heartbeat freshness; an idle reactive agent is healthy; a stuck subagent must not fail pod liveness",
+    "readyz": "GET /readyz \u2014 503 while lame-duck, draining, or intel_all_down"
   }
 }

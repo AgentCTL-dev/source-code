@@ -428,7 +428,7 @@ async fn authorize(
 
 /// Deliver a management verb directly to the agent pod as a contract-1.0 A2A
 /// admin JSON-RPC (`a2a.Drain`/`a2a.LameDuck`/`a2a.Pause`/`a2a.Resume`/
-/// `a2a.Cancel` on `POST /mcp`). The agent serves mTLS-gated HTTPS on :8443
+/// `a2a.Cancel` on the A2A listener root). The agent serves mTLS-gated HTTPS on :8443
 /// (rendered by the operator); our client certificate chains to the cluster CA
 /// the agent was given as `--serve-client-ca`, which mints the `Management`
 /// origin these verbs require. The pod itself is the endpoint, addressed by pod
@@ -477,16 +477,18 @@ async fn running_pod_ips(client: &Client, ns: &str, name: &str) -> Result<Vec<St
         .collect())
 }
 
-/// POST an admin verb to one agent pod's mTLS `/mcp` as a contract-1.0 A2A admin
-/// JSON-RPC. A bounded timeout keeps a single hung replica from stalling a fleet
-/// fan-out.
+/// POST an admin verb to one agent pod's A2A listener root as JSON-RPC (ACC 2:
+/// there is no served-MCP `/mcp` any more; the admin verbs ride the A2A
+/// endpoint and are accepted case-insensitively in both `a2a.X` and bare
+/// spellings). A bounded timeout keeps a single hung replica from stalling a
+/// fleet fan-out.
 async fn forward_verb_to_ip(
     http: &reqwest::Client,
     pod_ip: &str,
     verb: &str,
 ) -> Result<String, String> {
     let method = verb_to_method(verb)?;
-    let url = format!("https://{pod_ip}:8443/mcp");
+    let url = format!("https://{pod_ip}:8443/");
     // Inject the W3C `traceparent` so the agent's run joins this trace (no-op when
     // OTLP is off). No Origin header is sent (the agent 403s cross-origin).
     let mut trace_headers = reqwest::header::HeaderMap::new();

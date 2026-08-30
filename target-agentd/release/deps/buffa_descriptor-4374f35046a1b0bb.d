@@ -1,0 +1,10 @@
+/root/agentctl-dev/source-code/target-agentd/release/deps/buffa_descriptor-4374f35046a1b0bb.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.descriptor.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.compiler.plugin.rs
+
+/root/agentctl-dev/source-code/target-agentd/release/deps/libbuffa_descriptor-4374f35046a1b0bb.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.descriptor.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.compiler.plugin.rs
+
+/root/agentctl-dev/source-code/target-agentd/release/deps/libbuffa_descriptor-4374f35046a1b0bb.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.descriptor.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.compiler.plugin.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/mod.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.descriptor.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/buffa-descriptor-0.3.0/src/generated/google.protobuf.compiler.plugin.rs:

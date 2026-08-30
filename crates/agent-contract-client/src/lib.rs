@@ -329,10 +329,29 @@ pub mod metrics {
         }
 
         pub fn status(&self, name: &str) -> Option<Status> {
-            self.metrics
+            let direct = self
+                .metrics
                 .iter()
                 .find(|(n, _)| n == name)
-                .map(|(_, s)| *s)
+                .map(|(_, s)| *s);
+            if direct.is_some() {
+                return direct;
+            }
+            // Histogram/summary expositions emit `<base>_sum/_count/_bucket`
+            // series; the registry lists the BASE name once.
+            for suffix in ["_sum", "_count", "_bucket"] {
+                if let Some(base) = name.strip_suffix(suffix) {
+                    if let Some(s) = self
+                        .metrics
+                        .iter()
+                        .find(|(n, _)| n == base)
+                        .map(|(_, s)| *s)
+                    {
+                        return Some(s);
+                    }
+                }
+            }
+            None
         }
 
         pub fn is_registered(&self, name: &str) -> bool {

@@ -23,7 +23,7 @@ metadata:
   namespace: default
 spec:
   provider: mock
-  endpoint: http://mock-provider.default:8080
+  endpoint: https://mock-provider.default:8443
   credentialSecretRef:
     name: provider-credentials
     key: api-key

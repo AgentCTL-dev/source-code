@@ -437,21 +437,24 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
     }
 
     // --- store + lifecycle ------------------------------------------------
-    if is_daemon(input.mode) {
-        doc.insert(
-            "store".into(),
-            json!({ "kind": "file", "file": { "path": paths::STATE_DIR } }),
-        );
-        doc.insert(
-            "lifecycle".into(),
-            json!({ "run_until": "drained", "drain_timeout": DRAIN_TIMEOUT }),
-        );
+    // The store is ALWAYS declared explicitly: even a one-shot run initializes
+    // its state dir at boot, and the unset default lands on
+    // $XDG_STATE_HOME/agentd/state — a read-only rootfs in our pods (observed:
+    // exit 6 "store dir ...: Read-only file system"). The workload layer
+    // mounts a writable emptyDir at the parent of STATE_DIR for every shape.
+    doc.insert(
+        "store".into(),
+        json!({ "kind": "file", "file": { "path": paths::STATE_DIR } }),
+    );
+    let run_until = if is_daemon(input.mode) {
+        "drained"
     } else {
-        doc.insert(
-            "lifecycle".into(),
-            json!({ "run_until": "idle", "drain_timeout": DRAIN_TIMEOUT }),
-        );
-    }
+        "idle"
+    };
+    doc.insert(
+        "lifecycle".into(),
+        json!({ "run_until": run_until, "drain_timeout": DRAIN_TIMEOUT }),
+    );
 
     // --- limits + budget --------------------------------------------------
     if let Some(l) = &input.limits {
@@ -628,7 +631,9 @@ mod tests {
         assert_eq!(d["agent"]["instruction"], "Do the thing.");
         assert_eq!(d["lifecycle"]["run_until"], "idle");
         assert!(d.get("workflows").is_none(), "sugar main is agentd's own");
-        assert!(d.get("store").is_none(), "one-shots write nothing");
+        // The store is explicit for EVERY shape (a defaulted store lands on
+        // the read-only rootfs — observed exit 6 in-cluster).
+        assert_eq!(d["store"]["kind"], "file");
     }
 
     #[test]
