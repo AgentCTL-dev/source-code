@@ -739,6 +739,45 @@ spec:
               handle:
                 nullable: true
                 type: string
+              partitioning:
+                description: |-
+                  v2 partitioning (RFC 0034 §3): how members divide the work. Absent ⇒
+                  the v1 `scaling.mode` behavior stands unchanged.
+                nullable: true
+                properties:
+                  static:
+                    description: 'Static-strategy details (`strategy: static`).'
+                    nullable: true
+                    properties:
+                      defaults:
+                        description: Fleet-wide var defaults every member receives (overridden per-member).
+                        x-kubernetes-preserve-unknown-fields: true
+                      singletons:
+                        description: |-
+                          Workflows that must run on EXACTLY ONE member (ordinal 0): entries
+                          name a trigger KIND (`schedule`, `loop`, …) to single out every
+                          generated workflow of that kind, or a hand-authored workflow's name.
+                          Everyone else renders the workflow `armed: false` — loaded, inert.
+                        items:
+                          type: string
+                        type: array
+                      vars:
+                        description: |-
+                          Per-member vars overlays, indexed by ordinal: `vars[0]` lands on
+                          member 0's config as `vars:` (referenced as `{{config.<key>}}`).
+                          Shorter than `replicas` ⇒ later members get only the defaults below.
+                        items:
+                          x-kubernetes-preserve-unknown-fields: true
+                        type: array
+                    type: object
+                  strategy:
+                    default: static
+                    enum:
+                    - static
+                    - dispatcher
+                    - workqueue
+                    type: string
+                type: object
               replicas:
                 format: uint32
                 minimum: 0.0

@@ -31,6 +31,13 @@ fn preserve_arbitrary(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema 
     })
 }
 
+fn preserve_arbitrary_vec(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array",
+        "items": { "x-kubernetes-preserve-unknown-fields": true }
+    })
+}
+
 // ===========================================================================
 // Agent
 // ===========================================================================
@@ -571,6 +578,60 @@ pub struct AgentFleetSpec {
     pub replicas: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<FleetCoordinator>,
+    /// v2 partitioning (RFC 0034 §3): how members divide the work. Absent ⇒
+    /// the v1 `scaling.mode` behavior stands unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitioning: Option<Partitioning>,
+}
+
+/// RFC 0034 §3 — the partitioning strategy family. v2-only (stash-preserved
+/// across v1-mediated writes; dropped with a warning on down-convert).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Partitioning {
+    #[serde(default)]
+    pub strategy: PartitionStrategy,
+    /// Static-strategy details (`strategy: static`).
+    #[serde(default, rename = "static", skip_serializing_if = "Option::is_none")]
+    pub static_: Option<StaticStrategy>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PartitionStrategy {
+    /// Fixed member set (StatefulSet): stable identities, per-member vars
+    /// overlays, ordinal-0 singletons.
+    #[default]
+    Static,
+    /// Owner + workers behind a fleet route (P6-3).
+    Dispatcher,
+    /// Members pull leases from the `work.*` fabric (P6-4).
+    Workqueue,
+}
+
+/// `strategy: static` — per-member differentiation over ONE shared config:
+/// members get the same document plus a tiny per-ordinal overlay carrying
+/// only `vars:` (agentd folds `{{config.*}}` references anywhere, and an
+/// `armed` workflow flag folds to a real bool — RFC 0034 §3.1 / ADR-0009).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StaticStrategy {
+    /// Per-member vars overlays, indexed by ordinal: `vars[0]` lands on
+    /// member 0's config as `vars:` (referenced as `{{config.<key>}}`).
+    /// Shorter than `replicas` ⇒ later members get only the defaults below.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "preserve_arbitrary_vec")]
+    pub vars: Vec<serde_json::Value>,
+    /// Fleet-wide var defaults every member receives (overridden per-member).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "preserve_arbitrary")]
+    pub defaults: Option<serde_json::Value>,
+    /// Workflows that must run on EXACTLY ONE member (ordinal 0): entries
+    /// name a trigger KIND (`schedule`, `loop`, …) to single out every
+    /// generated workflow of that kind, or a hand-authored workflow's name.
+    /// Everyone else renders the workflow `armed: false` — loaded, inert.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub singletons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
@@ -1046,6 +1107,9 @@ pub mod convert {
                 work: v1.work.clone(),
                 replicas: v1.replicas,
                 coordinator,
+                // v1 has no partitioning surface; the stash (or a v2 write)
+                // is the only source.
+                partitioning: None,
             },
             warnings,
         )
@@ -1054,6 +1118,13 @@ pub mod convert {
     /// v1alpha2 fleet → v1alpha1 (templates down-convert; lossy fields warn).
     pub fn fleet_v2_to_v1(v2: &AgentFleetSpec) -> (crate::AgentFleetSpec, Vec<String>) {
         let (template, mut warnings) = agent_v2_to_v1(&v2.template);
+        if v2.partitioning.is_some() {
+            warnings.push(
+                "spec.partitioning is v1alpha2-only and is not represented in v1alpha1 \
+                 (preserved via the conversion stash)"
+                    .into(),
+            );
+        }
         let coordinator = v2.coordinator.as_ref().map(|c| {
             let (t, w) = agent_v2_to_v1(&c.template);
             warnings.extend(w.into_iter().map(|w| format!("coordinator.template: {w}")));

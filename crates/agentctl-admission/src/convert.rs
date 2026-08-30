@@ -134,7 +134,14 @@ pub fn convert_object(obj: &Value, desired: &str) -> Result<Value, String> {
                             if serde_json::to_value(&down).ok() == serde_json::to_value(&v1).ok() {
                                 stash
                             } else {
-                                serde_json::to_value(fresh).map_err(|e| e.to_string())?
+                                // Same rule as the Agent arm: the v1 writer's
+                                // surface wins, the stashed v2-only fields
+                                // (spec.partitioning, template extras) merge
+                                // back on top rather than being erased.
+                                merge_v2_only(
+                                    serde_json::to_value(fresh).map_err(|e| e.to_string())?,
+                                    &stash,
+                                )
                             }
                         }
                         Err(_) => serde_json::to_value(fresh).map_err(|e| e.to_string())?,
@@ -219,6 +226,8 @@ fn merge_v2_only(mut fresh: Value, stash: &Value) -> Value {
         "priority",
         "lifecycle",
         "expose",
+        // Fleet-level v2-only surface (RFC 0034).
+        "partitioning",
     ];
     if let (Some(f), Some(s)) = (fresh.as_object_mut(), stash.as_object()) {
         for key in V2_ONLY {

@@ -1026,6 +1026,7 @@ fn pod_wiring(
             .is_some_and(|a| !a.principals.is_empty()),
         // Set by the caller once compose resolved the peer set.
         peer_bearers: false,
+        member_overlays: false,
         extra_env: Vec::new(),
     }
 }
@@ -1163,12 +1164,89 @@ async fn ensure_peer_bearers_secret(
     Ok(())
 }
 
+/// Compose a STATIC fleet's shared worker document from the v2 template
+/// (P6-1): trigger compiler + singleton arming; per-member variation lives
+/// entirely in the vars overlays ([`member_overlay_keys`]). Grants
+/// (`services[]`) on fleet templates are not resolved yet (P6 follow-up) —
+/// inline `mcpServers` work as on any agent.
+fn compose_static_fleet_document(
+    template: &agent_api::v1alpha2::AgentSpec,
+    st: &agent_api::v1alpha2::StaticStrategy,
+    intelligence: Option<&(String, Option<agent_api::SecretKeyRef>)>,
+    workflow: Option<&WorkflowMount>,
+) -> Result<Projection, String> {
+    let mut mcp: Vec<agent_config::ResolvedMcp> = template
+        .mcp_servers
+        .iter()
+        .map(agent_config::ResolvedMcp::from_spec)
+        .collect();
+    for m in &mut mcp {
+        m.endpoint = agent_config::absolutize_endpoint(&m.endpoint);
+    }
+    let intel = intelligence.map(|(endpoint, token)| agent_config::ResolvedIntelligence {
+        endpoint: agent_config::absolutize_endpoint(endpoint),
+        model: template.intelligence.as_ref().and_then(|i| i.model.clone()),
+        has_token: token.is_some(),
+    });
+    let (mut input, shape) =
+        agent_config::v2::from_v2_spec(template, intel, workflow.map(|w| w.file_path()), None, mcp)
+            .map_err(|e| e.to_string())?;
+    if !matches!(shape, agent_config::v2::RenderShape::Daemon) {
+        return Err(
+            "static fleet workers must be daemon-shaped (a job/cron template cannot be a \
+             fleet member; express a nightly run as a schedule TRIGGER + singletons)"
+                .to_string(),
+        );
+    }
+    input.singleton_selectors = st.singletons.clone();
+    // Fleet var DEFAULTS live in the BASE layer: agentd types each `-c` file
+    // INDEPENDENTLY before the RFC 7396 merge, so a `{{config.<key>}}`
+    // reference in the shared document must resolve from the shared
+    // document's own vars — the member overlay then overrides key-by-key.
+    // (A referenced var with no default is a per-file typing error at
+    // startup; bitten live: `config.color is not defined in vars`.)
+    if let Some(serde_json::Value::Object(defaults)) = &st.defaults {
+        for (k, v) in defaults {
+            input.vars.insert(k.clone(), v.clone());
+        }
+    }
+    agent_config::build_projection(&input).map_err(|e| e.to_string())
+}
+
+/// The per-ordinal overlay ConfigMap keys (`member-<n>.json`) for a static
+/// fleet: defaults ∪ vars[n] plus the reserved `member`/`is_lead` keys.
+fn member_overlay_keys(
+    st: &agent_api::v1alpha2::StaticStrategy,
+    members: u32,
+) -> Vec<(String, String)> {
+    (0..members)
+        .map(|n| {
+            (
+                format!("member-{n}.json"),
+                agent_config::member_overlay(n, st.defaults.as_ref(), st.vars.get(n as usize))
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
 async fn ensure_config_configmap(
     client: &Client,
     ns: &str,
     workload: &str,
     owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
     doc: &Projection,
+) -> Result<(), Error> {
+    ensure_config_configmap_with(client, ns, workload, owner, doc, &[]).await
+}
+
+async fn ensure_config_configmap_with(
+    client: &Client,
+    ns: &str,
+    workload: &str,
+    owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
+    doc: &Projection,
+    extra_keys: &[(String, String)],
 ) -> Result<(), Error> {
     use k8s_openapi::api::core::v1::ConfigMap;
     let name = config_configmap_name(workload);
@@ -1206,6 +1284,12 @@ async fn ensure_config_configmap(
         agent_config::paths::CONFIG_FILE.to_string(),
         doc.instance.to_json(),
     );
+    // Static-fleet member overlays (RFC 0034 §3.1): per-ordinal `vars:`
+    // layers in the SAME ConfigMap (`member-<n>.json`), mounted with the
+    // shared documents and appended as a third `-c` by the renderer.
+    for (key, value) in extra_keys {
+        data.insert(key.clone(), value.clone());
+    }
     let cm = ConfigMap {
         metadata: kube::api::ObjectMeta {
             name: Some(name.clone()),
@@ -1530,14 +1614,48 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     let intelligence = resolve_model_endpoint(&ctx.client, ns, &worker_spec).await;
     let workflow_mount =
         ensure_workflow_configmap(&ctx.client, ns, &name, &worker_spec, &owner).await?;
-    let composed = compose_document(
-        &worker_spec,
-        intelligence.as_ref(),
-        workflow_mount.as_ref(),
-        None,
-    )
+
+    // The v2 view (stash-backed): `spec.partitioning` + the FULL worker
+    // template (the v1 down-view drops triggers/services/store — composing
+    // from it would silently lose a v2 fleet's wake sources).
+    let v2_fleets: Api<agent_api::v1alpha2::AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
+    let static_ctx = match v2_fleets.get_opt(&name).await {
+        Ok(Some(f)) => f.spec.partitioning.clone().and_then(|p| {
+            (p.strategy == agent_api::v1alpha2::PartitionStrategy::Static).then(|| {
+                (
+                    f.spec.template.clone(),
+                    p.static_.unwrap_or_default(),
+                    f.spec.replicas.unwrap_or(1),
+                )
+            })
+        }),
+        _ => None,
+    };
+    let static_members = static_ctx.as_ref().map(|(_, _, n)| *n);
+    let member_keys: Vec<(String, String)> = static_ctx
+        .as_ref()
+        .map(|(_, st, members)| member_overlay_keys(st, *members))
+        .unwrap_or_default();
+    let composed = match &static_ctx {
+        // v2 static strategy (P6-1): the trigger compiler runs over the v2
+        // template (a nightly `schedule` trigger becomes a generated
+        // workflow), singleton selectors stamp `armed: {{config.is_lead}}`,
+        // and members differ ONLY by their vars overlay.
+        Some((v2_template, st, _)) => compose_static_fleet_document(
+            v2_template,
+            st,
+            intelligence.as_ref(),
+            workflow_mount.as_ref(),
+        ),
+        None => compose_document(
+            &worker_spec,
+            intelligence.as_ref(),
+            workflow_mount.as_ref(),
+            None,
+        ),
+    }
     .and_then(|doc| {
-        let wiring = pod_wiring(
+        let mut wiring = pod_wiring(
             &doc,
             &worker_spec,
             intelligence.as_ref(),
@@ -1545,7 +1663,8 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             false,
             ctx.api_token.should_inject(ns),
         );
-        render_fleet(&fleet, &ctx.render, &wiring)
+        wiring.member_overlays = static_members.is_some();
+        render_fleet(&fleet, &ctx.render, &wiring, static_members)
             .map(|rendered| (doc, rendered))
             .map_err(|e| e.to_string())
     });
@@ -1561,7 +1680,8 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 ensure_principals_secret(ctx.as_ref(), ns, &name, &worker_principals, &owner)
                     .await?;
             }
-            ensure_config_configmap(&ctx.client, ns, &name, &owner, &doc).await?;
+            ensure_config_configmap_with(&ctx.client, ns, &name, &owner, &doc, &member_keys)
+                .await?;
             // Workload PKI (serving Certificate + per-ns CA ConfigMap), so fleet
             // pods' mounts resolve as they schedule.
             if ctx.pki.enabled() {
@@ -1579,7 +1699,7 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
             // would do — which runs mixed moduli and double-owns / orphans keys
             // across the seam. Returns Some while the rebalance is in flight (the
             // StatefulSet is already patched + status set): short-circuit and requeue.
-            if fleet.spec.scaling.mode == ScaleMode::Shard {
+            if static_members.is_none() && fleet.spec.scaling.mode == ScaleMode::Shard {
                 if let Some(action) =
                     drive_shard_resize(ctx.as_ref(), ns, &name, &fleet, &rendered, observed).await?
                 {
@@ -2404,8 +2524,13 @@ mod tests {
         );
         shard.metadata.namespace = Some("agents".into());
         shard.metadata.uid = Some("uid-shard".into());
-        let rendered =
-            render_fleet(&shard, &RenderConfig::default(), &PodWiring::default()).unwrap();
+        let rendered = render_fleet(
+            &shard,
+            &RenderConfig::default(),
+            &PodWiring::default(),
+            None,
+        )
+        .unwrap();
         assert!(matches!(rendered, Rendered::StatefulSet(_)));
         assert_eq!(fleet_replica_count(&shard, &rendered), 4);
 
@@ -2425,8 +2550,13 @@ mod tests {
         );
         claim.metadata.namespace = Some("agents".into());
         claim.metadata.uid = Some("uid-claim".into());
-        let rendered =
-            render_fleet(&claim, &RenderConfig::default(), &PodWiring::default()).unwrap();
+        let rendered = render_fleet(
+            &claim,
+            &RenderConfig::default(),
+            &PodWiring::default(),
+            None,
+        )
+        .unwrap();
         assert!(matches!(rendered, Rendered::Deployment(_)));
         // KEDA-safe: the rendered Deployment still carries no .spec.replicas.
         if let Rendered::Deployment(dep) = &rendered {
@@ -2436,8 +2566,13 @@ mod tests {
 
         // claim mode with no spec.replicas → defaults to 0 (deferred to KEDA).
         claim.spec.replicas = None;
-        let rendered =
-            render_fleet(&claim, &RenderConfig::default(), &PodWiring::default()).unwrap();
+        let rendered = render_fleet(
+            &claim,
+            &RenderConfig::default(),
+            &PodWiring::default(),
+            None,
+        )
+        .unwrap();
         assert_eq!(fleet_replica_count(&claim, &rendered), 0);
     }
 
@@ -2526,8 +2661,13 @@ mod tests {
             f.metadata.uid = Some("u".into());
             f
         };
-        let rendered =
-            render_fleet(&shard, &RenderConfig::default(), &PodWiring::default()).unwrap();
+        let rendered = render_fleet(
+            &shard,
+            &RenderConfig::default(),
+            &PodWiring::default(),
+            None,
+        )
+        .unwrap();
         let Rendered::StatefulSet(live) = rendered else {
             panic!("statefulset")
         };
@@ -2565,8 +2705,13 @@ mod tests {
         );
 
         // every matchLabels entry on the rendered workload appears in the string.
-        let rendered =
-            render_fleet(&fleet, &RenderConfig::default(), &PodWiring::default()).unwrap();
+        let rendered = render_fleet(
+            &fleet,
+            &RenderConfig::default(),
+            &PodWiring::default(),
+            None,
+        )
+        .unwrap();
         let Rendered::Deployment(dep) = &rendered else {
             panic!("claim fleet should render a Deployment");
         };

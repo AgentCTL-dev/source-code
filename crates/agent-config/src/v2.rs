@@ -154,6 +154,8 @@ pub fn from_v2_spec_with_store(
             .as_ref()
             .map(|a| a.grants.clone())
             .unwrap_or_default(),
+        vars: Map::new(),
+        singleton_selectors: Vec::new(),
     };
     Ok((input, shape))
 }

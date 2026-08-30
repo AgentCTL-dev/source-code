@@ -213,6 +213,49 @@ pub struct ConfigInput {
     /// Typed-command grant patterns for the named principals (spec
     /// `access.grants`) — a command DataPart's `op` needs one; prose none.
     pub principal_grants: Vec<String>,
+    /// Base-layer `vars:` (agentd folds `{{config.<key>}}` references
+    /// anywhere in the document, type-preserving for whole-token
+    /// substitution; unresolved references refuse startup). Fleet members
+    /// override these via a per-member overlay layer.
+    pub vars: Map<String, Value>,
+    /// Singleton selectors (RFC 0034 §3.1): workflow entries these match — a
+    /// trigger KIND (matching generated `main-<kind>-…` names) or an exact
+    /// workflow/file-stem name — render `armed: "{{config.is_lead}}"`, so
+    /// exactly the member whose vars say `is_lead: true` runs them.
+    pub singleton_selectors: Vec<String>,
+}
+
+/// Does a singleton selector match a workflow entry name? Generated names
+/// are `main-<kind>-<i>`; hand entries carry their own name/file stem.
+pub fn singleton_matches(selector: &str, entry_name: &str) -> bool {
+    entry_name == selector
+        || entry_name == format!("main-{selector}")
+        || entry_name.starts_with(&format!("main-{selector}-"))
+}
+
+/// The per-member overlay document (RFC 0034 §3.1): ONLY `vars:` — merged
+/// over the shared layers by an extra `-c`, RFC 7396 key-by-key. `is_lead`
+/// (ordinal 0) is what singleton-armed workflows fold on; `member` is the
+/// ordinal for partition math in workflows/instructions.
+pub fn member_overlay(
+    ordinal: u32,
+    defaults: Option<&Value>,
+    member_vars: Option<&Value>,
+) -> Value {
+    let mut vars = Map::new();
+    if let Some(Value::Object(d)) = defaults {
+        for (k, v) in d {
+            vars.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(Value::Object(m)) = member_vars {
+        for (k, v) in m {
+            vars.insert(k.clone(), v.clone());
+        }
+    }
+    vars.insert("member".into(), json!(ordinal.to_string()));
+    vars.insert("is_lead".into(), json!(ordinal == 0));
+    json!({ "vars": vars })
 }
 
 impl ConfigInput {
@@ -255,6 +298,8 @@ impl ConfigInput {
                 .as_ref()
                 .map(|a| a.grants.clone())
                 .unwrap_or_default(),
+            vars: Map::new(),
+            singleton_selectors: Vec::new(),
         }
     }
 }
@@ -618,8 +663,38 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
         }
     }
     workflows.extend(input.generated_workflows.iter().cloned());
+    // Singleton arming (RFC 0034 §3.1): matched entries fold `armed` from the
+    // member's own vars — every member LOADS the workflow, exactly the
+    // `is_lead: true` member arms it. Whole-token substitution keeps the
+    // folded value a real bool.
+    if !input.singleton_selectors.is_empty() {
+        for wf in &mut workflows {
+            let name = wf
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if input
+                .singleton_selectors
+                .iter()
+                .any(|sel| singleton_matches(sel, &name))
+            {
+                wf["armed"] = json!("{{config.is_lead}}");
+            }
+        }
+    }
     if !workflows.is_empty() {
         doc.insert("workflows".into(), Value::Array(workflows));
+    }
+    // Base-layer vars. A fleet with singletons ALWAYS carries an `is_lead`
+    // default (true — a solo daemon is its own lead) so the armed template
+    // folds even before any member overlay lands.
+    let mut vars = input.vars.clone();
+    if !input.singleton_selectors.is_empty() {
+        vars.entry("is_lead".to_string()).or_insert(json!(true));
+    }
+    if !vars.is_empty() {
+        doc.insert("vars".into(), Value::Object(vars));
     }
     if let Some(w) = &input.webhooks_block {
         doc.insert("webhooks".into(), w.clone());
@@ -1227,6 +1302,49 @@ mod tests {
         assert_eq!(d["workflows"][0]["steps"]["tick"]["interval"], "30s");
     }
 
+    /// P6-1: member overlays carry ONLY vars; ordinal 0 is the lead;
+    /// per-member entries override fleet defaults key-by-key.
+    #[test]
+    fn member_overlays_are_vars_only_and_lead_is_zero() {
+        let defaults = json!({ "region": "eu", "batch": 100 });
+        let m1 = json!({ "region": "us" });
+        let o0 = member_overlay(0, Some(&defaults), None);
+        let o1 = member_overlay(1, Some(&defaults), Some(&m1));
+        assert_eq!(o0["vars"]["is_lead"], json!(true));
+        assert_eq!(o1["vars"]["is_lead"], json!(false));
+        assert_eq!(o0["vars"]["member"], "0");
+        assert_eq!(o1["vars"]["region"], "us");
+        assert_eq!(o1["vars"]["batch"], 100);
+        // Nothing but vars rides an overlay (RFC 7396 arrays replace
+        // wholesale — an overlay must never carry workflows).
+        assert_eq!(o1.as_object().unwrap().len(), 1);
+    }
+
+    /// P6-1: singleton selectors stamp `armed: {{config.is_lead}}` on the
+    /// matched workflow entries (generated `main-<kind>-…` by kind, hand
+    /// entries by name), and the base layer carries an `is_lead` default so
+    /// a solo daemon still arms.
+    #[test]
+    fn singletons_arm_only_matched_workflows() {
+        let mut input = base(Mode::Reactive);
+        input.generated_workflows = vec![
+            json!({ "name": "main-schedule-0", "version": 3, "steps": {} }),
+            json!({ "name": "main-loop-1", "version": 3, "steps": {} }),
+        ];
+        input.singleton_selectors = vec!["schedule".into()];
+        let d = build(&input).unwrap().value;
+        let wfs = d["workflows"].as_array().unwrap();
+        let by_name = |n: &str| wfs.iter().find(|w| w["name"] == n).unwrap().clone();
+        assert_eq!(by_name("main-schedule-0")["armed"], "{{config.is_lead}}");
+        assert!(by_name("main-loop-1").get("armed").is_none());
+        assert_eq!(d["vars"]["is_lead"], json!(true));
+
+        // Selector grammar.
+        assert!(singleton_matches("schedule", "main-schedule-0"));
+        assert!(singleton_matches("nightly-report", "nightly-report"));
+        assert!(!singleton_matches("schedule", "main-loop-0"));
+    }
+
     /// Ground truth: every document this builder emits must pass the real
     /// binary's own validation. Gated on AGENTD_BIN so `cargo test` stays
     /// hermetic; CI sets it to the pinned release binary.
@@ -1360,6 +1478,74 @@ access: { principals: ["mock:carol"] }
                 client_key: Some(paths::TLS_KEY.into()),
             }];
             cases.push(sup_input);
+        }
+
+        // P6-1 static-fleet member: the shared daemon document (schedule
+        // trigger compiled to a generated workflow, singleton-armed with the
+        // `{{config.is_lead}}` template) PLUS the per-member overlay as a
+        // THIRD `-c` — exactly the trio a fleet pod is invoked with. Proves
+        // the binary folds `armed` to a real bool from the overlay's vars.
+        {
+            let fleet_template: agent_api::v1alpha2::AgentSpec = serde_yaml::from_str(
+                r#"
+shape: daemon
+instruction: { text: "fleet worker persona for {{config.region}}" }
+expose: { a2a: true }
+triggers:
+  - schedule: { cron: "0 3 * * *" }
+  - loop: { interval: 10m }
+"#,
+            )
+            .unwrap();
+            let (mut member_input, _) = v2::from_v2_spec(
+                &fleet_template,
+                Some(ResolvedIntelligence {
+                    endpoint: "http://127.0.0.1:9999/v1".into(),
+                    model: Some("t".into()),
+                    has_token: false,
+                }),
+                None,
+                None,
+                Vec::new(),
+            )
+            .expect("fleet member compile");
+            member_input.singleton_selectors = vec!["schedule".into()];
+            // Referenced vars MUST default in the base layer (agentd types
+            // each file independently before the merge — a base-layer
+            // {{config.*}} with no base-layer default refuses startup).
+            member_input
+                .vars
+                .insert("region".into(), serde_json::json!("eu"));
+            let proj = build_projection(&member_input).expect("build");
+            let overlay = member_overlay(
+                1,
+                Some(&serde_json::json!({ "region": "eu" })),
+                Some(&serde_json::json!({ "region": "us" })),
+            );
+            let svc = dir.path().join("member-services.json");
+            let base = dir.path().join("member-agentd.json");
+            let over = dir.path().join("member-1.json");
+            std::fs::write(&svc, proj.services.to_json()).unwrap();
+            std::fs::write(&base, proj.instance.to_json()).unwrap();
+            std::fs::write(&over, serde_json::to_string_pretty(&overlay).unwrap()).unwrap();
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("-c")
+                .arg(&svc)
+                .arg("-c")
+                .arg(&base)
+                .arg("-c")
+                .arg(&over)
+                .arg("--validate-config")
+                .current_dir(dir.path());
+            for name in proj.secret_refs() {
+                cmd.env(name, "validation-placeholder");
+            }
+            let out = cmd.output().expect("run agentd");
+            assert!(
+                out.status.success(),
+                "static-member trio refused by the binary:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         for (n, input) in cases.iter().enumerate() {

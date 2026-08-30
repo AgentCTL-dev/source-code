@@ -170,7 +170,84 @@ fn catalogue() -> Vec<Scenario> {
         // @mention orchestration: gateway envelope → supervisor workflow
         // fan-out → owner-authenticated delegates → gathered answer (P4-7)
         scenario!("mention-orchestration", "control", mention_orchestration),
+        // static fleet: vars overlays + ordinal-0 singleton (P6-1)
+        scenario!("fleet-static", "fleets", fleet_static),
     ]
+}
+
+/// P6-1: a 3-member STATIC fleet — one shared document, per-member `vars`
+/// overlays (`member-<n>.json`, third `-c`), and a singleton trigger armed
+/// on ordinal 0 only. The singleton is a fast `loop` (same `armed` fold as
+/// a nightly schedule, observable in-test): member 0's run events show the
+/// loop firing; members 1–2 stay silent — fleet-wide, it fires ONCE per
+/// tick.
+async fn fleet_static(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let name = "fleet-static";
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  replicas: 3\n  scaling: {{ mode: shard, shards: 3 }}\n  partitioning:\n    strategy: static\n    static:\n      defaults: {{ color: none }}\n      vars:\n        - {{ color: red }}\n        - {{ color: blue }}\n        - {{ color: green }}\n      singletons: [\"loop\"]\n  template:\n    shape: daemon\n    runtime: {{ image: \"agentd:1.3.1\" }}\n    instruction: {{ text: \"tick for partition {{{{config.color}}}} in one line\" }}\n    expose: {{ a2a: true }}\n    triggers:\n      - loop: {{ interval: 20s }}\n"
+    ))?;
+
+    // StatefulSet up: 3/3 stable members.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "3")
+    })
+    .await
+    .context("static fleet 3/3 ready")?;
+
+    // The shared ConfigMap carries the per-member overlays, vars-only.
+    let cm = shell::kubectl(&[
+        "get", "configmap", "-n", ns, &format!("{name}-config"),
+        "-o", "jsonpath={.data.member-1\\.json}",
+    ])?;
+    let overlay: Value = serde_json::from_str(cm.trim()).context("member-1 overlay JSON")?;
+    if overlay["vars"]["color"] != json!("blue") || overlay["vars"]["is_lead"] != json!(false) {
+        bail!("member-1 overlay wrong: {overlay}");
+    }
+    let cm0 = shell::kubectl(&[
+        "get", "configmap", "-n", ns, &format!("{name}-config"),
+        "-o", "jsonpath={.data.member-0\\.json}",
+    ])?;
+    let overlay0: Value = serde_json::from_str(cm0.trim())?;
+    if overlay0["vars"]["is_lead"] != json!(true) {
+        bail!("member-0 is not the lead: {overlay0}");
+    }
+
+    // The pods mount the third layer keyed by their own ordinal.
+    let args = shell::kubectl(&[
+        "get", "pod", "-n", ns, &format!("{name}-0"),
+        "-o", "jsonpath={.spec.containers[0].args}",
+    ])?;
+    if !args.contains("member-$(AGENT_POD_INDEX).json") {
+        bail!("member overlay layer missing from argv: {args}");
+    }
+
+    // Singleton proof: the loop ticks on member 0 and ONLY member 0. Give it
+    // two intervals, then read each member's own run events.
+    let fired = |pod: &str| -> Result<bool> {
+        let logs = shell::kubectl(&["logs", "-n", ns, pod, "--tail=200"]).unwrap_or_default();
+        Ok(logs
+            .lines()
+            .any(|l| l.contains("\"run.start\"") && l.contains("main-loop")))
+    };
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(5), || async {
+        fired(&format!("{name}-0"))
+    })
+    .await
+    .context("lead member's singleton loop never fired")?;
+    for follower in [format!("{name}-1"), format!("{name}-2")] {
+        if fired(&follower)? {
+            bail!("{follower} ran the singleton loop — armed leaked past the lead");
+        }
+    }
+
+    shell::kubectl(&["delete", "agentfleet", "-n", ns, name, "--wait=false"]).ok();
+    pass()
 }
 
 /// P4-7: "@a and @b" through the supervisor, end to end. The gateway turns

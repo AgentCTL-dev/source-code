@@ -214,6 +214,11 @@ pub struct PodWiring {
     pub peer_bearers: bool,
     /// Extra plain env (fleet work-fabric coordinates for a coordinator).
     pub extra_env: Vec<(String, String)>,
+    /// Static-fleet member overlays (RFC 0034 §3.1): appends a third config
+    /// layer `-c <CONFIG_DIR>/member-$(AGENT_POD_INDEX).json` (the per-member
+    /// `vars:` overlay in the SAME shared ConfigMap) and the downward-API
+    /// `AGENT_POD_INDEX` env (the StatefulSet pod-index label).
+    pub member_overlays: bool,
 }
 
 /// In-pod mount of the AAuth key Secret.
@@ -422,6 +427,7 @@ pub fn render_fleet(
     fleet: &AgentFleet,
     cfg: &RenderConfig,
     wiring: &PodWiring,
+    static_replicas: Option<u32>,
 ) -> Result<Rendered, RenderError> {
     let name = fleet
         .metadata
@@ -444,6 +450,25 @@ pub fn render_fleet(
         owner_ref("AgentFleet", &name, uid_of(&fleet.metadata.uid)),
     );
     let template = pod_template(&name, &image, Mode::Reactive, &labels, wiring);
+
+    // v2 static strategy (RFC 0034 §3.1): a fixed member set — StatefulSet
+    // for stable ordinals (the member-overlay key + the store fence), sized
+    // by spec.replicas, NO shards annotation (no modulus, no guarded
+    // resize: vars overlays are per-ordinal, and scale-down drops the
+    // highest ordinals with their overlays).
+    if let Some(members) = static_replicas {
+        return Ok(Rendered::StatefulSet(Box::new(StatefulSet {
+            metadata: meta,
+            spec: Some(StatefulSetSpec {
+                replicas: Some(members as i32),
+                service_name: Some(name.clone()),
+                selector: label_selector(&labels),
+                template,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })));
+    }
 
     Ok(match fleet.spec.scaling.mode {
         ScaleMode::Claim => Rendered::Deployment(Box::new(Deployment {
@@ -901,6 +926,21 @@ fn pod_template(
     }
 
     let mut env = downward_env();
+    if wiring.member_overlays {
+        // The StatefulSet pod-index label (stable per member) — the ordinal
+        // the member-overlay argv layer keys off.
+        env.push(EnvVar {
+            name: "AGENT_POD_INDEX".to_string(),
+            value_from: Some(EnvVarSource {
+                field_ref: Some(ObjectFieldSelector {
+                    field_path: "metadata.labels['apps.kubernetes.io/pod-index']".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
     if let Some(r) = &wiring.intelligence_token {
         env.push(secret_env(
             agent_config::INTELLIGENCE_TOKEN_ENV,
@@ -922,17 +962,27 @@ fn pod_template(
         });
     }
 
+    let mut args = vec![
+        "-c".to_string(),
+        paths::services_file(),
+        "-c".to_string(),
+        paths::config_file(),
+    ];
+    if wiring.member_overlays {
+        // Member overlay LAST (RFC 7396: later layers win key-by-key). The
+        // kubelet expands $(AGENT_POD_INDEX) from the env below.
+        args.push("-c".to_string());
+        args.push(format!(
+            "{}/member-$(AGENT_POD_INDEX).json",
+            paths::CONFIG_DIR
+        ));
+    }
     let container = Container {
         name: "agent".to_string(),
         image: Some(image.to_string()),
         // Catalog layer first, instance last (RFC 7396 layering; folders —
         // when the projection emits them — adopt beside the LAST file).
-        args: Some(vec![
-            "-c".to_string(),
-            paths::services_file(),
-            "-c".to_string(),
-            paths::config_file(),
-        ]),
+        args: Some(args),
         env: Some(env),
         ports: Some(vec![
             ContainerPort {
@@ -1278,8 +1328,44 @@ mod tests {
     }
 
     #[test]
+    fn static_fleet_renders_member_addressed_statefulset() {
+        let mut w = wiring();
+        w.member_overlays = true;
+        let r = render_fleet(&fleet(ScaleMode::Shard, Some(3)), &cfg(), &w, Some(3)).unwrap();
+        let Rendered::StatefulSet(sts) = r else {
+            panic!("static strategy must render a StatefulSet");
+        };
+        let spec = sts.spec.as_ref().unwrap();
+        assert_eq!(spec.replicas, Some(3));
+        let tmpl = &spec.template;
+        // NO shards annotation: static members have no modulus to guard.
+        assert!(tmpl
+            .metadata
+            .as_ref()
+            .and_then(|m| m.annotations.as_ref())
+            .map(|a| !a.contains_key(SHARDS_ANNOTATION))
+            .unwrap_or(true));
+        let c = &tmpl.spec.as_ref().unwrap().containers[0];
+        let args = c.args.as_ref().unwrap();
+        // The member overlay is the THIRD -c, keyed by the pod index env.
+        assert_eq!(args.len(), 6);
+        assert!(args[5].contains("member-$(AGENT_POD_INDEX).json"));
+        assert!(c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "AGENT_POD_INDEX"
+                && e.value_from
+                    .as_ref()
+                    .and_then(|v| v.field_ref.as_ref())
+                    .map(|f| f.field_path.contains("pod-index"))
+                    .unwrap_or(false)));
+    }
+
+    #[test]
     fn claim_fleet_leaves_replicas_to_keda_and_carries_no_shard_flag() {
-        let r = render_fleet(&fleet(ScaleMode::Claim, None), &cfg(), &wiring()).unwrap();
+        let r = render_fleet(&fleet(ScaleMode::Claim, None), &cfg(), &wiring(), None).unwrap();
         let Rendered::Deployment(d) = r else {
             panic!("deployment")
         };
@@ -1305,7 +1391,7 @@ mod tests {
 
     #[test]
     fn shard_fleet_renders_statefulset_with_n_replicas_no_agent_side_identity() {
-        let r = render_fleet(&fleet(ScaleMode::Shard, Some(3)), &cfg(), &wiring()).unwrap();
+        let r = render_fleet(&fleet(ScaleMode::Shard, Some(3)), &cfg(), &wiring(), None).unwrap();
         let Rendered::StatefulSet(s) = r else {
             panic!("statefulset")
         };
@@ -1336,7 +1422,7 @@ mod tests {
     #[test]
     fn shard_fleet_without_shards_is_refused() {
         assert_eq!(
-            render_fleet(&fleet(ScaleMode::Shard, None), &cfg(), &wiring()).unwrap_err(),
+            render_fleet(&fleet(ScaleMode::Shard, None), &cfg(), &wiring(), None).unwrap_err(),
             RenderError::MissingShards
         );
     }
