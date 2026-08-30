@@ -1,95 +1,44 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/env-convention.json",
-  "title": "Agent Control Contract — Kubernetes Downward-API Env Convention",
-  "description": "The environment-variable convention of the Agent Control Contract: the Kubernetes downward-API identity vars, drain-vs-grace hint, sharding vars, and per-endpoint intelligence credentials. All values are read from the environment ONLY (valueFrom.fieldRef); a conformant agent NEVER calls the Kubernetes API. ALL vars are OPTIONAL; absence is never a config error. Identity is DESCRIPTIVE, never load-bearing (no placement or scheduling decision is made from it). Secrets travel ONLY the *_TOKEN[_FILE] env-secret path; the config file never carries a credential.",
-  "type": "object",
-  "additionalProperties": true,
-  "required": ["env_vars", "rules"],
-
-  "x-contract-version": "1.0",
-
-  "env_vars": {
-    "identity": {
-      "description": "Identity block — run_id, instance, uid, namespace, node. An empty value is coerced to UNSET, never an empty string. run_id is always present (minted when AGENT_RUN_ID is unset).",
-      "AGENT_RUN_ID":       { "source": "minted ULID if unset; stable across a retried Job", "type": "string", "maps_to": "identity.run_id", "note": "always present; the ONE identity field that is never absent" },
-      "AGENT_POD_NAME":      { "source": "metadata.name",      "fieldRef": "metadata.name",      "type": "string", "maps_to": "identity.instance" },
-      "AGENT_POD_UID":       { "source": "metadata.uid",       "fieldRef": "metadata.uid",       "type": "string", "maps_to": "identity.uid" },
-      "AGENT_POD_NAMESPACE": { "source": "metadata.namespace", "fieldRef": "metadata.namespace", "type": "string", "maps_to": "identity.namespace" },
-      "AGENT_NODE_NAME":     { "source": "spec.nodeName",      "fieldRef": "spec.nodeName",      "type": "string", "maps_to": "identity.node" }
-    },
-
-    "drain_grace": {
-      "description": "Drain-vs-grace hint.",
-      "AGENT_POD_GRACE_SECONDS": {
-        "source": "= terminationGracePeriodSeconds",
-        "fieldRef": "(operator-injected; mirrors spec.terminationGracePeriodSeconds)",
-        "type": "integer (seconds)",
-        "used_by": "drain validation: drain_timeout >= grace => EXIT_USAGE(2)",
-        "also_settable": "--pod-grace",
-        "provisional": "PROVISIONAL — the exact variable name is an unsettled convention; a conformant agent MAY not read it, so the var may be absent."
-      },
-      "AGENT_DRAIN_TIMEOUT": { "type": "duration/integer", "note": "drain budget; also a --drain-timeout flag; lifecycle" }
-    },
-
-    "sharding": {
-      "description": "Sharding. agentctl owns K via the StatefulSet ordinal; the agent does NOT discover its own shard.",
-      "AGENT_SHARD": {
-        "source": "\"K/N\" derived from StatefulSet ordinal (K=ordinal, N=replicas)",
-        "type": "string (\"K/N\", 0 <= K < N, N >= 1)",
-        "validation": "N==0 or K>=N is rejected => EXIT_USAGE(2)",
-        "maps_to": "surfaces.shard (\"K/N\" | null when N==1)",
-        "provisional": "PROVISIONAL — a literal \"K/N\" cannot be produced per-pod from a single StatefulSet pod template (the downward API cannot compute it); a future --shard auto/N form (deriving K from the AGENT_POD_NAME ordinal) is not yet available, so only an explicit K/N is accepted."
-      },
-      "AGENT_SHARD_TIMER": { "type": "enum(\"shard0\"|\"keyed\")", "default": "shard0", "note": "timer-route shard behaviour; shard0 => only K==0 (or N==1) fires; keyed => every replica fires" },
-      "AGENT_STANDBY": { "type": "boolean", "note": "standby surface toggle; maps to surfaces.standby" }
-    },
-
-    "credentials": {
-      "description": "Per-endpoint intelligence credentials. 1-indexed by endpoint list position; endpoint 1 uses the unsuffixed form. Each has a _FILE variant (mounted-secret path, rotation-friendly). A credential MUST NEVER be logged or serialized. Credentials use ONLY this env-secret path — never the identity downward-API path and never the config file.",
-      "AGENT_INTELLIGENCE_TOKEN":         { "type": "secret(string)", "endpoint": 1 },
-      "AGENT_INTELLIGENCE_TOKEN_FILE":    { "type": "path",           "endpoint": 1 },
-      "AGENT_INTELLIGENCE_TOKEN_{N}":     { "type": "secret(string)", "endpoint": "N (2,3,...)", "note": "per-endpoint, 1-indexed (N=1 == the unsuffixed form)" },
-      "AGENT_INTELLIGENCE_TOKEN_{N}_FILE":{ "type": "path",           "endpoint": "N" }
-    },
-
-    "budget": {
-      "description": "Per-INSTANCE token budget (RFC 0025). Cumulative across every run/reaction of the instance — distinct from the per-RUN box (--max-tokens, which bounds each once-run/reaction). Restart-only; never a secret. Absent => unbounded (today's behaviour). Enforcement: a bounded `once` run folds exhaustion into EXIT_BUDGET(7); a reactive/loop/schedule daemon stops accepting new reactions and drains cleanly (exit 0 by default, tunable via --budget-exit-code). Observability: the value is NOT in the --capabilities manifest or report.usage; it surfaces via the `agent://config/effective` resource (limits.lifetime_tokens) and the gauge agent_budget_tokens_remaining (metrics_schema 1.1), with agent_limit_exceeded_total{limit=tokens_lifetime} on the trip.",
-      "AGENT_BUDGET_TOKENS": {
-        "type": "integer (tokens)",
-        "maps_to": "limits.lifetime_tokens",
-        "also_settable": "--budget-tokens-lifetime; config-file limits.lifetime_tokens",
-        "note": "per-instance cumulative token cap; 0/absent => unbounded"
-      }
-    },
-
-    "lifecycle": {
-      "description": "Other control/lifecycle env. Restart-only (env/flag, never a config-file key). Contract 1.0: the served control surface and the intelligence endpoint are BOTH mTLS HTTPS URLs. Serving-TLS material (leaf cert, key, and the client-CA used to verify management peers) and the outbound private-CA trust anchor are supplied via flags/paths (--serve-cert / --serve-key / --serve-client-ca / --tls-ca), NOT via this env convention — that material is filesystem paths to mounted Secrets, never inline in env.",
-      "AGENT_SERVE_MCP":     { "type": "string (mTLS https URL) | absent", "note": "management address; contract 1.0 an mTLS HTTPS URL e.g. https://0.0.0.0:8443; optional; drives surfaces.management" },
-      "INTELLIGENCE":  { "type": "string (https URL)", "note": "intelligence primary endpoint — the model provider the agent dials DIRECTLY (from the bound ModelPool's endpoint). Auth is the agent's own AAuth identity (secret-free) OR the AGENT_INTELLIGENCE_TOKEN[_FILE] env-secret when the pool carries a key; restart-only" },
-      "AGENT_MODE":          { "type": "enum(once|loop|reactive|schedule)", "note": "restart-only; also --mode" },
-      "AGENT_MODEL":         { "type": "string", "note": "operator-declared model; never a secret; reloadable via config file too" }
-    }
+  "$comment": "ACC v2 — the agentd v1.3.1 environment convention. Every config-schema path derives an env var and a flag mechanically; the short aliases below are the curated set (crates/agentd/src/config/v2/mod.rs ENV_ALIASES). Precedence: built-in default < config files (merged) < env < CLI flag. Prefix resolution per name: AGENTD_<NAME> beats AGENT_<NAME> beats bare <NAME>; a derived path env (AGENTD_<PATH_WITH_UNDERSCORES>) beats an alias for the same field.",
+  "prefix_order": ["AGENTD_", "AGENT_", ""],
+  "derived_path_rule": "config path a.b.c → env AGENTD_A_B_C (also AGENT_A_B_C, bare A_B_C) → flag --a.b.c / --a-b-c / --a_b_c. Env/flag assignment REPLACES lists and maps wholesale.",
+  "aliases": {
+    "INSTRUCTION": "agent.instruction",
+    "PROMPT": "agent.prompt",
+    "INTELLIGENCE": "intelligence.endpoints",
+    "INTELLIGENCE_TOKEN": "intelligence.token",
+    "INTELLIGENCE_TOKEN_FILE": "intelligence.token_file",
+    "MODEL": "intelligence.model",
+    "MODEL_SWAP": "intelligence.swap_policy",
+    "BUDGET_TOKENS": "intelligence.budget.lifetime_tokens",
+    "MAX_STEPS": "limits.run.steps",
+    "MAX_TOKENS": "limits.run.tokens",
+    "DEADLINE": "limits.run.deadline",
+    "RUN_ID": "lifecycle.run_id",
+    "DRAIN_TIMEOUT": "lifecycle.drain_timeout",
+    "WATCH_CONFIG": "lifecycle.watch_config",
+    "LOG_LEVEL": "observability.log_level",
+    "LOG_CONTENT": "observability.log_content",
+    "METRICS_ADDR": "observability.metrics_addr",
+    "TRACEPARENT": "observability.traceparent",
+    "SERVE_MCP": "a2a.listen",
+    "SERVE_BEARER": "a2a.bearer",
+    "TLS_CA": "security.tls_ca",
+    "ALLOW_TRIFECTA": "security.allow_trifecta"
   },
-
-  "rules": {
-    "description": "Frozen rules of the env convention.",
-    "all_optional": "Every var is optional; absent => the field is null; never a config error.",
-    "identity_descriptive": "Identity is DESCRIPTIVE, never load-bearing — no placement/scheduling decision is made from it.",
-    "empty_is_unset": "An empty env value is coerced to UNSET; an empty string is never produced.",
-    "no_kube_api": "All values arrive via env (valueFrom.fieldRef); the agent NEVER calls the Kubernetes API.",
-    "secrets_path": "NO secrets via the identity downward-API path; credentials use the *_TOKEN[_FILE] env-secret path ONLY.",
-    "config_file_no_creds": "The config file NEVER carries a credential; only structural {{secret:NAME}}/{{secret-file:PATH}} references."
+  "non_config_vars": {
+    "AGENTD_CONFIG / AGENT_CONFIG": "colon-separated config file list (only the two prefixed spellings; no bare CONFIG)",
+    "AGENTD_INTELLIGENCE_TOKEN_<N> / ..._<N>_FILE": "per-endpoint credential for failover endpoint N (1-indexed; endpoint 1 uses the bare names)",
+    "AGENTD_STATE_DIR": "file-store root override (rung above XDG_STATE_HOME)",
+    "AGENTD_CRED_DIR": "credential cache dir (default $XDG_STATE_HOME/agentd/creds)",
+    "AGENTD_POD_NAME / AGENT_POD_NAME": "Kubernetes downward API; agent.name fallback ahead of HOSTNAME",
+    "AGENTD_POD_NAMESPACE / AGENTD_POD_UID / AGENTD_NODE_NAME": "Kubernetes downward API identity fields (AGENT_ spellings accepted)",
+    "HOSTNAME": "last fallback for agent.name",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "OTLP endpoint fallback"
   },
-
-  "x-sum-types": {
-    "identity_fields": "Each identity env field is string-or-absent; an empty string coerces to UNSET (defeats naive presence checks).",
-    "AGENT_SHARD": "string \"K/N\" => surfaces.shard is string|null (null when N==1).",
-    "AGENT_SERVE_MCP": "string (transport addr) | absent => surfaces.management is false | string."
-  },
-
-  "x-provisional": {
-    "p_grace": "AGENT_POD_GRACE_SECONDS is contract-specified but its exact name is an unsettled convention; a conformant agent MAY not read it.",
-    "p3_shard": "AGENT_SHARD \"K/N\" literal cannot be produced from a single StatefulSet pod template; a --shard auto/N form is not yet available."
+  "renderer_rules": {
+    "agent_name": "inject AGENT_POD_NAME via fieldRef metadata.name; never hardcode agent.name across replicas (store identity fence)",
+    "secrets": "only {{secret:NAME}} / {{secret-file:PATH}} references in config documents; values via env/secret file mounts",
+    "invocation": "config via '-c <files>' in layer order; flags reserved for process intent (--metrics-addr, --drain-timeout)"
   }
 }

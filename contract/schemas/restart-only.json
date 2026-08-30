@@ -1,0 +1,35 @@
+{
+  "$comment": "ACC v2 — agentd v1.3.1 RESTART_ONLY_PATHS (crates/agentd/src/config/v2/mod.rs). A config diff touching any of these paths cannot hot-reload: agentd reports config.reload.restart_required and applies NOTHING. The operator's diff classifier compiles this list: such diffs ⇒ rolling restart (drain-first); everything else is reloadable at a quiesce boundary (SIGHUP / --watch-config). Live runs finish under pinned definitions either way.",
+  "restart_only_paths": [
+    "config_version",
+    "agent.name",
+    "store.kind",
+    "store.prefix",
+    "store.mcp",
+    "store.http",
+    "store.file",
+    "lifecycle.run_until",
+    "lifecycle.drain_timeout",
+    "lifecycle.run_id",
+    "lifecycle.exit_code_map",
+    "lifecycle.watch_config",
+    "a2a.listen",
+    "a2a.tls",
+    "a2a.bearer",
+    "observability.otel",
+    "observability.metrics_addr",
+    "observability.health_file",
+    "observability.events_ring",
+    "observability.traceparent",
+    "security"
+  ],
+  "reloadable_highlights": [
+    "intelligence.{endpoints,model,token,token_file,budget} (hot-swap; in-flight turns follow swap_policy)",
+    "agent.* incl. instruction (+ directive re-extraction)",
+    "mcp.servers (live re-handshake + re-subscribe)",
+    "a2a.principals (per-user principal projection is restart-free)",
+    "workflows (retire/replace under pins)", "skills", "limits", "context", "tools/knowledge/search",
+    "lifecycle.idle_grace", "observability.log_level/log_content"
+  ],
+  "reload_triggers": "SIGHUP (--features hot-reload) or --watch-config inotify on each config file's parent dir. The kubelet ConfigMap ..data symlink-swap path is UNVERIFIED upstream (ask U1) — until verified, the operator treats every config change as a rolling restart."
+}

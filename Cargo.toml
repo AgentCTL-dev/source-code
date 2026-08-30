@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "crates/agent-contract-client",
     "crates/agent-api",
+    "crates/agent-config",
     "crates/agentctl-operator",
     "crates/agentctl-crdgen",
     "crates/agentctl-cli",

@@ -1,0 +1,50 @@
+{
+  "$comment": "ACC v2 — the agentd v1.3.1 A2A surface. Wire: JSON-RPC 2.0 on POST <listen>/ ; SSE side-streams; proto3 JSON enum spellings (TASK_STATE_*, ROLE_*); RFC 3339 timestamps. Cards at /.well-known/agent-card.json (+ legacy /.well-known/agent.json), unauthenticated. Verified against the binary's capabilities manifest (fixtures/capabilities/agentd-1.3.1-configured.json).",
+  "spec_methods": [
+    "SendMessage", "SendStreamingMessage", "GetTask", "CancelTask", "ListTasks",
+    "SubscribeToTask", "CreateTaskPushNotificationConfig", "GetTaskPushNotificationConfig",
+    "ListTaskPushNotificationConfigs", "DeleteTaskPushNotificationConfig", "GetExtendedAgentCard"
+  ],
+  "agentd_methods": {
+    "GetAgentCard | agent/card": "unauthenticated card fetch",
+    "GetExtendedAgentCard | agent/getAuthenticatedExtendedCard": "per-principal card; -32007 for anonymous",
+    "Pair | interface.pair": "the only method an anonymous caller may use (pairing-code login)",
+    "SubscribeToEvents": "the observation feed (SSE: hello{seq,resume,resync}/event*/goodbye); -32004 unless interface.enabled"
+  },
+  "admin_verbs": {
+    "operator_only": true,
+    "verbs": ["a2a.drain", "a2a.lameduck", "a2a.pause", "a2a.resume", "a2a.cancel"],
+    "notes": "bare spellings accepted, case-insensitive; lameduck aliases drain; pause/resume take optional {run}; cancel requires {run}"
+  },
+  "command_ops": {
+    "wire_shape": "SendMessage with parts[0].data.agentd = {op: <name>, ...args}",
+    "builtin": ["status", "config", "workflow.run", "workflow.status", "workflow.cancel", "workflow.signal", "subagent.send", "subagent.kill", "subagent.status", "plan.get"],
+    "taskless_reads": ["interface.info", "conversation.get", "run.get", "subagent.get", "debug.events", "pairing.code", "config.set"],
+    "workflow_declared": "an `a2a` start node with command:<name> registers <name> as an accepted op; its schema: is enforced synchronously at the listener; the run's terminal status completes the A2A task"
+  },
+  "principals": {
+    "roles": ["operator", "user", "agent", "anonymous"],
+    "resolution": "pairing token > verified mTLS client cert > constant-time bearer > loopback (if !require_auth); then a2a.principals[] first-match; declaring ANY principal disables loopback-as-operator",
+    "principal_fields": "match {san|sub|bearer_ref|any}, role, grants (tool-name patterns), labels (travel as agent/acting_for + agent/labels in MCP _meta), quotas {rate, budget}",
+    "gates": "addressed gates (human.to) are enforced on answer; operator override recorded as operator_override",
+    "hot_reload": "a2a.principals is reloadable; a2a.listen/tls/bearer are restart-only"
+  },
+  "error_codes": {
+    "-32001": "task not found (also: not owned — existence not disclosed)",
+    "-32002": "task not cancelable",
+    "-32003": "push notifications not supported / authorization refused",
+    "-32004": "unsupported operation",
+    "-32007": "extended card requires authentication",
+    "-32029": "rate limited (retry_after_s carried)"
+  },
+  "timeouts": { "unary_request_s": 120, "sse_stream_deadline_s": 600 },
+  "tls": {
+    "listener": "https (tls.cert/key[, client_ca]) | loopback http | unix:// (SO_PEERCRED same-uid)",
+    "hot_rotation": false,
+    "note": "A2A TLS material is read once at listener start (upstream ask U2); cert renewal ⇒ rolling restart. The webhook listener DOES rotate per-connection."
+  },
+  "message_depth": {
+    "internal_cap": "limits.max_message_depth (default 8)",
+    "cross_instance": "NOT propagated in the outbound A2A envelope — depth resets at every instance boundary (agentd owns no cross-instance coordination by design). Any cross-agent recursion ceiling is the control plane's to carry in its own command args."
+  }
+}

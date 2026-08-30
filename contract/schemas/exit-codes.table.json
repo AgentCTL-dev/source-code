@@ -1,77 +1,30 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/exit-codes.table.json",
-  "title": "Agent Control Contract — Exit-Code Table",
-  "description": "The FROZEN exit-code table of the Agent Control Contract. This artifact is a DATA catalogue (not a JSON-document validator) carrying the code -> {neutral name, const alias, meaning, podFailurePolicy intent} mapping plus mode reachability. agentctl compiles `intent` into Job onExitCodes / podFailurePolicy rules. Versioned by `exit_codes_version` (== surfaces.exit_codes); additive => minor; any change to a code's meaning or to its intent => major. A consumer MUST refuse only an unknown MAJOR; an unrecognised code defaults to intent `retriable` (never a silent FailJob).",
-  "type": "object",
-  "additionalProperties": true,
-  "required": ["exit_codes_version", "codes", "intent_vocabulary"],
-
-  "exit_codes_version": "1.0",
-  "x-version-note": "The contract pins exit_codes_version to the bare major.minor string \"1.0\".",
-  "x-contract-version": "1.0",
-
-  "intent_vocabulary": {
-    "description": "The CLOSED podFailurePolicy intent vocabulary agentctl compiles into onExitCodes. The intent mapping is total over the table; an unrecognised code defaults to `retriable`.",
-    "enum": ["complete", "terminal", "retriable", "policy", "infra"],
-    "semantics": {
-      "complete": "Treat as success; no retry, no FailJob (Job counts a completion).",
-      "terminal": "Permanent failure of THIS spec; do not retry (config/usage error or a reasoned refusal). Maps to FailJob.",
-      "retriable": "Transient/unspecified failure; eligible for backoff retry (Ignore toward backoffLimit).",
-      "policy": "Budget/partial outcome; verdict is operator policy (default-retriable but tunable via --budget-exit-code).",
-      "infra": "Kernel/infra-set (OOM, ungraceful SIGTERM); infrastructure remediation, not an application retry."
-    }
-  },
-
+  "$comment": "ACC v2 — the agentd exit-code contract, captured verbatim from crates/agentd/src/exit.rs at v1.3.1. `exit_codes` freezes the code→meaning table AND the pod_failure_intent mapping as a versioned API; any change to an existing code's meaning or intent bumps the major. agentctl refuses to compile podFailurePolicy rules for a major it does not understand. Unknown codes default to intent `retriable`.",
+  "exit_codes": "1.0",
   "codes": [
-    { "code": 0,   "name": "EXIT_OK",           "ref_name": "SUCCESS",           "intent": "complete",  "os_set": false, "returned_by_agent": true,  "meaning": "Success — one-shot completed / loop clean bound / CLEAN SIGTERM DRAIN (a clean drain exits 0, NOT 143)." },
-    { "code": 1,   "name": "EXIT_FAILURE",      "ref_name": "GENERIC",           "intent": "retriable", "os_set": false, "returned_by_agent": true,  "meaning": "Generic/unspecified failure; also used for cancelled and crashed runs." },
-    { "code": 2,   "name": "EXIT_USAGE",        "ref_name": "USAGE",             "intent": "terminal",  "os_set": false, "returned_by_agent": true,  "meaning": "Config/usage error — validation failed before any side effect. Also covers an invalid --validate-config check and a bad config file." },
-    { "code": 3,   "name": "EXIT_PARTIAL",      "ref_name": "PARTIAL",           "intent": "policy",    "os_set": false, "returned_by_agent": true,  "meaning": "Partial result emitted (a result-body property, not a status); also used for stalled or loop-detected runs. Remappable via --budget-exit-code." },
-    { "code": 4,   "name": "EXIT_INTELLIGENCE", "ref_name": "INTEL_UNAVAILABLE", "intent": "retriable", "os_set": false, "returned_by_agent": true,  "meaning": "Intelligence endpoint unreachable / auth error after retries." },
-    { "code": 5,   "name": "EXIT_SEMANTIC",     "ref_name": "REFUSED",           "intent": "terminal",  "os_set": false, "returned_by_agent": true,  "meaning": "Agent ran correctly but concluded the task cannot be done / refused." },
-    { "code": 6,   "name": "EXIT_MCP",          "ref_name": "MCP_REQUIRED_DOWN", "intent": "retriable", "os_set": false, "returned_by_agent": true,  "meaning": "A required MCP server failed connect/handshake or died unrecoverably." },
-    { "code": 7,   "name": "EXIT_BUDGET",       "ref_name": "BUDGET",            "intent": "policy",    "os_set": false, "returned_by_agent": true,  "meaning": "Hit max-steps/max-tokens/deadline/tree budget before a result; also used for exhausted-steps, exhausted-tokens, and deadline outcomes. Remappable via --budget-exit-code." },
-    { "code": 124, "name": "EXIT_TIMEOUT",      "ref_name": "DEADLINE",          "intent": "policy",    "os_set": false, "returned_by_agent": true,  "meaning": "Hard wall-clock deadline tripped (mnemonic to timeout(1)). Emitted when the supervisor hard-kills a run for exceeding its deadline or getting stuck. A run that reports its own deadline as a budget outcome uses BUDGET(7) instead; see x-mapping-divergence." },
-    { "code": 137, "name": "SIGKILL_EXIT",      "ref_name": "SIGKILL_EXIT",      "intent": "infra",     "os_set": true,  "returned_by_agent": false, "meaning": "128+SIGKILL — OOM / kubelet hard-kill (raise memory limit). Kernel-set; a conformant agent never returns 137 itself." },
-    { "code": 143, "name": "SIGTERM_EXIT",      "ref_name": "SIGTERM_EXIT",      "intent": "infra",     "os_set": true,  "returned_by_agent": false, "meaning": "128+SIGTERM — ungraceful exit (drain forced past budget). Kernel-set; DISTINCT from a clean drain, which is 0." }
+    { "code": 0,   "name": "SUCCESS",           "meaning": "completed; a clean SIGTERM drain is also 0, never 143", "intent": "complete" },
+    { "code": 1,   "name": "GENERIC",           "meaning": "generic failure / crash / cancelled",                    "intent": "retriable" },
+    { "code": 2,   "name": "USAGE",             "meaning": "config or usage error; fails in ms, pre-LLM",            "intent": "terminal" },
+    { "code": 3,   "name": "PARTIAL",           "meaning": "partial result / stalled / loop detected",               "intent": "policy" },
+    { "code": 4,   "name": "INTEL_UNAVAILABLE", "meaning": "intelligence endpoint(s) unreachable or auth-failed",    "intent": "retriable" },
+    { "code": 5,   "name": "REFUSED",           "meaning": "semantic refusal",                                       "intent": "terminal" },
+    { "code": 6,   "name": "MCP_REQUIRED_DOWN", "meaning": "a required MCP server failed",                           "intent": "retriable" },
+    { "code": 7,   "name": "BUDGET",            "meaning": "step/token/deadline budget exhausted",                   "intent": "policy" },
+    { "code": 124, "name": "DEADLINE",          "meaning": "supervisor hard-kill backstop past the deadline",        "intent": "policy" },
+    { "code": 137, "name": "SIGKILL_EXIT",      "meaning": "kernel-set 128+9: OOM / kubelet hard-kill",              "intent": "infra" },
+    { "code": 143, "name": "SIGTERM_EXIT",      "meaning": "kernel-set 128+15: ungraceful SIGTERM (drain forced past budget)", "intent": "infra" }
   ],
-
-  "x-mapping-divergence": {
-    "description": "The exit-code TABLE (code -> meaning -> intent) is the wire contract. The status-to-code mapping below is informative only and is NOT part of the frozen contract; only the table is frozen. It records how terminal run statuses map to exit codes, including where that mapping differs from the exit code a status name would suggest.",
-    "once_exit": {
-      "Completed": "0 (EXIT_OK), or 3 (EXIT_PARTIAL) when a usable partial exists",
-      "Refused": "5 (REFUSED)",
-      "ExhaustedSteps | ExhaustedTokens | Deadline": "7 (BUDGET) — a self-reported deadline folds to 7, so 124 is not produced by this status mapping; 124 IS produced by the supervisor kill path, see the code 124 meaning",
-      "Stalled | LoopDetected": "3 (PARTIAL)",
-      "Cancelled": "1 (GENERIC) — a clean drain instead exits 0",
-      "Crashed": "1 (GENERIC)"
-    },
-    "status_mapping_prose": "Deadline->124, Cancelled->0 (clean drain), Stalled/LoopDetected->3|1. Code 124 is defined and OS-mnemonic but is not produced by the status mapping above."
+  "intents": {
+    "complete":  "not a failure; never retry",
+    "terminal":  "a retry never helps — compile to FailJob",
+    "retriable": "usually transient — leave to backoffLimit (Count)",
+    "policy":    "default Count; honour the operator's --budget-exit-code remap when present",
+    "infra":     "kernel-set kill; the fix is a resource/config change — never author a retry rule"
   },
-
-  "x-mode-reachability": {
-    "description": "Informational — which codes each mode can produce. Descriptive, not enforced.",
-    "once_job": [0, 1, 2, 3, 4, 5, 6, 7, 124, 137],
-    "loop_job": [0, 1, 2, 3, 4, 5, 6, 7, 124, 137],
-    "schedule_job": [0, 1, 2, 3, 4, 5, 6, 7, 124, 137],
-    "reactive_deployment": [0, 143],
-    "reactive_fatal": [4, 6, 137],
-    "note": "exit_code=2 (EXIT_USAGE) is never reachable from a run-outcome report (validation fails before any run). 137/143 are kernel-set and never returned by the agent."
-  },
-
-  "x-budget-exit-code-remap": {
-    "description": "An operator may remap EXIT_PARTIAL(3) and EXIT_BUDGET(7) via --budget-exit-code. The default-retriable/policy disposition is operator-tunable, not a fixed verdict.",
+  "unknown_code_intent": "retriable",
+  "budget_remap": {
     "flag": "--budget-exit-code",
-    "affects": [3, 7]
-  },
-
-  "x-sum-types": {
-    "exit_disposition": "In agent://status the exit_disposition field is null | integer(code) — null until terminal, then the integer code."
-  },
-
-  "x-provisional": {
-    "p_cost": "EXIT_BUDGET(7) is the budget signal; its policy disposition is operator-remappable (see x-budget-exit-code-remap).",
-    "code_124_unreachable": "The 'unreachable' claim is scoped STRICTLY to the status-to-code mapping, where a self-reported deadline folds into BUDGET(7). 124 IS reachable: the supervisor hard-kills a run that exceeds its deadline or gets stuck, so returned_by_agent=true."
+    "remappable_codes": [3, 7],
+    "note": "only PARTIAL(3) and BUDGET(7) remap; every other code is returned unchanged. The remap applies only to the final process exit code; the run report keeps the canonical projection."
   }
 }

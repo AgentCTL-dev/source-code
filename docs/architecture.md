@@ -1,5 +1,15 @@
 # Architecture
 
+> ⚠️ **This document describes agentctl v1 as built** (through v1.3.0, against the
+> July-2026 reference agent). The **v2 transformation** — the agent-cloud pivot:
+> supervisors, brokered identity/OBO, the mcpg capability plane, tenancy,
+> lifecycle, multi-cluster — is designed in
+> **[`docs/v2/ARCHITECTURE.md`](v2/ARCHITECTURE.md)** (decisions:
+> [`docs/v2/adr/`](v2/adr/), plan: [`docs/v2/PLAN.md`](v2/PLAN.md), subsystems:
+> RFCs [0026](../rfcs/0026-v2-agent-cloud-pivot.md)–0035). The v1 operator's
+> flag-rendering described below does **not** work against the rewritten agentd
+> (≥ the August-2026 v1.x line); see RFC 0026 §5 for migration.
+
 agentctl is a Kubernetes control plane for fleets of conformant AI agents: it
 provisions, configures, scales, observes, secures, and exposes agents
 declaratively, through Custom Resources. This document is the reference for how

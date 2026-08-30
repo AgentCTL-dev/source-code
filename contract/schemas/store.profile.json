@@ -1,0 +1,38 @@
+{
+  "$comment": "ACC v2 — the agentd v1.3.1 store-over-MCP contract (the 'checkpointer profile', crates/agentd/src/store/mcp.rs default_ops). agentd's store.kind: mcp maps its four store operations onto tools/call against a declared server; a server advertising these four tools needs zero mapping config. agentctl's state service (RFC 0031 §2) MUST implement exactly this. All four remappable via store.mcp.{put,get,list,delete} = {tool, args, ok, conflict, value, keys}.",
+  "profile": "checkpointer",
+  "key_layout": "<store.prefix>/<instance>/<kind>/<id> — instance = agent.name; every write is a seq CAS; a Conflict on an owned key is fatal split-brain for the agent (preserve the fence, never paper over it)",
+  "meta": {
+    "agent/idempotency_key": "\"<key>#<seq>\" on every call — replays of the same put MUST be idempotent",
+    "agent/instance": "the calling instance name"
+  },
+  "tools": {
+    "state.put": {
+      "args": { "key": "<string>", "seq": "<u64 — the seq being written>", "state": "<the envelope JSON>" },
+      "result": {
+        "ok": "result.structuredContent.ok — truthy ⇒ accepted",
+        "conflict": "result.structuredContent.latest — non-null (the latest seq as u64) ⇒ CAS conflict",
+        "error": "isError:true with neither ⇒ transport/server error (agentd retries per store policy)"
+      },
+      "semantics": "compare-and-set: accept iff the stored seq for key is exactly seq-1 (insert when seq==1 and absent); on mismatch return latest, never overwrite"
+    },
+    "state.get": {
+      "args": { "key": "<string>", "seq": "<u64|null — optional exact-seq read>" },
+      "result": {
+        "value": "result.structuredContent.state — the envelope; null ⇒ absent",
+        "absent": "a tool-domain error (isError:true) on a read means ABSENT, not failure"
+      }
+    },
+    "state.list": {
+      "args": { "prefix": "<string>" },
+      "result": { "keys": "result.structuredContent.keys — array of \"key\" strings or {key, seq?} objects" }
+    },
+    "state.delete": {
+      "args": { "key": "<string>" },
+      "result": "success unless isError:true"
+    }
+  },
+  "advertisement": "agentd narrows to the ops the server actually advertises after tools/list: a missing state.list/state.delete degrades those ops to Unsupported; put/get are required",
+  "latency_budget": "store I/O is synchronous on agentd's reactor thread — the service's in-cluster p99 target is ≤50 ms (RFC 0031 §2); slow state = slow agent (timers, drains, liveness all stall)",
+  "tenancy_rule": "the serving implementation derives the permissible key prefix from the VERIFIED caller identity, never from arguments — an agent must be unable to name another agent's keys"
+}

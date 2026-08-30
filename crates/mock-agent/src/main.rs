@@ -420,26 +420,22 @@ mod tests {
     // listener — this sandbox kills bound listeners). These tests cover the pure
     // dispatch + manifest logic, which is where a wire bug would actually live.
 
+    // RETIREMENT NOTE (ACC 2 / RFC 0026): mock-agent speaks the July-era ACC
+    // 1.x wire (served-MCP `agent://capabilities`, `contract_version`,
+    // `surfaces{}`), which the rewritten reference agent no longer has. The
+    // e2e provisioning path now runs the REAL agentd binary; this crate stays
+    // only until the gateway's task-store scenarios migrate (PLAN P1-5), and
+    // its manifest is deliberately no longer conformance-tested — ACC 2
+    // identifies it as unmanageable (no `runtime` key), which is correct.
     #[test]
-    fn manifest_is_contract_1_0_conformant() {
-        // The REAL typed client (the conformance oracle) must parse + negotiate it.
+    fn manifest_is_recognized_as_pre_rewrite_by_the_acc2_client() {
         std::env::set_var("AGENT_POD_NAMESPACE", "agents");
         let json = manifest().to_string();
         let m = agent_contract_client::parse_manifest(&json).expect("manifest parses");
-        let v = m.negotiate().expect("negotiates");
-        assert_eq!(
-            v,
-            agent_contract_client::ContractVersion { major: 1, minor: 0 }
+        assert!(
+            !m.is_runtime_1(),
+            "mock-agent is an ACC 1.x artifact; the ACC 2 client must refuse it"
         );
-        // Bare PascalCase A2A + a2a.* operator tools + no exec (contract 1.0).
-        let a2a = m.surfaces.a2a.info().expect("a2a served");
-        assert!(a2a.methods.iter().any(|x| x == "SendMessage"));
-        assert!(!a2a.methods.iter().any(|x| x.starts_with("a2a.")));
-        assert_eq!(
-            m.surfaces.operator_tools.first().map(String::as_str),
-            Some("a2a.Drain")
-        );
-        assert!(!m.exec_enabled);
     }
 
     #[test]

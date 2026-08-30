@@ -1,0 +1,1282 @@
+{
+  "$defs": {
+    "kinds": {
+      "a2a": {
+        "fields": [
+          "command",
+          "roles",
+          "inputs",
+          "schema"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "a2a.delegate": {
+        "fields": [
+          "peer",
+          "objective",
+          "command",
+          "args",
+          "output_contract",
+          "timeout",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "peer"
+        ],
+        "start": false
+      },
+      "a2a.send": {
+        "fields": [
+          "to",
+          "parts",
+          "command",
+          "args",
+          "context",
+          "timeout",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "to"
+        ],
+        "start": false
+      },
+      "a2a.wait": {
+        "fields": [
+          "conversation",
+          "timeout"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "agent": {
+        "fields": [
+          "instruction",
+          "output_contract",
+          "output_schema",
+          "tools",
+          "servers",
+          "limits",
+          "context",
+          "skills",
+          "system",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "instruction"
+        ],
+        "start": false
+      },
+      "artifact.create": {
+        "fields": [
+          "name",
+          "mime",
+          "content",
+          "from_step",
+          "sensitive"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "artifact.delete": {
+        "fields": [
+          "id"
+        ],
+        "implemented": true,
+        "required": [
+          "id"
+        ],
+        "start": false
+      },
+      "artifact.get": {
+        "fields": [
+          "id"
+        ],
+        "implemented": true,
+        "required": [
+          "id"
+        ],
+        "start": false
+      },
+      "assert": {
+        "fields": [
+          "condition",
+          "message"
+        ],
+        "implemented": true,
+        "required": [
+          "condition"
+        ],
+        "start": false
+      },
+      "assign": {
+        "fields": [
+          "value",
+          "writes",
+          "mode"
+        ],
+        "implemented": true,
+        "required": [
+          "value"
+        ],
+        "start": false
+      },
+      "batch": {
+        "fields": [
+          "over",
+          "body",
+          "by",
+          "size",
+          "parallel",
+          "rate",
+          "collect",
+          "on_error"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "body"
+        ],
+        "start": false
+      },
+      "checkpoint": {
+        "fields": [
+          "name"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "chunk": {
+        "fields": [
+          "value",
+          "by",
+          "size",
+          "overlap"
+        ],
+        "implemented": true,
+        "required": [
+          "value",
+          "size"
+        ],
+        "start": false
+      },
+      "classify": {
+        "fields": [
+          "input",
+          "classes",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "classes"
+        ],
+        "start": false
+      },
+      "dedupe": {
+        "fields": [
+          "over",
+          "by"
+        ],
+        "implemented": true,
+        "required": [
+          "over"
+        ],
+        "start": false
+      },
+      "emit": {
+        "fields": [
+          "note",
+          "audit",
+          "metric",
+          "value",
+          "stream",
+          "subject",
+          "data",
+          "correlation"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "event": {
+        "fields": [
+          "on",
+          "filter",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "on"
+        ],
+        "start": true
+      },
+      "extract": {
+        "fields": [
+          "input",
+          "output_schema",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "output_schema"
+        ],
+        "start": false
+      },
+      "fail": {
+        "fields": [
+          "message",
+          "code"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "filter": {
+        "fields": [
+          "over",
+          "expr",
+          "as"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "expr"
+        ],
+        "start": false
+      },
+      "finish": {
+        "fields": [
+          "status",
+          "output",
+          "reason"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "foreach": {
+        "fields": [
+          "over",
+          "body",
+          "batch",
+          "collect",
+          "on_error",
+          "as"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "body"
+        ],
+        "start": false
+      },
+      "http": {
+        "fields": [
+          "method",
+          "url",
+          "headers",
+          "query",
+          "body",
+          "json",
+          "timeout",
+          "expect",
+          "allow_private",
+          "sign",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "url"
+        ],
+        "start": false
+      },
+      "human": {
+        "fields": [
+          "question",
+          "schema",
+          "to",
+          "timeout",
+          "reply_uri"
+        ],
+        "implemented": true,
+        "required": [
+          "question"
+        ],
+        "start": false
+      },
+      "iterate": {
+        "fields": [
+          "body",
+          "while",
+          "until",
+          "max_iterations",
+          "collect"
+        ],
+        "implemented": true,
+        "required": [
+          "body"
+        ],
+        "start": false
+      },
+      "join": {
+        "fields": [
+          "handles",
+          "timeout",
+          "min",
+          "partials"
+        ],
+        "implemented": true,
+        "required": [
+          "handles"
+        ],
+        "start": false
+      },
+      "judge": {
+        "fields": [
+          "input",
+          "rubric",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "rubric"
+        ],
+        "start": false
+      },
+      "knowledge.get": {
+        "fields": [
+          "id",
+          "uri"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "knowledge.search": {
+        "fields": [
+          "query",
+          "top_k",
+          "filters"
+        ],
+        "implemented": true,
+        "required": [
+          "query"
+        ],
+        "start": false
+      },
+      "loop": {
+        "fields": [
+          "interval",
+          "delay",
+          "until",
+          "max_iterations",
+          "backoff",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "manual": {
+        "fields": [
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "map": {
+        "fields": [
+          "over",
+          "expr",
+          "as"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "expr"
+        ],
+        "start": false
+      },
+      "mcp.resource": {
+        "fields": [
+          "server",
+          "op",
+          "uri",
+          "name",
+          "arguments",
+          "reference",
+          "argument"
+        ],
+        "implemented": true,
+        "required": [
+          "server",
+          "op"
+        ],
+        "start": false
+      },
+      "mcp.tool": {
+        "fields": [
+          "server",
+          "tool",
+          "args",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "server",
+          "tool"
+        ],
+        "start": false
+      },
+      "memory.delete": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "memory.get": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "memory.list": {
+        "fields": [
+          "prefix",
+          "limit"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "memory.pop": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "memory.push": {
+        "fields": [
+          "key",
+          "value"
+        ],
+        "implemented": true,
+        "required": [
+          "key",
+          "value"
+        ],
+        "start": false
+      },
+      "memory.set": {
+        "fields": [
+          "key",
+          "value",
+          "ttl"
+        ],
+        "implemented": true,
+        "required": [
+          "key",
+          "value"
+        ],
+        "start": false
+      },
+      "memory.shift": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "message": {
+        "fields": [
+          "to",
+          "text",
+          "parts",
+          "wait",
+          "timeout",
+          "on_timeout"
+        ],
+        "implemented": true,
+        "required": [
+          "to"
+        ],
+        "start": false
+      },
+      "noop": {
+        "fields": [],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "once": {
+        "fields": [
+          "policy",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "parallel": {
+        "fields": [
+          "branches",
+          "on_error"
+        ],
+        "implemented": true,
+        "required": [
+          "branches"
+        ],
+        "start": false
+      },
+      "parse": {
+        "fields": [
+          "text",
+          "format"
+        ],
+        "implemented": true,
+        "required": [
+          "text"
+        ],
+        "start": false
+      },
+      "race": {
+        "fields": [
+          "branches",
+          "timeout",
+          "min_success"
+        ],
+        "implemented": true,
+        "required": [
+          "branches"
+        ],
+        "start": false
+      },
+      "reduce": {
+        "fields": [
+          "over",
+          "expr",
+          "initial",
+          "as",
+          "acc"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "expr"
+        ],
+        "start": false
+      },
+      "route": {
+        "fields": [
+          "input",
+          "choices",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "choices"
+        ],
+        "start": false
+      },
+      "schedule": {
+        "fields": [
+          "cron",
+          "every",
+          "tz",
+          "jitter",
+          "catch_up",
+          "at",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "search.fetch": {
+        "fields": [
+          "url",
+          "max_bytes"
+        ],
+        "implemented": true,
+        "required": [
+          "url"
+        ],
+        "start": false
+      },
+      "search.query": {
+        "fields": [
+          "query",
+          "kind",
+          "limit",
+          "freshness"
+        ],
+        "implemented": true,
+        "required": [
+          "query"
+        ],
+        "start": false
+      },
+      "signal": {
+        "fields": [
+          "name",
+          "filter",
+          "deliver",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": true
+      },
+      "sleep": {
+        "fields": [
+          "duration"
+        ],
+        "implemented": true,
+        "required": [
+          "duration"
+        ],
+        "start": false
+      },
+      "sort": {
+        "fields": [
+          "over",
+          "by",
+          "order"
+        ],
+        "implemented": true,
+        "required": [
+          "over"
+        ],
+        "start": false
+      },
+      "stream": {
+        "fields": [
+          "stream",
+          "subject",
+          "filter",
+          "from",
+          "rate",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "stream"
+        ],
+        "start": true
+      },
+      "subagent": {
+        "fields": [
+          "instruction",
+          "template",
+          "params",
+          "mode",
+          "tools",
+          "servers",
+          "limits",
+          "priority",
+          "context",
+          "output_contract",
+          "output_schema",
+          "skills",
+          "durable"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "subgraph": {
+        "fields": [
+          "body"
+        ],
+        "implemented": true,
+        "required": [
+          "body"
+        ],
+        "start": false
+      },
+      "subscribe": {
+        "fields": [
+          "server",
+          "uri",
+          "debounce_ms",
+          "coalesce",
+          "filter",
+          "deliver",
+          "on_no_listener",
+          "window",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "server",
+          "uri"
+        ],
+        "start": true
+      },
+      "summarize": {
+        "fields": [
+          "input",
+          "length",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input"
+        ],
+        "start": false
+      },
+      "switch": {
+        "fields": [
+          "on",
+          "cases",
+          "default",
+          "on_no_match"
+        ],
+        "implemented": true,
+        "required": [
+          "on",
+          "cases"
+        ],
+        "start": false
+      },
+      "template": {
+        "fields": [
+          "text",
+          "value"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "think": {
+        "fields": [
+          "prompt",
+          "output_schema",
+          "reads",
+          "check",
+          "retries",
+          "skills",
+          "system",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "prompt"
+        ],
+        "start": false
+      },
+      "tool": {
+        "fields": [
+          "name",
+          "args"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "transform": {
+        "fields": [
+          "value",
+          "writes",
+          "mode"
+        ],
+        "implemented": true,
+        "required": [
+          "value"
+        ],
+        "start": false
+      },
+      "validate": {
+        "fields": [
+          "value",
+          "schema"
+        ],
+        "implemented": true,
+        "required": [
+          "value",
+          "schema"
+        ],
+        "start": false
+      },
+      "wait": {
+        "fields": [
+          "on",
+          "server",
+          "uri",
+          "condition",
+          "signal",
+          "run",
+          "subagent",
+          "conversation",
+          "webhook",
+          "stream",
+          "subject",
+          "match",
+          "timeout",
+          "on_timeout"
+        ],
+        "implemented": true,
+        "required": [
+          "on"
+        ],
+        "start": false
+      },
+      "webhook": {
+        "fields": [
+          "path",
+          "methods",
+          "auth",
+          "parallelism",
+          "on_overflow",
+          "rate",
+          "idempotency",
+          "respond",
+          "filter",
+          "inputs",
+          "signal"
+        ],
+        "implemented": true,
+        "required": [
+          "path"
+        ],
+        "start": true
+      },
+      "workflow": {
+        "fields": [
+          "name",
+          "inputs",
+          "mode",
+          "start",
+          "version",
+          "cascade"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "workflow.cancel": {
+        "fields": [
+          "run",
+          "reason"
+        ],
+        "implemented": true,
+        "required": [
+          "run"
+        ],
+        "start": false
+      },
+      "workflow.signal": {
+        "fields": [
+          "name",
+          "payload",
+          "run"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "workflow.wait": {
+        "fields": [
+          "run",
+          "timeout"
+        ],
+        "implemented": true,
+        "required": [
+          "run"
+        ],
+        "start": false
+      }
+    },
+    "step": {
+      "properties": {
+        "budget": {
+          "type": "integer"
+        },
+        "cache": {
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "idempotent": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "once",
+            "manual",
+            "loop",
+            "schedule",
+            "subscribe",
+            "stream",
+            "signal",
+            "event",
+            "a2a",
+            "webhook",
+            "switch",
+            "parallel",
+            "foreach",
+            "batch",
+            "iterate",
+            "race",
+            "join",
+            "subgraph",
+            "workflow",
+            "wait",
+            "sleep",
+            "assert",
+            "fail",
+            "noop",
+            "checkpoint",
+            "finish",
+            "assign",
+            "transform",
+            "map",
+            "filter",
+            "reduce",
+            "sort",
+            "dedupe",
+            "chunk",
+            "template",
+            "parse",
+            "validate",
+            "memory.get",
+            "memory.set",
+            "memory.list",
+            "memory.push",
+            "memory.shift",
+            "memory.pop",
+            "memory.delete",
+            "artifact.create",
+            "artifact.get",
+            "artifact.delete",
+            "knowledge.search",
+            "knowledge.get",
+            "search.query",
+            "search.fetch",
+            "mcp.tool",
+            "mcp.resource",
+            "tool",
+            "http",
+            "a2a.send",
+            "a2a.delegate",
+            "a2a.wait",
+            "message",
+            "workflow.signal",
+            "workflow.wait",
+            "workflow.cancel",
+            "emit",
+            "think",
+            "classify",
+            "extract",
+            "summarize",
+            "judge",
+            "route",
+            "agent",
+            "subagent",
+            "human"
+          ]
+        },
+        "on_error": {
+          "type": "string"
+        },
+        "on_replay": {
+          "enum": [
+            "retry",
+            "skip",
+            "fail"
+          ]
+        },
+        "otel": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "retry": {
+          "properties": {
+            "backoff": {
+              "type": "string"
+            },
+            "max": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "when": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://agentd.dev/schema/workflow-3.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "armed": {
+      "default": true,
+      "type": "boolean"
+    },
+    "concurrency": {
+      "properties": {
+        "max_runs": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "on_overflow": {
+          "enum": [
+            "queue",
+            "drop",
+            "replace"
+          ]
+        },
+        "scope": {
+          "description": "what max_runs counts: every run of this workflow (default), or every run about the same `key` — the difference between a queue and a per-entity lock",
+          "enum": [
+            "workflow",
+            "key"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "description": {
+      "type": "string"
+    },
+    "durable": {
+      "description": "false = runs are memory-only (no checkpoints, gone after a restart) — the fast path for recomputable work; absent = the store.durability.work default (durable)",
+      "type": "boolean"
+    },
+    "file": {
+      "description": "load the document from a path on disk instead of inline",
+      "type": "string"
+    },
+    "inputs": {
+      "properties": {
+        "schema": {
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "key": {
+      "description": "the logical thing a run is ABOUT, rendered from the trigger payload (e.g. \"{{payload.account_id}}\"); required by concurrency.scope: key",
+      "type": "string"
+    },
+    "limits": {
+      "properties": {
+        "budget": {
+          "type": "object"
+        },
+        "deadline": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "integer"
+        },
+        "tokens": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": {
+      "pattern": "^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "outputs": {
+      "properties": {
+        "schema": {
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "priority": {
+      "description": "contention weight: `low` sheds one pressure level earlier and is scheduled last; a tiebreak under scarcity, not a reservation",
+      "enum": [
+        "low",
+        "normal",
+        "high"
+      ]
+    },
+    "state": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "reducer": {
+            "description": "how concurrent writes to this key combine; declaring it makes concurrency a policy rather than a race",
+            "enum": [
+              "overwrite",
+              "append",
+              "merge",
+              "union"
+            ]
+          },
+          "schema": {
+            "description": "a JSON Schema every write to this key must satisfy",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "description": "declared run variables — {key: {schema, reducer}}",
+      "type": "object"
+    },
+    "steps": {
+      "additionalProperties": {
+        "$ref": "#/$defs/step"
+      },
+      "minProperties": 1,
+      "type": "object"
+    },
+    "tool": {
+      "additionalProperties": false,
+      "description": "register this workflow as a first-class tool — a callable procedure with retry, breaker, idempotency and a human gate INSIDE one apparent call. Startup config only; tags are DERIVED from what the steps reach.",
+      "properties": {
+        "grant": {
+          "additionalProperties": false,
+          "properties": {
+            "agent": {
+              "type": "boolean"
+            },
+            "root": {
+              "type": "boolean"
+            },
+            "subagents": {
+              "type": "boolean"
+            },
+            "user": {
+              "type": "boolean"
+            },
+            "workflows": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "mode": {
+          "description": "sync parks the caller on the run and returns its output; async returns a handle",
+          "enum": [
+            "sync",
+            "async"
+          ]
+        },
+        "name": {
+          "description": "the tool name callers see; may not shadow an internal contract",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "unload": {
+      "additionalProperties": false,
+      "description": "what happens to LIVE runs when this definition is retired (removed, replaced or deleted)",
+      "properties": {
+        "policy": {
+          "description": "drain (default) lets them finish",
+          "enum": [
+            "drain",
+            "cancel",
+            "detach"
+          ]
+        },
+        "timeout": {
+          "description": "how long a drain may take",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "uri": {
+      "description": "load the document from an MCP resource instead of inline",
+      "type": "string"
+    },
+    "version": {
+      "const": 3
+    }
+  },
+  "required": [
+    "name",
+    "steps"
+  ],
+  "title": "agentd workflow",
+  "type": "object"
+}

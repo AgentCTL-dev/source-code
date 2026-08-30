@@ -1,478 +1,59 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/metrics.registry.json",
-  "title": "Agent Control Contract — Metrics Registry (metrics_schema 1.0)",
-  "description": "DATA catalogue (not a JSON-Schema validator) of the frozen, versioned Prometheus metrics a conformant agent exposes on the opt-in /metrics surface, gated by manifest surfaces.metrics_schema. Metrics are Prometheus 0.0.4 text exposition, not a JSON document, so a per-metric registry of neutral agent_* names is the right artifact for agentctl to codegen dashboards/alerts/scalers from. Versioned additive-within-major (new series / new bounded label values tolerated); removal/rename bumps major. A consumer MUST ignore unknown additive series + unknown bounded-label values and refuse only an unknown major. NOTE: a conformant agent emits ONLY counters and gauges on /metrics — NO histograms — so all histograms here are provisional/unbuilt with bucket boundaries undefined.",
-
-  "metrics_schema": "1.1",
-  "x-contract-version": "1.0",
-  "x-version-note": "1.1 (additive minor): added the gauge agent_budget_tokens_remaining and the bounded label value limit=tokens_lifetime (RFC 0025 per-instance lifetime budget). A consumer refuses only an unknown MAJOR; these are additive.",
-
-  "prefix": {
-    "neutral": "agent_"
+  "$comment": "ACC v2 — the agentd v1.3.1 Prometheus surface (METRICS_SCHEMA 1.2, crates/agentd/src/obs/metrics.rs). Status values: 'live' = written at runtime; 'reserved' = rendered as HELP/TYPE but flat at zero or never written — MUST NOT be targeted by scalers/alerts; 'child_local' = incremented in the re-exec'd child process, so a supervisor scrape under-reports. Additive within the major; rename/removal bumps it.",
+  "metrics_schema": "1.2",
+  "scaler_guidance": {
+    "primary": "agent_inbox_pending",
+    "secondary": ["agent_turns_queued", "agent_runs_active", "agent_pressure_level"],
+    "never_target": ["agent_pending_events", "agent_inflight_reactions", "agent_reaction_lag_ms", "agent_subscriptions_active", "agent_active_subagents", "agent_tree_depth", "agent_tree_breadth"]
   },
-
-  "exposition": "Prometheus 0.0.4 text exposition; /metrics carries NO version label — the version is discovered out-of-band via manifest surfaces.metrics_schema.",
-
-  "cardinality_rule": "Bounded labels only. NEVER carry run_id / agent_id / agent_path / call_id / session_id / URI as a label. Closed enum domains each carry an `other` overflow slot. The `server` label is config-time string bounded structurally by a 16-slot intern table (MCP_SERVER_SLOTS); once full, further names fold into server=\"other\".",
-
-  "closed_label_domains": {
-    "status":        ["completed", "refused", "exhausted_steps", "exhausted_tokens", "deadline", "stalled", "loop_detected", "cancelled", "crashed", "other"],
-    "token_type":    ["in", "out"],
-    "refusal_reason":["trifecta", "rate", "budget", "depth", "mcp", "other"],
-    "limit":         ["steps", "tokens", "tokens_lifetime", "deadline", "depth", "tree_tokens", "restart_storm", "spawn_rate", "other"],
-    "restart_reason":["crashed", "stuck", "rate", "other"],
-    "stuck_signal":  ["term", "kill", "other"],
-    "intel_error_reason":["unreachable", "auth", "timeout", "5xx", "other"],
-    "drain_phase":   ["started", "completed", "forced", "other"],
-    "reload_result": ["applied", "rejected", "other"]
-  },
-
-  "label_domain_kinds": {
-    "closed": "value is a key of closed_label_domains — a frozen enum ending in `other`",
-    "open": "free string value (e.g. model) — unbounded by contract, used only where source guarantees low cardinality",
-    "open_bounded": "config-time string bounded structurally (e.g. server folded to 16 intern slots + `other`)"
-  },
-
-  "autoscaling_signal_subset": [
-    "agent_pending_events",
-    "agent_reaction_lag_ms",
-    "agent_saturation",
-    "agent_active_subagents",
-    "agent_inflight_reactions",
-    "agent_claims_lost_total",
-    "agent_shard_skipped_total"
-  ],
-
-  "cost_token_subset": [
-    "agent_tokens_total",
-    "agent_intel_calls_total",
-    "agent_tokens_input_total",
-    "agent_tokens_output_total"
-  ],
-
-  "histograms_note": "The duration histograms (agent_run_duration_ms / agent_intel_call_duration_ms / agent_tool_call_duration_ms) are named inconsistently across historical sources (some as otel-only agent_tool_duration_ms / agent_loop_step_duration_ms / gen_ai.client.operation.duration) and no conformant /metrics exposition emits any of them. All histogram entries below are status=provisional with buckets UNDEFINED; consumers MUST treat them as absent unless a future surfaces flag advertises them.",
-
-  "value_type_note": "All gauges/counters render as integers EXCEPT agent_saturation, which renders as a float in [0,1] (stored as basis points, divided by 10000). A consumer codegen that assumes a uniform u64 value type breaks on agent_saturation.",
-
-  "metric_record_shape": {
-    "name": "string REQUIRED — neutral agent_* canonical name",
-    "neutral_name": "string REQUIRED — duplicate of name for explicitness (canonical)",
-    "type": "enum REQUIRED — counter | gauge | histogram (frozen 3-way set)",
-    "labels": "Label[] REQUIRED (may be empty []) — each { key, domain }",
-    "unit": "enum — 1 | ms | bytes | bool | ratio | 1/s",
-    "help": "string REQUIRED — HELP text",
-    "source": "string — provenance note",
-    "status": "enum REQUIRED — stable | provisional | legacy",
-    "autoscaling_signal": "bool REQUIRED",
-    "cost_signal": "bool REQUIRED",
-    "note": "string OPTIONAL — divergence / caveat",
-    "scaling_role": "string OPTIONAL — role within the autoscaling subset",
-    "aliases_scaling": "string[] OPTIONAL — cross-source name aliases for the same signal"
-  },
-
   "metrics": [
-    {
-      "name": "agent_up", "neutral_name": "agent_up",
-      "type": "gauge", "labels": [], "unit": "bool",
-      "help": "1 while the process is alive.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_ready", "neutral_name": "agent_ready",
-      "type": "gauge", "labels": [], "unit": "bool",
-      "help": "1 when ready to accept work (not draining / lame-ducked).",
-      "source": "Standard /metrics series (computed from not-draining and not-lame-duck state).", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "No standalone agent_draining / agent_lame_duck gauges exist; drain and lame-duck state are observable via agent_ready==0 combined with agent_drains_total."
-    },
-    {
-      "name": "agent_paused", "neutral_name": "agent_paused",
-      "type": "gauge", "labels": [], "unit": "bool",
-      "help": "1 while the agentic tree is paused at turn boundaries. Pause is NOT readiness.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Pause is tracked independently of readiness (agent_ready)."
-    },
-    {
-      "name": "agent_runs_total", "neutral_name": "agent_runs_total",
-      "type": "counter", "labels": [{ "key": "status", "domain": "status" }], "unit": "1",
-      "help": "Runs by terminal status.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_loop_steps_total", "neutral_name": "agent_loop_steps_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Agentic loop steps executed.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_tokens_total", "neutral_name": "agent_tokens_total",
-      "type": "counter", "labels": [{ "key": "type", "domain": "token_type" }], "unit": "1",
-      "help": "Model tokens by direction.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": true,
-      "note": "Carries only the {type} label; a {model} label is not part of the contract (deferred)."
-    },
-    {
-      "name": "agent_intel_calls_total", "neutral_name": "agent_intel_calls_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Intelligence calls made.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": true,
-      "note": "Emitted without a {model} label; a {model} label is deferred and not part of the contract."
-    },
-    {
-      "name": "agent_refusals_total", "neutral_name": "agent_refusals_total",
-      "type": "counter", "labels": [{ "key": "reason", "domain": "refusal_reason" }], "unit": "1",
-      "help": "Refusals/guard trips by reason.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_limit_exceeded_total", "neutral_name": "agent_limit_exceeded_total",
-      "type": "counter", "labels": [{ "key": "limit", "domain": "limit" }], "unit": "1",
-      "help": "Hard-bound trips by limit (incl. limit=tokens_lifetime for the per-instance budget).",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_budget_tokens_remaining", "neutral_name": "agent_budget_tokens_remaining",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Tokens remaining against the per-instance lifetime budget (RFC 0025). Reads 0 when the budget is unbounded AND when it is exhausted — disambiguate via agent_limit_exceeded_total{limit=\"tokens_lifetime\"} / the limit.exceeded event. The alerting/scaling hook for a long-lived reactive instance approaching its cap.",
-      "source": "Emitted when --budget-tokens-lifetime (AGENT_BUDGET_TOKENS) is set.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": true
-    },
-    {
-      "name": "agent_active_subagents", "neutral_name": "agent_active_subagents",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Subagents currently alive in the tree.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": true, "cost_signal": false,
-      "scaling_role": "concurrency depth signal"
-    },
-    {
-      "name": "agent_tree_depth", "neutral_name": "agent_tree_depth",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Current max subagent-tree depth.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_tree_breadth", "neutral_name": "agent_tree_breadth",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Current max siblings at any tree node.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_subagents_spawned_total", "neutral_name": "agent_subagents_spawned_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Subagents spawned.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_subagents_exited_total", "neutral_name": "agent_subagents_exited_total",
-      "type": "counter", "labels": [{ "key": "status", "domain": "status" }], "unit": "1",
-      "help": "Subagents exited by terminal status.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_subagent_restarts_total", "neutral_name": "agent_subagent_restarts_total",
-      "type": "counter", "labels": [{ "key": "reason", "domain": "restart_reason" }], "unit": "1",
-      "help": "Subagent restarts by reason.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_subagent_stuck_kills_total", "neutral_name": "agent_subagent_stuck_kills_total",
-      "type": "counter", "labels": [{ "key": "signal", "domain": "stuck_signal" }], "unit": "1",
-      "help": "Wedged-subagent kills by signal.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_intel_up", "neutral_name": "agent_intel_up",
-      "type": "gauge", "labels": [], "unit": "bool",
-      "help": "1 when the intelligence endpoint is reachable.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "An older name was agent_intel_endpoint_up; the contract canonicalizes agent_intel_up."
-    },
-    {
-      "name": "agent_intel_all_down", "neutral_name": "agent_intel_all_down",
-      "type": "gauge", "labels": [], "unit": "bool",
-      "help": "1 while all intelligence endpoints are down.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Fleet-routing signal: 1 while EVERY model endpoint is down (the same latch that flips /readyz). Distinct from agent_intel_up (the active endpoint's reachability)."
-    },
-    {
-      "name": "agent_intel_errors_total", "neutral_name": "agent_intel_errors_total",
-      "type": "counter", "labels": [{ "key": "reason", "domain": "intel_error_reason" }], "unit": "1",
-      "help": "Intelligence-endpoint errors by reason.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_mcp_connect_failures_total", "neutral_name": "agent_mcp_connect_failures_total",
-      "type": "counter", "labels": [{ "key": "server", "domain": "open_bounded" }], "unit": "1",
-      "help": "MCP connect failures by server.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "server label is a config-time string bounded by a 16-slot intern table (MCP_SERVER_SLOTS); overflow folds into server=\"other\"."
-    },
-    {
-      "name": "agent_drains_total", "neutral_name": "agent_drains_total",
-      "type": "counter", "labels": [{ "key": "phase", "domain": "drain_phase" }], "unit": "1",
-      "help": "Drain phase transitions.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_restarts_total", "neutral_name": "agent_restarts_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Supervisor process restarts observed.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_reactor_stalls_total", "neutral_name": "agent_reactor_stalls_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Wedged-reactor liveness trips.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_config_reload_total", "neutral_name": "agent_config_reload_total",
-      "type": "counter", "labels": [{ "key": "result", "domain": "reload_result" }], "unit": "1",
-      "help": "Hot reloads by result.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Config hot-reload outcome counter; result is one of applied / rejected / other."
-    },
-    {
-      "name": "agent_config_generation", "neutral_name": "agent_config_generation",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Successfully-applied config reloads (the live generation).",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Advances only on a successfully-applied reload (the live generation counter)."
-    },
-    {
-      "name": "agent_pending_events", "neutral_name": "agent_pending_events",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Reactive events received but not yet routed.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": true, "cost_signal": false,
-      "scaling_role": "PRIMARY KEDA/HPA backlog signal",
-      "aliases_scaling": ["agent_reactive_backlog"],
-      "note": "agent_pending_events is the CANONICAL name; agent_reactive_backlog is an ALIAS for the same signal (mechanically a sum)."
-    },
-    {
-      "name": "agent_inflight_reactions", "neutral_name": "agent_inflight_reactions",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Reactions currently executing.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": true, "cost_signal": false,
-      "scaling_role": "concurrency / saturation numerator"
-    },
-    {
-      "name": "agent_subscriptions_active", "neutral_name": "agent_subscriptions_active",
-      "type": "gauge", "labels": [], "unit": "1",
-      "help": "Reconciled declared subscriptions.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_reaction_lag_ms", "neutral_name": "agent_reaction_lag_ms",
-      "type": "gauge", "labels": [], "unit": "ms",
-      "help": "Age of the oldest un-routed pending event (ms).",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": true, "cost_signal": false,
-      "scaling_role": "latency-SLO backlog signal"
-    },
-    {
-      "name": "agent_saturation", "neutral_name": "agent_saturation",
-      "type": "gauge", "labels": [], "unit": "ratio",
-      "help": "In-flight / capacity utilization in [0,1].",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": true, "cost_signal": false,
-      "scaling_role": "HPA target (~0.7)",
-      "note": "FLOAT-valued in [0,1] — the only non-integer series; defeats uniform u64 codegen."
-    },
-    {
-      "name": "agent_shard_skipped_total", "neutral_name": "agent_shard_skipped_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Items dropped as out-of-shard.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": true, "cost_signal": false,
-      "scaling_role": "shard mis-route signal"
-    },
-    {
-      "name": "agent_claims_lost_total", "neutral_name": "agent_claims_lost_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Work claims lost to another replica.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": true, "cost_signal": false,
-      "scaling_role": "over-provision / scale-down signal (high under low backlog ⇒ scale down)"
-    },
-    {
-      "name": "agent_claims_granted_total", "neutral_name": "agent_claims_granted_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Work claims granted to this replica.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_claims_released_total", "neutral_name": "agent_claims_released_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Held claims released back to the fleet.",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false
-    },
-    {
-      "name": "agent_memory_max_bytes", "neutral_name": "agent_memory_max_bytes",
-      "type": "gauge", "labels": [], "unit": "bytes",
-      "help": "cgroup v2 memory.max hard limit (bytes).",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Emitted only when the kernel exposes the cgroup v2 field; absent otherwise (graceful degradation)."
-    },
-    {
-      "name": "agent_memory_current_bytes", "neutral_name": "agent_memory_current_bytes",
-      "type": "gauge", "labels": [], "unit": "bytes",
-      "help": "cgroup v2 memory.current usage (bytes).",
-      "source": "Standard /metrics series.", "status": "stable",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Emitted only when the kernel exposes the cgroup v2 field; absent otherwise."
-    },
-
-    {
-      "name": "agent_runs_started_total", "neutral_name": "agent_runs_started_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Supervised runs started.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Legacy bare series retained additively; prefer agent_runs_total{status} for terminal accounting."
-    },
-    {
-      "name": "agent_runs_completed_total", "neutral_name": "agent_runs_completed_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Supervised runs that completed.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Legacy bare series; subsumed by agent_runs_total{status=\"completed\"}."
-    },
-    {
-      "name": "agent_runs_failed_total", "neutral_name": "agent_runs_failed_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Supervised runs that failed on infra.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Legacy bare series; subsumed by agent_runs_total{status}."
-    },
-    {
-      "name": "agent_runs_killed_total", "neutral_name": "agent_runs_killed_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Supervised runs torn down by the supervisor.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Legacy bare series."
-    },
-    {
-      "name": "agent_reactions_total", "neutral_name": "agent_reactions_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Reactive triggers fired.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Legacy bare series retained additively."
-    },
-    {
-      "name": "agent_tokens_input_total", "neutral_name": "agent_tokens_input_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Input tokens reported by direct children.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": true,
-      "note": "Legacy bare series; prefer agent_tokens_total{type=\"in\"}."
-    },
-    {
-      "name": "agent_tokens_output_total", "neutral_name": "agent_tokens_output_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Output tokens reported by direct children.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": true,
-      "note": "Legacy bare series; prefer agent_tokens_total{type=\"out\"}."
-    },
-    {
-      "name": "agent_restarts_tripped_total", "neutral_name": "agent_restarts_tripped_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "Restart-governor breaker trips.",
-      "source": "Legacy /metrics series.", "status": "legacy",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Legacy bare series retained additively."
-    },
-
-    {
-      "name": "agent_run_duration_ms", "neutral_name": "agent_run_duration_ms",
-      "type": "histogram", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL/UNBUILT — wall-clock run duration histogram.",
-      "source": "Declared but not currently emitted.", "status": "provisional",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "No histograms are emitted; bucket boundaries UNDEFINED. A similar duration exists only in otel. Consumers treat as absent unless surfaces advertises it."
-    },
-    {
-      "name": "agent_intel_call_duration_ms", "neutral_name": "agent_intel_call_duration_ms",
-      "type": "histogram", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL/UNBUILT — intelligence call duration histogram.",
-      "source": "Declared but not currently emitted.", "status": "provisional",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "No histograms are emitted; buckets UNDEFINED."
-    },
-    {
-      "name": "agent_tool_call_duration_ms", "neutral_name": "agent_tool_call_duration_ms",
-      "type": "histogram", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL/UNBUILT — tool call duration histogram.",
-      "source": "Declared but not currently emitted; exists only in otel as agent_tool_duration_ms.", "status": "provisional",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "No histograms are emitted; buckets UNDEFINED. Name conflicts with the otel-only agent_tool_duration_ms."
-    },
-    {
-      "name": "agent_mcp_up", "neutral_name": "agent_mcp_up",
-      "type": "gauge", "labels": [{ "key": "server", "domain": "open_bounded" }], "unit": "bool",
-      "help": "PROVISIONAL — 1 when a declared MCP server is connected.",
-      "source": "Declared but not currently emitted (no declared-server registration hook).", "status": "provisional",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "DIVERGENCE: declared in the contract but not currently emitted. The server label would fold to the same 16-slot bound as agent_mcp_connect_failures_total."
-    },
-    {
-      "name": "agent_tool_calls_total", "neutral_name": "agent_tool_calls_total",
-      "type": "counter", "labels": [], "unit": "1",
-      "help": "PROVISIONAL — tool invocations.",
-      "source": "Declared but not currently emitted on /metrics (logs/otel only).", "status": "provisional",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "DIVERGENCE: declared in the contract but not currently emitted on /metrics."
-    },
-    {
-      "name": "agent_tokens_per_sec", "neutral_name": "agent_tokens_per_sec",
-      "type": "gauge", "labels": [], "unit": "1/s",
-      "help": "PROVISIONAL/DERIVED — token throughput.",
-      "source": "Declared but not currently emitted.", "status": "provisional",
-      "autoscaling_signal": false, "cost_signal": true,
-      "note": "Autoscaling name not currently emitted; derived/provisional."
-    },
-    {
-      "name": "agent_intelligence_latency_ms", "neutral_name": "agent_intelligence_latency_ms",
-      "type": "gauge", "labels": [], "unit": "ms",
-      "help": "PROVISIONAL — intelligence latency signal.",
-      "source": "Declared but not currently emitted.", "status": "provisional",
-      "autoscaling_signal": false, "cost_signal": false,
-      "note": "Autoscaling name not currently emitted; provisional. See agent_intel_call_duration_ms (histogram, also provisional)."
-    }
-  ]
+    { "name": "agent_up", "type": "gauge", "status": "live" },
+    { "name": "agent_ready", "type": "gauge", "status": "live" },
+    { "name": "agent_inbox_pending", "type": "gauge", "status": "live", "note": "the real reactive-backlog signal" },
+    { "name": "agent_runs_active", "type": "gauge", "status": "live" },
+    { "name": "agent_turns_queued", "type": "gauge", "status": "live" },
+    { "name": "agent_pressure_level", "type": "gauge", "status": "live", "note": "0 ok / 1 warn / 2 shed" },
+    { "name": "agent_disk_free_bytes", "type": "gauge", "status": "live" },
+    { "name": "agent_runs_total", "type": "counter", "labels": ["status"], "status": "live" },
+    { "name": "agent_runs_started_total", "type": "counter", "status": "live" },
+    { "name": "agent_steps_total", "type": "counter", "status": "live" },
+    { "name": "agent_turns_total", "type": "counter", "status": "live" },
+    { "name": "agent_tokens_total", "type": "counter", "labels": ["type"], "status": "live", "note": "the 'model' label is reserved and absent" },
+    { "name": "agent_context_tokens", "type": "gauge", "status": "live" },
+    { "name": "agent_store_ops_total", "type": "counter", "labels": ["result"], "status": "live", "note": "result=conflict is the split-brain alarm" },
+    { "name": "agent_intel_up", "type": "gauge", "status": "live" },
+    { "name": "agent_intel_all_down", "type": "gauge", "status": "live" },
+    { "name": "agent_intel_errors_total", "type": "counter", "labels": ["reason"], "status": "live" },
+    { "name": "agent_intel_calls_total", "type": "counter", "status": "live" },
+    { "name": "agent_mcp_connect_failures_total", "type": "counter", "labels": ["server"], "status": "live" },
+    { "name": "agent_drains_total", "type": "counter", "labels": ["phase"], "status": "live" },
+    { "name": "agent_budget_tokens_remaining", "type": "gauge", "status": "live" },
+    { "name": "agent_config_reload_total", "type": "counter", "labels": ["result"], "status": "live" },
+    { "name": "agent_memory_max_bytes", "type": "gauge", "status": "live", "note": "cgroup-v2 conditional" },
+    { "name": "agent_memory_current_bytes", "type": "gauge", "status": "live", "note": "cgroup-v2 conditional" },
+    { "name": "agent_subagent_stuck_kills_total", "type": "counter", "labels": ["signal"], "status": "live" },
+    { "name": "agent_subagents_spawned_total", "type": "counter", "status": "live", "note": "counts EVERY child incl. turn/think workers — not a subagent-volume metric" },
+    { "name": "agent_subagents_exited_total", "type": "counter", "status": "live", "note": "same caveat as spawned_total" },
+    { "name": "agent_limit_exceeded_total", "type": "counter", "labels": ["limit"], "status": "live", "note": "most legs are child_local; only tree_tokens is supervisor-owned" },
+    { "name": "agent_loop_steps_total", "type": "counter", "status": "child_local" },
+    { "name": "agent_refusals_total", "type": "counter", "status": "child_local" },
+    { "name": "agent_pending_events", "type": "gauge", "status": "reserved" },
+    { "name": "agent_inflight_reactions", "type": "gauge", "status": "reserved" },
+    { "name": "agent_reaction_lag_ms", "type": "gauge", "status": "reserved" },
+    { "name": "agent_subscriptions_active", "type": "gauge", "status": "reserved" },
+    { "name": "agent_active_subagents", "type": "gauge", "status": "reserved" },
+    { "name": "agent_tree_depth", "type": "gauge", "status": "reserved" },
+    { "name": "agent_tree_breadth", "type": "gauge", "status": "reserved" },
+    { "name": "agent_paused", "type": "gauge", "status": "reserved", "note": "rendered, never written — read the A2A status command instead" },
+    { "name": "agent_config_generation", "type": "gauge", "status": "reserved", "note": "rendered, never written — read config.reloaded log / durable manifest" },
+    { "name": "agent_tool_calls_total", "type": "counter", "labels": ["server", "tool", "ok"], "status": "reserved", "note": "derive from tool.result log lines" },
+    { "name": "agent_run_duration_ms", "type": "histogram", "status": "reserved" },
+    { "name": "agent_intel_call_duration_ms", "type": "histogram", "status": "reserved" },
+    { "name": "agent_tool_call_duration_ms", "type": "histogram", "status": "reserved" }
+  ],
+  "endpoints": {
+    "metrics": "GET /metrics (text/plain; version=0.0.4)",
+    "healthz": "GET /healthz — reactor heartbeat freshness; an idle reactive agent is healthy; a stuck subagent must not fail pod liveness",
+    "readyz": "GET /readyz — 503 while lame-duck, draining, or intel_all_down"
+  }
 }

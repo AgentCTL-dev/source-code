@@ -1,598 +1,493 @@
-// SPDX-License-Identifier: Apache-2.0
-//! # agent-contract-client
+//! # agent-contract-client — typed access to the ACC 2 contract
 //!
-//! The typed client for the **Agent Control Contract (ACC)** — the
-//! language-neutral contract that agentctl consumes and that *any* conformant
-//! agent implements (see `contract/`).
+//! The August-2026 agent rewrite removed the ACC 1.x negotiation anchor: the
+//! capabilities manifest no longer carries `contract_version` or a `surfaces{}`
+//! block, and it under-reports several planes (see `contract/SPEC.md` §3).
+//! ACC 2 therefore negotiates on **four independent clocks**, each owned by its
+//! own artifact, and treats `--capabilities` as *informational*:
 //!
-//! **Design principle:** agentctl depends on the *contract*, never on a specific
-//! agent. `agentd` is the reference implementation only. This crate therefore
-//! models the contract's wire shapes — it does not import any agent's types.
+//! 1. the config schema's `x-agentd-contract-version` (config-document contract),
+//! 2. the workflow schema `$id` dialect (`workflow-3`),
+//! 3. the exit-code table (`exit_codes`),
+//! 4. the metrics registry (`metrics_schema`).
 //!
-//! Most of the manifest is plain serde. The load-bearing exceptions are the
-//! `surfaces{}` **sum types** that codegen cannot derive; these carry
-//! hand-written [`Deserialize`] impls here:
-//!
-//! | field | shape | type |
-//! |---|---|---|
-//! | `surfaces.management` / `surfaces.metrics` | `false \| string` | [`SurfaceAddr`] |
-//! | `surfaces.a2a` | `false \| object` | [`A2aSurface`] |
-//! | `surfaces.claim` | `bool \| object` | [`ClaimSurface`] |
-//! | `surfaces.shard` | `string \| null` | `Option<String>` |
-//! | `intelligence.healthy` | `"unknown" \| bool` | [`Health`] |
-//!
-//! One invariant from the contract's version-negotiation rules is enforced
-//! structurally:
-//!
-//! * **Additive tolerance** — every struct ignores unknown fields (no
-//!   `deny_unknown_fields`), so a newer agent that adds manifest keys, surface
-//!   keys, or operator tools still parses. A consumer refuses only an unknown
-//!   **major** (see [`Manifest::negotiate`]).
+//! The vendored copies under `contract/schemas/` are compiled in ([`clocks`],
+//! [`exit_codes`], [`metrics`], [`restart_only`]) so every control-plane
+//! component branches on one baseline; conformance re-captures them from the
+//! pinned binary and diffs. Parsing stays additive-tolerant everywhere: no
+//! `deny_unknown_fields`, `Option` for anything upstream might drop.
 
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
+use std::fmt;
 
-/// The contract major version this client understands. A manifest whose
-/// `contract_version` major differs is refused ([`Manifest::negotiate`]); a
-/// differing minor is tolerated (additive-by-minor).
-///
-/// Under contract major 1 the reference agent serves exclusively over HTTP:
-/// MCP servers are remote `https://` endpoints, the A2A methods use the bare
-/// PascalCase binding, and the serving surface is mTLS HTTPS. The `surfaces{}`
-/// sum types below are transport-agnostic, so they remain valid regardless of
-/// transport; the major version is the compatibility gate.
-pub const SUPPORTED_MAJOR: u32 = 1;
-
-// ---------------------------------------------------------------------------
-// The capabilities manifest
-// ---------------------------------------------------------------------------
-
-/// The capabilities manifest — the discovery spine of the contract. Emitted by
-/// `--capabilities` (one-shot) and the `agent://capabilities` resource (live).
-#[derive(Debug, Clone, Deserialize)]
-pub struct Manifest {
-    /// The contract version, `major.minor` (e.g. `"1.0"`). The only key a
-    /// consumer must understand before anything else; gate on it via
-    /// [`Manifest::negotiate`].
-    pub contract_version: String,
-
-    /// The agent-version key the reference agent emits (descriptive metadata;
-    /// resolve via [`Manifest::version`]).
-    #[serde(default)]
-    pub agent_version: Option<String>,
-
-    /// Compiled-in build features. **OPAQUE / agent-defined — never branch on a
-    /// value here.** Capability discovery keys exclusively off [`Surfaces`].
-    /// Useful only as diagnostic metadata and as a cache discriminator.
-    #[serde(default)]
-    pub build_features: Vec<String>,
-
-    /// Downward-API instance identity (all fields optional / null when run
-    /// outside a cluster).
-    #[serde(default)]
-    pub identity: Identity,
-
-    /// The configured run shape (`once` / `loop` / `reactive` / `schedule`).
-    #[serde(default)]
-    pub mode: Option<String>,
-    /// Operator-declared model id (metadata, never a secret).
-    #[serde(default)]
-    pub model: Option<String>,
-
-    /// Intelligence binding (structural only — transport + endpoint count +
-    /// reachability; never a URL or credential).
-    #[serde(default)]
-    pub intelligence: Intelligence,
-
-    /// Resolved limits/budgets.
-    #[serde(default)]
-    pub limits: Limits,
-
-    /// Declared MCP servers and their capability tags.
-    #[serde(default)]
-    pub mcp_servers: Vec<McpServer>,
-
-    /// Whether the gated `exec` capability is enabled.
-    #[serde(default)]
-    pub exec_enabled: bool,
-    /// Whether the lethal-trifecta override is permitted for this instance.
-    #[serde(default)]
-    pub allow_trifecta: bool,
-
-    /// **The single discovery point**: which control-plane surfaces this build/
-    /// config actually serves. Drive only what is declared (graceful
-    /// degradation).
-    pub surfaces: Surfaces,
-}
-
-impl Manifest {
-    /// Resolve and validate the contract version. Returns the parsed version on
-    /// success; errors only on a malformed string or an **unsupported major**
-    /// (the one breaking condition — additive minors are accepted).
-    pub fn negotiate(&self) -> Result<ContractVersion, NegotiationError> {
-        let v = ContractVersion::parse(&self.contract_version)?;
-        if v.major != SUPPORTED_MAJOR {
-            return Err(NegotiationError::UnsupportedMajor {
-                found: v.major,
-                supported: SUPPORTED_MAJOR,
-            });
-        }
-        Ok(v)
-    }
-
-    /// The agent version, from the neutral `agent_version` key.
-    pub fn version(&self) -> Option<&str> {
-        self.agent_version.as_deref()
-    }
-}
-
-/// Downward-API instance identity (contract `env-convention`). All optional —
-/// descriptive, not load-bearing.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Identity {
-    #[serde(default)]
-    pub run_id: Option<String>,
-    #[serde(default)]
-    pub instance: Option<String>,
-    #[serde(default)]
-    pub namespace: Option<String>,
-    #[serde(default)]
-    pub node: Option<String>,
-    #[serde(default)]
-    pub uid: Option<String>,
-}
-
-/// Structural intelligence binding (no URLs, no credentials).
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Intelligence {
-    #[serde(default)]
-    pub endpoints: u32,
-    #[serde(default)]
-    pub transport: Option<String>,
-    #[serde(default)]
-    pub healthy: Health,
-}
-
-/// Resolved limits/budgets. Additive-tolerant.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Limits {
-    #[serde(default)]
-    pub deadline_ms: Option<u64>,
-    #[serde(default)]
-    pub drain_timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub max_children: Option<u64>,
-    #[serde(default)]
-    pub max_depth: Option<u64>,
-    #[serde(default)]
-    pub max_steps: Option<u64>,
-    #[serde(default)]
-    pub max_tokens: Option<u64>,
-    #[serde(default)]
-    pub max_total_subagents: Option<u64>,
-    #[serde(default)]
-    pub tree_token_budget: Option<u64>,
-}
-
-/// A declared MCP server and its capability/trifecta tags.
-#[derive(Debug, Clone, Deserialize)]
-pub struct McpServer {
-    pub name: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-// ---------------------------------------------------------------------------
-// surfaces{} — the discovery block (with the sum-type fields)
-// ---------------------------------------------------------------------------
-
-/// The `surfaces{}` block: the single point where an agent advertises which
-/// control-plane surfaces it serves. A key absent/off ⇒ that surface is unbuilt
-/// ⇒ the consumer degrades gracefully.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Surfaces {
-    /// Management transport address, or off.
-    #[serde(default = "SurfaceAddr::off")]
-    pub management: SurfaceAddr,
-    /// Prometheus `/metrics` scrape address, or off.
-    #[serde(default = "SurfaceAddr::off")]
-    pub metrics: SurfaceAddr,
-    /// A2A surface (methods/streaming/version), or off.
-    #[serde(default = "A2aSurface::off")]
-    pub a2a: A2aSurface,
-    /// Work-claim styles, if the claim surface is served.
-    #[serde(default)]
-    pub claim: Option<ClaimSurface>,
-    /// Workflow-execution surface (dialect + checkpoint/resume), if served.
-    /// Omitted-when-absent. Gate resumable-workflow behaviour on
-    /// [`WorkflowSurface::resumable`] (`dialect >= 2 && checkpoint`).
-    #[serde(default)]
-    pub workflow: Option<WorkflowSurface>,
-    /// AAuth identity surface, if the agent carries a portable AAuth identity
-    /// (RFC 0023). Omitted-when-absent (a stock/unconfigured build). Carries
-    /// the draft marker, the bound provider, and the resolved identity —
-    /// never key or token material.
-    #[serde(default)]
-    pub aauth: Option<AauthSurface>,
-    /// Shard identity `"K/N"`, or `null`.
-    #[serde(default)]
-    pub shard: Option<String>,
-
-    #[serde(default)]
-    pub events: bool,
-    #[serde(default)]
-    pub hot_reload: bool,
-    #[serde(default)]
-    pub config_validate: bool,
-    #[serde(default)]
-    pub config_schema: bool,
-    #[serde(default)]
-    pub intelligence: bool,
-    #[serde(default)]
-    pub cluster: bool,
-    #[serde(default)]
-    pub standby: bool,
-
-    /// Sub-schema versions surfaced for independent negotiation.
-    #[serde(default)]
-    pub metrics_schema: Option<String>,
-    #[serde(default)]
-    pub report_schema: Option<String>,
-    #[serde(default)]
-    pub exit_codes: Option<String>,
-
-    /// The operator tools actually served (read this — never hardcode the set).
-    #[serde(default)]
-    pub operator_tools: Vec<String>,
-}
-
-/// `false | string` — a served surface address, or off. (`true` is rejected.)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SurfaceAddr {
-    /// The surface is not served.
-    Off,
-    /// The surface is served at this address (e.g. the mTLS HTTPS management
-    /// address `"https://0.0.0.0:8443"` or the metrics scrape address
-    /// `"127.0.0.1:9090"`).
-    At(String),
-}
-
-impl SurfaceAddr {
-    fn off() -> Self {
-        SurfaceAddr::Off
-    }
-    /// The address if served, else `None`.
-    pub fn addr(&self) -> Option<&str> {
-        match self {
-            SurfaceAddr::At(s) => Some(s),
-            SurfaceAddr::Off => None,
-        }
-    }
-    /// Whether the surface is served.
-    pub fn is_served(&self) -> bool {
-        matches!(self, SurfaceAddr::At(_))
-    }
-}
-
-impl<'de> Deserialize<'de> for SurfaceAddr {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        match serde_json::Value::deserialize(d)? {
-            serde_json::Value::Bool(false) => Ok(SurfaceAddr::Off),
-            serde_json::Value::String(s) => Ok(SurfaceAddr::At(s)),
-            other => Err(D::Error::custom(format!(
-                "surface address must be `false` or a string, got {other}"
-            ))),
-        }
-    }
-}
-
-/// `false | object` — the A2A surface descriptor, or off.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum A2aSurface {
-    /// A2A is not served.
-    Off,
-    /// A2A is served with this descriptor.
-    On(A2aInfo),
-}
-
-/// The served-A2A descriptor.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct A2aInfo {
-    pub version: String,
-    #[serde(default)]
-    pub streaming: bool,
-    #[serde(default)]
-    pub methods: Vec<String>,
-}
-
-impl A2aSurface {
-    fn off() -> Self {
-        A2aSurface::Off
-    }
-    /// The descriptor if served, else `None`.
-    pub fn info(&self) -> Option<&A2aInfo> {
-        match self {
-            A2aSurface::On(i) => Some(i),
-            A2aSurface::Off => None,
-        }
-    }
-    /// Whether A2A is served.
-    pub fn is_served(&self) -> bool {
-        matches!(self, A2aSurface::On(_))
-    }
-}
-
-impl<'de> Deserialize<'de> for A2aSurface {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = serde_json::Value::deserialize(d)?;
-        match v {
-            serde_json::Value::Bool(false) => Ok(A2aSurface::Off),
-            serde_json::Value::Object(_) => serde_json::from_value(v)
-                .map(A2aSurface::On)
-                .map_err(D::Error::custom),
-            other => Err(D::Error::custom(format!(
-                "surfaces.a2a must be `false` or an object, got {other}"
-            ))),
-        }
-    }
-}
-
-/// `bool | object` — the work-claim surface. Per the contract this is
-/// omitted-when-absent rather than `false`, but both spellings are accepted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClaimSurface {
-    /// Claiming is not served.
-    Off,
-    /// Claiming is served with these styles (e.g. `["tool", "resource"]`).
-    On { styles: Vec<String> },
-}
-
-impl ClaimSurface {
-    /// The claim styles if served, else `None`.
-    pub fn styles(&self) -> Option<&[String]> {
-        match self {
-            ClaimSurface::On { styles } => Some(styles),
-            ClaimSurface::Off => None,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ClaimSurface {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Styles {
-            #[serde(default)]
-            styles: Vec<String>,
-        }
-        match serde_json::Value::deserialize(d)? {
-            serde_json::Value::Bool(b) => Ok(if b {
-                ClaimSurface::On { styles: Vec::new() }
-            } else {
-                ClaimSurface::Off
-            }),
-            v @ serde_json::Value::Object(_) => {
-                let s: Styles = serde_json::from_value(v).map_err(D::Error::custom)?;
-                Ok(ClaimSurface::On { styles: s.styles })
-            }
-            other => Err(D::Error::custom(format!(
-                "surfaces.claim must be a bool or an object, got {other}"
-            ))),
-        }
-    }
-}
-
-/// `bool | object` — the workflow-execution surface. Per the contract this is
-/// omitted-when-absent (a build without a workflow engine leaves the key out);
-/// a bare `true` is accepted as an object with `dialect == 1` and no checkpoint.
-/// The resumable-workflow capability (checkpoint/resume + the INPUT_REQUIRED
-/// gate + `--workflow-resume`) is advertised by `dialect >= 2 && checkpoint`;
-/// read it via [`WorkflowSurface::resumable`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkflowSurface {
-    /// A workflow engine is not served.
-    Off,
-    /// A workflow engine is served with this dialect + checkpoint capability.
-    On {
-        /// Workflow-graph dialect version (>= 2 introduces checkpoint/resume).
-        dialect: u32,
-        /// Whether checkpoint/resume (INPUT_REQUIRED gate + gate-reply) is served.
-        checkpoint: bool,
-    },
-}
-
-impl WorkflowSurface {
-    /// Whether a workflow engine is served at all.
-    pub fn is_served(&self) -> bool {
-        matches!(self, WorkflowSurface::On { .. })
-    }
-    /// Whether the RESUMABLE workflow surface is served: `dialect >= 2` AND
-    /// `checkpoint`. This is the single gate a consumer keys the
-    /// checkpoint/resume + INPUT_REQUIRED-gate behaviour off.
-    pub fn resumable(&self) -> bool {
-        matches!(self, WorkflowSurface::On { dialect, checkpoint } if *dialect >= 2 && *checkpoint)
-    }
-}
-
-impl<'de> Deserialize<'de> for WorkflowSurface {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Wf {
-            #[serde(default = "one")]
-            dialect: u32,
-            #[serde(default)]
-            checkpoint: bool,
-        }
-        fn one() -> u32 {
-            1
-        }
-        match serde_json::Value::deserialize(d)? {
-            serde_json::Value::Bool(false) => Ok(WorkflowSurface::Off),
-            serde_json::Value::Bool(true) => Ok(WorkflowSurface::On {
-                dialect: 1,
-                checkpoint: false,
-            }),
-            v @ serde_json::Value::Object(_) => {
-                let w: Wf = serde_json::from_value(v).map_err(D::Error::custom)?;
-                Ok(WorkflowSurface::On {
-                    dialect: w.dialect,
-                    checkpoint: w.checkpoint,
-                })
-            }
-            other => Err(D::Error::custom(format!(
-                "surfaces.workflow must be a bool or an object, got {other}"
-            ))),
-        }
-    }
-}
-
-/// `surfaces.aauth` — the portable-identity surface (RFC 0023): `false`/omitted
-/// (a stock or unconfigured build) or an object `{draft, provider, agent}`.
-/// `agent` is `null` until the instance has enrolled + fetched its first token
-/// (`aauth.ready`). The surface NEVER carries key or token material. While
-/// `draft` is true the underlying protocol tracks unreleased IETF drafts —
-/// consumers treat the capability as experimental.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AauthSurface {
-    /// No AAuth identity is configured/built.
-    Off,
-    /// An AAuth identity is configured.
-    On {
-        /// The protocol is a draft; treat as experimental while true.
-        draft: bool,
-        /// The Agent Provider issuer URL this instance is bound to.
-        provider: String,
-        /// The resolved identity (`aauth:local@domain`), or `None` pre-enroll.
-        agent: Option<String>,
-    },
-}
-
-impl AauthSurface {
-    /// Whether an AAuth identity is configured at all.
-    pub fn is_served(&self) -> bool {
-        matches!(self, AauthSurface::On { .. })
-    }
-    /// The resolved identity, once the instance has enrolled.
-    pub fn agent_id(&self) -> Option<&str> {
-        match self {
-            AauthSurface::On {
-                agent: Some(id), ..
-            } => Some(id),
-            _ => None,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for AauthSurface {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Aa {
-            #[serde(default)]
-            draft: bool,
-            provider: String,
-            #[serde(default)]
-            agent: Option<String>,
-        }
-        match serde_json::Value::deserialize(d)? {
-            serde_json::Value::Bool(false) => Ok(AauthSurface::Off),
-            v @ serde_json::Value::Object(_) => {
-                let a: Aa = serde_json::from_value(v).map_err(D::Error::custom)?;
-                Ok(AauthSurface::On {
-                    draft: a.draft,
-                    provider: a.provider,
-                    agent: a.agent,
-                })
-            }
-            other => Err(D::Error::custom(format!(
-                "surfaces.aauth must be `false` or an object, got {other}"
-            ))),
-        }
-    }
-}
-
-/// `"unknown" | bool` — intelligence reachability, or unknown pre-connect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Health {
-    /// Reachability not yet known (e.g. a pre-connect `--capabilities` probe).
-    #[default]
-    Unknown,
-    /// Last-known reachability.
-    Known(bool),
-}
-
-impl<'de> Deserialize<'de> for Health {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        match serde_json::Value::deserialize(d)? {
-            serde_json::Value::String(s) if s == "unknown" => Ok(Health::Unknown),
-            serde_json::Value::Bool(b) => Ok(Health::Known(b)),
-            other => Err(D::Error::custom(format!(
-                "intelligence.healthy must be `\"unknown\"` or a bool, got {other}"
-            ))),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Version negotiation
-// ---------------------------------------------------------------------------
-
-/// A parsed `major.minor` contract version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContractVersion {
+/// A `major.minor` clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Version {
     pub major: u32,
     pub minor: u32,
 }
 
-impl ContractVersion {
-    /// Parse a `"major.minor"` string.
-    pub fn parse(s: &str) -> Result<Self, NegotiationError> {
-        let (maj, min) = s
-            .split_once('.')
-            .ok_or_else(|| NegotiationError::Malformed(s.to_string()))?;
-        let major = maj
-            .parse()
-            .map_err(|_| NegotiationError::Malformed(s.to_string()))?;
-        let minor = min
-            .parse()
-            .map_err(|_| NegotiationError::Malformed(s.to_string()))?;
-        Ok(ContractVersion { major, minor })
+impl Version {
+    /// Parse `"1.0"`-style strings.
+    pub fn parse(s: &str) -> Option<Version> {
+        let (maj, min) = s.split_once('.')?;
+        Some(Version {
+            major: maj.parse().ok()?,
+            minor: min.parse().ok()?,
+        })
     }
 }
 
-impl std::fmt::Display for ContractVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}", self.major, self.minor)
     }
 }
 
-/// Why a manifest's contract version could not be accepted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NegotiationError {
-    /// `contract_version` was not a `major.minor` string.
-    Malformed(String),
-    /// The major version is one this client does not understand.
-    UnsupportedMajor { found: u32, supported: u32 },
+/// Contract skew: a clock the client cannot manage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkewError {
+    /// A clock string was absent or unparsable.
+    Malformed { clock: &'static str, found: String },
+    /// A major this build does not understand.
+    UnsupportedMajor {
+        clock: &'static str,
+        found: Version,
+        supported: u32,
+    },
 }
 
-impl std::fmt::Display for NegotiationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SkewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NegotiationError::Malformed(s) => {
-                write!(
-                    f,
-                    "malformed contract_version: {s:?} (want \"major.minor\")"
-                )
+            SkewError::Malformed { clock, found } => {
+                write!(f, "{clock}: malformed version {found:?} (want \"major.minor\")")
             }
-            NegotiationError::UnsupportedMajor { found, supported } => write!(
+            SkewError::UnsupportedMajor {
+                clock,
+                found,
+                supported,
+            } => write!(
                 f,
-                "unsupported contract major {found} (this client speaks major {supported})"
+                "{clock}: major {found} is not supported (this agentctl speaks major {supported}) — refuse to manage this agent version"
             ),
         }
     }
 }
 
-impl std::error::Error for NegotiationError {}
+impl std::error::Error for SkewError {}
 
-/// Parse a capabilities manifest from JSON.
+/// The four negotiation clocks (ACC 2, `contract/SPEC.md` §3).
+pub mod clocks {
+    use super::{SkewError, Version};
+
+    /// `x-agentd-contract-version` major this build renders documents for.
+    pub const CONFIG_CONTRACT_MAJOR: u32 = 1;
+    /// The workflow dialect this build authors/validates.
+    pub const WORKFLOW_DIALECT: u32 = 3;
+    /// The exit-code table major compiled into `podFailurePolicy` rules.
+    pub const EXIT_CODES_MAJOR: u32 = 1;
+    /// The metrics schema major dashboards/scalers are built against.
+    pub const METRICS_SCHEMA_MAJOR: u32 = 1;
+
+    /// Read + gate the config-contract clock from a served/vendored config
+    /// schema document (the JSON of `agentd --config-schema`).
+    pub fn negotiate_config_schema(schema: &serde_json::Value) -> Result<Version, SkewError> {
+        let found = schema
+            .get("x-agentd-contract-version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let v = Version::parse(found).ok_or(SkewError::Malformed {
+            clock: "x-agentd-contract-version",
+            found: found.to_string(),
+        })?;
+        if v.major != CONFIG_CONTRACT_MAJOR {
+            return Err(SkewError::UnsupportedMajor {
+                clock: "x-agentd-contract-version",
+                found: v,
+                supported: CONFIG_CONTRACT_MAJOR,
+            });
+        }
+        Ok(v)
+    }
+
+    /// Gate the workflow dialect from a workflow schema `$id`
+    /// (`https://agentd.dev/schema/workflow-<dialect>.json`).
+    pub fn negotiate_workflow_schema(schema: &serde_json::Value) -> Result<u32, SkewError> {
+        let id = schema
+            .get("$id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let dialect = id
+            .rsplit_once("workflow-")
+            .and_then(|(_, tail)| tail.strip_suffix(".json"))
+            .and_then(|d| d.parse::<u32>().ok())
+            .ok_or(SkewError::Malformed {
+                clock: "workflow-schema $id",
+                found: id.to_string(),
+            })?;
+        if dialect != WORKFLOW_DIALECT {
+            return Err(SkewError::UnsupportedMajor {
+                clock: "workflow-dialect",
+                found: Version {
+                    major: dialect,
+                    minor: 0,
+                },
+                supported: WORKFLOW_DIALECT,
+            });
+        }
+        Ok(dialect)
+    }
+
+    /// The vendored config schema (captured from the pinned binary).
+    pub fn vendored_config_schema() -> serde_json::Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contract/schemas/config.schema.json"
+        )))
+        .expect("vendored config schema parses")
+    }
+
+    /// The vendored workflow schema (captured from the pinned binary).
+    pub fn vendored_workflow_schema() -> serde_json::Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contract/schemas/workflow.schema.json"
+        )))
+        .expect("vendored workflow schema parses")
+    }
+}
+
+/// The exit-code table + `podFailurePolicy` intents (vendored, `exit_codes 1.0`).
+pub mod exit_codes {
+    use super::Version;
+    use serde::Deserialize;
+
+    /// The five intents a control plane compiles exit codes into.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Intent {
+        Complete,
+        Terminal,
+        Retriable,
+        Policy,
+        Infra,
+    }
+
+    impl Intent {
+        fn parse(s: &str) -> Option<Intent> {
+            Some(match s {
+                "complete" => Intent::Complete,
+                "terminal" => Intent::Terminal,
+                "retriable" => Intent::Retriable,
+                "policy" => Intent::Policy,
+                "infra" => Intent::Infra,
+                _ => return None,
+            })
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RawCode {
+        code: i32,
+        name: String,
+        intent: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RawTable {
+        exit_codes: String,
+        codes: Vec<RawCode>,
+    }
+
+    /// The parsed table.
+    #[derive(Debug)]
+    pub struct Table {
+        pub version: Version,
+        codes: Vec<(i32, String, Intent)>,
+    }
+
+    impl Table {
+        /// The vendored table, compiled in. Panics only if the vendored file is
+        /// corrupt (a build-time defect, caught by tests).
+        pub fn vendored() -> Table {
+            let raw: RawTable = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../contract/schemas/exit-codes.table.json"
+            )))
+            .expect("vendored exit-code table parses");
+            Table {
+                version: Version::parse(&raw.exit_codes).expect("exit_codes version"),
+                codes: raw
+                    .codes
+                    .into_iter()
+                    .map(|c| {
+                        let i = Intent::parse(&c.intent)
+                            .unwrap_or_else(|| panic!("unknown intent {:?}", c.intent));
+                        (c.code, c.name, i)
+                    })
+                    .collect(),
+            }
+        }
+
+        pub fn is_known(&self, code: i32) -> bool {
+            self.codes.iter().any(|(c, _, _)| *c == code)
+        }
+
+        pub fn name(&self, code: i32) -> Option<&str> {
+            self.codes
+                .iter()
+                .find(|(c, _, _)| *c == code)
+                .map(|(_, n, _)| n.as_str())
+        }
+
+        /// The frozen mapping; an unknown code is `retriable` (the table's own
+        /// conservative rule).
+        pub fn intent(&self, code: i32) -> Intent {
+            self.codes
+                .iter()
+                .find(|(c, _, _)| *c == code)
+                .map(|(_, _, i)| *i)
+                .unwrap_or(Intent::Retriable)
+        }
+
+        /// The codes carrying one intent — the input to a `podFailurePolicy`
+        /// rule (`FailJob` over `terminal`, `Count` over `retriable`+`policy`).
+        pub fn codes_with_intent(&self, intent: Intent) -> Vec<i32> {
+            self.codes
+                .iter()
+                .filter(|(_, _, i)| *i == intent)
+                .map(|(c, _, _)| *c)
+                .collect()
+        }
+    }
+}
+
+/// The metrics registry (vendored, `metrics_schema 1.2`).
+pub mod metrics {
+    use super::Version;
+    use serde::Deserialize;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Status {
+        /// Written at runtime — safe to alert/scale on.
+        Live,
+        /// Rendered but flat/never written — MUST NOT be targeted.
+        Reserved,
+        /// Incremented in the child process — a supervisor scrape under-reports.
+        ChildLocal,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RawMetric {
+        name: String,
+        status: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RawRegistry {
+        metrics_schema: String,
+        metrics: Vec<RawMetric>,
+        scaler_guidance: RawGuidance,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RawGuidance {
+        primary: String,
+    }
+
+    #[derive(Debug)]
+    pub struct Registry {
+        pub version: Version,
+        pub scaler_primary: String,
+        metrics: Vec<(String, Status)>,
+    }
+
+    impl Registry {
+        pub fn vendored() -> Registry {
+            let raw: RawRegistry = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../contract/schemas/metrics.registry.json"
+            )))
+            .expect("vendored metrics registry parses");
+            Registry {
+                version: Version::parse(&raw.metrics_schema).expect("metrics_schema version"),
+                scaler_primary: raw.scaler_guidance.primary,
+                metrics: raw
+                    .metrics
+                    .into_iter()
+                    .map(|m| {
+                        let s = match m.status.as_str() {
+                            "live" => Status::Live,
+                            "reserved" => Status::Reserved,
+                            "child_local" => Status::ChildLocal,
+                            other => panic!("unknown metric status {other:?}"),
+                        };
+                        (m.name, s)
+                    })
+                    .collect(),
+            }
+        }
+
+        pub fn status(&self, name: &str) -> Option<Status> {
+            self.metrics
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| *s)
+        }
+
+        pub fn is_registered(&self, name: &str) -> bool {
+            self.status(name).is_some()
+        }
+
+        /// A metric a scaler/alert may target.
+        pub fn is_live(&self, name: &str) -> bool {
+            self.status(name) == Some(Status::Live)
+        }
+    }
+}
+
+/// The reload/restart config partition (vendored `restart-only.json`).
+pub mod restart_only {
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct Raw {
+        restart_only_paths: Vec<String>,
+    }
+
+    /// The vendored path list.
+    pub fn paths() -> Vec<String> {
+        let raw: Raw = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contract/schemas/restart-only.json"
+        )))
+        .expect("vendored restart-only list parses");
+        raw.restart_only_paths
+    }
+
+    /// Does a changed dotted path fall in the restart-only partition?
+    /// Subtree semantics both ways: entry `security` covers a change at
+    /// `security.policies`; a change replacing the whole `a2a` object covers
+    /// the entry `a2a.tls`.
+    pub fn is_restart_only(changed_path: &str, entries: &[String]) -> bool {
+        entries.iter().any(|e| {
+            e == changed_path
+                || changed_path.starts_with(&format!("{e}."))
+                || e.starts_with(&format!("{changed_path}."))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The capabilities manifest (informational at ACC 2)
+// ---------------------------------------------------------------------------
+
+/// One workflow as the manifest reports it.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct WorkflowInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub inputs_schema: bool,
+    /// KNOWN GAP (U3): `webhook` and `stream` starts are missing here —
+    /// an empty list does not mean "no trigger".
+    #[serde(default)]
+    pub start_kinds: Vec<String>,
+}
+
+/// The `a2a` block when a listener is configured.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct A2aInfo {
+    #[serde(default)]
+    pub listen: Option<String>,
+    #[serde(default)]
+    pub bearer: bool,
+    /// The admin verbs this build serves (`a2a.drain`, …).
+    #[serde(default)]
+    pub admin: Vec<String>,
+    /// Built-in command ops. KNOWN GAP (U3): omits workflow-declared commands.
+    #[serde(default)]
+    pub command_ops: Vec<String>,
+}
+
+/// `agent` block.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AgentInfo {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub instruction: bool,
+    #[serde(default)]
+    pub preflight: Option<String>,
+}
+
+/// `intelligence` block.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct IntelligenceInfo {
+    #[serde(default)]
+    pub endpoints: u32,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// `lifecycle` block. `daemon` is documented-unreliable (U4): never the
+/// workload-shape oracle — the renderer decides shape from the spec.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LifecycleInfo {
+    #[serde(default)]
+    pub daemon: bool,
+    #[serde(default)]
+    pub run_until: Option<String>,
+}
+
+/// The v1.3.x `--capabilities` document. Additive-tolerant throughout; use it
+/// to *identify* an agent and enumerate its configured inventories — never to
+/// decide workload shape or trigger presence (`contract/SPEC.md` §3).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Manifest {
+    /// The config-document generation (`"1"`).
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// The agent semver (e.g. `"1.3.1"`).
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub agent: AgentInfo,
+    #[serde(default)]
+    pub intelligence: IntelligenceInfo,
+    #[serde(default)]
+    pub internal_tools: Vec<String>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowInfo>,
+    #[serde(default)]
+    pub a2a: Option<A2aInfo>,
+    #[serde(default)]
+    pub lifecycle: LifecycleInfo,
+    /// Untyped remainder (interface, store, skills, …) for forward-compat
+    /// readers that need a peek without a schema commitment.
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Manifest {
+    /// A manifest that identifies as the runtime generation this client
+    /// understands. (`None` runtime ⇒ pre-rewrite agent ⇒ unmanageable.)
+    pub fn is_runtime_1(&self) -> bool {
+        self.runtime.as_deref() == Some("1")
+    }
+
+    pub fn workflow(&self, name: &str) -> Option<&WorkflowInfo> {
+        self.workflows.iter().find(|w| w.name == name)
+    }
+
+    pub fn admin_verbs(&self) -> &[String] {
+        self.a2a.as_ref().map(|a| a.admin.as_slice()).unwrap_or(&[])
+    }
+}
+
+/// Parse a `--capabilities` document.
 pub fn parse_manifest(json: &str) -> serde_json::Result<Manifest> {
     serde_json::from_str(json)
 }
@@ -602,120 +497,110 @@ mod unit {
     use super::*;
 
     #[test]
-    fn contract_version_parses() {
-        assert_eq!(
-            ContractVersion::parse("1.0").unwrap(),
-            ContractVersion { major: 1, minor: 0 }
-        );
-        assert_eq!(
-            ContractVersion::parse("2.7").unwrap(),
-            ContractVersion { major: 2, minor: 7 }
-        );
-        assert!(ContractVersion::parse("1").is_err());
-        assert!(ContractVersion::parse("x.y").is_err());
+    fn version_parses_and_displays() {
+        let v = Version::parse("1.2").unwrap();
+        assert_eq!((v.major, v.minor), (1, 2));
+        assert_eq!(v.to_string(), "1.2");
+        assert!(Version::parse("nope").is_none());
+        assert!(Version::parse("3").is_none());
     }
 
     #[test]
-    fn health_sum_type() {
+    fn config_schema_clock_negotiates_and_refuses() {
+        let ok = serde_json::json!({ "x-agentd-contract-version": "1.0" });
         assert_eq!(
-            serde_json::from_str::<Health>("\"unknown\"").unwrap(),
-            Health::Unknown
+            clocks::negotiate_config_schema(&ok).unwrap(),
+            Version { major: 1, minor: 0 }
         );
-        assert_eq!(
-            serde_json::from_str::<Health>("true").unwrap(),
-            Health::Known(true)
-        );
-        assert!(serde_json::from_str::<Health>("\"maybe\"").is_err());
+        let newer_minor = serde_json::json!({ "x-agentd-contract-version": "1.7" });
+        assert!(clocks::negotiate_config_schema(&newer_minor).is_ok());
+        let major = serde_json::json!({ "x-agentd-contract-version": "2.0" });
+        assert!(matches!(
+            clocks::negotiate_config_schema(&major),
+            Err(SkewError::UnsupportedMajor { .. })
+        ));
+        let absent = serde_json::json!({});
+        assert!(matches!(
+            clocks::negotiate_config_schema(&absent),
+            Err(SkewError::Malformed { .. })
+        ));
     }
 
     #[test]
-    fn surface_addr_rejects_true() {
+    fn vendored_schemas_carry_the_supported_clocks() {
+        let cfg = clocks::vendored_config_schema();
+        let v = clocks::negotiate_config_schema(&cfg).expect("vendored config clock");
+        assert_eq!(v.major, clocks::CONFIG_CONTRACT_MAJOR);
+        let wf = clocks::vendored_workflow_schema();
         assert_eq!(
-            serde_json::from_str::<SurfaceAddr>("false").unwrap(),
-            SurfaceAddr::Off
+            clocks::negotiate_workflow_schema(&wf).expect("vendored workflow clock"),
+            clocks::WORKFLOW_DIALECT
         );
-        assert_eq!(
-            serde_json::from_str::<SurfaceAddr>("\"https://0.0.0.0:8443\"").unwrap(),
-            SurfaceAddr::At("https://0.0.0.0:8443".into())
-        );
-        assert!(serde_json::from_str::<SurfaceAddr>("true").is_err());
     }
 
     #[test]
-    fn workflow_surface_detects_the_resumable_capability() {
-        use WorkflowSurface as W;
-        // Absent ⇒ Off ⇒ not resumable (via the Surfaces default).
-        let s: Surfaces = serde_json::from_str("{}").unwrap();
-        assert!(s.workflow.is_none());
-
-        // A base dialect-1 engine: served, but NOT resumable.
-        let base: W = serde_json::from_str(r#"{"dialect":1}"#).unwrap();
-        assert!(base.is_served());
-        assert!(!base.resumable());
-
-        // dialect >= 2 alone is not enough — checkpoint must also be true.
-        let no_ckpt: W = serde_json::from_str(r#"{"dialect":2}"#).unwrap();
-        assert!(!no_ckpt.resumable(), "dialect>=2 without checkpoint");
-
-        // The full resumable surface.
-        let full: W = serde_json::from_str(r#"{"dialect":2,"checkpoint":true}"#).unwrap();
-        assert!(full.resumable());
-        assert_eq!(
-            full,
-            W::On {
-                dialect: 2,
-                checkpoint: true
-            }
-        );
-
-        // `false` ⇒ Off; bare `true` ⇒ served-but-dialect-1 (not resumable).
-        assert_eq!(serde_json::from_str::<W>("false").unwrap(), W::Off);
-        assert!(!serde_json::from_str::<W>("true").unwrap().resumable());
-
-        // Parsed off a full manifest surfaces block.
-        let m = parse_manifest(
-            r#"{"contract_version":"1.0",
-                "surfaces":{"workflow":{"dialect":2,"checkpoint":true}}}"#,
-        )
-        .unwrap();
-        assert!(m.surfaces.workflow.as_ref().unwrap().resumable());
+    fn exit_code_table_matches_the_frozen_mapping() {
+        use exit_codes::Intent::*;
+        let t = exit_codes::Table::vendored();
+        assert_eq!(t.version, Version { major: 1, minor: 0 });
+        for (code, intent) in [
+            (0, Complete),
+            (2, Terminal),
+            (5, Terminal),
+            (3, Policy),
+            (7, Policy),
+            (124, Policy),
+            (1, Retriable),
+            (4, Retriable),
+            (6, Retriable),
+            (137, Infra),
+            (143, Infra),
+        ] {
+            assert_eq!(t.intent(code), intent, "code {code}");
+            assert!(t.is_known(code));
+        }
+        // The conservative default for a future additive code.
+        assert_eq!(t.intent(99), Retriable);
+        assert!(!t.is_known(99));
+        assert_eq!(t.codes_with_intent(Terminal), vec![2, 5]);
     }
 
     #[test]
-    fn aauth_surface_exposes_identity_never_material() {
-        use AauthSurface as A;
-        // Absent ⇒ None (a stock/unconfigured build leaves the key out).
-        let s: Surfaces = serde_json::from_str("{}").unwrap();
-        assert!(s.aauth.is_none());
-
-        // Configured but not yet enrolled: agent is null.
-        let pre: A =
-            serde_json::from_str(r#"{"draft":true,"provider":"https://ap.example"}"#).unwrap();
-        assert!(pre.is_served());
-        assert_eq!(pre.agent_id(), None);
-
-        // Enrolled: the resolved identity is readable.
-        let m = parse_manifest(
-            r#"{"contract_version":"1.0",
-                "surfaces":{"aauth":{"draft":true,
-                                     "provider":"https://ap.example",
-                                     "agent":"aauth:k7q3p9n2@ap.example"}}}"#,
-        )
-        .unwrap();
-        let a = m.surfaces.aauth.as_ref().unwrap();
-        assert_eq!(a.agent_id(), Some("aauth:k7q3p9n2@ap.example"));
-        assert_eq!(
-            a,
-            &A::On {
-                draft: true,
-                provider: "https://ap.example".into(),
-                agent: Some("aauth:k7q3p9n2@ap.example".into()),
-            }
+    fn metrics_registry_separates_live_from_reserved() {
+        let r = metrics::Registry::vendored();
+        assert_eq!(r.version, Version { major: 1, minor: 2 });
+        assert_eq!(r.scaler_primary, "agent_inbox_pending");
+        assert!(r.is_live("agent_inbox_pending"));
+        assert!(r.is_registered("agent_pending_events"));
+        assert!(
+            !r.is_live("agent_pending_events"),
+            "reserved-flat: never target"
         );
+        assert_eq!(
+            r.status("agent_loop_steps_total"),
+            Some(metrics::Status::ChildLocal)
+        );
+        assert!(!r.is_registered("agent_made_up_total"));
+    }
 
-        // `false` ⇒ Off; a missing provider on the object form is an error
-        // (the surface is meaningless without its issuer).
-        assert_eq!(serde_json::from_str::<A>("false").unwrap(), A::Off);
-        assert!(serde_json::from_str::<A>(r#"{"draft":true}"#).is_err());
+    #[test]
+    fn restart_only_matches_subtrees_both_ways() {
+        let entries = restart_only::paths();
+        assert!(entries.iter().any(|e| e == "security"));
+        assert!(restart_only::is_restart_only("security.policies", &entries));
+        assert!(restart_only::is_restart_only("store.kind", &entries));
+        assert!(
+            restart_only::is_restart_only("a2a", &entries),
+            "whole-object replace covers a2a.tls"
+        );
+        assert!(
+            !restart_only::is_restart_only("a2a.principals", &entries),
+            "principals hot-reload"
+        );
+        assert!(!restart_only::is_restart_only(
+            "intelligence.endpoints",
+            &entries
+        ));
+        assert!(!restart_only::is_restart_only("mcp.servers", &entries));
     }
 }

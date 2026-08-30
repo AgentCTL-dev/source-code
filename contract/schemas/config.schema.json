@@ -1,154 +1,3695 @@
 {
- "$defs": {
-  "A2aPeer": {
-   "additionalProperties": false,
-   "properties": {
-    "client_cert": {
-     "description": "client certificate PEM file path (mutual TLS to the peer; requires client_key)",
-     "type": "string"
+  "$defs": {
+    "A2aPeer": {
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/Auth"
+        },
+        "client_cert": {
+          "type": "string"
+        },
+        "client_key": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "endpoint"
+      ],
+      "type": "object"
     },
-    "client_key": {
-     "description": "client private-key PEM file path",
-     "type": "string"
+    "AAuth": {
+      "additionalProperties": false,
+      "properties": {
+        "enroll_assertion_file": {
+          "type": "string"
+        },
+        "enroll_token": {
+          "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+          "type": "string"
+        },
+        "key_file": {
+          "type": "string"
+        },
+        "person_server": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
     },
-    "endpoint": {
-     "type": "string"
+    "Auth": {
+      "additionalProperties": false,
+      "description": "A unified credential provider.",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "audience": {
+          "type": "string"
+        },
+        "authorization_url": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "client_secret": {
+          "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+          "type": "string"
+        },
+        "device_authorization_url": {
+          "type": "string"
+        },
+        "grant": {
+          "enum": [
+            "device",
+            "authorization_code",
+            "client_credentials"
+          ]
+        },
+        "header": {
+          "type": "string"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "jwt_svid_file": {
+          "type": "string"
+        },
+        "key_file": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "static",
+            "oauth2",
+            "aws",
+            "spiffe"
+          ]
+        },
+        "region": {
+          "type": "string"
+        },
+        "role_name": {
+          "type": "string"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "service": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "env",
+            "static",
+            "imds",
+            "irsa",
+            "sso"
+          ]
+        },
+        "sso_start_url": {
+          "type": "string"
+        },
+        "svid": {
+          "enum": [
+            "jwt",
+            "x509"
+          ]
+        },
+        "svid_file": {
+          "type": "string"
+        },
+        "token": {
+          "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+          "type": "string"
+        },
+        "token_url": {
+          "type": "string"
+        },
+        "value": {
+          "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
     },
-    "headers": {
-     "additionalProperties": {
-      "type": "string"
-     },
-     "description": "secret-free auth header templates presented to the peer ({{secret:NAME}} references)",
-     "type": "object"
+    "BudgetWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "per": {
+          "enum": [
+            "second",
+            "minute",
+            "hour",
+            "day",
+            "week"
+          ]
+        },
+        "requests": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "reset": {
+          "description": "calendar-window reset time (UTC), e.g. 00:00Z",
+          "pattern": "^[0-9]{2}:[0-9]{2}Z$",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "per"
+      ],
+      "type": "object"
     },
-    "name": {
-     "pattern": "^[a-zA-Z0-9_-]+$",
-     "type": "string"
+    "GoalAction": {
+      "oneOf": [
+        {
+          "enum": [
+            "finish",
+            "idle",
+            "replan",
+            "escalate"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "workflow": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workflow"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpOp": {
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "conflict_status": {
+          "maximum": 599,
+          "minimum": 100,
+          "type": "integer"
+        },
+        "keys": {
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "GET",
+            "PUT",
+            "POST",
+            "DELETE"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "McpServer": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "endpoint"
+          ]
+        },
+        {
+          "required": [
+            "service"
+          ]
+        }
+      ],
+      "properties": {
+        "aauth": {
+          "type": "boolean"
+        },
+        "allow": {
+          "description": "admit only advertised tools matching these globs",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "auth": {
+          "$ref": "#/$defs/Auth"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "exclude": {
+          "description": "never admit advertised tools matching these globs (beats allow)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "type": "string"
+        },
+        "ns": {
+          "description": "tool namespace prefix (`ns.tool`)",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "type": "string"
+        },
+        "oauth": {
+          "additionalProperties": false,
+          "properties": {
+            "client_id": {
+              "type": "string"
+            },
+            "client_secret": {
+              "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+              "type": "string"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "token_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token_url",
+            "client_id",
+            "client_secret"
+          ],
+          "type": "object"
+        },
+        "service": {
+          "description": "reference a services: catalog entry — inherit its connection settings (restating endpoint/auth/headers is refused) and narrow its tool ceiling",
+          "type": "string"
+        },
+        "tags": {
+          "additionalProperties": {
+            "items": {
+              "enum": [
+                "untrusted_input",
+                "sensitive",
+                "egress"
+              ]
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ParamSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {},
+        "description": {
+          "type": "string"
+        },
+        "enum": {
+          "type": "array"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "integer",
+            "boolean"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Pricing": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "input_per_1k": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "output_per_1k": {
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "Principal": {
+      "additionalProperties": false,
+      "properties": {
+        "grants": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "operator-declared attributes carried into the run, the MCP `_meta` and the audit line",
+          "type": "object"
+        },
+        "match": {
+          "additionalProperties": false,
+          "properties": {
+            "aauth_agent": {
+              "type": "string"
+            },
+            "any": {
+              "type": "boolean"
+            },
+            "bearer_ref": {
+              "type": "string"
+            },
+            "san": {
+              "type": "string"
+            },
+            "sub": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "quotas": {
+          "additionalProperties": false,
+          "properties": {
+            "budget": {
+              "additionalProperties": false,
+              "properties": {
+                "degrade": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "model": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "lifetime_tokens": {
+                  "description": "hard ceiling; 0 = unbounded",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "on_exhausted": {
+                  "enum": [
+                    "wait",
+                    "slow",
+                    "degrade",
+                    "refuse",
+                    "fail"
+                  ]
+                },
+                "reserve": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "estimate": {
+                      "enum": [
+                        "context",
+                        "fixed",
+                        "none"
+                      ]
+                    },
+                    "fixed": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "scope": {
+                  "items": {
+                    "enum": [
+                      "instance",
+                      "run",
+                      "conversation",
+                      "principal"
+                    ]
+                  },
+                  "type": "array"
+                },
+                "slow": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "factor": {
+                      "exclusiveMinimum": 0,
+                      "maximum": 1,
+                      "type": "number"
+                    }
+                  },
+                  "type": "object"
+                },
+                "windows": {
+                  "items": {
+                    "$ref": "#/$defs/BudgetWindow"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "rate": {
+              "description": "`<burst>/<per>s` arrival quota; operators are exempt",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "role": {
+          "enum": [
+            "operator",
+            "user",
+            "agent",
+            "anonymous"
+          ]
+        }
+      },
+      "required": [
+        "match",
+        "role"
+      ],
+      "type": "object"
+    },
+    "Service": {
+      "additionalProperties": false,
+      "description": "a service-catalog entry: connection settings, one shared credential, authoritative trifecta tags (a floor for any matching endpoint), and a tool-surface ceiling consumers can only narrow",
+      "properties": {
+        "allow": {
+          "description": "the CEILING: the widest advertised-tool surface any consumer may get",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "auth": {
+          "$ref": "#/$defs/Auth"
+        },
+        "endpoint": {
+          "description": "the connection URL and the dial-time match base (scheme + authority + path prefix)",
+          "type": "string"
+        },
+        "exclude": {
+          "description": "never admitted, unioned into every consumer (beats allow)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "kind": {
+          "description": "phase A: mcp only (intelligence/peer/http reserved)",
+          "enum": [
+            "mcp"
+          ]
+        },
+        "rate": {
+          "description": "per-instance pacing toward the service (`<burst>/<per>`, e.g. `60/1m`)",
+          "type": "string"
+        },
+        "tags": {
+          "additionalProperties": {
+            "items": {
+              "enum": [
+                "untrusted_input",
+                "sensitive",
+                "egress"
+              ]
+            },
+            "type": "array"
+          },
+          "description": "authoritative — unioned into any consumer whose endpoint matches, referencing or inline, open or closed",
+          "type": "object"
+        },
+        "timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "type": "object"
+    },
+    "SkillSource": {
+      "additionalProperties": false,
+      "properties": {
+        "discover": {
+          "enum": [
+            "prompts",
+            "resources",
+            "auto"
+          ]
+        },
+        "filter": {
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
+    "StoreFile": {
+      "additionalProperties": false,
+      "properties": {
+        "min_free": {
+          "description": "shed new work below this much free disk (256MB, 1.5GiB, bytes; 0 disables); warn at twice it",
+          "type": "string"
+        },
+        "path": {
+          "description": "the state root; default $AGENTD_STATE_DIR, else $XDG_STATE_HOME/agentd/state, else $HOME/.local/state/agentd/state, else the OS temp dir",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "StoreHttp": {
+      "additionalProperties": false,
+      "properties": {
+        "base_url": {
+          "type": "string"
+        },
+        "delete": {
+          "$ref": "#/$defs/HttpOp"
+        },
+        "get": {
+          "$ref": "#/$defs/HttpOp"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "list": {
+          "$ref": "#/$defs/HttpOp"
+        },
+        "put": {
+          "$ref": "#/$defs/HttpOp"
+        }
+      },
+      "required": [
+        "base_url"
+      ],
+      "type": "object"
+    },
+    "StoreMcp": {
+      "additionalProperties": false,
+      "properties": {
+        "delete": {
+          "$ref": "#/$defs/StoreOp"
+        },
+        "get": {
+          "$ref": "#/$defs/StoreOp"
+        },
+        "list": {
+          "$ref": "#/$defs/StoreOp"
+        },
+        "put": {
+          "$ref": "#/$defs/StoreOp"
+        },
+        "server": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
+    "StoreOp": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "type": "string"
+        },
+        "conflict": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool"
+      ],
+      "type": "object"
+    },
+    "SubagentTemplate": {
+      "additionalProperties": false,
+      "description": "an operator-declared subagent definition: `instruction` is a full instruction document — no config-defining directives = the flat worker; machinery (:::workflow/:::mcp/:::stream/:::config/:::tools) = an instance-tier child",
+      "properties": {
+        "budget": {
+          "additionalProperties": false,
+          "properties": {
+            "degrade": {
+              "additionalProperties": false,
+              "properties": {
+                "model": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "lifetime_tokens": {
+              "description": "hard ceiling; 0 = unbounded",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "on_exhausted": {
+              "enum": [
+                "wait",
+                "slow",
+                "degrade",
+                "refuse",
+                "fail"
+              ]
+            },
+            "reserve": {
+              "additionalProperties": false,
+              "properties": {
+                "estimate": {
+                  "enum": [
+                    "context",
+                    "fixed",
+                    "none"
+                  ]
+                },
+                "fixed": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "scope": {
+              "items": {
+                "enum": [
+                  "instance",
+                  "run",
+                  "conversation",
+                  "principal"
+                ]
+              },
+              "type": "array"
+            },
+            "slow": {
+              "additionalProperties": false,
+              "properties": {
+                "factor": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 1,
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "windows": {
+              "items": {
+                "$ref": "#/$defs/BudgetWindow"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "context": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "durable": {
+          "description": "false = memory-only record (an instance child runs on a memory store; no restore-respawn); absent = the store.durability.work default",
+          "type": "boolean"
+        },
+        "instruction": {
+          "description": "the definition; {{params.X}} holes fold in at spawn as data, never re-parsed for directives",
+          "type": "string"
+        },
+        "limits": {
+          "additionalProperties": true,
+          "description": "flat tier: the per-spawn limits object; instance tier: OS caps only (memory, cpu)",
+          "type": "object"
+        },
+        "mirror_streams": {
+          "description": "child streams mirrored into the parent's same-named streams (declared on both sides; needs a parent A2A listener)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "description": "instance tier supports detached only (phase A)",
+          "enum": [
+            "sync",
+            "async",
+            "detached",
+            "warm"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "output_contract": {
+          "type": "string"
+        },
+        "output_schema": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "params": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ParamSpec"
+          },
+          "description": "the ONLY holes the model may fill, schema-validated at spawn",
+          "type": "object"
+        },
+        "priority": {
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ]
+        },
+        "result": {
+          "additionalProperties": false,
+          "description": "instance mode: sync — resolve the spawn when the child's named workflow first completes, returning its output (needs a parent A2A listener)",
+          "properties": {
+            "workflow": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workflow"
+          ],
+          "type": "object"
+        },
+        "servers": {
+          "description": "flat tier: narrowing server grants from the parent's set",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "singleton": {
+          "description": "one live child; its A2A peer alias is the template name",
+          "type": "boolean"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "description": "flat tier: narrowing tool grants",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ttl": {
+          "description": "instance tier: retire after this long (graceful drain)",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "until": {
+          "description": "instance tier: a signal name (templated over params) whose delivery in the child retires it",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instruction"
+      ],
+      "type": "object"
+    },
+    "ToolOverride": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "description": "a JSON template or `CEL: …` producing the MCP tool arguments from `args`/`ctx`",
+          "type": "string"
+        },
+        "result": {
+          "description": "a JSON pointer / template / `CEL: …` mapping the CallToolResult to the internal output schema",
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "server",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "WebhookAuth": {
+      "additionalProperties": false,
+      "properties": {
+        "bearer": {
+          "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+          "type": "string"
+        },
+        "header": {
+          "additionalProperties": false,
+          "properties": {
+            "equals": {
+              "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "hmac": {
+          "additionalProperties": false,
+          "properties": {
+            "algo": {
+              "enum": [
+                "sha256"
+              ]
+            },
+            "header": {
+              "description": "the header carrying the signature (default X-Signature)",
+              "type": "string"
+            },
+            "prefix": {
+              "description": "a prefix stripped before the constant-time compare, e.g. sha256=",
+              "type": "string"
+            },
+            "secret": {
+              "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "none": {
+          "description": "loopback-only, no auth (dev) — explicit opt-in",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "WorkflowRef": {
+      "additionalProperties": false,
+      "description": "a {name, file|uri|url} reference, a {dir, glob} directory, or an inline workflow definition",
+      "properties": {
+        "allow_private": {
+          "description": "permit `url` to resolve to a private/loopback address",
+          "type": "boolean"
+        },
+        "armed": {
+          "type": "boolean"
+        },
+        "concurrency": {
+          "properties": {
+            "max_runs": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "on_overflow": {
+              "enum": [
+                "queue",
+                "drop",
+                "replace"
+              ]
+            },
+            "scope": {
+              "description": "what max_runs counts: every run of this workflow (default), or every run about the same `key` — the difference between a queue and a per-entity lock",
+              "enum": [
+                "workflow",
+                "key"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "description": {
+          "type": "string"
+        },
+        "dir": {
+          "description": "load every matching file in a directory",
+          "type": "string"
+        },
+        "durable": {
+          "description": "false = runs are memory-only (no checkpoints, gone after a restart) — the fast path for recomputable work; absent = the store.durability.work default (durable)",
+          "type": "boolean"
+        },
+        "file": {
+          "description": "a path on disk",
+          "type": "string"
+        },
+        "glob": {
+          "description": "comma-separated globs relative to `dir` (default `*.yaml,*.yml,*.json`); `**` recurses",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "headers for `url` — credential values must be {{secret:…}} references",
+          "type": "object"
+        },
+        "inputs": {
+          "properties": {
+            "schema": {
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "key": {
+          "description": "the logical thing a run is ABOUT, rendered from the trigger payload (e.g. \"{{payload.account_id}}\"); required by concurrency.scope: key",
+          "type": "string"
+        },
+        "limits": {
+          "properties": {
+            "budget": {
+              "type": "object"
+            },
+            "deadline": {
+              "type": "string"
+            },
+            "steps": {
+              "type": "integer"
+            },
+            "tokens": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "outputs": {
+          "properties": {
+            "schema": {
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "priority": {
+          "description": "contention weight: `low` sheds one pressure level earlier and is scheduled last; a tiebreak under scarcity, not a reservation",
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ]
+        },
+        "state": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "reducer": {
+                "description": "how concurrent writes to this key combine; declaring it makes concurrency a policy rather than a race",
+                "enum": [
+                  "overwrite",
+                  "append",
+                  "merge",
+                  "union"
+                ]
+              },
+              "schema": {
+                "description": "a JSON Schema every write to this key must satisfy",
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "description": "declared run variables — {key: {schema, reducer}}",
+          "type": "object"
+        },
+        "steps": {
+          "additionalProperties": {
+            "$ref": "#/$defs/step"
+          },
+          "minProperties": 1,
+          "type": "object"
+        },
+        "timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "tool": {
+          "additionalProperties": false,
+          "description": "register this workflow as a first-class tool — a callable procedure with retry, breaker, idempotency and a human gate INSIDE one apparent call. Startup config only; tags are DERIVED from what the steps reach.",
+          "properties": {
+            "grant": {
+              "additionalProperties": false,
+              "properties": {
+                "agent": {
+                  "type": "boolean"
+                },
+                "root": {
+                  "type": "boolean"
+                },
+                "subagents": {
+                  "type": "boolean"
+                },
+                "user": {
+                  "type": "boolean"
+                },
+                "workflows": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "mode": {
+              "description": "sync parks the caller on the run and returns its output; async returns a handle",
+              "enum": [
+                "sync",
+                "async"
+              ]
+            },
+            "name": {
+              "description": "the tool name callers see; may not shadow an internal contract",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "unload": {
+          "additionalProperties": false,
+          "description": "what happens to LIVE runs when this definition is retired (removed, replaced or deleted)",
+          "properties": {
+            "policy": {
+              "description": "drain (default) lets them finish",
+              "enum": [
+                "drain",
+                "cancel",
+                "detach"
+              ]
+            },
+            "timeout": {
+              "description": "how long a drain may take",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "uri": {
+          "description": "an MCP resource (mcp://<server>/<uri>, or one a connected server serves)",
+          "type": "string"
+        },
+        "url": {
+          "description": "fetched over HTTP(S) at startup; fail-closed if unreachable",
+          "type": "string"
+        },
+        "version": {
+          "const": 3
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "kinds": {
+      "a2a": {
+        "fields": [
+          "command",
+          "roles",
+          "inputs",
+          "schema"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "a2a.delegate": {
+        "fields": [
+          "peer",
+          "objective",
+          "command",
+          "args",
+          "output_contract",
+          "timeout",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "peer"
+        ],
+        "start": false
+      },
+      "a2a.send": {
+        "fields": [
+          "to",
+          "parts",
+          "command",
+          "args",
+          "context",
+          "timeout",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "to"
+        ],
+        "start": false
+      },
+      "a2a.wait": {
+        "fields": [
+          "conversation",
+          "timeout"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "agent": {
+        "fields": [
+          "instruction",
+          "output_contract",
+          "output_schema",
+          "tools",
+          "servers",
+          "limits",
+          "context",
+          "skills",
+          "system",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "instruction"
+        ],
+        "start": false
+      },
+      "artifact.create": {
+        "fields": [
+          "name",
+          "mime",
+          "content",
+          "from_step",
+          "sensitive"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "artifact.delete": {
+        "fields": [
+          "id"
+        ],
+        "implemented": true,
+        "required": [
+          "id"
+        ],
+        "start": false
+      },
+      "artifact.get": {
+        "fields": [
+          "id"
+        ],
+        "implemented": true,
+        "required": [
+          "id"
+        ],
+        "start": false
+      },
+      "assert": {
+        "fields": [
+          "condition",
+          "message"
+        ],
+        "implemented": true,
+        "required": [
+          "condition"
+        ],
+        "start": false
+      },
+      "assign": {
+        "fields": [
+          "value",
+          "writes",
+          "mode"
+        ],
+        "implemented": true,
+        "required": [
+          "value"
+        ],
+        "start": false
+      },
+      "batch": {
+        "fields": [
+          "over",
+          "body",
+          "by",
+          "size",
+          "parallel",
+          "rate",
+          "collect",
+          "on_error"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "body"
+        ],
+        "start": false
+      },
+      "checkpoint": {
+        "fields": [
+          "name"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "chunk": {
+        "fields": [
+          "value",
+          "by",
+          "size",
+          "overlap"
+        ],
+        "implemented": true,
+        "required": [
+          "value",
+          "size"
+        ],
+        "start": false
+      },
+      "classify": {
+        "fields": [
+          "input",
+          "classes",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "classes"
+        ],
+        "start": false
+      },
+      "dedupe": {
+        "fields": [
+          "over",
+          "by"
+        ],
+        "implemented": true,
+        "required": [
+          "over"
+        ],
+        "start": false
+      },
+      "emit": {
+        "fields": [
+          "note",
+          "audit",
+          "metric",
+          "value",
+          "stream",
+          "subject",
+          "data",
+          "correlation"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "event": {
+        "fields": [
+          "on",
+          "filter",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "on"
+        ],
+        "start": true
+      },
+      "extract": {
+        "fields": [
+          "input",
+          "output_schema",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "output_schema"
+        ],
+        "start": false
+      },
+      "fail": {
+        "fields": [
+          "message",
+          "code"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "filter": {
+        "fields": [
+          "over",
+          "expr",
+          "as"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "expr"
+        ],
+        "start": false
+      },
+      "finish": {
+        "fields": [
+          "status",
+          "output",
+          "reason"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "foreach": {
+        "fields": [
+          "over",
+          "body",
+          "batch",
+          "collect",
+          "on_error",
+          "as"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "body"
+        ],
+        "start": false
+      },
+      "http": {
+        "fields": [
+          "method",
+          "url",
+          "headers",
+          "query",
+          "body",
+          "json",
+          "timeout",
+          "expect",
+          "allow_private",
+          "sign",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "url"
+        ],
+        "start": false
+      },
+      "human": {
+        "fields": [
+          "question",
+          "schema",
+          "to",
+          "timeout",
+          "reply_uri"
+        ],
+        "implemented": true,
+        "required": [
+          "question"
+        ],
+        "start": false
+      },
+      "iterate": {
+        "fields": [
+          "body",
+          "while",
+          "until",
+          "max_iterations",
+          "collect"
+        ],
+        "implemented": true,
+        "required": [
+          "body"
+        ],
+        "start": false
+      },
+      "join": {
+        "fields": [
+          "handles",
+          "timeout",
+          "min",
+          "partials"
+        ],
+        "implemented": true,
+        "required": [
+          "handles"
+        ],
+        "start": false
+      },
+      "judge": {
+        "fields": [
+          "input",
+          "rubric",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "rubric"
+        ],
+        "start": false
+      },
+      "knowledge.get": {
+        "fields": [
+          "id",
+          "uri"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "knowledge.search": {
+        "fields": [
+          "query",
+          "top_k",
+          "filters"
+        ],
+        "implemented": true,
+        "required": [
+          "query"
+        ],
+        "start": false
+      },
+      "loop": {
+        "fields": [
+          "interval",
+          "delay",
+          "until",
+          "max_iterations",
+          "backoff",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "manual": {
+        "fields": [
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "map": {
+        "fields": [
+          "over",
+          "expr",
+          "as"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "expr"
+        ],
+        "start": false
+      },
+      "mcp.resource": {
+        "fields": [
+          "server",
+          "op",
+          "uri",
+          "name",
+          "arguments",
+          "reference",
+          "argument"
+        ],
+        "implemented": true,
+        "required": [
+          "server",
+          "op"
+        ],
+        "start": false
+      },
+      "mcp.tool": {
+        "fields": [
+          "server",
+          "tool",
+          "args",
+          "idempotency",
+          "breaker",
+          "rate"
+        ],
+        "implemented": true,
+        "required": [
+          "server",
+          "tool"
+        ],
+        "start": false
+      },
+      "memory.delete": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "memory.get": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "memory.list": {
+        "fields": [
+          "prefix",
+          "limit"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "memory.pop": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "memory.push": {
+        "fields": [
+          "key",
+          "value"
+        ],
+        "implemented": true,
+        "required": [
+          "key",
+          "value"
+        ],
+        "start": false
+      },
+      "memory.set": {
+        "fields": [
+          "key",
+          "value",
+          "ttl"
+        ],
+        "implemented": true,
+        "required": [
+          "key",
+          "value"
+        ],
+        "start": false
+      },
+      "memory.shift": {
+        "fields": [
+          "key"
+        ],
+        "implemented": true,
+        "required": [
+          "key"
+        ],
+        "start": false
+      },
+      "message": {
+        "fields": [
+          "to",
+          "text",
+          "parts",
+          "wait",
+          "timeout",
+          "on_timeout"
+        ],
+        "implemented": true,
+        "required": [
+          "to"
+        ],
+        "start": false
+      },
+      "noop": {
+        "fields": [],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "once": {
+        "fields": [
+          "policy",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "parallel": {
+        "fields": [
+          "branches",
+          "on_error"
+        ],
+        "implemented": true,
+        "required": [
+          "branches"
+        ],
+        "start": false
+      },
+      "parse": {
+        "fields": [
+          "text",
+          "format"
+        ],
+        "implemented": true,
+        "required": [
+          "text"
+        ],
+        "start": false
+      },
+      "race": {
+        "fields": [
+          "branches",
+          "timeout",
+          "min_success"
+        ],
+        "implemented": true,
+        "required": [
+          "branches"
+        ],
+        "start": false
+      },
+      "reduce": {
+        "fields": [
+          "over",
+          "expr",
+          "initial",
+          "as",
+          "acc"
+        ],
+        "implemented": true,
+        "required": [
+          "over",
+          "expr"
+        ],
+        "start": false
+      },
+      "route": {
+        "fields": [
+          "input",
+          "choices",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input",
+          "choices"
+        ],
+        "start": false
+      },
+      "schedule": {
+        "fields": [
+          "cron",
+          "every",
+          "tz",
+          "jitter",
+          "catch_up",
+          "at",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": true
+      },
+      "search.fetch": {
+        "fields": [
+          "url",
+          "max_bytes"
+        ],
+        "implemented": true,
+        "required": [
+          "url"
+        ],
+        "start": false
+      },
+      "search.query": {
+        "fields": [
+          "query",
+          "kind",
+          "limit",
+          "freshness"
+        ],
+        "implemented": true,
+        "required": [
+          "query"
+        ],
+        "start": false
+      },
+      "signal": {
+        "fields": [
+          "name",
+          "filter",
+          "deliver",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": true
+      },
+      "sleep": {
+        "fields": [
+          "duration"
+        ],
+        "implemented": true,
+        "required": [
+          "duration"
+        ],
+        "start": false
+      },
+      "sort": {
+        "fields": [
+          "over",
+          "by",
+          "order"
+        ],
+        "implemented": true,
+        "required": [
+          "over"
+        ],
+        "start": false
+      },
+      "stream": {
+        "fields": [
+          "stream",
+          "subject",
+          "filter",
+          "from",
+          "rate",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "stream"
+        ],
+        "start": true
+      },
+      "subagent": {
+        "fields": [
+          "instruction",
+          "template",
+          "params",
+          "mode",
+          "tools",
+          "servers",
+          "limits",
+          "priority",
+          "context",
+          "output_contract",
+          "output_schema",
+          "skills",
+          "durable"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "subgraph": {
+        "fields": [
+          "body"
+        ],
+        "implemented": true,
+        "required": [
+          "body"
+        ],
+        "start": false
+      },
+      "subscribe": {
+        "fields": [
+          "server",
+          "uri",
+          "debounce_ms",
+          "coalesce",
+          "filter",
+          "deliver",
+          "on_no_listener",
+          "window",
+          "inputs"
+        ],
+        "implemented": true,
+        "required": [
+          "server",
+          "uri"
+        ],
+        "start": true
+      },
+      "summarize": {
+        "fields": [
+          "input",
+          "length",
+          "prompt",
+          "skills",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "input"
+        ],
+        "start": false
+      },
+      "switch": {
+        "fields": [
+          "on",
+          "cases",
+          "default",
+          "on_no_match"
+        ],
+        "implemented": true,
+        "required": [
+          "on",
+          "cases"
+        ],
+        "start": false
+      },
+      "template": {
+        "fields": [
+          "text",
+          "value"
+        ],
+        "implemented": true,
+        "required": [],
+        "start": false
+      },
+      "think": {
+        "fields": [
+          "prompt",
+          "output_schema",
+          "reads",
+          "check",
+          "retries",
+          "skills",
+          "system",
+          "model"
+        ],
+        "implemented": true,
+        "required": [
+          "prompt"
+        ],
+        "start": false
+      },
+      "tool": {
+        "fields": [
+          "name",
+          "args"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "transform": {
+        "fields": [
+          "value",
+          "writes",
+          "mode"
+        ],
+        "implemented": true,
+        "required": [
+          "value"
+        ],
+        "start": false
+      },
+      "validate": {
+        "fields": [
+          "value",
+          "schema"
+        ],
+        "implemented": true,
+        "required": [
+          "value",
+          "schema"
+        ],
+        "start": false
+      },
+      "wait": {
+        "fields": [
+          "on",
+          "server",
+          "uri",
+          "condition",
+          "signal",
+          "run",
+          "subagent",
+          "conversation",
+          "webhook",
+          "stream",
+          "subject",
+          "match",
+          "timeout",
+          "on_timeout"
+        ],
+        "implemented": true,
+        "required": [
+          "on"
+        ],
+        "start": false
+      },
+      "webhook": {
+        "fields": [
+          "path",
+          "methods",
+          "auth",
+          "parallelism",
+          "on_overflow",
+          "rate",
+          "idempotency",
+          "respond",
+          "filter",
+          "inputs",
+          "signal"
+        ],
+        "implemented": true,
+        "required": [
+          "path"
+        ],
+        "start": true
+      },
+      "workflow": {
+        "fields": [
+          "name",
+          "inputs",
+          "mode",
+          "start",
+          "version",
+          "cascade"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "workflow.cancel": {
+        "fields": [
+          "run",
+          "reason"
+        ],
+        "implemented": true,
+        "required": [
+          "run"
+        ],
+        "start": false
+      },
+      "workflow.signal": {
+        "fields": [
+          "name",
+          "payload",
+          "run"
+        ],
+        "implemented": true,
+        "required": [
+          "name"
+        ],
+        "start": false
+      },
+      "workflow.wait": {
+        "fields": [
+          "run",
+          "timeout"
+        ],
+        "implemented": true,
+        "required": [
+          "run"
+        ],
+        "start": false
+      }
+    },
+    "step": {
+      "properties": {
+        "budget": {
+          "type": "integer"
+        },
+        "cache": {
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "idempotent": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "once",
+            "manual",
+            "loop",
+            "schedule",
+            "subscribe",
+            "stream",
+            "signal",
+            "event",
+            "a2a",
+            "webhook",
+            "switch",
+            "parallel",
+            "foreach",
+            "batch",
+            "iterate",
+            "race",
+            "join",
+            "subgraph",
+            "workflow",
+            "wait",
+            "sleep",
+            "assert",
+            "fail",
+            "noop",
+            "checkpoint",
+            "finish",
+            "assign",
+            "transform",
+            "map",
+            "filter",
+            "reduce",
+            "sort",
+            "dedupe",
+            "chunk",
+            "template",
+            "parse",
+            "validate",
+            "memory.get",
+            "memory.set",
+            "memory.list",
+            "memory.push",
+            "memory.shift",
+            "memory.pop",
+            "memory.delete",
+            "artifact.create",
+            "artifact.get",
+            "artifact.delete",
+            "knowledge.search",
+            "knowledge.get",
+            "search.query",
+            "search.fetch",
+            "mcp.tool",
+            "mcp.resource",
+            "tool",
+            "http",
+            "a2a.send",
+            "a2a.delegate",
+            "a2a.wait",
+            "message",
+            "workflow.signal",
+            "workflow.wait",
+            "workflow.cancel",
+            "emit",
+            "think",
+            "classify",
+            "extract",
+            "summarize",
+            "judge",
+            "route",
+            "agent",
+            "subagent",
+            "human"
+          ]
+        },
+        "on_error": {
+          "type": "string"
+        },
+        "on_replay": {
+          "enum": [
+            "retry",
+            "skip",
+            "fail"
+          ]
+        },
+        "otel": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "retry": {
+          "properties": {
+            "backoff": {
+              "type": "string"
+            },
+            "max": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "when": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
     }
-   },
-   "required": [
-    "name",
-    "endpoint"
-   ],
-   "type": "object"
   },
-  "Limits": {
-   "additionalProperties": false,
-   "properties": {
-    "deadline_secs": {
-     "minimum": 0,
-     "type": "integer"
+  "$id": "https://agentd.dev/schema/config-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "agentd configuration document (YAML or JSON; several files merge in order; every path is also AGENTD_<PATH> and --<path>)",
+  "properties": {
+    "a2a": {
+      "additionalProperties": false,
+      "properties": {
+        "bearer": {
+          "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+          "type": "string"
+        },
+        "conversation_ttl": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "listen": {
+          "description": "https://host:port (loopback http:// for dev)",
+          "type": "string"
+        },
+        "peers": {
+          "items": {
+            "$ref": "#/$defs/A2aPeer"
+          },
+          "type": "array"
+        },
+        "principals": {
+          "items": {
+            "$ref": "#/$defs/Principal"
+          },
+          "type": "array"
+        },
+        "push": {
+          "additionalProperties": false,
+          "description": "push notifications: a caller registers a webhook and agentd POSTs its task's updates there. Default-OFF — the URL comes from a peer, so making the request at all is the operator's decision.",
+          "properties": {
+            "allow_private": {
+              "description": "permit webhook targets on private / loopback addresses (a separate and larger decision — a peer could otherwise reach agentd's own surfaces or a cloud metadata endpoint)",
+              "type": "boolean"
+            },
+            "enabled": {
+              "description": "accept CreateTaskPushNotificationConfig and deliver on transitions",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "tls": {
+          "additionalProperties": false,
+          "properties": {
+            "cert": {
+              "type": "string"
+            },
+            "client_ca": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
     },
-    "max_depth": {
-     "minimum": 0,
-     "type": "integer"
+    "agent": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "description": "whether a gate asks a person (ask), lets an LLM judge decide (auto), or takes the ask's recommendation (accept); runtime-settable via config.set",
+          "enum": [
+            "ask",
+            "auto",
+            "accept"
+          ]
+        },
+        "ask_human_fallback": {
+          "description": "what ask_human does with no human channel (and, for auto, on an unanswered gate timeout): wait (park until timeout), fail (default), or auto (an LLM judge answers on the operator's behalf, marked as auto)",
+          "enum": [
+            "wait",
+            "pause",
+            "idle",
+            "fail",
+            "finish",
+            "stop",
+            "auto"
+          ]
+        },
+        "conversation_budget": {
+          "additionalProperties": false,
+          "properties": {
+            "degrade": {
+              "additionalProperties": false,
+              "properties": {
+                "model": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "lifetime_tokens": {
+              "description": "hard ceiling; 0 = unbounded",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "on_exhausted": {
+              "enum": [
+                "wait",
+                "slow",
+                "degrade",
+                "refuse",
+                "fail"
+              ]
+            },
+            "reserve": {
+              "additionalProperties": false,
+              "properties": {
+                "estimate": {
+                  "enum": [
+                    "context",
+                    "fixed",
+                    "none"
+                  ]
+                },
+                "fixed": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "scope": {
+              "items": {
+                "enum": [
+                  "instance",
+                  "run",
+                  "conversation",
+                  "principal"
+                ]
+              },
+              "type": "array"
+            },
+            "slow": {
+              "additionalProperties": false,
+              "properties": {
+                "factor": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 1,
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "windows": {
+              "items": {
+                "$ref": "#/$defs/BudgetWindow"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "instruction": {
+          "description": "static text, or a single-token URI a configured MCP server serves (read + subscribed)",
+          "type": "string"
+        },
+        "max_parallel_turns": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "instance identity (falls back to the downward-API instance, then the hostname)",
+          "type": "string"
+        },
+        "on_workflow_finished": {
+          "enum": [
+            "ignore",
+            "note",
+            "think"
+          ]
+        },
+        "preflight": {
+          "enum": [
+            "never",
+            "auto",
+            "always"
+          ]
+        },
+        "prompt": {
+          "description": "a one-shot task (--prompt): with no workflows configured the generated run executes this, while `instruction` stays the standing policy (the run's system prompt)",
+          "type": "string"
+        },
+        "tools": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "description": "`all` | `none` | a list of names",
+              "oneOf": [
+                {
+                  "enum": [
+                    "all",
+                    "none"
+                  ]
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "internal": {
+              "description": "`all` | `none` | a list of names",
+              "oneOf": [
+                {
+                  "enum": [
+                    "all",
+                    "none"
+                  ]
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "mcp": {
+              "description": "`all` | `none` | a list of names",
+              "oneOf": [
+                {
+                  "enum": [
+                    "all",
+                    "none"
+                  ]
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "wake_on": {
+          "items": {
+            "enum": [
+              "a2a_message",
+              "human_reply",
+              "subagent_result",
+              "workflow_finished",
+              "workflow_failed",
+              "instruction_updated",
+              "budget_resumed"
+            ]
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
-    "max_steps": {
-     "minimum": 1,
-     "type": "integer"
-    }
-   },
-   "type": "object"
-  },
-  "McpServer": {
-   "additionalProperties": false,
-   "properties": {
-    "endpoint": {
-     "type": "string"
-    },
-    "headers": {
-     "additionalProperties": {
+    "config_version": {
+      "const": "1",
+      "description": "the document version",
       "type": "string"
-     },
-     "type": "object"
     },
-    "name": {
-     "pattern": "^[a-zA-Z0-9_-]+$",
-     "type": "string"
+    "context": {
+      "additionalProperties": false,
+      "properties": {
+        "compact_at": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "type": "number"
+        },
+        "keep_last": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model_window": {
+          "description": "the model's context window in tokens (overrides the value inferred from intelligence.model)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "plan": {
+          "additionalProperties": false,
+          "properties": {
+            "max_items": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "summarize": {
+          "additionalProperties": false,
+          "description": "compaction's model-facing half",
+          "properties": {
+            "model": {
+              "description": "summarize on a cheaper model than the instance's",
+              "type": "string"
+            },
+            "prompt": {
+              "description": "override the summarizer guidance; the JSON schema it must satisfy is fixed",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "template": {
+          "description": "the system-prompt template; unset = the built-in default, printed by `agentd --context-template`",
+          "type": "string"
+        },
+        "templates": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "named alternates a node selects with context: {template: <name>}",
+          "type": "object"
+        }
+      },
+      "type": "object"
     },
-    "tags": {
-     "additionalProperties": {
+    "goal": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "additionalProperties": false,
+          "properties": {
+            "condition": {
+              "description": "a cheap CEL predicate over durable state, evaluated first",
+              "type": "string"
+            },
+            "every": {
+              "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "via": {
+              "enum": [
+                "both",
+                "condition",
+                "agent"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "on_achieved": {
+          "$ref": "#/$defs/GoalAction"
+        },
+        "on_stuck": {
+          "$ref": "#/$defs/GoalAction"
+        },
+        "statement": {
+          "description": "the goal in natural language (the LLM judge reads it)",
+          "type": "string"
+        },
+        "stuck_after": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "description": "who work is done ON BEHALF OF — including work nobody typed",
+      "properties": {
+        "autonomous_as": {
+          "description": "the actor a schedule/webhook/stream firing is attributed to (default `system`); without it the attribution chain is dropped at its first hop",
+          "type": "string"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "labels stamped on autonomous work",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "intelligence": {
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/Auth"
+        },
+        "budget": {
+          "additionalProperties": false,
+          "properties": {
+            "degrade": {
+              "additionalProperties": false,
+              "properties": {
+                "model": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "lifetime_tokens": {
+              "description": "hard ceiling; 0 = unbounded",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "on_exhausted": {
+              "enum": [
+                "wait",
+                "slow",
+                "degrade",
+                "refuse",
+                "fail"
+              ]
+            },
+            "reserve": {
+              "additionalProperties": false,
+              "properties": {
+                "estimate": {
+                  "enum": [
+                    "context",
+                    "fixed",
+                    "none"
+                  ]
+                },
+                "fixed": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "scope": {
+              "items": {
+                "enum": [
+                  "instance",
+                  "run",
+                  "conversation",
+                  "principal"
+                ]
+              },
+              "type": "array"
+            },
+            "slow": {
+              "additionalProperties": false,
+              "properties": {
+                "factor": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 1,
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "windows": {
+              "items": {
+                "$ref": "#/$defs/BudgetWindow"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "default": {
+          "description": "the tier used when nothing names one",
+          "type": "string"
+        },
+        "dialect": {
+          "description": "wire dialect; bedrock = native Amazon Bedrock Converse (pair with auth.kind=aws)",
+          "enum": [
+            "openai",
+            "anthropic",
+            "bedrock"
+          ]
+        },
+        "endpoints": {
+          "description": "ordered endpoint list (failover); one comma-separated string is accepted",
+          "oneOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "model": {
+          "description": "the default model — a declared `models:` tier name, or a literal model string",
+          "type": "string"
+        },
+        "models": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "fallback": {
+                "description": "the tier to degrade to — a ladder that walks down instead of failing",
+                "type": "string"
+              },
+              "model": {
+                "description": "the wire model name sent to the provider",
+                "type": "string"
+              },
+              "pricing": {
+                "additionalProperties": false,
+                "properties": {
+                  "input_per_1k": {
+                    "type": "number"
+                  },
+                  "output_per_1k": {
+                    "type": "number"
+                  }
+                },
+                "type": "object"
+              },
+              "service": {
+                "description": "a `services:` entry of kind: intelligence supplying endpoint, auth and tags",
+                "type": "string"
+              },
+              "window": {
+                "description": "this model's context window, so compaction stops guessing from the model NAME",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "model"
+            ],
+            "type": "object"
+          },
+          "description": "named model tiers: cost/quality tiering inside one workflow without forking a process. A tier points AT a `services:` entry and may only narrow — it inherits that service's trifecta tags and can never declare its own floor.",
+          "type": "object"
+        },
+        "preflight_model": {
+          "description": "the tier preflight runs on — a recurring fixed cost that does not need the answering model",
+          "type": "string"
+        },
+        "pricing": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Pricing"
+          },
+          "type": "object"
+        },
+        "structured_output": {
+          "enum": [
+            "auto",
+            "json_schema",
+            "tool",
+            "prompt"
+          ]
+        },
+        "swap_policy": {
+          "enum": [
+            "finish-on-old",
+            "restart-turn"
+          ]
+        },
+        "timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "token": {
+          "description": "a secret — from a file it MUST be a `{{secret:NAME}}` / `{{secret-file:PATH}}` reference; env/flag values may be inline",
+          "type": "string"
+        },
+        "token_file": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "interface": {
+      "additionalProperties": false,
+      "description": "The display-client (TUI/web-UI) surface, served on the A2A listener. Default-OFF.",
+      "properties": {
+        "debug": {
+          "description": "expose extra debug information (transcripts, run step detail, the log ring, audit feed events); runtime-togglable via the config.set op",
+          "type": "boolean"
+        },
+        "display": {
+          "additionalProperties": false,
+          "description": "what clients render in their chrome — ordered item lists for the top (header) and bottom (status bar) edges; unknown items are skipped",
+          "properties": {
+            "bottom": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "top": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "enabled": {
+          "description": "serve the interface methods (SubscribeToEvents, interface.info, …)",
+          "type": "boolean"
+        },
+        "origins": {
+          "description": "extra allowed browser origins (scheme://host[:port]) for a hosted web UI; loopback origins never need listing",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pairing": {
+          "additionalProperties": false,
+          "description": "pairing-code login: a rotating 6-digit code (shown to operators) a client exchanges for a session token — the low-friction alternative to copying a bearer",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "role": {
+              "description": "the role a paired session gets (operator or user; default operator)",
+              "enum": [
+                "operator",
+                "user",
+                "agent",
+                "anonymous"
+              ]
+            },
+            "ttl": {
+              "description": "session-token lifetime (default 12h)",
+              "type": [
+                "string",
+                "integer"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "knowledge": {
+      "additionalProperties": false,
+      "properties": {
+        "auto_context": {
+          "additionalProperties": false,
+          "properties": {
+            "max_bytes": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "on": {
+              "enum": [
+                "turn",
+                "never"
+              ]
+            },
+            "top_k": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "server": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "lifecycle": {
+      "additionalProperties": false,
+      "properties": {
+        "drain_timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "exit_code_map": {
+          "additionalProperties": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "remap the policy exit codes (3/7 only): {\"3\": N, \"7\": N}",
+          "type": "object"
+        },
+        "idle_grace": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "run_until": {
+          "enum": [
+            "auto",
+            "idle",
+            "drained"
+          ]
+        },
+        "until_signal": {
+          "description": "delivery of this signal begins graceful shutdown — the retirement trigger a parent composes into an instance-tier child",
+          "type": "string"
+        },
+        "watch_config": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "limits": {
+      "additionalProperties": false,
+      "properties": {
+        "inline_max_bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_message_depth": {
+          "description": "how many chained `message` deliveries may run before one is refused (default 8) — the loop guard on message → turn → run → message",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_runs": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "run": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline": {
+              "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "steps": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "tokens": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "step_timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "subagents": {
+          "additionalProperties": false,
+          "properties": {
+            "breadth": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "depth": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "instances": {
+              "additionalProperties": false,
+              "description": "instance-tier children: defaults 2 live / 8 lifetime / 4/1h",
+              "properties": {
+                "breadth": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "rate": {
+                  "type": "string"
+                },
+                "total": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "rate": {
+              "description": "`<burst>/<per>s`, e.g. `8/2s`",
+              "type": "string"
+            },
+            "total": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "workflow": {
+          "additionalProperties": false,
+          "properties": {
+            "fan_out": {
+              "description": "max concurrent lanes a foreach/batch body may use; a definition asking for more is refused at load",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "mcp": {
+      "additionalProperties": false,
+      "properties": {
+        "default_timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "servers": {
+          "items": {
+            "$ref": "#/$defs/McpServer"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "memory": {
+      "additionalProperties": false,
+      "properties": {
+        "list_default_limit": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_value_bytes": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "observability": {
+      "additionalProperties": false,
+      "properties": {
+        "audit": {
+          "additionalProperties": false,
+          "properties": {
+            "sink": {
+              "items": {
+                "enum": [
+                  "log",
+                  "store",
+                  "stream"
+                ]
+              },
+              "type": "array"
+            },
+            "stream": {
+              "description": "the declared stream `sink: [stream]` appends to — the supported path off the box, and the only sink a workflow can consume",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "events_ring": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "health_file": {
+          "type": "string"
+        },
+        "log_content": {
+          "type": "boolean"
+        },
+        "log_level": {
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "metrics_addr": {
+          "type": "string"
+        },
+        "otel": {
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string"
+            },
+            "logs": {
+              "type": "boolean"
+            },
+            "metrics": {
+              "type": "boolean"
+            },
+            "traces": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "report_file": {
+          "type": "string"
+        },
+        "runtime_events": {
+          "additionalProperties": false,
+          "properties": {
+            "include": {
+              "description": "event families taken in full (the segment before the first dot); an unknown family is a startup error",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "queue": {
+              "description": "how many events may queue between ticks before the tap drops and counts (default 512)",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "sampled": {
+              "description": "event families taken at 1-in-16 — for high-rate families that arrive in storms",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stream": {
+              "description": "declared stream the selected events land on",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "traceparent": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "search": {
+      "additionalProperties": false,
+      "properties": {
+        "server": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "security": {
+      "additionalProperties": false,
+      "properties": {
+        "aauth": {
+          "$ref": "#/$defs/AAuth"
+        },
+        "allow_trifecta": {
+          "type": "boolean"
+        },
+        "cgroup": {
+          "additionalProperties": false,
+          "properties": {
+            "memory_max": {
+              "type": "string"
+            },
+            "pids_max": {
+              "type": "string"
+            },
+            "spec": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "egress": {
+          "description": "closed = an outbound MCP dial whose URL matches no services: catalog entry is refused; default open",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "exec": {
+          "additionalProperties": false,
+          "description": "The guarded local command runner (default-OFF; needs --features exec).",
+          "properties": {
+            "allow": {
+              "description": "allow-listed command names (argv[0])",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "env": {
+              "description": "env var names passed through",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "max_output": {
+              "type": "integer"
+            },
+            "timeout": {
+              "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+              "type": [
+                "string",
+                "integer"
+              ]
+            },
+            "workdir": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "policies": {
+          "description": "ordered verdicts on a tool call; first match wins, no match is allow",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "description": "shadow refuses and says the call was held; it never fabricates a result",
+                "enum": [
+                  "allow",
+                  "deny",
+                  "ask",
+                  "shadow"
+                ]
+              },
+              "match": {
+                "additionalProperties": false,
+                "properties": {
+                  "args": {
+                    "description": "CEL over `args`, `tool` and `caller` — the only place an ARGUMENT can be judged, since grants are name patterns",
+                    "type": "string"
+                  },
+                  "caller": {
+                    "items": {
+                      "enum": [
+                        "root",
+                        "workflow",
+                        "subagent"
+                      ]
+                    },
+                    "type": "array"
+                  },
+                  "principal": {
+                    "description": "principal-id glob, for calls carrying one",
+                    "type": "string"
+                  },
+                  "tags": {
+                    "description": "every listed trifecta tag must be present on the tool",
+                    "items": {
+                      "enum": [
+                        "untrusted_input",
+                        "sensitive",
+                        "egress"
+                      ]
+                    },
+                    "type": "array"
+                  },
+                  "tool": {
+                    "description": "tool-name glob; absent matches every tool",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "on_timeout": {
+                "description": "what an unanswered `ask` becomes (default deny)",
+                "enum": [
+                  "allow",
+                  "deny",
+                  "ask",
+                  "shadow"
+                ]
+              },
+              "question": {
+                "description": "the question put to a person for `ask`; {{tool}}, {{caller}} and {{args}} are substituted",
+                "type": "string"
+              },
+              "timeout": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "tls_ca": {
+          "type": "string"
+        },
+        "workflows": {
+          "additionalProperties": false,
+          "properties": {
+            "immutable": {
+              "description": "refuse workflow.create/update/delete at runtime — definitions become read-only for the model, subagents and operators alike; loading from config/file/url/dir is unaffected",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "services": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Service"
+      },
+      "description": "the service catalog: the named external services this deployment may use; mcp.servers entries reference entries via `service:` and may only narrow them",
+      "type": "object"
+    },
+    "skills": {
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "description": "a local folder of skill files (frontmatter + body, or <name>/SKILL.md); `skills/` beside the config is adopted when this is unset",
+          "type": "string"
+        },
+        "max_bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_loaded": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "reference_prefix": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SkillSource"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "store": {
+      "additionalProperties": false,
+      "properties": {
+        "audit": {
+          "type": "boolean"
+        },
+        "checkpoint": {
+          "additionalProperties": false,
+          "properties": {
+            "debounce_ms": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "durability": {
+          "additionalProperties": false,
+          "properties": {
+            "a2a": {
+              "enum": [
+                "strict",
+                "eventual"
+              ]
+            },
+            "steps": {
+              "enum": [
+                "strict",
+                "eventual"
+              ]
+            },
+            "work": {
+              "description": "default durability CLASS for runs + subagent records: ephemeral = nothing persists unless a workflow/spawn says durable: true (the fast path); default durable",
+              "enum": [
+                "durable",
+                "ephemeral"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "file": {
+          "$ref": "#/$defs/StoreFile"
+        },
+        "http": {
+          "$ref": "#/$defs/StoreHttp"
+        },
+        "kind": {
+          "enum": [
+            "mcp",
+            "http",
+            "file",
+            "memory",
+            "none"
+          ]
+        },
+        "mcp": {
+          "$ref": "#/$defs/StoreMcp"
+        },
+        "on_error": {
+          "enum": [
+            "halt",
+            "degrade"
+          ]
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "retention": {
+          "additionalProperties": false,
+          "properties": {
+            "runs": {
+              "additionalProperties": false,
+              "properties": {
+                "keep_last": {
+                  "description": "keep at most this many terminal runs",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "ttl": {
+                  "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "timeout": {
+          "description": "a duration: `10m`, `90s`, `500ms`, or bare seconds",
+          "type": [
+            "string",
+            "integer"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "streams": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "retention": {
+            "additionalProperties": false,
+            "properties": {
+              "max_age": {
+                "type": "string"
+              },
+              "max_events": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "subagents": {
+      "additionalProperties": false,
+      "description": "subagent templates + spawn policy: operator-declared definitions the model may instantiate, filling declared params only",
+      "properties": {
+        "allow_freeform": {
+          "description": "false = templates are the ONLY spawn path (freeform flat-tier instruction spawns are refused); default true",
+          "type": "boolean"
+        },
+        "defaults": {
+          "additionalProperties": false,
+          "description": "applied to every spawn unless overridden at the template or call site",
+          "properties": {
+            "durable": {
+              "description": "default durability class for spawns (false = memory-only records)",
+              "type": "boolean"
+            },
+            "limits": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "sync",
+                "async",
+                "detached",
+                "warm"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "priority": {
+              "enum": [
+                "low",
+                "normal",
+                "high"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "templates": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SubagentTemplate"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "tools": {
+      "additionalProperties": false,
+      "properties": {
+        "disabled": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "overrides": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ToolOverride"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "vars": {
+      "additionalProperties": true,
+      "description": "operator-defined constants; reference anywhere (and in workflows) as {{config.NAME}} — dotted paths reach nested values, unresolved references refuse startup",
+      "type": "object"
+    },
+    "webhooks": {
+      "additionalProperties": false,
+      "properties": {
+        "default_auth": {
+          "$ref": "#/$defs/WebhookAuth"
+        },
+        "listen": {
+          "description": "https://host:port (loopback http:// for dev) — the inbound webhook surface",
+          "type": "string"
+        },
+        "tls": {
+          "additionalProperties": false,
+          "properties": {
+            "cert": {
+              "type": "string"
+            },
+            "client_ca": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "workflows": {
+      "description": "inline workflow definitions or {name, file|uri} references",
       "items": {
-       "enum": [
-        "untrusted_input",
-        "sensitive",
-        "egress"
-       ]
+        "$ref": "#/$defs/WorkflowRef"
       },
       "type": "array"
-     },
-     "type": "object"
     }
-   },
-   "required": [
-    "name",
-    "endpoint"
-   ],
-   "type": "object"
-  }
- },
- "$id": "https://agentctl.dev/contract/v1/config.schema.json",
- "$schema": "https://json-schema.org/draft/2020-12/schema",
- "additionalProperties": false,
- "properties": {
-  "a2a_peers": {
-   "items": {
-    "$ref": "#/$defs/A2aPeer"
-   },
-   "type": "array"
   },
-  "config_version": {
-   "type": "string"
-  },
-  "intelligence": {
-   "type": "string"
-  },
-  "intelligence_headers": {
-   "additionalProperties": {
-    "type": "string"
-   },
-   "type": "object"
-  },
-  "limits": {
-   "$ref": "#/$defs/Limits"
-  },
-  "log_level": {
-   "enum": [
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error"
-   ]
-  },
-  "max_tokens": {
-   "minimum": 1,
-   "type": "integer"
-  },
-  "mcp_servers": {
-   "items": {
-    "$ref": "#/$defs/McpServer"
-   },
-   "type": "array"
-  },
-  "model": {
-   "type": "string"
-  },
-  "model_swap": {
-   "enum": [
-    "finish-on-old",
-    "restart-turn"
-   ]
-  },
-  "subscribe": {
-   "items": {
-    "type": "string"
-   },
-   "type": "array"
-  }
- },
- "title": "Agent Control Contract \u2014 declarative agent config file (contract 1.0)",
- "type": "object",
- "x-agentd-contract-version": "2.0",
- "x-contract-version": "1.0"
+  "title": "agentd configuration (config_version 1)",
+  "type": "object",
+  "x-agentd-contract-version": "1.0"
 }

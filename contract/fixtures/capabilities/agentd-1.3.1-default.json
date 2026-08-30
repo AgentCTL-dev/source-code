@@ -1,0 +1,100 @@
+{
+  "a2a": null,
+  "agent": {
+    "instruction": false,
+    "name": "agentd",
+    "preflight": "auto"
+  },
+  "intelligence": {
+    "endpoints": 0,
+    "model": null
+  },
+  "interface": {
+    "debug": false,
+    "display": {
+      "bottom": null,
+      "top": null
+    },
+    "enabled": false,
+    "origins": 0,
+    "pairing": false
+  },
+  "internal_tools": [
+    "instruction.read",
+    "instruction.subscribe",
+    "subagent.run",
+    "subagent.retire",
+    "subagent.send",
+    "subagent.kill",
+    "subagent.status",
+    "subagent.await",
+    "subagent.list",
+    "code.run",
+    "memory.get",
+    "memory.set",
+    "memory.list",
+    "memory.push",
+    "memory.shift",
+    "memory.pop",
+    "memory.delete",
+    "artifact.create",
+    "artifact.get",
+    "artifact.delete",
+    "artifact.list",
+    "message.send",
+    "workflow.run",
+    "workflow.create",
+    "workflow.update",
+    "workflow.delete",
+    "workflow.list",
+    "workflow.status",
+    "workflow.cancel",
+    "workflow.pause",
+    "workflow.resume",
+    "workflow.signal",
+    "workflow.wait",
+    "plan.create",
+    "plan.get",
+    "plan.update",
+    "plan.clear",
+    "ask_human",
+    "sleep",
+    "await",
+    "context.compact",
+    "think",
+    "finish",
+    "status",
+    "knowledge.search",
+    "knowledge.get",
+    "knowledge.list",
+    "search.query",
+    "search.fetch",
+    "skills.list",
+    "skills.load",
+    "skills.unload",
+    "exec"
+  ],
+  "knowledge": {
+    "server": null
+  },
+  "lifecycle": {
+    "daemon": false,
+    "run_until": "auto"
+  },
+  "mcp_servers": [],
+  "runtime": "1",
+  "search": {
+    "server": null
+  },
+  "skills": {
+    "sources": 0
+  },
+  "store": "none",
+  "store_file": null,
+  "tools": {
+    "disabled": [],
+    "overrides": []
+  },
+  "version": "1.3.1",
+  "workflows": []
+}

@@ -1,0 +1,49 @@
+config_version: "1"
+agent:
+  name: contract-fixture
+  instruction: "You are a contract-capture fixture."
+intelligence:
+  endpoints: http://127.0.0.1:9999/v1
+  model: test-model
+mcp:
+  servers:
+    - name: fs
+      endpoint: http://127.0.0.1:8931/mcp
+      tags: { "*": [sensitive] }
+store:
+  kind: file
+  file: { path: ./state }
+a2a:
+  listen: http://127.0.0.1:8420
+webhooks:
+  listen: http://127.0.0.1:9441
+streams:
+  orders: { retention: { max_events: 1000 } }
+lifecycle:
+  run_until: drained
+workflows:
+  - name: hourly
+    steps:
+      s: { kind: schedule, every: 1h }
+      do: { kind: agent, depends_on: [s], instruction: "tick" }
+      f: { kind: finish, depends_on: [do] }
+  - name: hook
+    steps:
+      s: { kind: webhook, path: /in, auth: { bearer: "{{secret:HOOK_BEARER}}" } }
+      do: { kind: agent, depends_on: [s], instruction: "handle" }
+      f: { kind: finish, depends_on: [do] }
+  - name: watcher
+    steps:
+      s: { kind: subscribe, server: fs, uri: "queue://inbox" }
+      do: { kind: agent, depends_on: [s], instruction: "process" }
+      f: { kind: finish, depends_on: [do] }
+  - name: cmd
+    steps:
+      s: { kind: a2a, command: ask, schema: { type: object, properties: { q: { type: string } }, required: [q] } }
+      do: { kind: agent, depends_on: [s], instruction: "answer {{steps.s.output.args.q}}" }
+      f: { kind: finish, depends_on: [do] }
+  - name: consumer
+    steps:
+      s: { kind: stream, stream: orders }
+      do: { kind: agent, depends_on: [s], instruction: "consume" }
+      f: { kind: finish, depends_on: [do] }

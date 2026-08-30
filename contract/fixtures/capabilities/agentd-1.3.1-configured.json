@@ -1,0 +1,177 @@
+{
+  "a2a": {
+    "admin": [
+      "a2a.drain",
+      "a2a.lameduck",
+      "a2a.cancel",
+      "a2a.pause",
+      "a2a.resume"
+    ],
+    "bearer": false,
+    "command_ops": [
+      "status",
+      "config",
+      "workflow.run",
+      "workflow.status",
+      "workflow.cancel",
+      "workflow.signal",
+      "subagent.send",
+      "subagent.kill",
+      "subagent.status",
+      "plan.get"
+    ],
+    "listen": "http://127.0.0.1:8420",
+    "loopback_operator": true,
+    "methods": [
+      "SendMessage",
+      "SendStreamingMessage",
+      "GetTask",
+      "CancelTask",
+      "ListTasks",
+      "SubscribeToTask",
+      "GetAgentCard"
+    ],
+    "mtls": false,
+    "principals": [],
+    "tls": false
+  },
+  "agent": {
+    "instruction": true,
+    "name": "contract-fixture",
+    "preflight": "auto"
+  },
+  "intelligence": {
+    "endpoints": 1,
+    "model": "test-model"
+  },
+  "interface": {
+    "debug": false,
+    "display": {
+      "bottom": null,
+      "top": null
+    },
+    "enabled": false,
+    "origins": 0,
+    "pairing": false
+  },
+  "internal_tools": [
+    "instruction.read",
+    "instruction.subscribe",
+    "subagent.run",
+    "subagent.retire",
+    "subagent.send",
+    "subagent.kill",
+    "subagent.status",
+    "subagent.await",
+    "subagent.list",
+    "code.run",
+    "memory.get",
+    "memory.set",
+    "memory.list",
+    "memory.push",
+    "memory.shift",
+    "memory.pop",
+    "memory.delete",
+    "artifact.create",
+    "artifact.get",
+    "artifact.delete",
+    "artifact.list",
+    "message.send",
+    "workflow.run",
+    "workflow.create",
+    "workflow.update",
+    "workflow.delete",
+    "workflow.list",
+    "workflow.status",
+    "workflow.cancel",
+    "workflow.pause",
+    "workflow.resume",
+    "workflow.signal",
+    "workflow.wait",
+    "plan.create",
+    "plan.get",
+    "plan.update",
+    "plan.clear",
+    "ask_human",
+    "sleep",
+    "await",
+    "context.compact",
+    "think",
+    "finish",
+    "status",
+    "knowledge.search",
+    "knowledge.get",
+    "knowledge.list",
+    "search.query",
+    "search.fetch",
+    "skills.list",
+    "skills.load",
+    "skills.unload",
+    "exec"
+  ],
+  "knowledge": {
+    "server": null
+  },
+  "lifecycle": {
+    "daemon": true,
+    "run_until": "drained"
+  },
+  "mcp_servers": [
+    "fs"
+  ],
+  "runtime": "1",
+  "search": {
+    "server": null
+  },
+  "skills": {
+    "sources": 0
+  },
+  "store": "file",
+  "store_file": {
+    "defaulted": false,
+    "path": "./state"
+  },
+  "tools": {
+    "disabled": [],
+    "overrides": []
+  },
+  "version": "1.3.1",
+  "workflows": [
+    {
+      "description": null,
+      "inputs_schema": false,
+      "name": "hourly",
+      "start_kinds": [
+        "schedule"
+      ]
+    },
+    {
+      "description": null,
+      "inputs_schema": false,
+      "name": "hook",
+      "start_kinds": []
+    },
+    {
+      "description": null,
+      "inputs_schema": false,
+      "name": "watcher",
+      "start_kinds": [
+        "subscribe"
+      ]
+    },
+    {
+      "description": null,
+      "inputs_schema": false,
+      "name": "cmd",
+      "start_kinds": [
+        "a2a"
+      ]
+    },
+    {
+      "description": null,
+      "inputs_schema": false,
+      "name": "consumer",
+      "start_kinds": []
+    }
+  ]
+}

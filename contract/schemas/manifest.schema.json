@@ -1,358 +1,77 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentctl.dev/contract/v1/manifest.schema.json",
-  "title": "Agent Control Contract — Capabilities Manifest",
-  "description": "The neutral, machine-readable capabilities manifest: the discovery spine of the Agent Control Contract (ACC). A conformant agent emits this object from the one-shot `--capabilities` entrypoint and (later) from the live `agent://capabilities` resource. agentctl consumes ONLY this contract, never an agent-specific shape. The `surfaces{}` block is the SINGLE discovery point for every control-plane surface: a key ABSENT means the surface is unbuilt and the consumer degrades gracefully; never branch on a value that is not advertised here. VERSIONING: `contract_version` is major.minor; additive growth (new fields/tools/metrics/surfaces keys) bumps MINOR and a consumer MUST tolerate it (this object and its open sub-objects use additionalProperties:true); a consumer refuses ONLY an unknown MAJOR. NEUTRAL TOKENS: the contract uses neutral tokens only — agent_version, agent://, agent_, AGENT_*. SECRETS: this manifest NEVER carries credentials — intelligence is structural (transport scheme + endpoint count) only.",
+  "$id": "https://agentctl.dev/contract/acc2/manifest.schema.json",
+  "title": "agentd --capabilities manifest (ACC v2, informational)",
+  "$comment": "ACC v2 treats the capabilities manifest as INFORMATIONAL, not the negotiation anchor: v1.3.1 emits no contract_version and no surfaces{} block (upstream ask U3), and under-reports (no webhooks key; workflows[].start_kinds omits webhook and stream). Negotiation anchors instead on the config schema's x-agentd-contract-version, the workflow schema $id, exit_codes, and metrics_schema (see SPEC.md §3). This schema is deliberately permissive (additive upstream changes must not break readers); requireds are the minimal stable core.",
   "type": "object",
+  "required": ["runtime", "version"],
   "additionalProperties": true,
-  "required": [
-    "contract_version",
-    "build_features",
-    "identity",
-    "mode",
-    "intelligence",
-    "surfaces",
-    "agent_version"
-  ],
   "properties": {
-    "contract_version": {
-      "type": "string",
-      "pattern": "^\\d+\\.\\d+$",
-      "description": "The Agent Control Contract version this binary speaks, major.minor (current value \"2.0\"). Negotiation is on MAJOR only: a consumer refuses an instance whose MAJOR it does not understand and tolerates any unknown additive content within a MAJOR it knows. In contract 1.0 the network is the substrate: a conformant agent serves its entire control surface over mTLS HTTPS; there are no non-HTTP transports and no local exec surface.",
-      "examples": ["1.0"]
-    },
-    "agent_version": {
-      "type": "string",
-      "description": "Build/version string of the agent binary. Free-form, implementation-defined. REQUIRED at the root."
-    },
-    "build_features": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "OPAQUE list of compile-time features present in this binary (example tokens include tls, serve-mcp, serve-https, a2a, cron, metrics, otel). The contract does NOT freeze the membership of this set and consumers MUST NOT branch on individual values — feature presence is advertised structurally via surfaces{}. Treat build_features as diagnostic metadata only; new tokens are additive and must be tolerated.",
-      "examples": [["tls", "serve-mcp", "metrics"]]
-    },
-    "identity": { "$ref": "#/$defs/identity" },
-    "mode": {
-      "type": "string",
-      "description": "The configured run shape. NOT a frozen enum (open, additive-tolerant): the defined set is once | loop | reactive | schedule, but a consumer MUST tolerate an unknown mode string.",
-      "examples": ["once", "loop", "reactive", "schedule"]
-    },
-    "model": {
-      "type": ["string", "null"],
-      "description": "Operator-declared model identifier, or null when unset. Metadata only, NEVER a secret."
-    },
-    "intelligence": { "$ref": "#/$defs/intelligence" },
-    "intelligence_summary": { "$ref": "#/$defs/intelligence_summary" },
-    "mcp_servers": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/mcp_server" },
-      "description": "Operator-declared MCP client servers, structural name + trifecta tags only — never the endpoint URL or headers. Contract 1.0: MCP servers are remote HTTPS endpoints, so there is no argv to leak."
-    },
-    "a2a_peers": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/a2a_peer" },
-      "description": "Operator-declared A2A delegation peers, structural name + transport scheme only — never the endpoint URL."
-    },
-    "exec_enabled": {
-      "type": "boolean",
-      "description": "Whether the local exec/tool surface is enabled for this run."
-    },
-    "allow_trifecta": {
-      "type": "boolean",
-      "description": "Whether the lethal-trifecta combination is permitted."
-    },
-    "limits": { "$ref": "#/$defs/limits" },
-    "surfaces": { "$ref": "#/$defs/surfaces" }
-  },
-  "$defs": {
-    "identity": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "Downward-API identity block. DESCRIPTIVE only — never load-bearing for placement/scheduling. run_id is always present (a ULID is synthesized if unset); the Kubernetes-sourced fields are string-or-null. A conformant agent populates these from the downward-API env vars noted per field (AGENT_*); an empty env value is coerced to unset (null).",
-      "required": ["run_id"],
+    "runtime": { "type": "string", "const": "1", "description": "the config document generation ('1')" },
+    "version": { "type": "string", "description": "the agentd semver, e.g. 1.3.1 — identify, never feature-detect from it" },
+    "agent": {
+      "type": "object", "additionalProperties": true,
       "properties": {
-        "run_id": {
-          "type": "string",
-          "description": "Always present. Stable run identity (ULID if not supplied). Populated from env AGENT_RUN_ID."
-        },
-        "instance": {
-          "type": ["string", "null"],
-          "description": "Pod name. Downward API metadata.name via AGENT_POD_NAME. null when unset."
-        },
-        "uid": {
-          "type": ["string", "null"],
-          "description": "Pod UID. Downward API metadata.uid via AGENT_POD_UID. null when unset."
-        },
-        "node": {
-          "type": ["string", "null"],
-          "description": "Node name. Downward API spec.nodeName via AGENT_NODE_NAME. null when unset."
-        },
-        "namespace": {
-          "type": ["string", "null"],
-          "description": "Namespace. Downward API metadata.namespace via AGENT_POD_NAMESPACE. null when unset."
-        }
+        "name": { "type": "string" },
+        "instruction": { "type": "boolean" },
+        "preflight": { "type": "string" }
       }
     },
     "intelligence": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "STRUCTURAL intelligence summary — transport scheme + configured endpoint count + reachability. NEVER an endpoint URL or token (no embedded credentials). The full per-endpoint health view lives at agent://intelligence; the manifest carries only the bounded count.",
-      "required": ["transport", "endpoints", "healthy"],
-      "properties": {
-        "transport": {
-          "type": ["string", "null"],
-          "description": "The PRIMARY endpoint's transport scheme, or null when no endpoint is configured / scheme is unrecognized. Contract 1.0 scheme set: https — intelligence is reached over an HTTPS URL.",
-          "examples": ["https", null]
-        },
-        "endpoints": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Count of configured intelligence endpoints (0 when unset; a single --intelligence element is 1)."
-        },
-        "healthy": {
-          "description": "SUM TYPE: a boolean last-known reachability, OR the literal string \"unknown\" on the one-shot pre-connect probe (nothing has connected yet). Consumers MUST handle both the boolean and the \"unknown\" string; codegen needs a hand-written deserializer for this field.",
-          "oneOf": [
-            { "type": "boolean" },
-            { "type": "string", "const": "unknown" }
-          ]
+      "type": "object", "additionalProperties": true,
+      "properties": { "endpoints": { "type": "integer" }, "model": { "type": ["string", "null"] } }
+    },
+    "mcp_servers": { "type": ["array", "integer", "null"] },
+    "internal_tools": { "type": "array", "items": { "type": "string" } },
+    "tools": {},
+    "workflows": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": true,
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": ["string", "null"] },
+          "inputs_schema": { "type": "boolean" },
+          "start_kinds": {
+            "type": "array", "items": { "type": "string" },
+            "description": "KNOWN GAP: webhook and stream starts report as absent/empty at 1.3.1 — do not infer 'no trigger' from an empty list"
+          }
         }
       }
     },
-    "intelligence_summary": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "Coarse capability hints for placement (no secrets). Open object; fields are advisory and may be omitted. Only `toolmode` is emitted by default; `max_context_hint` is omitted unless configured.",
+    "knowledge": {},
+    "search": {},
+    "skills": {
+      "type": "object", "additionalProperties": true,
+      "properties": { "sources": { "type": "integer" } },
+      "description": "KNOWN GAP: reports sources count only — skills.dir and inline skills are not reflected"
+    },
+    "a2a": {
+      "type": ["object", "null"], "additionalProperties": true,
       "properties": {
-        "toolmode": {
-          "type": "string",
-          "description": "Tool-calling mode hint. Example value: \"native\".",
-          "examples": ["native"]
-        },
-        "max_context_hint": {
-          "type": ["integer", "null"],
-          "description": "Operator-declared max-context hint, or null. Omitted-when-absent."
+        "listen": { "type": ["string", "null"] },
+        "bearer": { "type": "boolean" },
+        "admin": { "type": "array", "items": { "type": "string" } },
+        "command_ops": {
+          "type": "array", "items": { "type": "string" },
+          "description": "KNOWN GAP: omits workflow-declared a2a commands"
         }
       }
     },
-    "mcp_server": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "An MCP client server entry: structural name + trifecta tags only.",
-      "required": ["name", "tags"],
-      "properties": {
-        "name": { "type": "string" },
-        "tags": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Trifecta tags (e.g. untrusted_input, sensitive, egress)."
-        }
-      }
+    "interface": { "type": "object", "additionalProperties": true },
+    "store": { "type": ["string", "object", "null"] },
+    "store_file": {
+      "type": ["object", "null"], "additionalProperties": true,
+      "properties": { "defaulted": { "type": "boolean" }, "path": { "type": "string" } }
     },
-    "a2a_peer": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "An A2A delegation peer entry: structural name + transport scheme only (no address).",
-      "required": ["name", "transport"],
+    "lifecycle": {
+      "type": "object", "additionalProperties": true,
       "properties": {
-        "name": { "type": "string" },
-        "transport": {
-          "type": "string",
-          "description": "Peer transport scheme. Contract 1.0 set: https | unknown (unknown when the endpoint scheme is unrecognized). A2A peers are dialed over mTLS HTTPS.",
-          "examples": ["https", "unknown"]
-        }
-      }
-    },
-    "limits": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "The bounding box: per-run limits + supervisor fork-bomb tree caps. All values are integers. Open object; consumers tolerate additional limit keys.",
-      "properties": {
-        "max_depth": { "type": "integer", "description": "Max subagent tree depth." },
-        "max_children": { "type": "integer", "description": "Max direct children per node (tree cap)." },
-        "max_total_subagents": { "type": "integer", "description": "Max total subagents in the tree (tree cap)." },
-        "max_steps": { "type": "integer", "description": "Max loop steps." },
-        "max_tokens": { "type": "integer", "description": "Max tokens." },
-        "tree_token_budget": { "type": "integer", "description": "Tree-wide token ceiling (tree cap)." },
-        "deadline_ms": { "type": "integer", "description": "Wall-clock deadline in ms (a large sentinel when no deadline is set)." },
-        "drain_timeout_ms": { "type": "integer", "description": "Drain budget in ms." }
-      }
-    },
-    "surfaces": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "The graceful-degradation contract and SINGLE discovery point. Each control-plane surface is reported HONESTLY as served-or-not for THIS build/config; agentctl drives ONLY what is declared here. A key ABSENT means the surface is unbuilt — degrade gracefully; do NOT treat absence as an error. additionalProperties:true is mandatory (additive-tolerance): NEVER apply deny-unknown / additionalProperties:false here — new surface keys are additive and bump MINOR. Several keys are SUM TYPES (bool|string, bool|object) and require hand-written deserializers in any codegen target: codegen cannot derive these.",
-      "properties": {
-        "management": {
-          "description": "SUM TYPE (bool|string): the served self-MCP management address when configured (contract 1.0: an mTLS HTTPS URL, e.g. \"https://0.0.0.0:8443\"), else false. A conformant agent emits either the address string or the boolean false; codegen needs a hand-written deserializer.",
-          "oneOf": [
-            { "type": "boolean", "const": false },
-            { "type": "string", "description": "Management address — contract 1.0 serves the self-MCP over mTLS HTTPS, e.g. \"https://0.0.0.0:8443\"." }
-          ]
-        },
-        "operator_tools": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Operator admin methods advertised on the management surface, invokable only by a Management-origin peer. Contract 1.0 spells these as the a2a.* admin JSON-RPC methods, in FROZEN order: a2a.Drain, a2a.LameDuck, a2a.Pause, a2a.Resume, a2a.Cancel. These are operator extensions, distinct from the A2A-protocol methods in surfaces.a2a (which keep the bare PascalCase spelling). `attach` is NOT a tool — it maps to subagent.send and is excluded. There is NO `force` tool (force = a second SIGTERM). Empty array when the build cannot serve the management surface. Items are typed as open strings (not a closed enum) for additive-tolerance: a consumer MUST tolerate an unknown additive tool name and refuse only at a new MAJOR."
-        },
-        "a2a": {
-          "description": "SUM TYPE (bool|object): the A2A external-agent surface. false when this build does not serve A2A; otherwise an object advertising the served method set. Contract 1.0: this key advertises the COMPILED A2A capability independent of whether a listener is bound, so a no-serve build still advertises it. The normative method names are the A2A protocol's canonical BARE PascalCase spelling served over HTTPS JSON-RPC (POST /mcp); the legacy a2a.-prefixed spelling is accepted for back-compat but the bare form is canonical. Requires a hand-written deserializer (bool|object).",
-          "oneOf": [
-            { "type": "boolean", "const": false },
-            {
-              "type": "object",
-              "additionalProperties": true,
-              "required": ["version", "streaming", "methods"],
-              "properties": {
-                "version": {
-                  "type": "string",
-                  "description": "A2A protocol version this surface advertises (e.g. \"1.0\").",
-                  "examples": ["1.0"]
-                },
-                "streaming": {
-                  "type": "boolean",
-                  "description": "Whether status-level streaming (SendStreamingMessage + SubscribeToTask) is served. Contract 1.0: streaming is an SSE text/event-stream of StreamResponse frames terminated by the terminal task STATE plus stream close — there is no non-spec `final` flag."
-                },
-                "methods": {
-                  "type": "array",
-                  "items": { "type": "string" },
-                  "description": "The served method names. Contract 1.0 canonical set is the A2A protocol's BARE PascalCase spelling over HTTPS JSON-RPC: SendMessage, GetTask, CancelTask, ListTasks, SendStreamingMessage, SubscribeToTask. The legacy a2a.-prefixed spelling (a2a.SendMessage, …) is accepted for back-compat. Open string items for additive-tolerance.",
-                  "examples": [["SendMessage", "GetTask", "CancelTask", "ListTasks", "SendStreamingMessage", "SubscribeToTask"]]
-                },
-                "address": {
-                  "type": "string",
-                  "description": "OPTIONAL dedicated A2A listener address. Contract 1.0: A2A is served on the same mTLS HTTPS /mcp listener as management, so this key is omitted by default; it is present only if a build serves A2A on its own separate address."
-                }
-              }
-            }
-          ]
-        },
-        "metrics": {
-          "description": "SUM TYPE (bool|string): the Prometheus /metrics scrape address when configured (e.g. \":9090\"), else false. Carries the ADDRESS only — the byte-identical Prom-text resource (agent://metrics) and the capacity schema (agent://capacity) are out of manifest scope. Requires a hand-written deserializer (bool|string).",
-          "oneOf": [
-            { "type": "boolean", "const": false },
-            { "type": "string", "description": "Scrape address, e.g. \":9090\"." }
-          ]
-        },
-        "metrics_schema": {
-          "type": "string",
-          "pattern": "^\\d+\\.\\d+$",
-          "description": "FROZEN metrics-schema version, major.minor (current value \"1.0\"). Opaque version string: it gates which metric registry the consumer reads.",
-          "examples": ["1.0"]
-        },
-        "events": {
+        "daemon": {
           "type": "boolean",
-          "description": "Whether the agent://events stream is served."
+          "description": "KNOWN GAP: under-reports for stream/webhook-start-only, a2a-start-only, webhooks.listen and goal instances — never the Deployment-vs-Job oracle; the operator decides shape from the rendered spec"
         },
-        "report_schema": {
-          "type": "string",
-          "pattern": "^\\d+\\.\\d+$",
-          "description": "FROZEN run-outcome report schema version, major.minor (current value \"1.0\").",
-          "examples": ["1.0"]
-        },
-        "exit_codes": {
-          "type": "string",
-          "description": "The exit-code contract version, a major.minor version string (current value \"1.0\").",
-          "examples": ["1.0"]
-        },
-        "intelligence": {
-          "type": "boolean",
-          "description": "Whether the agent://intelligence endpoint-health resource is served."
-        },
-        "hot_reload": {
-          "type": "boolean",
-          "description": "Whether the SIGHUP-triggered reload of the reloadable config subset is served."
-        },
-        "config_validate": {
-          "type": "boolean",
-          "description": "Whether --validate-config is available."
-        },
-        "config_schema": {
-          "type": "boolean",
-          "description": "Whether --config-schema is available. PROVISIONAL: a true value is contract-declared."
-        },
-        "cluster": {
-          "type": "boolean",
-          "description": "Whether horizontal-scaling sharding + the capacity resource are present."
-        },
-        "shard": {
-          "type": ["string", "null"],
-          "description": "SUM TYPE (string|null): this instance's \"K/N\" shard identity, or null when unsharded (N==1) or no cluster.",
-          "examples": ["0/3", null]
-        },
-        "standby": {
-          "type": "boolean",
-          "description": "Whether this instance is a standby (--standby); agentctl routes a directed assignment only to instances reporting standby:true."
-        },
-        "claim": {
-          "description": "SUM TYPE (bool|object): when present, the claim styles this instance speaks. IMPORTANT: this key is OMITTED-when-absent, never false — a build without the claim path leaves the key out entirely (agentctl places a claim route only on instances advertising it). The schema allows bool|object so that absence validates and a hypothetical false (if ever emitted) still validates, but the contract intent is OMITTED, not false.",
-          "oneOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "additionalProperties": true,
-              "required": ["styles"],
-              "properties": {
-                "styles": {
-                  "type": "array",
-                  "items": { "type": "string" },
-                  "description": "Claim styles spoken. Defined set: tool, resource.",
-                  "examples": [["tool", "resource"]]
-                }
-              }
-            }
-          ]
-        },
-        "workflow": {
-          "description": "SUM TYPE (bool|object): the workflow-execution surface. OMITTED-when-absent (a build without a workflow engine leaves the key out; consumers MUST treat absence as unbuilt, not error). When an object, it advertises the workflow dialect version and whether checkpoint/resume is served. Additive, MINOR-bump — the top-level contract_version is unchanged; a consumer detects the resumable-workflow capability purely by inspecting this key. agentctl gates the resumable-workflow behaviour on `dialect >= 2 AND checkpoint == true`.",
-          "oneOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "additionalProperties": true,
-              "required": ["dialect"],
-              "properties": {
-                "dialect": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "description": "Workflow-graph dialect version. dialect >= 2 introduces checkpoint/resume and the input-required gate (a run may pause mid-graph awaiting external input).",
-                  "examples": [2]
-                },
-                "checkpoint": {
-                  "type": "boolean",
-                  "description": "Whether workflow checkpoint/resume is served. When true, a run can PAUSE at a gate by emitting a non-terminal TASK_STATE_INPUT_REQUIRED, then RESUME when a SendMessage carrying `message.taskId` supplies the gate reply (-32004 UNSUPPORTED_OPERATION if no gate is waiting on that task). Also exposes the `--workflow-resume` / `--workflow-resume-force` CLI on the reference agent. A consumer MUST keep polling/streaming across INPUT_REQUIRED (it is NOT a terminal state)."
-                }
-              }
-            }
-          ]
-        },
-        "aauth": {
-          "description": "SUM TYPE (false|object): the portable-identity surface (AAuth, draft-hardt-oauth-aauth). OMITTED-when-absent (a stock/unconfigured build leaves the key out; consumers MUST treat absence as unbuilt, not error). When an object, the instance holds an AAuth identity: it signs its outbound MCP requests (RFC 9421) and presents short-lived proof-of-possession agent tokens issued by the named Agent Provider. The surface carries the DRAFT marker, the bound provider issuer URL, and the resolved identity — NEVER key or token material (a conformant agent MUST NOT surface either). Additive, MINOR-bump — the top-level contract_version is unchanged. While `draft` is true the underlying protocol tracks unreleased IETF drafts and consumers MUST treat the capability as experimental (wire forms may change).",
-          "oneOf": [
-            { "type": "boolean", "const": false },
-            {
-              "type": "object",
-              "additionalProperties": true,
-              "required": ["provider"],
-              "properties": {
-                "draft": {
-                  "type": "boolean",
-                  "description": "True while the AAuth protocol support tracks unreleased IETF drafts. Consumers treat the whole surface as experimental while set."
-                },
-                "provider": {
-                  "type": "string",
-                  "format": "uri",
-                  "description": "The Agent Provider issuer URL this instance is bound to (the `iss` of its agent tokens; verifiers fetch `{iss}/.well-known/aauth-agent.json`).",
-                  "examples": ["https://ap.example.com"]
-                },
-                "agent": {
-                  "type": ["string", "null"],
-                  "description": "The resolved stable agent identifier (`aauth:local@domain`), or null until the instance has enrolled and fetched its first agent token (`aauth.ready`).",
-                  "examples": ["aauth:k7q3p9n2@ap.example"]
-                }
-              }
-            }
-          ]
-        }
+        "run_until": { "type": "string" }
       }
     }
   }
