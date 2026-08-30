@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 
 mod auth;
 mod db_tls;
+mod identity;
 mod metrics;
 mod na_client;
 mod oidc;
@@ -72,6 +73,10 @@ struct AppState {
     /// replicas. Per-replica (each gateway replica has its own), which
     /// is fine for spreading load; strict global fairness is not required.
     round_robin: Arc<std::sync::atomic::AtomicUsize>,
+    /// Identity-service wiring for the org route family (RFC 0029 §3):
+    /// inbound bearer introspection + per-(user,agent) principal injection.
+    /// Unconfigured ⇒ `/orgs/…` refuses 503 (never open, never operator).
+    identity: identity::IdentityConfig,
 }
 
 #[tokio::main]
@@ -131,6 +136,22 @@ async fn main() {
             get(fleet_card),
         )
         .route("/agents/{ns}/{name}", post(a2a_rpc))
+        // The org route family (RFC 0029 §2): the public, tenant-scoped
+        // addresses. Resolution: Organization CR → managed namespace; authn:
+        // identity-service introspection of the inbound bearer; the caller's
+        // per-(user,agent) principal bearer is injected upstream so agentd
+        // resolves `user:<subject>`, not operator. (Handle resolution — P2-7 —
+        // will overlay name→spec.handle; today <name> is the CR name.)
+        .route("/orgs/{org}/agents/{name}", post(org_a2a_rpc))
+        .route(
+            "/orgs/{org}/agents/{name}/.well-known/agent-card.json",
+            get(org_agent_card),
+        )
+        .route("/orgs/{org}/fleets/{name}", post(org_fleet_rpc))
+        .route(
+            "/orgs/{org}/fleets/{name}/.well-known/agent-card.json",
+            get(org_fleet_card),
+        )
         // The fleet as a single addressable A2A endpoint: the same
         // RPC surface as an agent, but member selection routes to the coordinator
         // (front door) or load-balances across worker replicas.
@@ -151,6 +172,7 @@ async fn main() {
             // it for non-OIDC agents.
             auth: gate,
             round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            identity: identity::IdentityConfig::from_env(),
         });
 
     // TRUSTED-PROXY mode (front-proxy trust over mTLS). OFF by default — when off
@@ -376,6 +398,48 @@ async fn fleet_card(
     }
 }
 
+/// `GET /orgs/{org}/agents/{name}/.well-known/agent-card.json` — the signed
+/// card at the tenant-scoped address (the card's URL field advertises the org
+/// route via `base_url` + the request path).
+async fn org_agent_card(
+    State(state): State<AppState>,
+    Path((org, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    org_card_common(state, org, name, None, headers).await
+}
+
+async fn org_fleet_card(
+    State(state): State<AppState>,
+    Path((org, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    org_card_common(state, org, name, Some("AgentFleet"), headers).await
+}
+
+async fn org_card_common(
+    state: AppState,
+    org: String,
+    name: String,
+    kind: Option<&str>,
+    headers: HeaderMap,
+) -> Response {
+    state.metrics.inc_card();
+    let ns = match resolve_org_namespace(&state, &org).await {
+        Ok(ns) => ns,
+        Err(resp) => return *resp,
+    };
+    let base_url = base_url(&headers);
+    match build_signed_card(&state, &ns, &name, &base_url, kind).await {
+        Ok(card) => (StatusCode::OK, Json(card)).into_response(),
+        Err(e) => {
+            state.metrics.inc_upstream_error();
+            tracing::warn!(%org, target = %name, error = %e, "org card build failed");
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response()
+        }
+    }
+}
+
 /// Bridge a spec-form A2A JSON-RPC request to the agent's reference method.
 ///
 /// Non-streaming methods (`message/send`, `tasks/get`, …) forward a single
@@ -390,7 +454,7 @@ async fn a2a_rpc(
     headers: HeaderMap,
     Json(req): Json<Value>,
 ) -> Response {
-    handle_a2a(state, ns, name, false, decision, headers, req).await
+    handle_a2a(state, ns, name, false, decision, headers, req, None).await
 }
 
 /// `POST /fleets/{ns}/{name}` — the fleet as a single addressable A2A endpoint.
@@ -405,13 +469,144 @@ async fn a2a_fleet_rpc(
     headers: HeaderMap,
     Json(req): Json<Value>,
 ) -> Response {
-    handle_a2a(state, ns, name, true, decision, headers, req).await
+    handle_a2a(state, ns, name, true, decision, headers, req, None).await
+}
+
+/// `POST /orgs/{org}/agents/{name}` — the tenant-scoped route: resolve the
+/// org's managed namespace, authenticate the inbound bearer at the identity
+/// service, then run the shared handler with the authenticated org user (whose
+/// per-agent principal bearer is injected upstream).
+#[tracing::instrument(skip_all, fields(org = %org, agent = %name))]
+async fn org_a2a_rpc(
+    State(state): State<AppState>,
+    Path((org, name)): Path<(String, String)>,
+    trusted_proxy::TrustedDecision(decision): trusted_proxy::TrustedDecision,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
+    org_rpc_common(state, org, name, false, decision, headers, req).await
+}
+
+/// `POST /orgs/{org}/fleets/{name}` — [`org_a2a_rpc`] for a fleet endpoint.
+#[tracing::instrument(skip_all, fields(org = %org, fleet = %name))]
+async fn org_fleet_rpc(
+    State(state): State<AppState>,
+    Path((org, name)): Path<(String, String)>,
+    trusted_proxy::TrustedDecision(decision): trusted_proxy::TrustedDecision,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
+    org_rpc_common(state, org, name, true, decision, headers, req).await
+}
+
+async fn org_rpc_common(
+    state: AppState,
+    org: String,
+    name: String,
+    is_fleet: bool,
+    decision: trusted_proxy::Decision,
+    headers: HeaderMap,
+    req: Value,
+) -> Response {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let ns = match resolve_org_namespace(&state, &org).await {
+        Ok(ns) => ns,
+        Err(resp) => return *resp,
+    };
+    // Org routes REQUIRE identity-service authn — no coarse-token or open
+    // fallback, and an unreachable identity service refuses (never fails open).
+    if !state.identity.ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(rpc_error(
+                id,
+                -32603,
+                "org routes require the identity service (identity.service.enabled)",
+            )),
+        )
+            .into_response();
+    }
+    let Some(token) = bearer_token(&headers).map(str::to_string) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(rpc_error(
+                id,
+                -32001,
+                "a bearer token is required on org routes",
+            )),
+        )
+            .into_response();
+    };
+    let user = match identity::introspect(&state.na, &state.identity, &token).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            state.metrics.inc_oidc_deny();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(rpc_error(id, -32001, "bearer token is not active")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            state.metrics.inc_upstream_error();
+            tracing::warn!(%org, error = %e, "identity introspection failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(rpc_error(id, -32603, "identity introspection failed")),
+            )
+                .into_response();
+        }
+    };
+    state.metrics.inc_oidc_allow();
+    handle_a2a(
+        state,
+        ns,
+        name,
+        is_fleet,
+        decision,
+        headers,
+        req,
+        Some(user),
+    )
+    .await
+}
+
+/// Resolve an org name to its primary managed namespace: the Organization
+/// CR's `status.namespaces[0]` when reconciled, else the `org-<name>`
+/// convention. An absent CR is a 404 (org routes never guess).
+async fn resolve_org_namespace(state: &AppState, org: &str) -> Result<String, Box<Response>> {
+    let orgs: Api<agent_api::Organization> = Api::all(state.client.clone());
+    match orgs.get_opt(org).await {
+        Ok(Some(o)) => Ok(o
+            .status
+            .as_ref()
+            .and_then(|s| s.namespaces.first().cloned())
+            .unwrap_or_else(|| agent_api::org::org_namespace(org))),
+        Ok(None) => Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("unknown organization {org:?}") })),
+            )
+                .into_response(),
+        )),
+        Err(e) => Err(Box::new(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("read Organization {org}: {e}") })),
+            )
+                .into_response(),
+        )),
+    }
 }
 
 /// The shared A2A RPC handler for both an agent (`is_fleet=false`) and a fleet
 /// (`is_fleet=true`). The only fleet-specific behaviour is member selection at the
 /// forward step (see [`select_member`]); auth, the gateway-owned verbs, and task
 /// persistence are keyed by `name` (the agent OR fleet name) identically.
+/// `org_user` (the org route family) carries the identity-authenticated caller:
+/// their per-(user,agent) principal bearer is fetched and injected upstream so
+/// the agent resolves them as `user:<subject>` instead of the operator.
+#[allow(clippy::too_many_arguments)]
 async fn handle_a2a(
     state: AppState,
     ns: String,
@@ -420,22 +615,50 @@ async fn handle_a2a(
     decision: trusted_proxy::Decision,
     headers: HeaderMap,
     mut req: Value,
+    org_user: Option<identity::OrgUser>,
 ) -> Response {
     state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
 
     // Per-agent access enforcement, BEFORE any method handling. Precedence:
+    //   (0) an org-route caller — ALREADY authenticated at the identity
+    //       service (org_rpc_common); the legacy rungs don't apply (their
+    //       coarse-gate rung would demand the api token from a caller whose
+    //       bearer is an IdP token). Identity is forwarded for attribution.
     //   (1) a verified trusted-proxy identity (mTLS listener) — trusted, enforce
     //       any requiredClaims, forward identity;
     //   (2) per-agent OIDC (spec.access.oidc) — validate the JWT;
     //   (3) the coarse bearer gate.
     // On success with identity forwarding, the verified caller identity is sent to
     // the agent as X-Auth-* headers.
-    let (identity, forward_identity) =
-        match enforce_access(&state, &ns, &name, &headers, &decision).await {
+    let (identity, forward_identity) = match &org_user {
+        Some(user) => (
+            Some(oidc::Identity {
+                sub: user.subject.clone(),
+                email: user.email.clone(),
+                groups: user.groups.clone(),
+            }),
+            true,
+        ),
+        None => match enforce_access(&state, &ns, &name, &headers, &decision).await {
             Ok(v) => v,
             Err(resp) => return resp,
-        };
+        },
+    };
+
+    // Org-route principal injection (RFC 0028 §6 / 0029 §3): the caller's
+    // per-(user,agent) bearer — minted by identity, projected by the operator
+    // into `<name>-principals` — is what makes agentd resolve `user:<subject>`
+    // rather than the operator the control-plane client cert would mint. An
+    // agent that names principals answers ONLY listed subjects (403 for the
+    // rest); an agent naming none keeps today's posture (no bearer injected).
+    let upstream_bearer = match &org_user {
+        Some(user) => match principal_bearer_for(&state, &ns, &name, &user.subject).await {
+            Ok(b) => b,
+            Err(resp) => return *resp,
+        },
+        None => None,
+    };
     let spec = req
         .get("method")
         .and_then(Value::as_str)
@@ -540,7 +763,14 @@ async fn handle_a2a(
         // pipe). v2.1 frames carry no `final`; terminality is the terminal task
         // state + stream close, which the client observes directly.
         state.metrics.inc_stream();
-        let forwarded = forward_request(&state, &url, &req, &identity, forward_identity);
+        let forwarded = forward_request(
+            &state,
+            &url,
+            &req,
+            &identity,
+            forward_identity,
+            upstream_bearer.as_deref(),
+        );
         return match forwarded.send().await {
             Ok(resp) => (
                 [(header::CONTENT_TYPE, "text/event-stream")],
@@ -554,7 +784,14 @@ async fn handle_a2a(
         };
     }
 
-    let forwarded = forward_request(&state, &url, &req, &identity, forward_identity);
+    let forwarded = forward_request(
+        &state,
+        &url,
+        &req,
+        &identity,
+        forward_identity,
+        upstream_bearer.as_deref(),
+    );
     let body = match forwarded.send().await {
         Ok(resp) => match resp.json::<Value>().await {
             Ok(b) => b,
@@ -1242,11 +1479,97 @@ fn forward_request(
     req: &Value,
     identity: &Option<oidc::Identity>,
     forward_identity: bool,
+    upstream_bearer: Option<&str>,
 ) -> reqwest::RequestBuilder {
-    let rb = state.na.post(url).json(req);
+    let mut rb = state.na.post(url).json(req);
+    // The per-(user,agent) principal bearer: agentd's principal rules are
+    // first-match-wins with the user bearer rules listed before the
+    // control-plane operator san-rule, so this header — not the client cert —
+    // decides the caller's principal.
+    if let Some(b) = upstream_bearer {
+        rb = rb.bearer_auth(b);
+    }
     match (forward_identity, identity) {
         (true, Some(id)) => id.inject(rb),
         _ => rb,
+    }
+}
+
+/// Fetch the caller's per-agent principal bearer from the projected
+/// `<name>-principals` Secret. Outcomes: agent names the subject → its bearer;
+/// agent names principals but NOT this subject → 403 (the addressed gate);
+/// agent names none → `None` (no injection, today's posture). The Secret is
+/// operator-owned; a listed subject whose key is missing is a provisioning
+/// race → 503 (retryable), never silent operator promotion.
+async fn principal_bearer_for(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+    subject: &str,
+) -> Result<Option<String>, Box<Response>> {
+    let declared = match read_access(&state.client, ns, name).await {
+        Ok(a) => a.map(|a| a.principals).unwrap_or_default(),
+        Err(e) => {
+            state.metrics.inc_upstream_error();
+            return Err(Box::new(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("read access policy: {e}") })),
+                )
+                    .into_response(),
+            ));
+        }
+    };
+    if declared.is_empty() {
+        return Ok(None);
+    }
+    if !declared.iter().any(|s| s == subject) {
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": format!("{subject:?} is not a named principal on this agent") })),
+            )
+                .into_response(),
+        ));
+    }
+    let secrets: Api<k8s_openapi::api::core::v1::Secret> =
+        Api::namespaced(state.client.clone(), ns);
+    let key = agent_config::principal_secret_key(subject);
+    let secret_name = format!("{name}-principals");
+    let found = secrets
+        .get_opt(&secret_name)
+        .await
+        .map_err(|e| {
+            state.metrics.inc_upstream_error();
+            Box::new(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("read {secret_name}: {e}") })),
+                )
+                    .into_response(),
+            )
+        })?
+        .and_then(|s| s.data)
+        .and_then(|d| d.get(&key).map(|v| v.0.clone()));
+    match found {
+        Some(raw) => String::from_utf8(raw).map(Some).map_err(|_| {
+            Box::new(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "projected principal bearer is not UTF-8" })),
+                )
+                    .into_response(),
+            )
+        }),
+        None => Err(Box::new(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": format!(
+                    "principal for {subject:?} is declared but not yet projected (key {key} in {secret_name}); retry shortly"
+                ) })),
+            )
+                .into_response(),
+        )),
     }
 }
 

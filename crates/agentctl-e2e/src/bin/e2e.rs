@@ -153,7 +153,196 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("org-tenancy", "tenancy", org_tenancy),
         // per-user principals (P1-4)
         scenario!("a2a-principals-gate", "tenancy", a2a_principals_gate),
+        // org routes + identity authn + principal injection (P1-5)
+        scenario!("org-route-user", "tenancy", org_route_user),
     ]
+}
+
+/// The whole P1-5 chain, live: `/orgs/<org>/agents/<name>` resolves the
+/// Organization's managed namespace; the inbound bearer (an RS256 token signed
+/// with the mock-IdP test key) is introspected at the identity service (which
+/// fetches JWKS from the in-cluster mock-idp over the private chart CA); the
+/// caller's minted per-(user,agent) principal bearer is fetched from the
+/// projected Secret and injected upstream, so the agent answers as
+/// `user:mock:alice`. Negatives: no token 401, an unlisted subject 403, an
+/// unknown org 404.
+async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str| {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({
+                "iss": "https://mock-idp:8443",
+                "aud": "agentctl-cli",
+                "sub": sub,
+                "email": format!("{sub}@example.test"),
+                "groups": ["eng"],
+                "exp": exp,
+            }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    // Organization + a principal-gated agent in its managed namespace.
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-route";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({ "displayName": "E2E Route" }))?,
+        )),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    let name = "assistant";
+    let mut agent = agentd_agent(ctx, name, Mode::Reactive, "idle");
+    agent.spec.instruction = None;
+    agent.spec.surfaces = Some(agent_api::DesiredSurfaces {
+        a2a: true,
+        ..Default::default()
+    });
+    agent.spec.access = Some(agent_api::Access {
+        principals: vec!["mock:alice".to_string()],
+        ..Default::default()
+    });
+    agent.metadata.namespace = Some(ns.clone());
+    kh::apply(&ctx.client, &ns, name, &agent).await?;
+    let pod = {
+        // wait_for_first_pod is pinned to ctx.cfg.ns; poll the org ns directly.
+        let mut found = String::new();
+        kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+            Ok(!first_pod(&ns, &agent_label(name)).unwrap_or_default().is_empty())
+        })
+        .await
+        .context("agent pod in org namespace")?;
+        found.push_str(&first_pod(&ns, &agent_label(name))?);
+        found
+    };
+    kh::wait_pod_running(&ctx.client, &ns, &pod, READY_TIMEOUT).await?;
+
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18098)?;
+    let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+        "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-org-1", "parts": [{ "text": "ping" }] } } });
+    let url = format!("{}/orgs/{org}/agents/{name}", pf.base_url());
+
+    // Named user end-to-end: token → introspection → principal bearer → answer.
+    let resp = ctx
+        .http
+        .post(&url)
+        .bearer_auth(sign("alice"))
+        .json(&rpc)
+        .send()
+        .await?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() || body.get("result").is_none() {
+        bail!("org-route call as mock:alice failed (status {status}): {body}");
+    }
+
+    // No token → 401 (org routes never fall open).
+    let resp = ctx.http.post(&url).json(&rpc).send().await?;
+    if resp.status().as_u16() != 401 {
+        bail!("unauthenticated org-route call got {} (want 401)", resp.status());
+    }
+
+    // A valid token for a subject the agent does NOT name → 403.
+    let resp = ctx
+        .http
+        .post(&url)
+        .bearer_auth(sign("bob"))
+        .json(&rpc)
+        .send()
+        .await?;
+    if resp.status().as_u16() != 403 {
+        bail!("unlisted subject got {} (want 403 addressed-gate refusal)", resp.status());
+    }
+
+    // Unknown org → 404.
+    let resp = ctx
+        .http
+        .post(format!("{}/orgs/no-such-org/agents/{name}", pf.base_url()))
+        .bearer_auth(sign("alice"))
+        .json(&rpc)
+        .send()
+        .await?;
+    if resp.status().as_u16() != 404 {
+        bail!("unknown org got {} (want 404)", resp.status());
+    }
+
+    // Streaming through the org route with the injected principal: the SSE
+    // pipe opens and carries at least one data frame.
+    let stream_rpc = json!({ "jsonrpc": "2.0", "id": 2, "method": "SendStreamingMessage",
+        "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-org-2", "parts": [{ "text": "ping" }] } } });
+    let resp = ctx
+        .http
+        .post(&url)
+        .bearer_auth(sign("alice"))
+        .json(&stream_rpc)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!("org-route stream got {}", resp.status());
+    }
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !ct.starts_with("text/event-stream") {
+        bail!("org-route stream content-type {ct:?}, want text/event-stream");
+    }
+    let body = resp.text().await.unwrap_or_default();
+    if !body.contains("data:") {
+        bail!("org-route stream carried no SSE data frame: {body:?}");
+    }
+
+    // The card is served at the tenant-scoped address.
+    let resp = ctx
+        .http
+        .get(format!(
+            "{}/orgs/{org}/agents/{name}/.well-known/agent-card.json",
+            pf.base_url()
+        ))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!("org-route card got {}", resp.status());
+    }
+
+    drop(pf);
+    kh::api::<Agent>(&ctx.client, &ns)
+        .delete(name, &Default::default())
+        .await
+        .ok();
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
 }
 
 /// Per-(user, agent) principals (RFC 0028 §6): `spec.access.principals` makes

@@ -550,12 +550,15 @@ fn a2a_block(peers: &[Peer], principal_subjects: &[String]) -> Value {
     if !peers.is_empty() {
         a2a.insert("peers".into(), Value::Array(peer_entries(peers)));
     }
-    if !principal_subjects.is_empty() {
-        a2a.insert(
-            "principals".into(),
-            Value::Array(principal_entries(principal_subjects)),
-        );
-    }
+    // ALWAYS declared (RFC 0029 §4, "close the loopback-operator trap on all
+    // agents"): even with no user subjects the list carries the control-plane
+    // operator rule, and ANY non-empty list switches off agentd's implicit
+    // loopback/management operator fallback — so an anonymous or loopback
+    // caller is never silently the operator on any rendered agent.
+    a2a.insert(
+        "principals".into(),
+        Value::Array(principal_entries(principal_subjects)),
+    );
     Value::Object(a2a)
 }
 
@@ -826,8 +829,9 @@ mod tests {
         assert_eq!(principals[2]["match"]["san"], "agentctl-control-plane");
         assert_eq!(principals[2]["role"], "operator");
 
-        // No subjects ⇒ NO principals key at all: an empty array would also
-        // disable agentd's loopback-operator fallback.
+        // No subjects ⇒ STILL a principals list with the operator rule: the
+        // loopback-operator trap is closed on every rendered agent (RFC 0029
+        // §4), and the control plane keeps its management path via the cert.
         let bare = build(&ConfigInput {
             mode: Mode::Reactive,
             serve_a2a: true,
@@ -835,7 +839,10 @@ mod tests {
         })
         .unwrap()
         .value;
-        assert!(bare["a2a"].get("principals").is_none());
+        let bare_principals = bare["a2a"]["principals"].as_array().unwrap();
+        assert_eq!(bare_principals.len(), 1);
+        assert_eq!(bare_principals[0]["match"]["san"], "agentctl-control-plane");
+        assert_eq!(bare_principals[0]["role"], "operator");
     }
 
     /// Byte-identical with `agentctl_identity::principals::principal_secret_key`

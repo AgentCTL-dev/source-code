@@ -47,6 +47,9 @@ tower = { version = "0.5", default-features = false }
 x509-cert = "0.2"
 # CRD types (Agent / AgentFleet) for the mesh discovery registry (GET /agents).
 agent-api = { path = "../agent-api" }
+# The principal Secret-key derivation MUST stay byte-identical to the
+# operator/identity mapping — take it from the shared builder, never re-derive.
+agent-config = { path = "../agent-config" }
 # Durable A2A task store. sslmode=disable → NoTls (default); when the
 # DSN asks for TLS (sslmode=require, e.g. bundled postgres.tls.enabled) the store
 # wraps the hop with tokio-postgres-rustls. Both pure Rust, no C toolchain.
@@ -56,6 +59,7 @@ tokio-postgres = "0.7"
 # (no aws-lc-rs, no C toolchain — reuses the rustls/ring stack above).
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+serde.workspace = true
 serde_json.workspace = true
 tracing = "0.1"
 # Shared tracing init: fmt-only by default, OTLP export when

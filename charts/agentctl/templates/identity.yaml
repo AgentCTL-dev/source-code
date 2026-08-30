@@ -104,15 +104,27 @@ spec:
                 secretKeyRef:
                   name: agentctl-api-token
                   key: AGENTCTL_API_TOKEN
+            {{- if or $id.issuerCa.secretName $id.issuerCa.configMapName }}
+            # Private-CA roots for issuer TLS (identity.service.issuerCa).
+            - name: IDENTITY_ISSUER_CA
+              value: /etc/agentctl-issuer-ca/{{ $id.issuerCa.key }}
+            {{- end }}
           {{- with $id.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- $pgMount := "" }}
           {{- if eq $id.store "postgres" }}{{ $pgMount = include "agentctl.pgCaVolumeMount" $ }}{{- end }}
-          {{- with (trim $pgMount) }}
+          {{- if or (trim $pgMount) $id.issuerCa.secretName $id.issuerCa.configMapName }}
           volumeMounts:
+            {{- with (trim $pgMount) }}
             {{- include "agentctl.pgCaVolumeMount" $ | nindent 12 }}
+            {{- end }}
+            {{- if or $id.issuerCa.secretName $id.issuerCa.configMapName }}
+            - name: issuer-ca
+              mountPath: /etc/agentctl-issuer-ca
+              readOnly: true
+            {{- end }}
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -131,9 +143,20 @@ spec:
             {{- toYaml $id.resources | nindent 12 }}
       {{- $pgVol := "" }}
       {{- if eq $id.store "postgres" }}{{ $pgVol = include "agentctl.pgCaVolume" $ }}{{- end }}
-      {{- with (trim $pgVol) }}
+      {{- if or (trim $pgVol) $id.issuerCa.secretName $id.issuerCa.configMapName }}
       volumes:
+        {{- with (trim $pgVol) }}
         {{- include "agentctl.pgCaVolume" $ | nindent 8 }}
+        {{- end }}
+        {{- if $id.issuerCa.secretName }}
+        - name: issuer-ca
+          secret:
+            secretName: {{ $id.issuerCa.secretName }}
+        {{- else if $id.issuerCa.configMapName }}
+        - name: issuer-ca
+          configMap:
+            name: {{ $id.issuerCa.configMapName }}
+        {{- end }}
       {{- end }}
 ---
 apiVersion: v1

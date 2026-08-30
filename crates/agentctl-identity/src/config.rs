@@ -64,6 +64,9 @@ pub struct Config {
     /// The chart wires the shared control-plane token; empty ⇒ mutating
     /// surfaces are refused entirely (fail closed, never open).
     pub admin_token: Option<String>,
+    /// Extra PEM root CA file for issuer TLS (`IDENTITY_ISSUER_CA`) — for
+    /// IdPs serving from a private CA. Adds to (never replaces) webpki.
+    pub issuer_ca: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,12 +138,17 @@ impl Config {
             .ok()
             .filter(|t| !t.trim().is_empty());
 
+        let issuer_ca = std::env::var("IDENTITY_ISSUER_CA")
+            .ok()
+            .filter(|p| !p.trim().is_empty());
+
         Ok(Config {
             bind,
             providers,
             store,
             seal_key,
             admin_token,
+            issuer_ca,
         })
     }
 

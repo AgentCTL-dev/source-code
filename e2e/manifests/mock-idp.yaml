@@ -1,0 +1,96 @@
+# An in-cluster mock OIDC issuer for the identity-gateway e2e lane: a STATIC
+# TLS file server (discovery + JWKS only — the e2e signs its own tokens with
+# the matching vendored TEST key, crates/agentctl-identity/tests/keys/, so no
+# token endpoint is needed). Serves from the chart CA (agentctl-ca
+# ClusterIssuer); the identity service trusts it via identity.service.issuerCa.
+# Lives in agentctl-system so the single-label issuer host `mock-idp` resolves
+# through the FIRST search domain — immune to the cluster's wildcard-DNS trap.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mock-idp
+  namespace: agentctl-system
+spec:
+  secretName: mock-idp-tls
+  commonName: mock-idp
+  dnsNames: [mock-idp, mock-idp.agentctl-system, mock-idp.agentctl-system.svc]
+  usages: ["server auth"]
+  issuerRef: { name: agentctl-ca, kind: ClusterIssuer }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-idp
+  namespace: agentctl-system
+data:
+  openid-configuration: |
+    {"issuer":"https://mock-idp:8443","jwks_uri":"https://mock-idp:8443/jwks.json","device_authorization_endpoint":"https://mock-idp:8443/device","token_endpoint":"https://mock-idp:8443/token"}
+  jwks.json: |
+    {"keys":[{"kty":"RSA","kid":"test-1","alg":"RS256","use":"sig","n":"lRo93Tzu-mK5IO5yroYRPeHh9eU8cetk0w5qv09gOH8Ly2T4ODDO1fq6ECkyYUgFUzbxM8fcR77U9F9gEq2D8UBarwOIvs5yVTu6mhtLLbzMvJsFWblvNzBP67UPi6A-TsGW6Jz5ul2RqELLTTZpLrp4ObqeAMbSBvPyMNdAGz7wz3BU63YeIEGSExe9_kPoYfv1xScqKrcFNaIC74uDcuOdOIwoHUWhlgn3ieoLNWm97MXNyRBiq9FAxFS4xHpo8aA4x0JDK8_Xj65rmbg469qpEAWUuJ-cs8u9jBhN4FI9un-6sSqwTF-p3r0FSVt_mo_5o4sTuHEiET1YPmITzw","e":"AQAB"}]}
+  server.py: |
+    import http.server, ssl, os
+    DOCS = {
+        "/.well-known/openid-configuration": ("/data/openid-configuration", "application/json"),
+        "/jwks.json": ("/data/jwks.json", "application/json"),
+    }
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def do_GET(self):
+            doc = DOCS.get(self.path)
+            if not doc:
+                body = b'{"error":"not found"}'
+                self.send_response(404)
+            else:
+                body = open(doc[0], "rb").read()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *a):
+            pass
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain("/tls/tls.crt", "/tls/tls.key")
+    srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8443), H)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    print("mock-idp serving :8443", flush=True)
+    srv.serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-idp
+  namespace: agentctl-system
+  labels: { app: mock-idp }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mock-idp }
+  template:
+    metadata:
+      labels: { app: mock-idp }
+    spec:
+      containers:
+        - name: idp
+          image: python:3.12-alpine
+          command: ["python", "/data/server.py"]
+          ports:
+            - containerPort: 8443
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tls, mountPath: /tls }
+      volumes:
+        - name: data
+          configMap: { name: mock-idp }
+        - name: tls
+          secret: { secretName: mock-idp-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-idp
+  namespace: agentctl-system
+spec:
+  selector: { app: mock-idp }
+  ports:
+    - { port: 8443, targetPort: 8443, name: https }

@@ -71,8 +71,29 @@ fn now_unix() -> i64 {
 
 /// Build the shared outbound client (webpki roots, rustls/ring, no proxies).
 pub fn outbound_client() -> reqwest::Client {
+    outbound_client_with_extra_roots(&[]).expect("webpki roots always parse")
+}
+
+/// [`outbound_client`] plus additional PEM root certificates — for IdPs
+/// serving from a private CA (an in-cluster Keycloak, the e2e mock issuer).
+/// The extra roots ADD to webpki; public issuers keep working.
+pub fn outbound_client_with_extra_roots(extra_pem: &[u8]) -> Result<reqwest::Client, String> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if !extra_pem.is_empty() {
+        let mut added = 0usize;
+        use rustls_pki_types::pem::PemObject as _;
+        for cert in rustls_pki_types::CertificateDer::pem_slice_iter(extra_pem) {
+            let cert = cert.map_err(|e| format!("issuer CA: bad PEM: {e:?}"))?;
+            roots
+                .add(cert)
+                .map_err(|e| format!("issuer CA: rejected certificate: {e}"))?;
+            added += 1;
+        }
+        if added == 0 {
+            return Err("issuer CA: no certificates found in PEM".into());
+        }
+    }
     let tls = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -80,7 +101,7 @@ pub fn outbound_client() -> reqwest::Client {
         .use_preconfigured_tls(tls)
         .timeout(Duration::from_secs(15))
         .build()
-        .expect("reqwest client")
+        .map_err(|e| format!("build outbound client: {e}"))
 }
 
 impl Federation {

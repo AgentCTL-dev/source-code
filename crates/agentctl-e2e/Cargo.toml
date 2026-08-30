@@ -54,6 +54,9 @@ agent-api = { path = "../agent-api" }
 agent-contract-client = { path = "../agent-contract-client" }
 # HTTP client for: /metrics scrapes over a port-forward, the A2A gateway card/RPC/
 # SSE surface, and the coordination /mcp throughput load-gen.
+# The org-route scenario signs RS256 test tokens against the vendored mock-IdP
+# key (crates/agentctl-identity/tests/keys/) — same crypto family as the stack.
+jsonwebtoken = "9"
 # `rustls-tls` is ring-backed in reqwest 0.12 (→ no aws-lc-rs, no C toolchain).
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",

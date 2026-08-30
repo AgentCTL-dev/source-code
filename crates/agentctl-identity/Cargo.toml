@@ -22,6 +22,8 @@ path = "src/main.rs"
 agentctl-telemetry = { path = "../agentctl-telemetry" }
 axum = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# PEM parsing for IDENTITY_ISSUER_CA extra roots (the maintained pemfile successor).
+rustls-pki-types = { version = "1", features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
 # Outbound to IdPs: discovery, JWKS, device/token endpoints. Same rustls
 # manual-roots posture as the operator's AAuth client (webpki roots, no C).

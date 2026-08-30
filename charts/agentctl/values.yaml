@@ -495,6 +495,13 @@ identity:
     sealKeySecret:
       name: ""
       key: IDENTITY_SEAL_KEY
+    # Extra PEM root CA for issuer TLS (IdPs behind a private CA — an
+    # in-cluster Keycloak, a corp CA). Adds to (never replaces) the public
+    # webpki roots. Point at a Secret OR ConfigMap holding the PEM.
+    issuerCa:
+      secretName: ""
+      configMapName: ""
+      key: ca.crt
     resources:
       requests: { cpu: 25m, memory: 32Mi }
       limits: { cpu: 300m, memory: 128Mi }

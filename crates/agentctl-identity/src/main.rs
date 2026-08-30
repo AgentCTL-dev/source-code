@@ -53,8 +53,30 @@ async fn main() {
         }
     };
 
+    let outbound = match &cfg.issuer_ca {
+        Some(path) => {
+            let pem = match std::fs::read(path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("identity config error: IDENTITY_ISSUER_CA {path}: {e}");
+                    std::process::exit(2);
+                }
+            };
+            match agentctl_identity::oidc::outbound_client_with_extra_roots(&pem) {
+                Ok(c) => {
+                    info!(path, "issuer TLS: webpki + extra private-CA roots");
+                    c
+                }
+                Err(e) => {
+                    eprintln!("identity config error: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        None => outbound_client(),
+    };
     let state = Arc::new(AppState {
-        federation: Federation::new(outbound_client(), cfg.providers.clone()),
+        federation: Federation::new(outbound, cfg.providers.clone()),
         store,
         admin_token: cfg.admin_token.clone(),
     });

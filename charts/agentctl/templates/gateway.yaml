@@ -36,6 +36,18 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["agents", "agentfleets"]
     verbs: ["get", "list"]
+{{- if .Values.identity.service.enabled }}
+  # Org route family (RFC 0029): resolve /orgs/<org>/… to the tenant's managed
+  # namespace, and fetch the caller's per-(user,agent) principal bearer from
+  # the operator-projected <agent>-principals Secret for upstream injection.
+  # Read-only; no list/watch on secrets.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["organizations"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -116,6 +128,20 @@ spec:
             # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
             {{- . | nindent 12 }}
             {{- end }}
+{{- if .Values.identity.service.enabled }}
+            # Org route family (RFC 0029 §3): inbound bearer introspection at
+            # the identity service + per-(user,agent) principal injection.
+            # DELIBERATELY a separate env pair from AGENTCTL_API_TOKEN — that
+            # one arms the coarse data-plane gate; this one only authenticates
+            # the gateway's admin channel to identity.
+            - name: AGENTCTL_IDENTITY_URL
+              value: http://agentctl-identity.{{ $ns }}
+            - name: AGENTCTL_IDENTITY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+{{- end }}
             # Ed25519 seed for Agent Card JWS signing.
             - name: GATEWAY_SIGNING_SEED
               valueFrom:

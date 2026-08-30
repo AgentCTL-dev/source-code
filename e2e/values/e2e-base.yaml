@@ -51,7 +51,11 @@ identity:
   service:
     enabled: true
     store: postgres
+    # The in-cluster mock issuer (e2e/manifests/mock-idp.yaml) serves from the
+    # chart CA; the public cert is copied into this ConfigMap by up.sh (the
+    # same shape an admin uses for a corp-CA Keycloak).
+    issuerCa: { configMapName: agentctl-issuer-ca, key: ca.crt }
     providers:
       - name: mock
-        issuer: https://idp.invalid
+        issuer: https://mock-idp:8443
         client_id: agentctl-cli
