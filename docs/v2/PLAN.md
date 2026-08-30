@@ -88,7 +88,7 @@ identity + a minimal P3 state path for the supervisor's own store.)
 
 | ID | Item | Definition of done | Status |
 |---|---|---|---|
-| P5-1 | Tenant mcpg per org (operator-provisioned via mcpg CRs) | org create brings its gateway; catalog rendered from MCPService entries | Todo |
+| P5-1 | Tenant mcpg per org (operator-provisioned via mcpg CRs) | org create brings its gateway; catalog rendered from MCPService entries | **Done(2026-08-30)** — provisioned by OUR operator directly (no mcpg-operator dependency; Rust-only stands): the org controller renders `agentctl-mcpg` ConfigMap/Deployment/Service per managed ns (org-owned, GC cascades) from the blessed GATEWAY image, PROXY-ONLY (`mcp.federations[]`, zero plugins — the broken OCI lane never enters the boot path). Registry entries federate under `<entry>.` prefixes narrowed by allow/exclude (mcpg's exact\|*\|prefix* grammar; inner wildcards drop with a warning); `control` NEVER federates (identity laundering, pinned by test); header-asserted callers + netpol perimeter (P5-2 upgrades to JWKS); HOT catalog via config_watch. **Live e2e `tenant-mcpg` PASS**: org brings the gateway, workstats.work.stats visible and callable through governance, nothing else leaks |
 | P5-2 | AAuth verification chain at mcpg (identity JWKS) | unsigned/foreign-signed calls refused | Todo |
 | P5-3 | Our Apache CredentialIssuer plugin → identity `/exchange` | per-user token injected upstream; cache + refresh observed over simulated days | Todo |
 | P5-4 | Connections flow (consent, `connection_required` → HITL card) | user connects a provider once; agent proceeds | Todo |
