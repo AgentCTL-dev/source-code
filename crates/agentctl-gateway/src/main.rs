@@ -733,6 +733,7 @@ async fn org_approve(
         (n == nonce && exp > now).then_some((a, requester))
     });
     let Some((target, requester)) = pending else {
+        state.metrics.inc_approval(false);
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "no live pending approval with that code" })),
@@ -741,6 +742,7 @@ async fn org_approve(
     };
     if requester != user.subject {
         // Addressed to the OWNER alone — not even another admin.
+        state.metrics.inc_approval(false);
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "this approval is addressed to the requesting owner" })),
@@ -762,6 +764,7 @@ async fn org_approve(
         )
             .into_response();
     }
+    state.metrics.inc_approval(true);
     tracing::info!(%org, agent = %name, approved_by = %user.subject, %nonce, "destructive request approved by owner");
     Json(json!({ "approved": name, "by": user.subject })).into_response()
 }

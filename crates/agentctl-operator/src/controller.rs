@@ -1744,10 +1744,12 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // remainder — leased items redeliver when it resumes, so the pause is
     // loss-free by the fabric's own semantics.
     let budget = v2_view.as_ref().and_then(|f| f.spec.budget.clone());
+    let mut budget_used_units: i64 = 0;
     let budget_exceeded = match &budget {
         Some(b) if b.window_seconds > 0 && b.max_units > 0 => {
             match fleet_budget_used(&ctx.client, ns, &name, b).await {
                 Ok(used) => {
+                    budget_used_units = used;
                     if used >= b.max_units {
                         info!(fleet = %name, used, max = b.max_units, kind = %b.kind,
                               "fleet budget window breached; pausing intake");
@@ -1900,6 +1902,16 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                 };
             // Fold the coordinator's readiness in: a not-ready coordinator holds the
             // whole fleet Progressing (the front door is down even if workers are up).
+            ctx.metrics.set_fleet(
+                ns,
+                &name,
+                crate::metrics::FleetGauges {
+                    ready: ready_replicas.unwrap_or(0),
+                    desired: desired_replicas.unwrap_or(0),
+                    budget_used: budget_used_units,
+                    budget_paused: budget_exceeded,
+                },
+            );
             let condition = if budget_exceeded {
                 Condition {
                     type_: "Ready".to_string(),

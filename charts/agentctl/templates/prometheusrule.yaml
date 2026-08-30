@@ -83,6 +83,34 @@ spec:
         # The admission webhook is denying an unusual volume of Agent/AgentFleet
         # admissions — a misconfigured allow-list, a bad rollout, or an attacker
         # probing the trifecta/registry gates. Sustained, not a single deny.
+        - alert: AgentctlFleetBudgetPaused
+          expr: agentctl_operator_fleet_budget_paused > 0
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "Fleet {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.fleet {{ "}}" }} intake paused by budget breach"
+            description: "The fleet's metered usage breached its budget window; intake stays paused until the window slides."
+        - alert: AgentctlFleetDegraded
+          expr: agentctl_operator_fleet_ready_replicas < agentctl_operator_fleet_desired_replicas
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "Fleet {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.fleet {{ "}}" }} below desired for 10m"
+            description: "Ready members have trailed desired for 10 minutes (crash-loops, scheduling pressure, or a wedged resize)."
+        - alert: AgentctlWorkDeadletterGrowth
+          expr: increase(agentctl_coordination_claims_deadlettered_total[15m]) > 0
+          for: 0m
+          labels: { severity: warning }
+          annotations:
+            summary: "Work items are dead-lettering"
+            description: "Poison or over-budget items moved to the DLQ in the last 15m — inspect dlq://items and requeue or drop."
+        - alert: AgentctlApprovalsRefusedSpike
+          expr: increase(agentctl_gateway_approvals_total{outcome="refused"}[10m]) > 5
+          for: 0m
+          labels: { severity: warning }
+          annotations:
+            summary: "Destructive-request approvals being refused repeatedly"
+            description: "Wrong-user or unknown-nonce approval attempts are spiking — possibly a confused client, possibly probing."
         - alert: AgentctlAdmissionDenySpike
           expr: sum(rate(agentctl_admission_deny_total[5m])) > 1
           for: 10m

@@ -26,6 +26,10 @@ pub struct Metrics {
     upstream_errors: AtomicU64,
     /// Requests rejected (401) by the bearer-token access gate.
     auth_rejected: AtomicU64,
+    /// Owner approvals on destructive requests (P4-5): granted vs refused
+    /// (wrong user / unknown nonce) — the "gates" observability (P7-2).
+    approvals_allowed: AtomicU64,
+    approvals_refused: AtomicU64,
     /// Per-agent OIDC requests allowed (valid JWT + claims) on the A2A surface.
     oidc_allow: AtomicU64,
     /// Per-agent OIDC requests denied (authN 401 or authZ 403) on the A2A surface.
@@ -49,6 +53,8 @@ impl Metrics {
             tasks: AtomicU64::new(0),
             upstream_errors: AtomicU64::new(0),
             auth_rejected: AtomicU64::new(0),
+            approvals_allowed: AtomicU64::new(0),
+            approvals_refused: AtomicU64::new(0),
             oidc_allow: AtomicU64::new(0),
             oidc_deny: AtomicU64::new(0),
             trusted_proxy_accepted: AtomicU64::new(0),
@@ -81,7 +87,15 @@ impl Metrics {
         self.upstream_errors.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A request was rejected (401) by the bearer-token access gate.
+    /// An owner-approval outcome on a destructive request (granted or refused).
+    pub fn inc_approval(&self, allowed: bool) {
+        if allowed {
+            self.approvals_allowed.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.approvals_refused.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn inc_auth_rejected(&self) {
         self.auth_rejected.fetch_add(1, Ordering::Relaxed);
     }
@@ -146,6 +160,18 @@ impl Metrics {
             "Requests that failed at the agent/upstream hop.",
             self.upstream_errors.load(Ordering::Relaxed),
         );
+        // Owner-approval outcomes (P4-5 gates; labeled, so hand-rendered).
+        out.push_str(
+            "# HELP agentctl_gateway_approvals_total Owner-approval outcomes on destructive requests.\n# TYPE agentctl_gateway_approvals_total counter\n",
+        );
+        out.push_str(&format!(
+            "agentctl_gateway_approvals_total{{outcome=\"allowed\"}} {}\n",
+            self.approvals_allowed.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "agentctl_gateway_approvals_total{{outcome=\"refused\"}} {}\n",
+            self.approvals_refused.load(Ordering::Relaxed)
+        ));
         counter(
             &mut out,
             "agentctl_gateway_auth_rejected_total",
@@ -221,6 +247,9 @@ mod tests {
         m.inc_card();
         m.inc_task();
         m.inc_upstream_error();
+        m.inc_approval(true);
+        m.inc_approval(false);
+        m.inc_approval(false);
         let body = m.render();
         assert!(body.contains("# TYPE agentctl_gateway_rpc_requests_total counter"));
         assert!(body.contains("agentctl_gateway_rpc_requests_total 2"));
@@ -228,6 +257,9 @@ mod tests {
         assert!(body.contains("agentctl_gateway_card_requests_total 1"));
         assert!(body.contains("agentctl_gateway_tasks_total 1"));
         assert!(body.contains("agentctl_gateway_upstream_errors_total 1"));
+        assert!(body.contains("# TYPE agentctl_gateway_approvals_total counter"));
+        assert!(body.contains("agentctl_gateway_approvals_total{outcome=\"allowed\"} 1"));
+        assert!(body.contains("agentctl_gateway_approvals_total{outcome=\"refused\"} 2"));
         assert!(body.contains("# TYPE process_start_time_seconds gauge"));
     }
 }

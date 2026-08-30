@@ -10,7 +10,9 @@
 //! component namespaces its own metrics this way — so a single Prometheus job
 //! can scrape every component without name collisions.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Upper bounds (seconds) for the reconcile-duration histogram. The Prometheus
@@ -39,6 +41,19 @@ pub struct Metrics {
     leader: AtomicBool,
     /// True once the controller manager has started reconciling.
     manager_up: AtomicBool,
+    /// Per-fleet health/budget gauges (P7-2), keyed `namespace/fleet`.
+    /// A Mutex is fine here: written once per fleet reconcile, read once per
+    /// scrape — never on a hot path.
+    fleet_state: Mutex<BTreeMap<String, FleetGauges>>,
+}
+
+/// One fleet's observable state, as of its latest reconcile.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FleetGauges {
+    pub ready: u32,
+    pub desired: u32,
+    pub budget_used: i64,
+    pub budget_paused: bool,
 }
 
 impl Default for Metrics {
@@ -58,6 +73,21 @@ impl Metrics {
             duration_sum_micros: AtomicU64::new(0),
             leader: AtomicBool::new(false),
             manager_up: AtomicBool::new(false),
+            fleet_state: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Publish one fleet's health/budget gauges (latest reconcile wins).
+    pub fn set_fleet(&self, ns: &str, fleet: &str, g: FleetGauges) {
+        if let Ok(mut m) = self.fleet_state.lock() {
+            m.insert(format!("{ns}/{fleet}"), g);
+        }
+    }
+
+    /// Drop a deleted fleet's series.
+    pub fn clear_fleet(&self, ns: &str, fleet: &str) {
+        if let Ok(mut m) = self.fleet_state.lock() {
+            m.remove(&format!("{ns}/{fleet}"));
         }
     }
 
@@ -157,6 +187,45 @@ impl Metrics {
         );
         out.push_str("# TYPE agentctl_operator_leader gauge\n");
         out.push_str(&format!("agentctl_operator_leader {leader}\n"));
+
+        // Per-fleet health + budget gauges (P7-2 dashboards/alerts).
+        let fleets = self
+            .fleet_state
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        if !fleets.is_empty() {
+            out.push_str("# HELP agentctl_operator_fleet_ready_replicas Fleet members Ready.\n");
+            out.push_str("# TYPE agentctl_operator_fleet_ready_replicas gauge\n");
+            out.push_str(
+                "# HELP agentctl_operator_fleet_desired_replicas Fleet members desired.\n",
+            );
+            out.push_str("# TYPE agentctl_operator_fleet_desired_replicas gauge\n");
+            out.push_str("# HELP agentctl_operator_fleet_budget_used Metered units used in the current budget window.\n");
+            out.push_str("# TYPE agentctl_operator_fleet_budget_used gauge\n");
+            out.push_str("# HELP agentctl_operator_fleet_budget_paused 1 while intake is paused by a budget breach.\n");
+            out.push_str("# TYPE agentctl_operator_fleet_budget_paused gauge\n");
+            for (key, g) in fleets {
+                let (ns, fleet) = key.split_once('/').unwrap_or(("", key.as_str()));
+                let l = format!("{{namespace=\"{ns}\",fleet=\"{fleet}\"}}");
+                out.push_str(&format!(
+                    "agentctl_operator_fleet_ready_replicas{l} {}\n",
+                    g.ready
+                ));
+                out.push_str(&format!(
+                    "agentctl_operator_fleet_desired_replicas{l} {}\n",
+                    g.desired
+                ));
+                out.push_str(&format!(
+                    "agentctl_operator_fleet_budget_used{l} {}\n",
+                    g.budget_used
+                ));
+                out.push_str(&format!(
+                    "agentctl_operator_fleet_budget_paused{l} {}\n",
+                    u8::from(g.budget_paused)
+                ));
+            }
+        }
 
         out
     }
