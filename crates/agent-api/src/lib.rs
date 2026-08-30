@@ -18,6 +18,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub mod org;
+pub mod registry;
 pub mod v1alpha2;
 pub use org::{Organization, OrganizationSpec, OrganizationStatus};
 
