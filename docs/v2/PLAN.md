@@ -116,7 +116,7 @@ identity + a minimal P3 state path for the supervisor's own store.)
 | P7-3 | Audit pipeline end-to-end (gateway/apiserver/identity/mcpg/agentd streams) | one queryable trail for a full OBO tool call | Todo |
 | P7-4 | **Billing-ready metering** — versioned event vocabulary (agent-hours, tokens by tier, tool calls by MCPService, OBO exchanges, sandbox CPU-s, state/artifact bytes, webhook/A2A counts, gates, seats, feature enablement), all attributed {org, group, user, agent} | durable events + Prometheus counters + apiserver aggregation/export (CSV/JSON by period); a sample invoice computable from export alone | Todo |
 | P7-5 | Managed-service profile docs + API hardening pass (req. 27) | "build on agentctl" guide | Todo |
-| P7-6 | Supervisor scale-to-zero (gateway park/wake) | dormant supervisors cost ~0 | Todo |
+| P7-6 | Supervisor scale-to-zero (gateway park/wake) | dormant supervisors cost ~0 | **Done(2026-08-30)** — the park clock IS the wake signal: the gateway stamps `status.lastConversation` on every supervisor touch (30s rate-limited); the operator's sweep (half-window leash) parks past `operator.supervisorIdleParkSeconds` and the next touch unparks through the ordinary 503-provisioning flow. `lifecycle.paused` became REAL en route (paused v2 daemons render at zero replicas — previously declared-only; config/identity/peers/Secrets stay). **Live e2e `supervisor-park` PASS (42.7s)**: converse → Parked at 0 replicas → one message wakes to a live answer |
 | P7-7 | OCI bundles for registry sets; docs site refresh; v2 GA checklist | — | Todo |
 
 ## PM — Multi-cluster (held at Draft)
