@@ -149,7 +149,148 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("sec-apitoken", "security", sec_apitoken),
         scenario!("sec-netpol", "security", sec_netpol),
         scenario!("sec-aauth", "security", sec_aauth),
+        // tenancy (P1-3)
+        scenario!("org-tenancy", "tenancy", org_tenancy),
     ]
+}
+
+/// Organization → managed namespace + agent-count quota + Ready status; org
+/// deletion GC-cascades the namespace via its ownerReference (RFC 0033 §2.1).
+/// Applies the CRD itself (helm installs `crds/` on FIRST install only, so an
+/// upgraded live cluster may lack it) and requires an operator built with the
+/// tenancy controller — an older operator leaves status empty and this fails.
+async fn org_tenancy(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use k8s_openapi::api::core::v1::{Namespace, ResourceQuota};
+    use kube::api::{Api, Patch, PatchParams};
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    shell::kubectl(&[
+        "wait",
+        "--for=condition=Established",
+        "crd/organizations.agentctl.dev",
+        "--timeout=60s",
+    ])?;
+
+    let name = "e2e-acme";
+    let ns_name = org_namespace(name);
+    let spec: OrganizationSpec = serde_json::from_value(serde_json::json!({
+        "displayName": "E2E Acme",
+        "quotas": { "agents": 5 },
+        "accessPolicies": [
+            { "match": { "groups": ["mock:eng-*"] }, "role": "operator",
+              "selector": { "matchLabels": { "team": "engineering" } } },
+        ],
+    }))?;
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        name,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(name, spec)),
+    )
+    .await
+    .context("apply Organization")?;
+
+    // Reconcile lands the namespace (labeled + owner-referenced), the quota,
+    // and a Ready status.
+    let ns_api: Api<Namespace> = Api::all(ctx.client.clone());
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        let Some(ns) = ns_api.get_opt(&ns_name).await? else {
+            return Ok(false);
+        };
+        // The single SSA writes labels + ownerRef atomically: an existing
+        // namespace missing either is a real defect, not a pending state.
+        let labels = ns.metadata.labels.unwrap_or_default();
+        if labels.get("agentctl.dev/organization").map(String::as_str) != Some(name) {
+            bail!("namespace exists but lacks the organization label");
+        }
+        let owned_by_org = ns
+            .metadata
+            .owner_references
+            .unwrap_or_default()
+            .iter()
+            .any(|o| o.kind == "Organization" && o.name == name);
+        if !owned_by_org {
+            bail!("namespace exists but is not owner-referenced to the org");
+        }
+        Ok(true)
+    })
+    .await
+    .context("managed namespace")?;
+
+    let quota_api: Api<ResourceQuota> = Api::namespaced(ctx.client.clone(), &ns_name);
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        let Some(q) = quota_api.get_opt("agentctl-org-quota").await? else {
+            return Ok(false);
+        };
+        let hard = q.spec.and_then(|s| s.hard).unwrap_or_default();
+        let agents = hard
+            .get("count/agents.agentctl.dev")
+            .map(|v| v.0.clone())
+            .unwrap_or_default();
+        if agents != "5" {
+            bail!("quota present but count/agents.agentctl.dev={agents:?}, want 5");
+        }
+        Ok(true)
+    })
+    .await
+    .context("org quota")?;
+
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        let org = orgs.get(name).await?;
+        let Some(status) = org.status else {
+            return Ok(false);
+        };
+        if status.phase.as_deref() != Some("Ready") {
+            return Ok(false);
+        }
+        if !status.namespaces.contains(&ns_name) {
+            bail!("status.namespaces {:?} missing {ns_name}", status.namespaces);
+        }
+        Ok(true)
+    })
+    .await
+    .context("org Ready status")?;
+
+    // The quota actually enforces: agent #6 must be refused by the apiserver.
+    // (Quota usage sync is asynchronous; poll the creates.)
+    let agents_api: Api<Agent> = Api::namespaced(ctx.client.clone(), &ns_name);
+    let mut refused = false;
+    for i in 0..6 {
+        let mut a = agentd_agent(ctx, &format!("quota-probe-{i}"), Mode::Reactive, "idle");
+        // Reactive needs a wake source (CRD CEL rule) — the a2a surface is the
+        // cheapest; these probes only exist to be COUNTED by the quota.
+        a.spec.instruction = None;
+        a.spec.surfaces = Some(agent_api::DesiredSurfaces {
+            a2a: true,
+            ..Default::default()
+        });
+        a.metadata.namespace = Some(ns_name.clone());
+        match agents_api.create(&Default::default(), &a).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(e)) if e.code == 403 && e.message.contains("exceeded quota") => {
+                refused = true;
+                break;
+            }
+            Err(e) => return Err(e).context("unexpected error creating quota probe"),
+        }
+    }
+    if !refused {
+        bail!("created 6 agents under a quota of 5 — the ResourceQuota is not enforcing");
+    }
+
+    // Deleting the org GC-cascades the namespace (and everything in it).
+    orgs.delete(name, &Default::default()).await?;
+    kh::poll_until(GC_TIMEOUT, Duration::from_secs(2), || async {
+        // GC is asynchronous: gone or terminating both prove the cascade.
+        Ok(match ns_api.get_opt(&ns_name).await? {
+            None => true,
+            Some(ns) => ns.metadata.deletion_timestamp.is_some(),
+        })
+    })
+    .await
+    .context("namespace GC after org delete")?;
+    pass()
 }
 
 // --- CLI --------------------------------------------------------------------
