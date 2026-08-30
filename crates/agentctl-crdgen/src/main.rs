@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::Path;
 
-use agent_api::{Agent, AgentFleet, ModelPool};
+use agent_api::{Agent, AgentFleet, ModelPool, Organization};
 use kube::CustomResourceExt;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,6 +24,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             serde_yaml::to_string(&AgentFleet::crd())?,
         ),
         ("modelpool.yaml", serde_yaml::to_string(&ModelPool::crd())?),
+        (
+            "organization.yaml",
+            serde_yaml::to_string(&Organization::crd())?,
+        ),
     ] {
         let path = out.join(file);
         fs::write(&path, format!("{header}{yaml}"))?;

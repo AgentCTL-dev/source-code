@@ -17,15 +17,17 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use agent_api::{Agent, AgentFleet};
+use agent_api::{Agent, AgentFleet, Organization};
 use agentctl_operator::controller::{
     error_policy, error_policy_fleet, reconcile, reconcile_fleet, ApiTokenConfig, Ctx, ScalerConfig,
 };
+use agentctl_operator::org::{error_policy_org, reconcile_org};
 use agentctl_operator::{lease, serve, Metrics};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::coordination::v1::Lease;
+use k8s_openapi::api::core::v1::Namespace;
 use kube::runtime::controller::Error as ControllerError;
 use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::{watcher, Controller};
@@ -160,7 +162,7 @@ async fn main() -> Result<(), kube::Error> {
         aauth,
     });
 
-    info!("starting agentctl-operator controllers (Agent + AgentFleet)");
+    info!("starting agentctl-operator controllers (Agent + AgentFleet + Organization)");
 
     // Agent → Job/Deployment.
     let agent_ctrl = Controller::new(
@@ -215,7 +217,43 @@ async fn main() -> Result<(), kube::Error> {
         }
     });
 
-    tokio::join!(agent_ctrl, fleet_ctrl);
+    // Organization → managed namespaces + quotas (tenancy root, RFC 0033 §2.1).
+    // The CRD may lag the operator on upgraded clusters, so a missing
+    // organizations.agentctl.dev must not take the whole binary down: probe
+    // for it and run the tenancy controller only when present.
+    let orgs_api = Api::<Organization>::all(client.clone());
+    let org_crd_present = orgs_api
+        .list(&Default::default())
+        .await
+        .map(|_| true)
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "Organization CRD not listable — tenancy controller disabled (install deploy/crds/organization.yaml)");
+            false
+        });
+    let org_ctrl = async {
+        if !org_crd_present {
+            return;
+        }
+        Controller::new(orgs_api, watcher::Config::default())
+            .owns(
+                Api::<Namespace>::all(client.clone()),
+                watcher::Config::default(),
+            )
+            .shutdown_on_signal()
+            .run(reconcile_org, error_policy_org, ctx.clone())
+            .for_each(|res| async move {
+                match res {
+                    Ok((obj, action)) => info!(kind = "Organization", ?obj, ?action, "reconciled"),
+                    Err(e @ ControllerError::ObjectNotFound(_)) => {
+                        debug!(error = %e, "object gone before reconcile (post-delete race)")
+                    }
+                    Err(e) => error!(error = %e, "reconcile loop error"),
+                }
+            })
+            .await
+    };
+
+    tokio::join!(agent_ctrl, fleet_ctrl, org_ctrl);
 
     info!("agentctl-operator controllers stopped");
     Ok(())

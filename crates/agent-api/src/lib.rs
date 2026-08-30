@@ -17,6 +17,9 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod org;
+pub use org::{Organization, OrganizationSpec, OrganizationStatus};
+
 /// Group for all agentctl CRDs.
 pub const GROUP: &str = "agentctl.dev";
 

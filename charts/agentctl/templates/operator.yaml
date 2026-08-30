@@ -35,6 +35,22 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["agents/finalizers", "agentfleets/finalizers"]
     verbs: ["update"]
+  # Tenancy root (RFC 0033 §2.1): the operator reconciles each Organization to
+  # its managed namespaces (owner-referenced, so org deletion GC-cascades) and
+  # a per-namespace ResourceQuota capping Agent CRs. No delete verbs: teardown
+  # rides the ownerReference garbage collector.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["organizations"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["agentctl.dev"]
+    resources: ["organizations/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

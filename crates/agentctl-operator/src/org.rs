@@ -1,0 +1,231 @@
+// SPDX-License-Identifier: BUSL-1.1
+//! # Organization reconciliation (RFC 0033 §2.1, P1-3)
+//!
+//! The tenancy root: an [`Organization`] reconciles to its **managed
+//! namespaces** (`org-<name>` + any `spec.namespaces.extra`, each labeled and
+//! owner-referenced so deleting the org garbage-collects its spaces) and a
+//! per-namespace **ResourceQuota** enforcing `spec.quotas.agents` as
+//! `count/agents.agentctl.dev`. The metering ceilings (tokens/day, sandbox
+//! CPU) are recorded on the spec for the billing plane and are NOT Kubernetes
+//! quotas. Access-policy *resolution* is pure library code
+//! ([`agent_api::org::access`]); *enforcement* wires up at the gateway /
+//! apiserver in P1-8 — nothing here inspects principals.
+//!
+//! `namespaces.mode: unmanaged` reconciles no namespaces (the org then only
+//! scopes identity/policy); an existing quota object in a previously-managed
+//! namespace is left behind deliberately (the namespace's owner is the org —
+//! flipping to unmanaged is a policy statement, not a teardown).
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use agent_api::org::{org_namespace, NamespaceMode, Organization, OrganizationStatus};
+use agent_api::Condition;
+use k8s_openapi::api::core::v1::{Namespace, ResourceQuota, ResourceQuotaSpec};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use kube::api::{Api, Patch, PatchParams};
+use kube::runtime::controller::Action;
+use kube::{Resource, ResourceExt};
+use tracing::{info, warn};
+
+use crate::controller::{error_backoff, requeue_after, Ctx, Error};
+
+const FIELD_MANAGER: &str = "agentctl-operator";
+/// Label stamped on every managed namespace, carrying the owning org's name.
+pub const ORG_LABEL: &str = "agentctl.dev/organization";
+/// The managed per-namespace quota object.
+pub const QUOTA_NAME: &str = "agentctl-org-quota";
+/// The ResourceQuota key counting Agent CRs.
+pub const AGENTS_COUNT_KEY: &str = "count/agents.agentctl.dev";
+
+/// The namespaces this org manages, in apply order. Empty for unmanaged mode.
+pub fn managed_namespaces(org: &Organization) -> Vec<String> {
+    let spec_ns = org.spec.namespaces.clone().unwrap_or_default();
+    if spec_ns.mode == NamespaceMode::Unmanaged {
+        return Vec::new();
+    }
+    let mut out = vec![org_namespace(&org.name_any())];
+    for extra in &spec_ns.extra {
+        if !out.contains(extra) {
+            out.push(extra.clone());
+        }
+    }
+    out
+}
+
+/// The desired managed Namespace: labeled with the owning org and
+/// owner-referenced to it (cluster→cluster ownership is legal, and it makes
+/// `kubectl delete org` tear the tenant down through GC).
+pub fn desired_namespace(name: &str, org_name: &str, owner: OwnerReference) -> Namespace {
+    Namespace {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            labels: Some(BTreeMap::from([
+                (ORG_LABEL.to_string(), org_name.to_string()),
+                (
+                    "app.kubernetes.io/managed-by".to_string(),
+                    "agentctl-operator".to_string(),
+                ),
+            ])),
+            owner_references: Some(vec![owner]),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// The desired per-namespace quota: `spec.quotas.agents` as a CR count.
+/// `None` when the spec sets no agent ceiling (the caller then deletes any
+/// previously-applied quota so lowering→removing a ceiling round-trips).
+pub fn desired_quota(namespace: &str, agents: Option<i64>) -> Option<ResourceQuota> {
+    let agents = agents?;
+    Some(ResourceQuota {
+        metadata: ObjectMeta {
+            name: Some(QUOTA_NAME.to_string()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: Some(ResourceQuotaSpec {
+            hard: Some(BTreeMap::from([(
+                AGENTS_COUNT_KEY.to_string(),
+                Quantity(agents.to_string()),
+            )])),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+/// The Ready condition for a fully-applied org.
+pub fn org_ready_condition(observed_generation: Option<i64>, namespaces: usize) -> Condition {
+    Condition {
+        type_: "Ready".to_string(),
+        status: "True".to_string(),
+        reason: Some("Provisioned".to_string()),
+        message: Some(format!("{namespaces} managed namespace(s) reconciled")),
+        observed_generation,
+        last_transition_time: None,
+    }
+}
+
+#[tracing::instrument(skip_all, fields(org = %org.name_any()))]
+pub async fn reconcile_org(org: Arc<Organization>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+    // Deletion: nothing to unwind by hand — the managed namespaces carry an
+    // ownerReference to this org, so GC cascades. No finalizer needed.
+    if org.meta().deletion_timestamp.is_some() {
+        return Ok(Action::await_change());
+    }
+
+    let owner = org.controller_owner_ref(&()).ok_or(Error::MissingName)?;
+    let org_name = org.name_any();
+    let pp = PatchParams::apply(FIELD_MANAGER).force();
+
+    let namespaces = managed_namespaces(&org);
+    let ns_api: Api<Namespace> = Api::all(ctx.client.clone());
+    for ns in &namespaces {
+        let desired = desired_namespace(ns, &org_name, owner.clone());
+        ns_api.patch(ns, &pp, &Patch::Apply(&desired)).await?;
+
+        let quota_api: Api<ResourceQuota> = Api::namespaced(ctx.client.clone(), ns);
+        match desired_quota(ns, org.spec.quotas.as_ref().and_then(|q| q.agents)) {
+            Some(quota) => {
+                quota_api
+                    .patch(QUOTA_NAME, &pp, &Patch::Apply(&quota))
+                    .await?;
+            }
+            None => {
+                // A ceiling removed from the spec removes the quota object.
+                match quota_api.delete(QUOTA_NAME, &Default::default()).await {
+                    Ok(_) => info!(namespace = %ns, "removed org quota (no agent ceiling in spec)"),
+                    Err(kube::Error::Api(e)) if e.code == 404 => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+    }
+
+    let status = OrganizationStatus {
+        phase: Some("Ready".to_string()),
+        namespaces: namespaces.clone(),
+        conditions: vec![org_ready_condition(org.meta().generation, namespaces.len())],
+        observed_generation: org.meta().generation,
+    };
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch_status(
+        &org_name,
+        &PatchParams::default(),
+        &Patch::Merge(&serde_json::json!({ "status": status })),
+    )
+    .await?;
+
+    Ok(Action::requeue(requeue_after()))
+}
+
+pub fn error_policy_org(_org: Arc<Organization>, err: &Error, _ctx: Arc<Ctx>) -> Action {
+    warn!(error = %err, "organization reconcile failed; requeueing");
+    Action::requeue(error_backoff())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_api::org::OrganizationSpec;
+
+    fn org(name: &str, yaml: &str) -> Organization {
+        Organization::new(
+            name,
+            serde_yaml::from_str::<OrganizationSpec>(yaml).unwrap(),
+        )
+    }
+
+    fn owner() -> OwnerReference {
+        OwnerReference {
+            api_version: "agentctl.dev/v1alpha2".into(),
+            kind: "Organization".into(),
+            name: "acme".into(),
+            uid: "u-1".into(),
+            controller: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn managed_namespaces_default_extra_and_unmanaged() {
+        // Default (no namespaces block) → the conventional org-<name>.
+        assert_eq!(managed_namespaces(&org("acme", "{}")), vec!["org-acme"]);
+        // extra spaces append, deduplicated against the conventional one.
+        assert_eq!(
+            managed_namespaces(&org(
+                "acme",
+                "namespaces: { mode: managed, extra: [org-acme, acme-scratch] }"
+            )),
+            vec!["org-acme", "acme-scratch"]
+        );
+        // unmanaged → the operator touches no namespaces.
+        assert!(managed_namespaces(&org("acme", "namespaces: { mode: unmanaged }")).is_empty());
+    }
+
+    #[test]
+    fn namespace_is_labeled_and_owned() {
+        let ns = desired_namespace("org-acme", "acme", owner());
+        let labels = ns.metadata.labels.unwrap();
+        assert_eq!(labels.get(ORG_LABEL).unwrap(), "acme");
+        let owners = ns.metadata.owner_references.unwrap();
+        assert_eq!(owners[0].kind, "Organization");
+        assert_eq!(
+            owners[0].controller,
+            Some(true),
+            "GC cascades on org delete"
+        );
+    }
+
+    #[test]
+    fn quota_maps_agents_to_cr_count_and_absent_means_none() {
+        let q = desired_quota("org-acme", Some(200)).unwrap();
+        assert_eq!(q.metadata.name.as_deref(), Some(QUOTA_NAME));
+        let hard = q.spec.unwrap().hard.unwrap();
+        assert_eq!(hard.get(AGENTS_COUNT_KEY).unwrap().0, "200");
+        assert!(desired_quota("org-acme", None).is_none());
+    }
+}

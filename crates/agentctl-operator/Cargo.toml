@@ -51,6 +51,8 @@ webpki-roots = "1"
 ring = "0.17"
 
 [dev-dependencies]
+# org tests parse RFC-shaped YAML specs verbatim.
+serde_yaml = "0.9"
 serde_json.workspace = true
 # Drive the axum health/metrics router in unit tests (ServiceExt::oneshot).
 tower = { version = "0.5", features = ["util"] }
