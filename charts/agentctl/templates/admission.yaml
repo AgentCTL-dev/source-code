@@ -32,6 +32,13 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["modelpools"]
     verbs: ["get", "list"]
+  # Referenced-Secret EXISTENCE check (rung 3b): a dangling
+  # credentialSecretRef/tokenSecretRef is not caught by --validate-config
+  # (upstream-confirmed) and would surface as a pod that cannot start. The
+  # webhook only ever get_opt's Secrets the spec names; it reads no values.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -95,13 +102,14 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
-      {{- if .Values.admission.binaryValidation.enabled }}
-      # Rung 4 (ground truth): stage the pinned reference-agent binary into a
-      # shared emptyDir so the webhook can run `agentd --validate-config` over
-      # the exact document the operator will mount. NOTE: the upstream image is
-      # FROM scratch (no shell, no cp), so `image` must be one that can emit
-      # the binary — the e2e suite builds `agentd-staging` (binary + busybox)
-      # for exactly this; a stock-image path is upstream ask U9.
+      {{- if and .Values.admission.binaryValidation.enabled (eq .Values.admission.binaryValidation.mode "staging") }}
+      # Rung 4 (ground truth), staging mode: copy the reference-agent binary
+      # into a shared emptyDir so the webhook can run `agentd --validate-config`
+      # over the exact document the operator will mount. The upstream image is
+      # FROM scratch (no shell, no cp) and upstream declined a --copy-self
+      # helper (U9), so `image` must be one able to emit the binary — e2e
+      # builds `agentd-staging` (binary + busybox). Prefer mode=imageVolume on
+      # K8s >=1.33 / containerd 2.0+: it mounts the STOCK signed image.
       initContainers:
         - name: stage-agentd
           image: {{ required "admission.binaryValidation.image is required when binaryValidation is enabled (an image able to copy /agentd out; the stock scratch image cannot)" .Values.admission.binaryValidation.image }}
@@ -168,7 +176,15 @@ spec:
             secretName: agentctl-admission-tls
         {{- if .Values.admission.binaryValidation.enabled }}
         - name: agentd-bin
+          {{- if eq .Values.admission.binaryValidation.mode "imageVolume" }}
+          # KEP-4639: the stock signed image mounted read-only as a volume —
+          # /agentd appears at the mount root, nothing staged or derived.
+          image:
+            reference: {{ .Values.admission.binaryValidation.image | default .Values.referenceAgent.image }}
+            pullPolicy: IfNotPresent
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         # Writable scratch for the validation tempdirs (rootfs is read-only).
         - name: validate-tmp
           emptyDir: {}

@@ -39,9 +39,15 @@ exercising schedule / webhook / subscribe / a2a-command / stream starts —
   clustering flags (`--mode`, `--shard`, `--claim`, `--subscribe`, …) are
   **removed upstream and exit 2** — nothing may render them.
 - **Validation authority** is the binary: `agentd --validate-config` runs the
-  exact startup checks, offline, exit 0/2; stderr is NDJSON
+  exact startup checks, network-offline, exit 0/2; stderr is NDJSON
   (`config.valid` / errors; `config.effective_server` lines when a `services:`
   catalog is present). Admission shells this, never re-implements it.
+  Verified boundaries (2026-08-30, upstream-confirmed): workflow `file:` refs
+  are stat'd; TLS/CA/store paths are NOT; `{{secret:…}}` refs must resolve
+  from env **only in header maps** (`intelligence.headers`, MCP/webhook
+  headers/auth) — `intelligence.token` and `mcp.servers[].auth.token` pass
+  UNRESOLVED (upstream defect raised; do not depend on either behavior:
+  export placeholders for every ref, and check Secret existence separately).
 - **Exit codes** per `exit-codes.table.json`; a clean drain is 0, never 143;
   the drain worst case (drain_timeout 25 s + abandon 3 s = **28 s**) must stay
   below `terminationGracePeriodSeconds`.

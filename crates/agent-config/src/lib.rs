@@ -234,10 +234,12 @@ impl ConfigDoc {
     }
 
     /// Every distinct `{{secret:NAME}}` env name the document references.
-    /// `--validate-config` requires each to RESOLVE from the environment
-    /// (verified against the binary), so a validator must export a placeholder
-    /// for each; the workload layer must mount a real `secretKeyRef` for each
-    /// — this scan is how both stay complete.
+    /// The workload layer must mount a real `secretKeyRef` for each, and a
+    /// validator exports a placeholder for each. NOTE (upstream-confirmed):
+    /// `--validate-config` enforces resolution only for refs in HEADER maps —
+    /// `intelligence.token` passes unresolved (defect raised upstream). The
+    /// placeholder export stays correct under either behavior; missing-Secret
+    /// detection therefore lives in admission's existence check, not here.
     pub fn secret_refs(&self) -> Vec<String> {
         fn scan(v: &Value, out: &mut Vec<String>) {
             match v {
@@ -763,6 +765,12 @@ mod tests {
             entry["headers"]["Authorization"],
             "Bearer {{secret:AGENT_MCP_BILLING_API_TOKEN}}"
         );
+        // PINNED SPELLING (upstream-confirmed asymmetry): only HEADER-map
+        // secret refs are enforced by --validate-config; the `auth.token`
+        // spelling passes unresolved. The builder must therefore never emit
+        // `auth:`/`token:` on an MCP entry — headers are the enforced form.
+        assert!(entry.get("auth").is_none());
+        assert!(entry.get("token").is_none());
     }
 
     #[test]

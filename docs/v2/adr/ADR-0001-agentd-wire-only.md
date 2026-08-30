@@ -2,6 +2,14 @@
 
 **Status:** Accepted · **Date:** 2026-08-30 · **Relates:** RFC 0026, ARCHITECTURE §3.6
 
+> **Update (2026-08-30):** the owner of agentd (and mcpg) has granted this
+> project a special license to use them — the AGPL-contamination rationale
+> below no longer binds us. **The wire-only decision stands on its engineering
+> merits** (anti-drift, contract discipline, independent release cadence), but
+> linking is now an open option where it demonstrably pays (e.g. reusing
+> agentd's store-mapping types in the state service). Any such exception is a
+> deliberate, per-crate decision recorded in the PLAN — never a default.
+
 ## Context
 
 agentd v1.3.1 (post-August-2026 rewrite) is a complete durable agent runtime: one

@@ -2,6 +2,13 @@
 
 **Status:** Accepted · **Date:** 2026-08-30 · **Relates:** RFC 0030, 0031, ARCHITECTURE §3.5
 
+> **Update (2026-08-30):** the owner of mcpg granted this project a special
+> license — the BUSL license-token consideration for mcpg's enterprise plugins
+> (oauth-token-exchange, id-jag, SPIFFE workload) no longer constrains us. We
+> may use them directly where they fit; the Apache CredentialIssuer-to-identity
+> design in RFC 0030 remains preferred where custody/policy should live in
+> agentctl-identity anyway.
+
 ## Context
 
 agentctl needs several MCP surfaces: agent state (agentd's `store.kind: mcp`

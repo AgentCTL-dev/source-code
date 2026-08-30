@@ -277,7 +277,17 @@ admission:
   # e2e suite builds `agentd-staging`: the binary on busybox).
   binaryValidation:
     enabled: false
-    image: ""                       # e.g. agentd-staging:1.3.1
+    # How the binary reaches the webhook pod:
+    #   staging     — initContainer copies /agentd out of `image` (needs an
+    #                 image with a shell, e.g. the e2e-built agentd-staging;
+    #                 upstream declined a --copy-self helper, U9)
+    #   imageVolume — mount the STOCK signed agentd image directly as an
+    #                 image-typed volume (KEP-4639; beta ~K8s 1.33, needs
+    #                 containerd 2.0+). Nothing staged, nothing derived, the
+    #                 signature you verify is the binary you run. `image` then
+    #                 defaults to referenceAgent.image.
+    mode: staging
+    image: ""                       # staging: e.g. agentd-staging:1.3.1; imageVolume: defaults to referenceAgent.image
     command: ["cp", "/agentd", "/agentd-bin/agentd"]
   nodeSelector: {}
   affinity: {}

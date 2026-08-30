@@ -313,11 +313,67 @@ async fn evaluate_view(
         state.aauth_default_provider,
         is_template,
     )?;
+    // Referenced-Secret existence (rung 3b): the binary does NOT catch a
+    // dangling credential Secret at validate time (upstream-confirmed: only
+    // header-map refs are resolution-checked, and a missing secretKeyRef
+    // would otherwise surface as a pod that cannot start). NotFound fails
+    // CLOSED naming the Secret; transient lookup errors fail OPEN.
+    check_referenced_secrets(state, view, namespace).await?;
     // Rung 4 (ground truth): compose the exact document the operator will
     // mount and run the pinned binary's own --validate-config over it. Skipped
     // when no binary is wired; transient cross-object failures fail OPEN (like
     // the pool lookup) — a spec defect the binary names fails CLOSED.
     binary_validate_view(state, view, namespace, is_template).await
+}
+
+/// Every Secret the spec's credential wiring will mount must exist in the
+/// agent's namespace: the bound ModelPool's `credentialSecretRef` and each
+/// `mcpServers[].auth.tokenSecretRef`.
+async fn check_referenced_secrets(
+    state: &AppState,
+    view: &Value,
+    namespace: &str,
+) -> Result<(), String> {
+    use k8s_openapi::api::core::v1::Secret;
+    let mut refs: Vec<(String, String)> = Vec::new(); // (secret, where)
+    if let Some(servers) = view.get("mcpServers").and_then(Value::as_array) {
+        for s in servers {
+            if let Some(name) = s
+                .pointer("/auth/tokenSecretRef/name")
+                .and_then(Value::as_str)
+            {
+                let server = s.get("name").and_then(Value::as_str).unwrap_or("?");
+                refs.push((
+                    name.to_string(),
+                    format!("mcpServers[{server}].auth.tokenSecretRef"),
+                ));
+            }
+        }
+    }
+    if let Some(pool_name) = view.pointer("/model/pool").and_then(Value::as_str) {
+        let api: Api<ModelPool> = Api::namespaced(state.client.clone(), namespace);
+        if let Ok(Some(pool)) = api.get_opt(pool_name).await {
+            if let Some(r) = pool.spec.credential_secret_ref {
+                refs.push((r.name, format!("ModelPool/{pool_name} credentialSecretRef")));
+            }
+        }
+    }
+    let secrets: Api<Secret> = Api::namespaced(state.client.clone(), namespace);
+    for (secret, site) in refs {
+        match secrets.get_opt(&secret).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(format!(
+                    "{site}: Secret '{secret}' not found in namespace '{namespace}' — the pod \
+                     would fail at start (this is not caught by --validate-config)"
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(%secret, error = %e, "Secret lookup failed; skipping existence check");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Compose + `agentd --validate-config` for one spec view (rung 4).
