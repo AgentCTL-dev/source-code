@@ -1981,7 +1981,19 @@ async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
 
     // The identity-provisioned once-agent: provisioned key + allowlist
     // enrollment + a DIRECT signed dial to the mock (auth.mode: aauth).
-    apply_example(&dir, "aauth-agent.yaml")?;
+    // The preceding overlay helm cycle restarts the admission pod, and the
+    // webhook's Service endpoints can lag pod readiness — retry the apply
+    // through the propagation window instead of failing on the first
+    // "context deadline exceeded".
+    kh::poll_until(Duration::from_secs(90), Duration::from_secs(3), || async {
+        match apply_example(&dir, "aauth-agent.yaml") {
+            Ok(()) => Ok(true),
+            Err(e) if format!("{e:#}").contains("failed to call webhook") => Ok(false),
+            Err(e) => Err(e),
+        }
+    })
+    .await
+    .context("apply aauth-agent through the admission webhook")?;
 
     // The operator learns the enrolled identity into status.identity.aauth
     // once the agent self-enrolls (allowlist consumed).
