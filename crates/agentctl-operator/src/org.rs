@@ -220,6 +220,88 @@ pub fn org_ready_condition(observed_generation: Option<i64>, namespaces: usize) 
     }
 }
 
+/// The seeded per-namespace `control` registry entry (P4-1): the platform
+/// control MCP, reachable by AAuth-signed dials, tool ceiling `control.*`.
+/// Pure — the endpoint comes from the operator env (chart `control.enabled`).
+pub fn desired_control_service(ns: &str, endpoint: &str) -> agent_api::v1alpha2::MCPService {
+    use agent_api::v1alpha2 as v2;
+    let mut svc = v2::MCPService::new(
+        "control",
+        v2::MCPServiceSpec {
+            endpoint: Some(endpoint.to_string()),
+            allow: vec!["control.*".into()],
+            ..Default::default()
+        },
+    );
+    svc.metadata.namespace = Some(ns.to_string());
+    svc
+}
+
+/// The seeded `supervisor` AgentClass (P4-3): the default profile every
+/// managed namespace starts with — the platform persona + the control grant.
+/// Orgs OWN it after seeding (create-if-absent, never overwritten).
+pub fn desired_supervisor_class(ns: &str, with_control: bool) -> agent_api::v1alpha2::AgentClass {
+    use agent_api::v1alpha2 as v2;
+    let mut class = v2::AgentClass::new(
+        crate::supervisor::SUPERVISOR_CLASS,
+        v2::AgentClassSpec {
+            supervisor: Some(v2::SupervisorProfile {
+                instruction: Some(
+                    "You are this user's supervisor: their standing assistant for the agent \
+                     estate in this organization. Use your control tools to list, inspect, \
+                     resolve and create agents when asked; report statuses plainly; never \
+                     invent an agent that your tools do not show."
+                        .into(),
+                ),
+                services: if with_control {
+                    vec![v2::ServiceGrant {
+                        name: "control".into(),
+                        allow: vec!["control.*".into()],
+                    }]
+                } else {
+                    Vec::new()
+                },
+                budget: None,
+            }),
+            ..Default::default()
+        },
+    );
+    class.metadata.namespace = Some(ns.to_string());
+    class
+}
+
+/// Seed the platform defaults into a managed namespace — CREATE-IF-ABSENT:
+/// the org owns both objects after birth (a 409 is success, and the operator
+/// never overwrites an org's edits).
+async fn seed_namespace_defaults(ctx: &Ctx, ns: &str) -> Result<(), Error> {
+    use agent_api::v1alpha2 as v2;
+    let Ok(control_url) = std::env::var("AGENTCTL_CONTROL_URL") else {
+        return Ok(());
+    };
+    let create_if_absent_svc: Api<v2::MCPService> = Api::namespaced(ctx.client.clone(), ns);
+    match create_if_absent_svc
+        .create(
+            &Default::default(),
+            &desired_control_service(ns, &control_url),
+        )
+        .await
+    {
+        Ok(_) => info!(namespace = %ns, "seeded control MCPService"),
+        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        Err(e) => return Err(e.into()),
+    }
+    let classes: Api<v2::AgentClass> = Api::namespaced(ctx.client.clone(), ns);
+    match classes
+        .create(&Default::default(), &desired_supervisor_class(ns, true))
+        .await
+    {
+        Ok(_) => info!(namespace = %ns, "seeded supervisor AgentClass"),
+        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
 #[tracing::instrument(skip_all, fields(org = %org.name_any()))]
 pub async fn reconcile_org(org: Arc<Organization>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     // Deletion: nothing to unwind by hand — the managed namespaces carry an
@@ -251,6 +333,10 @@ pub async fn reconcile_org(org: Arc<Organization>, ctx: Arc<Ctx>) -> Result<Acti
                 .patch(&name, &pp, &Patch::Apply(&binding))
                 .await?;
         }
+
+        // Platform defaults (control registry entry + supervisor class) —
+        // seeded once, then org-owned.
+        seed_namespace_defaults(&ctx, ns).await?;
 
         let quota_api: Api<ResourceQuota> = Api::namespaced(ctx.client.clone(), ns);
         match desired_quota(ns, org.spec.quotas.as_ref().and_then(|q| q.agents)) {

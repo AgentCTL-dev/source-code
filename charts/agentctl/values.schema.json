@@ -573,6 +573,23 @@
           "type": "object"
         }
       }
+    },
+    "control": {
+      "type": "object",
+      "description": "Control MCP (P4-1): AAuth-verified, namespace-scoped control.* tools for supervisors.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resources": {
+          "type": "object"
+        }
+      }
     }
   }
 }

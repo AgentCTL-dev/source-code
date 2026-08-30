@@ -94,20 +94,26 @@ impl ProviderKey {
         agent_id: &str,
         agent_x_b64url: &str,
         ttl_secs: i64,
+        workload: Option<&str>,
     ) -> String {
         let now = now_unix();
         let header = B64URL
             .encode(json!({ "alg": "EdDSA", "typ": "aa-agent+jwt", "kid": self.kid }).to_string());
-        let claims = B64URL.encode(
-            json!({
-                "iss": issuer,
-                "sub": agent_id,
-                "iat": now,
-                "exp": now + ttl_secs,
-                "cnf": { "jwk": { "kty": "OKP", "crv": "Ed25519", "x": agent_x_b64url } },
-            })
-            .to_string(),
-        );
+        let mut claims = json!({
+            "iss": issuer,
+            "sub": agent_id,
+            "iat": now,
+            "exp": now + ttl_secs,
+            "cnf": { "jwk": { "kty": "OKP", "crv": "Ed25519", "x": agent_x_b64url } },
+        });
+        // The enrolled key's operator-registered workload label
+        // (`<namespace>/<name>`): in-cluster resource servers (the control
+        // MCP) scope authorization by it. Signed by the provider — an agent
+        // cannot claim another workload's label.
+        if let Some(wl) = workload {
+            claims["wl"] = json!(wl);
+        }
+        let claims = B64URL.encode(claims.to_string());
         let signing_input = format!("{header}.{claims}");
         let sig = self.pair.sign(signing_input.as_bytes());
         format!("{signing_input}.{}", B64URL.encode(sig.as_ref()))
@@ -228,6 +234,162 @@ pub fn verify_signed_request(
     Ok(SignedCaller {
         jkt: jkt(&x),
         x_b64url: x,
+    })
+}
+
+/// The verified caller of a `jwt`-scheme signed request (RFC 0024 rung 1 —
+/// what a RESOURCE SERVER sees from a remote agent dial).
+#[derive(Debug, Clone)]
+pub struct VerifiedAgent {
+    /// The token's `sub` — `aauth:<local>@<domain>`.
+    pub agent: String,
+    /// The token's `wl` claim, split: the operator-registered workload
+    /// `(namespace, name)` — present iff the provider embedded it at mint.
+    pub workload: Option<(String, String)>,
+    /// RFC 7638 thumbprint of the proven possession key.
+    pub jkt: String,
+}
+
+/// Verify a `jwt`-scheme RFC 9421 request — the profile agentd 1.3.1 signs
+/// REMOTE dials with once challenged (`Signature-Key: sig=jwt;jwt="…"`,
+/// covered `@method @authority @path signature-key`, optional
+/// `content-digest`): (1) the presented `aa-agent+jwt` verifies against the
+/// PROVIDER key `resolve_provider_key(kid)` returns and is unexpired; (2) the
+/// HTTP signature verifies against the token's `cnf.jwk` (proof of
+/// possession); (3) `created` is inside ±300s. Errors name the defect, never
+/// key material.
+pub fn verify_agent_request(
+    method: &str,
+    authority: &str,
+    path: &str,
+    sig: &SignatureHeaders<'_>,
+    body: &[u8],
+    resolve_provider_key: impl Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<VerifiedAgent, String> {
+    let SignatureHeaders {
+        signature_input,
+        signature,
+        signature_key,
+        content_digest,
+    } = *sig;
+
+    // Signature-Key: sig=jwt;jwt="<aa-agent+jwt>"
+    let token = signature_key
+        .strip_prefix("sig=jwt;jwt=\"")
+        .and_then(|r| r.strip_suffix('"'))
+        .ok_or("Signature-Key is not the jwt scheme")?;
+
+    // (1) Trust: the token is the PROVIDER's word.
+    let mut parts = token.split('.');
+    let (h, p) = (
+        parts.next().ok_or("token: no header")?,
+        parts.next().ok_or("token: no payload")?,
+    );
+    let header: Value = serde_json::from_slice(
+        &B64URL
+            .decode(h)
+            .map_err(|_| "token header is not base64url".to_string())?,
+    )
+    .map_err(|_| "token header is not JSON".to_string())?;
+    if header.get("typ").and_then(Value::as_str) != Some("aa-agent+jwt") {
+        return Err("token typ is not aa-agent+jwt".into());
+    }
+    let kid = header
+        .get("kid")
+        .and_then(Value::as_str)
+        .ok_or("token has no kid")?;
+    let provider_key = resolve_provider_key(kid)?;
+    let (signed, token_sig) = token.rsplit_once('.').ok_or("token: no signature")?;
+    let token_sig = B64URL
+        .decode(token_sig)
+        .map_err(|_| "token signature is not base64url".to_string())?;
+    UnparsedPublicKey::new(&ED25519, &provider_key)
+        .verify(signed.as_bytes(), &token_sig)
+        .map_err(|_| "token does not verify against the provider JWKS".to_string())?;
+    let claims: Value = serde_json::from_slice(
+        &B64URL
+            .decode(p)
+            .map_err(|_| "token payload is not base64url".to_string())?,
+    )
+    .map_err(|_| "token payload is not JSON".to_string())?;
+    if claims.get("exp").and_then(Value::as_i64).unwrap_or(0) < now_unix() {
+        return Err("agent token expired".into());
+    }
+    let agent = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .ok_or("token has no sub")?
+        .to_string();
+    let cnf_x = claims
+        .pointer("/cnf/jwk/x")
+        .and_then(Value::as_str)
+        .ok_or("token has no cnf.jwk.x")?;
+    let cnf_key = B64URL
+        .decode(cnf_x)
+        .map_err(|_| "cnf.jwk.x is not base64url".to_string())?;
+
+    // (2)+(3) Possession: the HTTP signature, rebuilt exactly, against cnf.jwk.
+    let params = signature_input
+        .strip_prefix("sig=")
+        .ok_or("Signature-Input label != sig")?;
+    let created: i64 = params
+        .split("created=")
+        .nth(1)
+        .and_then(|c| c.split(';').next())
+        .and_then(|c| c.trim().parse().ok())
+        .ok_or("no created parameter")?;
+    if (now_unix() - created).abs() > 300 {
+        return Err("created outside the freshness window".into());
+    }
+    let components = params
+        .strip_prefix('(')
+        .and_then(|p| p.split(')').next())
+        .ok_or("malformed covered-component list")?;
+    let mut base = String::new();
+    for comp in components.split_whitespace() {
+        let name = comp.trim_matches('"');
+        let value = match name {
+            "@method" => method.to_string(),
+            "@authority" => authority.to_string(),
+            "@path" => path.to_string(),
+            "signature-key" => signature_key.to_string(),
+            "content-digest" => {
+                // Covered ⇒ it must also match the actual body.
+                let presented = content_digest.ok_or("missing Content-Digest")?;
+                let expected = format!(
+                    "sha-256=:{}:",
+                    B64STD.encode(ring::digest::digest(&ring::digest::SHA256, body))
+                );
+                if presented != expected {
+                    return Err("Content-Digest does not match the body".into());
+                }
+                presented.to_string()
+            }
+            other => return Err(format!("unsupported covered component {other:?}")),
+        };
+        base.push_str(&format!("\"{name}\": {value}\n"));
+    }
+    base.push_str(&format!("\"@signature-params\": {params}"));
+    let sig_b64 = signature
+        .strip_prefix("sig=:")
+        .and_then(|r| r.strip_suffix(':'))
+        .ok_or("malformed Signature header")?;
+    let http_sig = B64STD
+        .decode(sig_b64)
+        .map_err(|_| "Signature is not base64".to_string())?;
+    UnparsedPublicKey::new(&ED25519, &cnf_key)
+        .verify(base.as_bytes(), &http_sig)
+        .map_err(|_| "HTTP signature does not verify against cnf.jwk".to_string())?;
+
+    let workload = claims
+        .get("wl")
+        .and_then(Value::as_str)
+        .and_then(|wl| wl.split_once('/'))
+        .map(|(ns, name)| (ns.to_string(), name.to_string()));
+    Ok(VerifiedAgent {
+        agent,
+        workload,
+        jkt: jkt(cnf_x),
     })
 }
 
@@ -400,7 +562,13 @@ mod tests {
         let provider = ProviderKey::from_seed(&[9u8; 32]).unwrap();
         let agent_pair = test_pair();
         let agent_x = B64URL.encode(agent_pair.public_key().as_ref());
-        let tok = provider.mint_agent_token("http://ap", "aauth:abc@ap", &agent_x, 300);
+        let tok = provider.mint_agent_token(
+            "http://ap",
+            "aauth:abc@ap",
+            &agent_x,
+            300,
+            Some("org-acme/sup-alice"),
+        );
 
         let parts: Vec<&str> = tok.split('.').collect();
         assert_eq!(parts.len(), 3);
@@ -411,6 +579,7 @@ mod tests {
         let claims: Value = serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
         assert_eq!(claims["sub"], "aauth:abc@ap");
         assert_eq!(claims["cnf"]["jwk"]["x"], agent_x);
+        assert_eq!(claims["wl"], "org-acme/sup-alice");
 
         // Verifies against the JWKS key (what the resource server does).
         let jwks = provider.jwks();
@@ -420,5 +589,118 @@ mod tests {
         UnparsedPublicKey::new(&ED25519, &pk)
             .verify(signing_input.as_bytes(), &B64URL.decode(parts[2]).unwrap())
             .expect("token verifies against the published JWKS");
+    }
+
+    /// The resource-server rung end to end: sign a request exactly the way
+    /// the 1.3.1 client does (jwt scheme, minted token, PoP over the base),
+    /// verify it, and prove each trust leg trips independently.
+    #[test]
+    fn jwt_scheme_request_verifies_and_each_leg_trips() {
+        let provider = ProviderKey::from_seed(&[9u8; 32]).unwrap();
+        let agent_pair = test_pair();
+        let agent_x = B64URL.encode(agent_pair.public_key().as_ref());
+        let token = provider.mint_agent_token(
+            "http://ap",
+            "aauth:abc@ap",
+            &agent_x,
+            300,
+            Some("org-acme/sup-alice"),
+        );
+        let sig_key = format!("sig=jwt;jwt=\"{token}\"");
+        let created = now_unix();
+        let params =
+            format!("(\"@method\" \"@authority\" \"@path\" \"signature-key\");created={created}");
+        let base = format!(
+            "\"@method\": POST\n\"@authority\": control.agentctl-system\n\"@path\": /mcp\n\"signature-key\": {sig_key}\n\"@signature-params\": {params}"
+        );
+        let http_sig = format!(
+            "sig=:{}:",
+            B64STD.encode(agent_pair.sign(base.as_bytes()).as_ref())
+        );
+        let sig_input = format!("sig={params}");
+        let headers = SignatureHeaders {
+            signature_input: &sig_input,
+            signature: &http_sig,
+            signature_key: &sig_key,
+            content_digest: None,
+        };
+        let resolve = |kid: &str| {
+            assert_eq!(kid, provider.kid);
+            Ok(B64URL.decode(provider.public_x_b64url()).unwrap())
+        };
+
+        let v = verify_agent_request(
+            "POST",
+            "control.agentctl-system",
+            "/mcp",
+            &headers,
+            b"{}",
+            resolve,
+        )
+        .unwrap();
+        assert_eq!(v.agent, "aauth:abc@ap");
+        assert_eq!(
+            v.workload,
+            Some(("org-acme".to_string(), "sup-alice".to_string()))
+        );
+
+        // Wrong possession key: PoP trips.
+        let evil = Ed25519KeyPair::from_seed_unchecked(&[1u8; 32]).unwrap();
+        let bad = format!(
+            "sig=:{}:",
+            B64STD.encode(evil.sign(base.as_bytes()).as_ref())
+        );
+        let bad_headers = SignatureHeaders {
+            signature: &bad,
+            ..headers
+        };
+        assert!(verify_agent_request(
+            "POST",
+            "control.agentctl-system",
+            "/mcp",
+            &bad_headers,
+            b"{}",
+            resolve
+        )
+        .unwrap_err()
+        .contains("cnf.jwk"));
+
+        // Token signed by a NON-provider key: JWKS trust trips.
+        let forger = ProviderKey::from_seed(&[1u8; 32]).unwrap();
+        let forged = forger.mint_agent_token("http://ap", "aauth:abc@ap", &agent_x, 300, None);
+        let forged_key = format!("sig=jwt;jwt=\"{forged}\"");
+        let forged_base = base.replace(&sig_key, &forged_key);
+        let forged_sig = format!(
+            "sig=:{}:",
+            B64STD.encode(agent_pair.sign(forged_base.as_bytes()).as_ref())
+        );
+        let resolve_real = |_: &str| Ok(B64URL.decode(provider.public_x_b64url()).unwrap());
+        let forged_headers = SignatureHeaders {
+            signature_input: &sig_input,
+            signature: &forged_sig,
+            signature_key: &forged_key,
+            content_digest: None,
+        };
+        assert!(verify_agent_request(
+            "POST",
+            "control.agentctl-system",
+            "/mcp",
+            &forged_headers,
+            b"{}",
+            resolve_real
+        )
+        .unwrap_err()
+        .contains("provider JWKS"));
+
+        // A tampered PATH (signed for /mcp, presented for /admin): base mismatch.
+        assert!(verify_agent_request(
+            "POST",
+            "control.agentctl-system",
+            "/admin",
+            &headers,
+            b"{}",
+            resolve
+        )
+        .is_err());
     }
 }

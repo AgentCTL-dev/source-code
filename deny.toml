@@ -52,6 +52,7 @@ exceptions = [
     { allow = ["BUSL-1.1"], crate = "agentctl-admission" },
     { allow = ["BUSL-1.1"], crate = "agentctl-identity" },
     { allow = ["BUSL-1.1"], crate = "agentctl-coordination" },
+    { allow = ["BUSL-1.1"], crate = "agentctl-control" },
     { allow = ["BUSL-1.1"], crate = "agentctl-scaler" },
     { allow = ["BUSL-1.1"], crate = "agentctl-telemetry" },
 ]

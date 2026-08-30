@@ -1,0 +1,150 @@
+{{- if .Values.control.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+# ---------------------------------------------------------------------------
+# Control MCP (RFC 0027 §5, P4-1): the governed `control.*` tool surface
+# supervisors manage their owner's estate through. Every call must be
+# AAuth-signed (RFC 9421 jwt scheme) — the server verifies against the fleet
+# Agent Provider's JWKS and scopes every tool to the VERIFIED caller's own
+# namespace (the token's operator-registered `wl` label). Writes go through
+# the ordinary admission chain as THIS service account.
+# Requires identity.aauth.provider (the Agent Provider) and cert-manager
+# (HTTPS serving — agentd's `aauth ⇒ https` rule refuses plaintext).
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-control
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-control
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  # The five P4-1 verbs: list/get/status/resolve read; create is the one
+  # write (non-destructive; delete/pause wait for P4-5 approval gates).
+  - apiGroups: ["agentctl.dev"]
+    resources: ["agents"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-control
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-control
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-control
+    namespace: {{ $ns }}
+---
+# Serving cert (chart CA): the SANs match the in-cluster dial names agents use.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-control
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-control-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-control.{{ $ns }}.svc
+    - agentctl-control.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-control
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-control
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.control.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-control
+        {{- include "agentctl.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: agentctl-control
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control
+          image: {{ include "agentctl.image" (dict "root" $ "component" "control") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8443, name: https }
+          env:
+            - name: AGENTCTL_AAUTH_PROVIDER
+              value: {{ required "control.enabled needs identity.aauth.provider (the Agent Provider issuer)" .Values.identity.aauth.provider | quote }}
+            {{- if .Values.certManager.enabled }}
+            # Trust for an https provider (JWKS fetch) signed by the chart CA.
+            - name: AGENTCTL_CA_FILE
+              value: /etc/agentctl/ca/ca.crt
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: https, scheme: HTTPS }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: https, scheme: HTTPS }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.control.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/agentctl/control-tls, readOnly: true }
+            {{- if .Values.certManager.enabled }}
+            - { name: agentctl-ca, mountPath: /etc/agentctl/ca, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: tls
+          secret: { secretName: agentctl-control-tls }
+        {{- if .Values.certManager.enabled }}
+        - name: agentctl-ca
+          secret:
+            secretName: agentctl-client-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-control
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-control
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-control
+  ports:
+    - { name: https, port: 8443, targetPort: https }
+{{- end }}

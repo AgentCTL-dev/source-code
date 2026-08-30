@@ -546,6 +546,16 @@ state:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: "1", memory: 512Mi }
 
+# Control MCP (P4-1): the governed `control.*` tool surface supervisors manage
+# their estate through. AAuth-verified callers only; every tool scoped to the
+# caller's own namespace. Needs identity.aauth.provider + cert-manager.
+control:
+  enabled: false
+  replicas: 1
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the

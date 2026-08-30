@@ -63,7 +63,7 @@ log "cargo build --release (control plane + mocks)"
 ( cd "$REPO_ROOT" && cargo build --release \
     -p agentctl-operator -p agentctl-apiserver -p agentctl-gateway \
     -p agentctl-admission -p agentctl-coordination -p agentctl-scaler \
-    -p agentctl-identity -p mock-agent )
+    -p agentctl-identity -p agentctl-control -p mock-agent )
 
 comp_image() { # <component> <binary-name>
   local comp="$1" bin="$2"
@@ -85,6 +85,7 @@ comp_image admission agentctl-admission
 comp_image coordination agentctl-coordination
 comp_image scaler agentctl-scaler
 comp_image identity agentctl-identity
+comp_image control agentctl-control
 
 # mock-agent + mock-aauth-mcp: staged like the components (the repo-root
 # .dockerignore excludes target/, so the canonical Dockerfiles cannot see the

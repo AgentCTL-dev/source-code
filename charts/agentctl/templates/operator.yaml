@@ -40,6 +40,17 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["agentclasses"]
     verbs: ["get", "list", "watch"]
+  # Grant resolution (P2-8): the v2 compose path reads `services[]` grants
+  # against the namespace's MCPService registry entries.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["mcpservices"]
+    verbs: ["get", "list", "watch"]
+  # Tenancy seeding (P4-1): the org controller CREATES the per-namespace
+  # platform defaults (control MCPService + supervisor AgentClass) once;
+  # 409 = org-owned, never overwritten.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["mcpservices", "agentclasses"]
+    verbs: ["create"]
   - apiGroups: ["agentctl.dev"]
     resources: ["supervisors/status"]
     verbs: ["get", "update", "patch"]
@@ -299,6 +310,12 @@ spec:
             # agents (trailing-dot FQDN — dodges search-domain capture).
             - name: AGENTCTL_STATE_URL
               value: {{ printf "http://agentctl-state.%s.svc.cluster.local.:8787/mcp" $ns | quote }}
+            {{- end }}
+            {{- if .Values.control.enabled }}
+            # Control MCP (P4-1): the endpoint seeded as the per-namespace
+            # `control` MCPService (org tenancy controller, create-if-absent).
+            - name: AGENTCTL_CONTROL_URL
+              value: {{ printf "https://agentctl-control.%s.svc.cluster.local:8443/mcp" $ns | quote }}
             {{- end }}
             {{- if .Values.identity.aauth.provider }}
             # AAuth house-provisioning (RFC 0023): the default Agent Provider

@@ -59,11 +59,15 @@ pub fn compose_instruction(platform: Option<&str>, user_override: Option<&str>) 
     out
 }
 
-/// The Agent a Supervisor renders to. Pure — unit-tested below.
+/// The Agent a Supervisor renders to. Pure — unit-tested below. `aauth` arms
+/// the workload identity (RFC 0028 §5) — set iff the operator has a
+/// configured Agent Provider; the supervisor then signs its control-MCP
+/// dials, which is how the control server knows WHO is calling.
 pub fn desired_agent(
     supervisor: &Supervisor,
     profile: Option<&SupervisorProfile>,
     class_exists: bool,
+    aauth: bool,
 ) -> v2::Agent {
     let name = supervisor.name_any();
     let spec = &supervisor.spec;
@@ -104,6 +108,10 @@ pub fn desired_agent(
                 // everyone else is anonymous (refused).
                 principals: vec![spec.user.clone()],
             }),
+            identity: aauth.then(|| v2::IdentitySpec {
+                aauth: Some(agent_api::AauthIdentity::default()),
+                ..Default::default()
+            }),
             expose: Some(Expose {
                 a2a: true,
                 webhooks: Vec::new(),
@@ -142,7 +150,12 @@ pub async fn reconcile_supervisor(
     let class = classes.get_opt(SUPERVISOR_CLASS).await?;
     let profile = class.as_ref().and_then(|c| c.spec.supervisor.clone());
 
-    let mut agent = desired_agent(&supervisor, profile.as_ref(), class.is_some());
+    let mut agent = desired_agent(
+        &supervisor,
+        profile.as_ref(),
+        class.is_some(),
+        ctx.aauth.provider.is_some(),
+    );
     agent.metadata.owner_references = Some(vec![owner]);
     let agents: Api<v2::Agent> = Api::namespaced(ctx.client.clone(), &ns);
     let agent_ref = agent.metadata.name.clone().expect("named agent");
@@ -255,6 +268,7 @@ mod tests {
             &sup("mock:alice", Some("Prefer terse answers.")),
             Some(&profile),
             true,
+            true,
         );
         let spec = &agent.spec;
         assert_eq!(spec.class.as_deref(), Some("supervisor"));
@@ -271,11 +285,17 @@ mod tests {
         assert!(text.starts_with("You are the org supervisor."));
         assert!(text.contains("> Prefer terse answers."));
         assert!(spec.expose.as_ref().unwrap().a2a);
+        // The workload identity is armed — the control MCP authenticates by it.
+        assert!(spec.identity.as_ref().unwrap().aauth.is_some());
     }
 
     #[test]
     fn missing_class_renders_a_classless_default() {
-        let agent = desired_agent(&sup("mock:bob", None), None, false);
+        let agent = desired_agent(&sup("mock:bob", None), None, false, false);
+        assert!(
+            agent.spec.identity.is_none(),
+            "no provider configured ⇒ no aauth opt-in (admission would deny it)"
+        );
         assert!(
             agent.spec.class.is_none(),
             "a named-but-missing class would be denied at admission"

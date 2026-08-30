@@ -127,6 +127,42 @@ spec:
       ports:
         - { protocol: TCP, port: 5432 }
 {{- end }}
+{{- if .Values.control.enabled }}
+---
+# Control MCP: accepts only agent-pod callers (supervisors) from the listed
+# agentNamespaces + operator-managed org namespaces. Identity is enforced by
+# the AAuth signature; this perimeter is defense in depth.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-control-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-control
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range $agentNs := $agentNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $agentNs }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+        {{- end }}
+        - namespaceSelector:
+            matchExpressions:
+              - { key: agentctl.dev/organization, operator: Exists }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - { protocol: TCP, port: 8443 }
+{{- end }}
 {{- if .Values.state.enabled }}
 ---
 # Managed state service: accepts only agent-pod callers — the listed
@@ -224,10 +260,11 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: ["agentctl-gateway", "agentctl-coordination", "agentctl-state"]
+                values: ["agentctl-gateway", "agentctl-coordination", "agentctl-state", "agentctl-control"]
       ports:
         - { protocol: TCP, port: 8080 }  # A2A gateway + coordination (plaintext)
         - { protocol: TCP, port: 8787 }  # managed state service (checkpointer)
+        - { protocol: TCP, port: 8443 }  # control MCP (AAuth-signed HTTPS)
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane
 # (no cross-tenant pod-to-pod traffic).

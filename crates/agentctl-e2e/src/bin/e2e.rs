@@ -165,7 +165,324 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("trigger-matrix", "triggers", trigger_matrix),
         // managed state service: checkpointer contract + SIGKILL/restore (P3)
         scenario!("state-durability", "durability", state_durability),
+        // control MCP: AAuth-verified, namespace-scoped control.* tools (P4-1)
+        scenario!("control-mcp", "control", control_mcp),
     ]
+}
+
+/// P4-1: the control MCP end to end, as a REAL enrolled AAuth agent.
+/// The e2e generates an Ed25519 workload key, registers it through the
+/// operator admin channel with a workload label in a managed org namespace,
+/// enrolls + obtains an agent token (hwk-signed, the shipped 1.3.1 wire),
+/// then drives `control.*` with jwt-scheme RFC 9421 signatures:
+/// unsigned → the challenge; signed → tools scoped to the LABEL's namespace
+/// (never an argument); create renders a real admission-gated Agent stamped
+/// with the created-by label; a tampered signature is refused.
+/// Also proves the org controller SEEDED the namespace defaults (control
+/// MCPService + supervisor AgentClass).
+async fn control_mcp(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use agent_api::v1alpha2 as v2;
+    use base64::Engine as _;
+    use kube::api::{Api, Patch, PatchParams};
+    use ring::signature::{Ed25519KeyPair, KeyPair as _};
+
+    const B64URL: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    const B64STD: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
+
+    let sys = &ctx.cfg.system_ns;
+    let ready = shell::kubectl(&[
+        "get",
+        "deploy",
+        "-n",
+        sys,
+        "agentctl-control",
+        "-o",
+        "jsonpath={.status.readyReplicas}",
+    ])
+    .unwrap_or_default();
+    if ready.trim().is_empty() || ready.trim() == "0" {
+        bail!("agentctl-control is not Ready (control.enabled + identity.aauth.provider required)");
+    }
+
+    // Org + the seeded per-namespace platform defaults.
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-ctl";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({ "displayName": "E2E Control" }))?,
+        )),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        let svcs: Api<v2::MCPService> = Api::namespaced(ctx.client.clone(), &ns);
+        let classes: Api<v2::AgentClass> = Api::namespaced(ctx.client.clone(), &ns);
+        Ok(svcs.get_opt("control").await?.is_some()
+            && classes.get_opt("supervisor").await?.is_some())
+    })
+    .await
+    .context("seeded control MCPService + supervisor AgentClass")?;
+    let seeded: Api<v2::AgentClass> = Api::namespaced(ctx.client.clone(), &ns);
+    let profile = seeded
+        .get("supervisor")
+        .await?
+        .spec
+        .supervisor
+        .expect("seeded profile");
+    if profile.services.first().map(|s| s.name.as_str()) != Some("control") {
+        bail!("seeded supervisor profile does not grant the control service");
+    }
+
+    // The e2e's own workload identity: key → admin allowlist (labelled into
+    // the org namespace) → enroll → agent token. All on the 1.3.1 wire.
+    let admin_token_b64 = shell::kubectl(&[
+        "get",
+        "secret",
+        "-n",
+        sys,
+        "agentctl-api-token",
+        "-o",
+        "jsonpath={.data.AGENTCTL_API_TOKEN}",
+    ])?;
+    let admin_token = String::from_utf8(
+        base64::engine::general_purpose::STANDARD.decode(admin_token_b64.trim())?,
+    )?;
+    let seed: [u8; 32] = {
+        let mut s = [0u8; 32];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut s).unwrap();
+        s
+    };
+    let key = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+    let x = B64URL.encode(key.public_key().as_ref());
+    let jkt = {
+        let canonical = format!("{{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"{x}\"}}");
+        B64URL.encode(ring::digest::digest(
+            &ring::digest::SHA256,
+            canonical.as_bytes(),
+        ))
+    };
+
+    let pf_id = shell::PortForward::service(sys, "agentctl-identity", 80, 18101)?;
+    let resp = ctx
+        .http
+        .post(format!("{}/admin/allowed-keys", pf_id.base_url()))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "jkt": jkt, "label": format!("{ns}/sup-probe"), "ttl": 3600 }))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!("allowed-keys registration failed: {}", resp.status());
+    }
+
+    // hwk-sign a POST exactly as the shipped client does (covered:
+    // @method @authority @path content-digest signature-key).
+    let hwk_call = |path: &'static str| {
+        let key = &key;
+        let x = x.clone();
+        let base_url = pf_id.base_url();
+        async move {
+            let body = b"{}";
+            let digest = format!(
+                "sha-256=:{}:",
+                B64STD.encode(ring::digest::digest(&ring::digest::SHA256, body))
+            );
+            let authority = base_url.trim_start_matches("http://").to_string();
+            let sig_key = format!("sig=hwk;kty=\"OKP\";crv=\"Ed25519\";x=\"{x}\"");
+            let params = format!(
+                "(\"@method\" \"@authority\" \"@path\" \"content-digest\" \"signature-key\");created={}",
+                now()
+            );
+            let base = format!(
+                "\"@method\": POST\n\"@authority\": {authority}\n\"@path\": {path}\n\"content-digest\": {digest}\n\"signature-key\": {sig_key}\n\"@signature-params\": {params}"
+            );
+            let sig = format!(
+                "sig=:{}:",
+                B64STD.encode(key.sign(base.as_bytes()).as_ref())
+            );
+            let resp = ctx
+                .http
+                .post(format!("{base_url}{path}"))
+                .header("content-type", "application/json")
+                .header("content-digest", digest)
+                .header("signature-input", format!("sig={params}"))
+                .header("signature", sig)
+                .header("signature-key", sig_key)
+                .body(body.to_vec())
+                .send()
+                .await?;
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            if !status.is_success() {
+                bail!("{path} refused ({status}): {body}");
+            }
+            anyhow::Ok(body)
+        }
+    };
+    hwk_call("/enroll").await.context("aauth enroll")?;
+    let token_resp = hwk_call("/agent-token").await.context("agent token")?;
+    let agent_token = token_resp["agent_token"]
+        .as_str()
+        .context("agent_token in response")?
+        .to_string();
+
+    // Drive the control MCP over its HTTPS port-forward. TLS identity is the
+    // chart CA's (SAN = the svc name) — the e2e pins nothing here; what is
+    // under test is the AAuth layer.
+    let pf_ctl = shell::PortForward::service(sys, "agentctl-control", 8443, 18102)?;
+    let ctl_url = "https://127.0.0.1:18102/mcp".to_string();
+    let http = reqwest::Client::builder()
+        .user_agent("agentctl-e2e")
+        .danger_accept_invalid_certs(true)
+        .build()?;
+
+    // Unsigned → the spec challenge (this is what flips agentd into signing).
+    let resp = http
+        .post(&ctl_url)
+        .json(&json!({"jsonrpc":"2.0","id":0,"method":"ping"}))
+        .send()
+        .await?;
+    if resp.status().as_u16() != 401 || resp.headers().get("aauth-requirement").is_none() {
+        bail!(
+            "unsigned control call: want 401 + AAuth-Requirement, got {}",
+            resp.status()
+        );
+    }
+
+    // jwt-scheme signer (what agentd sends once challenged).
+    let jwt_call = |req: Value, tamper: bool| {
+        let key = &key;
+        let http = http.clone();
+        let ctl_url = ctl_url.clone();
+        let agent_token = agent_token.clone();
+        async move {
+            let authority = "127.0.0.1:18102";
+            let sig_key = format!("sig=jwt;jwt=\"{agent_token}\"");
+            let params = format!(
+                "(\"@method\" \"@authority\" \"@path\" \"signature-key\");created={}",
+                now()
+            );
+            let base = format!(
+                "\"@method\": POST\n\"@authority\": {authority}\n\"@path\": /mcp\n\"signature-key\": {sig_key}\n\"@signature-params\": {params}"
+            );
+            let mut sig_bytes = key.sign(base.as_bytes()).as_ref().to_vec();
+            if tamper {
+                sig_bytes[0] ^= 0xff;
+            }
+            let sig = format!("sig=:{}:", B64STD.encode(sig_bytes));
+            let resp = http
+                .post(&ctl_url)
+                .header("signature-input", format!("sig={params}"))
+                .header("signature", sig)
+                .header("signature-key", sig_key)
+                .json(&req)
+                .send()
+                .await?;
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok((status, body))
+        }
+    };
+
+    // Tampered signature → refused.
+    let (status, _) = jwt_call(json!({"jsonrpc":"2.0","id":1,"method":"ping"}), true).await?;
+    if status.as_u16() != 401 {
+        bail!("tampered signature admitted ({status})");
+    }
+
+    // Handshake + the tool surface.
+    let (status, body) = jwt_call(
+        json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25","capabilities":{},
+            "clientInfo":{"name":"agentctl-e2e","version":"0"}}}),
+        false,
+    )
+    .await?;
+    if !status.is_success() || body["result"]["serverInfo"]["name"] != json!("agentctl-control") {
+        bail!("initialize failed ({status}): {body}");
+    }
+    let (_, body) = jwt_call(json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}), false).await?;
+    let tools = body["result"]["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if tools.len() != 5 {
+        bail!("want the 5 control tools, got {}: {body}", tools.len());
+    }
+
+    let call = |id: u64, tool: &'static str, args: Value| {
+        let jwt_call = &jwt_call;
+        async move {
+            let (status, body) = jwt_call(
+                json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                       "params":{"name":tool,"arguments":args}}),
+                false,
+            )
+            .await?;
+            if !status.is_success() {
+                bail!("{tool} transport error ({status}): {body}");
+            }
+            anyhow::Ok(body["result"].clone())
+        }
+    };
+
+    // The scope is the LABEL's namespace — never an argument.
+    let r = call(4, "control.agents.list", json!({})).await?;
+    if r["structuredContent"]["namespace"] != json!(ns.clone()) {
+        bail!(
+            "list scoped to {:?}, want {ns}",
+            r["structuredContent"]["namespace"]
+        );
+    }
+
+    // Create through the narrow surface → a REAL admission-gated Agent.
+    let r = call(
+        5,
+        "control.agents.create",
+        json!({ "name": "probe-agent", "instruction": "acknowledge and stop", "once": true,
+                "handle": "probe" }),
+    )
+    .await?;
+    if r["isError"] == json!(true) {
+        bail!("create refused: {r}");
+    }
+    let agents: Api<v2::Agent> = Api::namespaced(ctx.client.clone(), &ns);
+    let created = agents.get("probe-agent").await.context("created agent")?;
+    if created
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("agentctl.dev/created-by"))
+        != Some(&"sup-probe".to_string())
+    {
+        bail!("created agent is not stamped with the creating workload");
+    }
+
+    // Resolve + status round out the read surface.
+    let r = call(6, "control.agents.resolve", json!({ "handle": "@probe" })).await?;
+    if r["structuredContent"]["name"] != json!("probe-agent") {
+        bail!("resolve @probe: {r}");
+    }
+    let r = call(7, "control.agents.status", json!({ "name": "probe-agent" })).await?;
+    if r["isError"] == json!(true) {
+        bail!("status errored: {r}");
+    }
+
+    drop(pf_ctl);
+    drop(pf_id);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
 }
 
 /// P2-8: every agentd start kind provisions from `spec.triggers[]`, the
@@ -189,7 +506,9 @@ async fn trigger_matrix(ctx: &Ctx) -> Result<Outcome> {
     ))
     .context("apply matrix daemon")?;
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
-        Ok(!first_pod(ns, &agent_label("matrix")).unwrap_or_default().is_empty())
+        Ok(!first_pod(ns, &agent_label("matrix"))
+            .unwrap_or_default()
+            .is_empty())
     })
     .await?;
     let pod = first_pod(ns, &agent_label("matrix"))?;
@@ -226,10 +545,17 @@ async fn trigger_matrix(ctx: &Ctx) -> Result<Outcome> {
     shell::run(
         "./target/release/agentctl",
         &[
-            "create", "agent", "matrix-once", "-n", ns,
-            "--instruction", "say hi and exit",
-            "--image", "agentd:1.3.1",
-            "--pool", "mockpool",
+            "create",
+            "agent",
+            "matrix-once",
+            "-n",
+            ns,
+            "--instruction",
+            "say hi and exit",
+            "--image",
+            "agentd:1.3.1",
+            "--pool",
+            "mockpool",
             "--once",
         ],
     )
@@ -240,8 +566,12 @@ async fn trigger_matrix(ctx: &Ctx) -> Result<Outcome> {
     .await
     .context("once shape must render a Job")?;
     shell::kubectl(&[
-        "wait", "job/matrix-once", "-n", ns,
-        "--for=condition=complete", "--timeout=120s",
+        "wait",
+        "job/matrix-once",
+        "-n",
+        ns,
+        "--for=condition=complete",
+        "--timeout=120s",
     ])
     .context("the once Job completes")?;
 
@@ -249,11 +579,19 @@ async fn trigger_matrix(ctx: &Ctx) -> Result<Outcome> {
     shell::run(
         "./target/release/agentctl",
         &[
-            "create", "agent", "matrix-cron", "-n", ns,
-            "--instruction", "tick",
-            "--image", "agentd:1.3.1",
-            "--pool", "mockpool",
-            "--schedule", "0 7 * * 1-5",
+            "create",
+            "agent",
+            "matrix-cron",
+            "-n",
+            ns,
+            "--instruction",
+            "tick",
+            "--image",
+            "agentd:1.3.1",
+            "--pool",
+            "mockpool",
+            "--schedule",
+            "0 7 * * 1-5",
         ],
     )
     .context("agentctl create agent --schedule")?;
@@ -263,14 +601,28 @@ async fn trigger_matrix(ctx: &Ctx) -> Result<Outcome> {
     .await
     .context("cron shape must render a CronJob")?;
     let cron = shell::kubectl(&[
-        "get", "cronjob", "matrix-cron", "-n", ns, "-o", "jsonpath={.spec.schedule}",
+        "get",
+        "cronjob",
+        "matrix-cron",
+        "-n",
+        ns,
+        "-o",
+        "jsonpath={.spec.schedule}",
     ])?;
     if cron.trim() != "0 7 * * 1-5" {
         bail!("cron shape rendered schedule {cron:?}");
     }
 
     for name in ["matrix", "matrix-once", "matrix-cron"] {
-        shell::kubectl(&["delete", "agent", name, "-n", ns, "--wait=false", "--ignore-not-found"])?;
+        shell::kubectl(&[
+            "delete",
+            "agent",
+            name,
+            "-n",
+            ns,
+            "--wait=false",
+            "--ignore-not-found",
+        ])?;
     }
     delete_example(&dir, "modelpool-mock.yaml");
     delete_example(&dir, "mock-provider.yaml");
@@ -351,10 +703,25 @@ async fn policy_ladder(ctx: &Ctx) -> Result<Outcome> {
     })
     .await
     .context("consumer deletion")?;
-    shell::kubectl_apply_stdin(&launder).context("tag drop with no consumers should be admitted")?;
+    shell::kubectl_apply_stdin(&launder)
+        .context("tag drop with no consumers should be admitted")?;
 
-    shell::kubectl(&["delete", "mcpservice", "tickets", "-n", ns, "--ignore-not-found"])?;
-    shell::kubectl(&["delete", "agentclass", "guarded", "-n", ns, "--ignore-not-found"])?;
+    shell::kubectl(&[
+        "delete",
+        "mcpservice",
+        "tickets",
+        "-n",
+        ns,
+        "--ignore-not-found",
+    ])?;
+    shell::kubectl(&[
+        "delete",
+        "agentclass",
+        "guarded",
+        "-n",
+        ns,
+        "--ignore-not-found",
+    ])?;
     pass()
 }
 
@@ -452,7 +819,9 @@ async fn org_access_policy(ctx: &Ctx) -> Result<Outcome> {
     }
     for name in ["eng-bot", "mkt-bot"] {
         kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
-            Ok(!first_pod(&ns, &agent_label(name)).unwrap_or_default().is_empty())
+            Ok(!first_pod(&ns, &agent_label(name))
+                .unwrap_or_default()
+                .is_empty())
         })
         .await?;
         let pod = first_pod(&ns, &agent_label(name))?;
@@ -466,7 +835,12 @@ async fn org_access_policy(ctx: &Ctx) -> Result<Outcome> {
         let http = ctx.http.clone();
         let url = format!("{}/orgs/{org}/agents/{name}", pf.base_url());
         async move {
-            let resp = http.post(&url).bearer_auth(token).json(&body).send().await?;
+            let resp = http
+                .post(&url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?;
             anyhow::Ok(resp.status().as_u16())
         }
     };
@@ -618,7 +992,9 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
         // wait_for_first_pod is pinned to ctx.cfg.ns; poll the org ns directly.
         let mut found = String::new();
         kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
-            Ok(!first_pod(&ns, &agent_label(name)).unwrap_or_default().is_empty())
+            Ok(!first_pod(&ns, &agent_label(name))
+                .unwrap_or_default()
+                .is_empty())
         })
         .await
         .context("agent pod in org namespace")?;
@@ -650,7 +1026,10 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
     // No token → 401 (org routes never fall open).
     let resp = ctx.http.post(&url).json(&rpc).send().await?;
     if resp.status().as_u16() != 401 {
-        bail!("unauthenticated org-route call got {} (want 401)", resp.status());
+        bail!(
+            "unauthenticated org-route call got {} (want 401)",
+            resp.status()
+        );
     }
 
     // A valid token for a subject the agent does NOT name → 403.
@@ -662,7 +1041,10 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
         .send()
         .await?;
     if resp.status().as_u16() != 403 {
-        bail!("unlisted subject got {} (want 403 addressed-gate refusal)", resp.status());
+        bail!(
+            "unlisted subject got {} (want 403 addressed-gate refusal)",
+            resp.status()
+        );
     }
 
     // Unknown org → 404.
@@ -795,7 +1177,10 @@ async fn supervisor_route(ctx: &Ctx) -> Result<Outcome> {
     // No token → 401 (the supervisor route never falls open).
     let resp = ctx.http.post(&url).json(&rpc).send().await?;
     if resp.status().as_u16() != 401 {
-        bail!("unauthenticated supervisor call got {} (want 401)", resp.status());
+        bail!(
+            "unauthenticated supervisor call got {} (want 401)",
+            resp.status()
+        );
     }
 
     // First authenticated touch: provisioning (503) + the CR appears.
@@ -821,7 +1206,10 @@ async fn supervisor_route(ctx: &Ctx) -> Result<Outcome> {
     .context("auto-created Supervisor CR")?;
     let sup = sups.get(sup_name).await?;
     if sup.spec.user != "mock:carol" {
-        bail!("Supervisor spec.user = {:?}, want mock:carol", sup.spec.user);
+        bail!(
+            "Supervisor spec.user = {:?}, want mock:carol",
+            sup.spec.user
+        );
     }
 
     // The rendered v2 Agent: owner-scoped to the CR, addressed ONLY to carol,
@@ -862,7 +1250,13 @@ async fn supervisor_route(ctx: &Ctx) -> Result<Outcome> {
         let rpc = rpc.clone();
         let token = sign("carol");
         async move {
-            let resp = ctx.http.post(&url).bearer_auth(token).json(&rpc).send().await?;
+            let resp = ctx
+                .http
+                .post(&url)
+                .bearer_auth(token)
+                .json(&rpc)
+                .send()
+                .await?;
             let status = resp.status();
             let body: Value = resp.json().await.unwrap_or(Value::Null);
             *last.lock().unwrap() = format!("status {status}: {body}");
@@ -987,13 +1381,23 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         // Leftover from a prior run — clear and re-read.
         call(2, "state.delete", json!({ "key": key })).await?;
     }
-    let r = call(3, "state.put", json!({ "key": key, "seq": 1, "state": envl })).await?;
+    let r = call(
+        3,
+        "state.put",
+        json!({ "key": key, "seq": 1, "state": envl }),
+    )
+    .await?;
     if sc(&r)["ok"] != json!(true) || !sc(&r)["latest"].is_null() {
         bail!("first put refused: {r}");
     }
     // Byte-identical replay of the accepted write stays accepted (the binding
     // self-idempotates; agentd's _meta idempotency never reaches SQL).
-    let r = call(4, "state.put", json!({ "key": key, "seq": 1, "state": envl })).await?;
+    let r = call(
+        4,
+        "state.put",
+        json!({ "key": key, "seq": 1, "state": envl }),
+    )
+    .await?;
     if sc(&r)["ok"] != json!(true) {
         bail!("idempotent replay refused: {r}");
     }
@@ -1054,7 +1458,9 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge ticks in one line\" }}\n  expose: {{ a2a: true }}\n  store: {{ class: managed }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
     ))?;
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
-        Ok(!first_pod(ns, &agent_label(name)).unwrap_or_default().is_empty())
+        Ok(!first_pod(ns, &agent_label(name))
+            .unwrap_or_default()
+            .is_empty())
     })
     .await
     .context("state-probe pod")?;
@@ -1165,7 +1571,10 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
             if s.phase.as_deref() == Some("Invalid") {
                 bail!(
                     "Agent went Invalid — is identity.service armed on the operator? {:?}",
-                    s.conditions.iter().map(|c| c.message.clone()).collect::<Vec<_>>()
+                    s.conditions
+                        .iter()
+                        .map(|c| c.message.clone())
+                        .collect::<Vec<_>>()
                 );
             }
         }
@@ -1175,9 +1584,12 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
     .context("principals Secret")?;
     let secret = secrets.get(&secret_name).await?;
     let data = secret.data.unwrap_or_default();
-    let raw = data
-        .get(key)
-        .ok_or_else(|| anyhow!("Secret {secret_name} lacks key {key}; has {:?}", data.keys()))?;
+    let raw = data.get(key).ok_or_else(|| {
+        anyhow!(
+            "Secret {secret_name} lacks key {key}; has {:?}",
+            data.keys()
+        )
+    })?;
     bearer.push_str(std::str::from_utf8(&raw.0)?);
     if !bearer.starts_with("pat-") {
         bail!("projected bearer does not look minted (want pat-…)");
@@ -1203,7 +1615,10 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
     shell::kubectl_apply_stdin(&cert_yaml)?;
     let tls_secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ctx.cfg.ns);
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
-        Ok(tls_secrets.get_opt("e2e-nobody-client-tls").await?.is_some())
+        Ok(tls_secrets
+            .get_opt("e2e-nobody-client-tls")
+            .await?
+            .is_some())
     })
     .await
     .context("nobody client cert issuance")?;
@@ -1214,7 +1629,11 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
         pem.extend_from_slice(&data.get("tls.crt").expect("tls.crt").0);
         pem
     };
-    let nobody = tls_secrets.get("e2e-nobody-client-tls").await?.data.unwrap();
+    let nobody = tls_secrets
+        .get("e2e-nobody-client-tls")
+        .await?
+        .data
+        .unwrap();
     let cp_secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ctx.cfg.system_ns);
     let cp = cp_secrets.get("agentctl-client-tls").await?.data.unwrap();
 
@@ -1275,8 +1694,22 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
     }
 
     drop(pf);
-    shell::kubectl(&["delete", "-n", &ctx.cfg.ns, "certificate", "e2e-nobody-client", "--ignore-not-found"])?;
-    shell::kubectl(&["delete", "-n", &ctx.cfg.ns, "secret", "e2e-nobody-client-tls", "--ignore-not-found"])?;
+    shell::kubectl(&[
+        "delete",
+        "-n",
+        &ctx.cfg.ns,
+        "certificate",
+        "e2e-nobody-client",
+        "--ignore-not-found",
+    ])?;
+    shell::kubectl(&[
+        "delete",
+        "-n",
+        &ctx.cfg.ns,
+        "secret",
+        "e2e-nobody-client-tls",
+        "--ignore-not-found",
+    ])?;
     cleanup_agent(ctx, name).await?;
     pass()
 }
@@ -1372,7 +1805,10 @@ async fn org_tenancy(ctx: &Ctx) -> Result<Outcome> {
             return Ok(false);
         }
         if !status.namespaces.contains(&ns_name) {
-            bail!("status.namespaces {:?} missing {ns_name}", status.namespaces);
+            bail!(
+                "status.namespaces {:?} missing {ns_name}",
+                status.namespaces
+            );
         }
         Ok(true)
     })
@@ -2665,7 +3101,6 @@ async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
     println!("    (mock verified {signed} signed call(s), {unsigned} unsigned challenge(s))");
     pass()
 }
-
 
 /// Read the mock AAuth MCP server's `/stats` from inside the cluster (a
 /// throwaway curl pod), avoiding a CA-trust dance on the harness side — the

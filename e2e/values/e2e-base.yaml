@@ -53,13 +53,29 @@ operator:
 state:
   enabled: true
 
+# Control MCP (P4-1): AAuth-verified control.* tools for supervisors. The
+# AAuth plane it needs is armed in the identity block below.
+control:
+  enabled: true
+
 # Identity plane (P1): the identity service (federated OIDC + principal
 # minting) with durable custody in the bundled Postgres. The api-token Secret
 # is rendered for its ADMIN channel (identity + operator minting) without
 # arming the coarse data-plane gate (apiToken.enabled stays off here — the
 # sec-apitoken overlay owns that gate).
 identity:
+  # AAuth plane armed in BASE (formerly only the sec-aauth overlay, which
+  # stays as a no-op layer): identity IS the fleet Agent Provider, the
+  # operator house-provisions per-agent keys, and supervisors sign their
+  # control-MCP dials (P4-1 depends on this).
+  aauth:
+    provider: "http://agentctl-identity.agentctl-system"
+    adminTokenSecret:
+      name: agentctl-api-token
+      key: AGENTCTL_API_TOKEN
   service:
+    aauth:
+      enabled: true
     enabled: true
     store: postgres
     # The in-cluster mock issuer (e2e/manifests/mock-idp.yaml) serves from the

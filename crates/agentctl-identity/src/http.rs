@@ -412,6 +412,9 @@ async fn aauth_agent_token(
         &agent.agent,
         &caller.x_b64url,
         aauth.token_ttl,
+        // The operator-registered workload label (`<ns>/<name>`) rides the
+        // token so in-cluster resource servers can scope by it.
+        Some(agent.label.as_str()).filter(|l| !l.is_empty()),
     );
     Json(json!({
         "agent_token": token,

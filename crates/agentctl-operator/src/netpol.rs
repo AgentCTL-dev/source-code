@@ -66,10 +66,11 @@ const P_INTERNET_EGRESS: &str = "agent-internet-egress";
 /// gateway (delegation), the coordination server (the claim-mode work fabric),
 /// and the managed state service (the `store.class: managed` checkpointer);
 /// intelligence + MCP are dialed DIRECTLY (see [`agent_internet_egress`]).
-const CONTROL_PLANE_APP_NAMES: [&str; 3] = [
+const CONTROL_PLANE_APP_NAMES: [&str; 4] = [
     "agentctl-gateway",
     "agentctl-coordination",
     "agentctl-state",
+    "agentctl-control",
 ];
 
 /// Operator-side wiring for the per-namespace agent NetworkPolicies. Read once at
@@ -193,9 +194,14 @@ fn allow_controlplane_and_dns(cp_ns: &str) -> NetworkPolicy {
         }]),
         // 8080: the A2A gateway (delegation-out) + the coordination server
         // (claims), both plaintext HTTP; 8787: the managed state service
-        // (checkpointer). Intelligence + MCP are dialed DIRECTLY over public
-        // HTTPS (see `agent_internet_egress`), not through here.
-        ports: Some(vec![port("TCP", 8080), port("TCP", 8787)]),
+        // (checkpointer); 8443: the control MCP (AAuth-signed HTTPS).
+        // Intelligence + MCP are dialed DIRECTLY over public HTTPS (see
+        // `agent_internet_egress`), not through here.
+        ports: Some(vec![
+            port("TCP", 8080),
+            port("TCP", 8787),
+            port("TCP", 8443),
+        ]),
     };
     NetworkPolicy {
         metadata: meta(P_ALLOW_CP_DNS),
@@ -447,8 +453,8 @@ mod tests {
         let gw_ports: Vec<i32> = gw.ports.as_ref().unwrap().iter().map(int_port).collect();
         assert_eq!(
             gw_ports,
-            vec![8080, 8787],
-            "8080 (A2A + coordination) and 8787 (managed state) only"
+            vec![8080, 8787, 8443],
+            "8080 (A2A + coordination), 8787 (managed state), 8443 (control MCP) only"
         );
     }
 
