@@ -160,6 +160,14 @@ pub struct ConfigInput {
     /// rendered agent serves its control surface over mTLS).
     pub serve_a2a: bool,
     pub allow_trifecta: bool,
+    /// Generated trigger workflows (P2-8: the v2 `triggers[]` compiler's
+    /// output — full dialect-3 documents appended to `workflows`).
+    pub generated_workflows: Vec<Value>,
+    /// The `webhooks:` config block a webhook trigger requires (the config is
+    /// REFUSED without `webhooks.listen` when a webhook start exists).
+    pub webhooks_block: Option<Value>,
+    /// The `streams:` declarations stream triggers consume.
+    pub streams_block: Option<Value>,
     /// Named A2A principal subjects (`spec.access.principals`,
     /// `<provider>:<sub>`). Non-empty ⇒ `a2a.principals[]` is projected:
     /// one `user` rule per subject (bearer file under
@@ -195,6 +203,9 @@ impl ConfigInput {
             aauth: aauth_provider.map(|provider| AauthInput { provider }),
             serve_a2a: true,
             allow_trifecta: false,
+            generated_workflows: Vec::new(),
+            webhooks_block: None,
+            streams_block: None,
             principal_subjects: spec
                 .access
                 .as_ref()
@@ -203,6 +214,8 @@ impl ConfigInput {
         }
     }
 }
+
+pub mod v2;
 
 /// Composition failures — each names the exact spec defect.
 #[derive(Debug, PartialEq, Eq)]
@@ -218,6 +231,16 @@ pub enum ConfigError {
     NoServerForSubscribe { uri: String },
     /// once/loop/schedule need an instruction (mirrors the CRD CEL rule).
     MissingInstruction,
+    /// A subscribe trigger names a service with no resolved MCP binding —
+    /// agentd would accept the config and the node would silently never fire.
+    UnknownSubscribeServer { service: String },
+    /// `shape: cron` (an external CronJob) needs CRON syntax; `every` cannot
+    /// be expressed as a CronJob schedule.
+    ExternalScheduleNeedsCron,
+    /// A schedule trigger with neither `cron` nor `every`.
+    ScheduleTriggerNeedsWhen,
+    /// A trigger union with no member set (CEL-guarded; defense in depth).
+    EmptyTrigger,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -235,6 +258,18 @@ impl std::fmt::Display for ConfigError {
             ConfigError::MissingInstruction => {
                 write!(f, "this mode requires spec.instruction")
             }
+            ConfigError::UnknownSubscribeServer { service } => write!(
+                f,
+                "subscribe trigger names service {service:?} with no resolved MCP binding                  (grant an MCPService or declare it inline) — agentd would accept the config                  and the trigger would silently never fire"
+            ),
+            ConfigError::ExternalScheduleNeedsCron => write!(
+                f,
+                "shape: cron (an external CronJob) needs cron syntax on spec.schedule or the                  schedule trigger; `every` cannot be a CronJob schedule (use an internal                  schedule on a daemon)"
+            ),
+            ConfigError::ScheduleTriggerNeedsWhen => {
+                write!(f, "a schedule trigger needs `cron` or `every`")
+            }
+            ConfigError::EmptyTrigger => write!(f, "a trigger must set exactly one kind"),
         }
     }
 }
@@ -527,8 +562,15 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
             workflows.push(json!({ "file": file }));
         }
     }
+    workflows.extend(input.generated_workflows.iter().cloned());
     if !workflows.is_empty() {
         doc.insert("workflows".into(), Value::Array(workflows));
+    }
+    if let Some(w) = &input.webhooks_block {
+        doc.insert("webhooks".into(), w.clone());
+    }
+    if let Some(st) = &input.streams_block {
+        doc.insert("streams".into(), st.clone());
     }
 
     // --- serving ----------------------------------------------------------
@@ -1077,6 +1119,50 @@ mod tests {
                 i
             },
         ];
+        // The P2-8 ten-kind daemon: every trigger compiles into this ONE
+        // document — the strongest possible check that the generated start
+        // nodes carry exactly the field names 1.3.1's strict validator wants.
+        let ten_kind: agent_api::v1alpha2::AgentSpec = serde_yaml::from_str(
+            r#"
+shape: daemon
+instruction: { text: "persona" }
+expose: { a2a: true }
+triggers:
+  - once: {}
+  - manual: {}
+  - loop: { interval: 10m }
+  - schedule: { cron: "0 7 * * 1-5" }
+  - schedule: { every: 1h }
+  - webhook: { path: /hooks/ci, methods: [POST], rate: "30/60s" }
+  - subscribe: { service: queue, uri: "queue://inbox", debounce: 500ms }
+  - stream: { stream: incidents, from: new }
+  - signal: { name: "reply/42" }
+  - event: { name: workflow.finished }
+  - a2aCommand: { command: qa.verify }
+"#,
+        )
+        .unwrap();
+        let (ten_input, _) = v2::from_v2_spec(
+            &ten_kind,
+            Some(ResolvedIntelligence {
+                endpoint: "http://127.0.0.1:9999/v1".into(),
+                model: Some("t".into()),
+                has_token: false,
+            }),
+            None,
+            None,
+            vec![ResolvedMcp {
+                name: "queue".into(),
+                endpoint: "http://127.0.0.1:8931/mcp".into(),
+                tags: vec![],
+                token_env: None,
+                header: None,
+            }],
+        )
+        .expect("ten-kind compile");
+        let mut cases = cases;
+        cases.push(ten_input);
+
         for (n, input) in cases.iter().enumerate() {
             // The document validates VERBATIM — the binary stats neither the
             // TLS/CA/store paths nor dials anything at --validate-config

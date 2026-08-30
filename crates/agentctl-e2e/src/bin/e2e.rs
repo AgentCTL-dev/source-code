@@ -159,7 +159,118 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("org-access-policy", "tenancy", org_access_policy),
         // registry floors + tag-laundering guard (P2-4)
         scenario!("policy-ladder", "tenancy", policy_ladder),
+        // trigger sugar over the ten start kinds (P2-8)
+        scenario!("trigger-matrix", "triggers", trigger_matrix),
     ]
+}
+
+/// P2-8: every agentd start kind provisions from `spec.triggers[]`, the
+/// right workload shape renders, and the fireable kinds FIRE:
+/// - one daemon carrying eight long-lived triggers (loop, schedule-every,
+///   webhook, subscribe, stream, signal, event, a2aCommand) → Deployment;
+///   the webhook is POSTed (via the loopback listener the compiler wired)
+///   and the 30s loop ticks — both proven from the agent's own run events;
+/// - `agentctl create agent --once` → Job that completes (instruction sugar);
+/// - `agentctl create agent --schedule` → CronJob with the cron expression.
+async fn trigger_matrix(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let dir = examples_dir();
+    apply_mock_provider(ctx, &dir)?;
+    apply_example(&dir, "modelpool-mock.yaml")?;
+
+    // The eight-trigger daemon (subscribe binds an inline loopback server —
+    // nothing listens there; the daemon retries and the start stays armed).
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: matrix, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge the trigger payload in one line\" }}\n  intelligence: {{ pool: mockpool }}\n  expose: {{ a2a: true }}\n  mcpServers:\n    - name: queue\n      endpoint: \"http://127.0.0.1:8931/mcp\"\n  triggers:\n    - loop: {{ interval: 30s }}\n    - schedule: {{ every: 1h }}\n    - webhook: {{ path: /hooks/ci, methods: [POST] }}\n    - subscribe: {{ service: queue, uri: \"queue://inbox\" }}\n    - stream: {{ stream: incidents }}\n    - signal: {{ name: \"reply/1\" }}\n    - event: {{ name: workflow.finished }}\n    - a2aCommand: {{ command: qa.verify }}\n"
+    ))
+    .context("apply matrix daemon")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(!first_pod(ns, &agent_label("matrix")).unwrap_or_default().is_empty())
+    })
+    .await?;
+    let pod = first_pod(ns, &agent_label("matrix"))?;
+    kh::wait_pod_running(&ctx.client, ns, &pod, READY_TIMEOUT).await?;
+    // Deployment shape.
+    shell::kubectl(&["get", "deployment", "matrix", "-n", ns])
+        .context("eight-trigger daemon must render a Deployment")?;
+
+    // FIRE the webhook through the loopback listener (port-forward reaches
+    // the pod's loopback).
+    let pf = shell::PortForward::pod(ns, &pod, 9494, 19494)?;
+    let resp = ctx
+        .http
+        .post("http://127.0.0.1:19494/hooks/ci")
+        .json(&json!({ "build": "1", "status": "green" }))
+        .send()
+        .await
+        .context("POST the webhook trigger")?;
+    if !resp.status().is_success() {
+        bail!("webhook POST got {}", resp.status());
+    }
+    drop(pf);
+
+    // Both firings visible in the agent's own events: the webhook workflow
+    // ran, and the 30s loop ticked at least once.
+    kh::poll_until(Duration::from_secs(120), Duration::from_secs(5), || async {
+        let logs = shell::kubectl(&["logs", "-n", ns, &pod, "--tail=-1"]).unwrap_or_default();
+        Ok(logs.contains("main-webhook") && logs.contains("main-loop"))
+    })
+    .await
+    .context("webhook + loop firings in the agent log")?;
+
+    // CLI: a once Job (instruction sugar; completes against the mock pool).
+    shell::run(
+        "./target/release/agentctl",
+        &[
+            "create", "agent", "matrix-once", "-n", ns,
+            "--instruction", "say hi and exit",
+            "--image", "agentd:1.3.1",
+            "--pool", "mockpool",
+            "--once",
+        ],
+    )
+    .context("agentctl create agent --once")?;
+    kh::poll_until(Duration::from_secs(60), Duration::from_secs(2), || async {
+        Ok(shell::kubectl(&["get", "job", "matrix-once", "-n", ns]).is_ok())
+    })
+    .await
+    .context("once shape must render a Job")?;
+    shell::kubectl(&[
+        "wait", "job/matrix-once", "-n", ns,
+        "--for=condition=complete", "--timeout=120s",
+    ])
+    .context("the once Job completes")?;
+
+    // CLI: a sole-cron schedule → CronJob with the expression.
+    shell::run(
+        "./target/release/agentctl",
+        &[
+            "create", "agent", "matrix-cron", "-n", ns,
+            "--instruction", "tick",
+            "--image", "agentd:1.3.1",
+            "--pool", "mockpool",
+            "--schedule", "0 7 * * 1-5",
+        ],
+    )
+    .context("agentctl create agent --schedule")?;
+    kh::poll_until(Duration::from_secs(60), Duration::from_secs(2), || async {
+        Ok(shell::kubectl(&["get", "cronjob", "matrix-cron", "-n", ns]).is_ok())
+    })
+    .await
+    .context("cron shape must render a CronJob")?;
+    let cron = shell::kubectl(&[
+        "get", "cronjob", "matrix-cron", "-n", ns, "-o", "jsonpath={.spec.schedule}",
+    ])?;
+    if cron.trim() != "0 7 * * 1-5" {
+        bail!("cron shape rendered schedule {cron:?}");
+    }
+
+    for name in ["matrix", "matrix-once", "matrix-cron"] {
+        shell::kubectl(&["delete", "agent", name, "-n", ns, "--wait=false", "--ignore-not-found"])?;
+    }
+    delete_example(&dir, "modelpool-mock.yaml");
+    delete_example(&dir, "mock-provider.yaml");
+    pass()
 }
 
 /// The policy ladder red/green (RFC 0032, P2-4): AgentClass floors deny past

@@ -407,25 +407,57 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     let intelligence = resolve_model_endpoint(&ctx.client, ns, &agent.spec).await;
     let workflow_mount =
         ensure_workflow_configmap(&ctx.client, ns, &name, &agent.spec, &owner).await?;
-    let composed = compose_document(
+    // P2-8: the Agent path composes from the v1alpha2 VIEW (triggers, service
+    // grants, shapes); the trigger compiler decides the render shape, which
+    // overrides the v1 mode for the one inference the schema default hides
+    // (a defaulted daemon whose only triggers are once/manual renders a Job).
+    let composed = match compose_document_v2(
+        &ctx.client,
+        ns,
+        &name,
         &agent.spec,
         intelligence.as_ref(),
         workflow_mount.as_ref(),
         aauth_provider.clone(),
     )
-    .and_then(|doc| {
-        let wiring = pod_wiring(
-            &doc,
-            &agent.spec,
-            intelligence.as_ref(),
-            workflow_mount.clone(),
-            aauth_provider.is_some(),
-            ctx.api_token.should_inject(ns),
-        );
-        render_agent(&agent, &ctx.render, &wiring)
-            .map(|rendered| (doc, rendered))
-            .map_err(|e| e.to_string())
-    });
+    .await
+    {
+        Ok((doc, _mcp, shape, grant_refs)) => {
+            let mut render_obj = agent.as_ref().clone();
+            render_obj.spec.mode = match &shape {
+                agent_config::v2::RenderShape::Daemon => agent_api::Mode::Reactive,
+                agent_config::v2::RenderShape::Job => agent_api::Mode::Once,
+                agent_config::v2::RenderShape::Cron(cron) => {
+                    render_obj.spec.schedule = Some(agent_api::Schedule {
+                        cron: cron.clone(),
+                        timezone: render_obj.spec.schedule.and_then(|s| s.timezone),
+                    });
+                    agent_api::Mode::Schedule
+                }
+            };
+            let mut wiring = pod_wiring(
+                &doc,
+                &agent.spec,
+                intelligence.as_ref(),
+                workflow_mount.clone(),
+                aauth_provider.is_some(),
+                ctx.api_token.should_inject(ns),
+            );
+            // Granted services' credentials ride the same env convention as
+            // inline MCP tokens.
+            for (svc, r) in &grant_refs {
+                wiring.mcp_tokens.push(crate::render::SecretEnv {
+                    env: agent_config::ResolvedMcp::token_env_for(svc),
+                    secret: r.name.clone(),
+                    key: r.key.clone(),
+                });
+            }
+            render_agent(&render_obj, &ctx.render, &wiring)
+                .map(|rendered| (doc, rendered))
+                .map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e),
+    };
     let (condition, phase, contract) = match composed {
         Ok((doc, rendered)) => {
             let kind = rendered_kind(&rendered);
@@ -724,6 +756,96 @@ fn compose_document(
     });
     agent_config::compose_from_spec(spec, intel, workflow.map(|w| w.file_path()), aauth_provider)
         .map_err(|e| e.to_string())
+}
+
+/// The v2-aware compose (P2-8): fetch the v1alpha2 view (storage version —
+/// the stash guarantees fidelity; falls back to an in-process up-conversion
+/// if the versioned read fails), resolve `services[]` grants to their
+/// MCPService endpoints, and run the trigger compiler. Returns the
+/// projection, the resolved MCP bindings, the render shape, and the granted
+/// services' secret refs (for the pod's env wiring).
+async fn compose_document_v2(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    v1_spec: &AgentSpec,
+    intelligence: Option<&(String, Option<agent_api::SecretKeyRef>)>,
+    workflow: Option<&WorkflowMount>,
+    aauth_provider: Option<String>,
+) -> Result<
+    (
+        Projection,
+        Vec<agent_config::ResolvedMcp>,
+        agent_config::v2::RenderShape,
+        Vec<(String, agent_api::SecretKeyRef)>,
+    ),
+    String,
+> {
+    let v2_api: Api<agent_api::v1alpha2::Agent> = Api::namespaced(client.clone(), ns);
+    let v2_spec = match v2_api.get_opt(name).await {
+        Ok(Some(a)) => a.spec,
+        _ => agent_api::v1alpha2::convert::agent_v1_to_v2(v1_spec).0,
+    };
+
+    // Inline mcpServers + granted services, all as ResolvedMcp.
+    let mut mcp: Vec<agent_config::ResolvedMcp> = v2_spec
+        .mcp_servers
+        .iter()
+        .map(agent_config::ResolvedMcp::from_spec)
+        .collect();
+    let mut grant_secret_refs: Vec<(String, agent_api::SecretKeyRef)> = Vec::new();
+    if !v2_spec.services.is_empty() {
+        let services: Api<agent_api::v1alpha2::MCPService> = Api::namespaced(client.clone(), ns);
+        for grant in &v2_spec.services {
+            let entry = services
+                .get_opt(&grant.name)
+                .await
+                .map_err(|e| format!("read MCPService {}: {e}", grant.name))?
+                .ok_or_else(|| format!("granted MCPService {:?} not found", grant.name))?;
+            let endpoint = entry
+                .spec
+                .endpoint
+                .clone()
+                .ok_or_else(|| format!("MCPService {:?} has no endpoint", grant.name))?;
+            let token_ref = entry
+                .spec
+                .auth
+                .as_ref()
+                .and_then(|a| a.token_secret_ref.clone());
+            let token_env = token_ref
+                .as_ref()
+                .map(|_| agent_config::ResolvedMcp::token_env_for(&grant.name));
+            if let Some(r) = token_ref {
+                grant_secret_refs.push((grant.name.clone(), r));
+            }
+            mcp.push(agent_config::ResolvedMcp {
+                name: grant.name.clone(),
+                endpoint,
+                tags: entry.spec.tags.clone(),
+                token_env,
+                header: None,
+            });
+        }
+    }
+    for m in &mut mcp {
+        m.endpoint = agent_config::absolutize_endpoint(&m.endpoint);
+    }
+
+    let intel = intelligence.map(|(endpoint, token)| ResolvedIntelligence {
+        endpoint: endpoint.clone(),
+        model: v2_spec.intelligence.as_ref().and_then(|i| i.model.clone()),
+        has_token: token.is_some(),
+    });
+    let (input, shape) = agent_config::v2::from_v2_spec(
+        &v2_spec,
+        intel,
+        workflow.map(|w| w.file_path()),
+        aauth_provider,
+        mcp.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    let projection = agent_config::build_projection(&input).map_err(|e| e.to_string())?;
+    Ok((projection, mcp, shape, grant_secret_refs))
 }
 
 /// The pod-shell wiring matching a composed document: the same resolved facts,

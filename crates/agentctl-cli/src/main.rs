@@ -13,6 +13,7 @@
 
 mod auth;
 mod chat;
+mod create;
 mod install;
 mod verbs;
 
@@ -34,6 +35,9 @@ struct Cli {
     command: Command,
 }
 
+// Boxing the large CreateAgentArgs variant would push Box through every match
+// arm for a one-shot CLI struct — the size skew is fine here.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// List agents as an aligned table (mirrors the CRD printer columns).
@@ -50,6 +54,9 @@ enum Command {
     Whoami(auth::WhoamiArgs),
     /// Chat with an agent through the gateway, as the signed-in user.
     Chat(chat::ChatArgs),
+    /// Create resources (currently: `create agent` — any shape from flags).
+    #[command(subcommand)]
+    Create(CreateCommand),
     /// Gracefully drain an agent (finish in-flight work, then stop).
     Drain(verbs::VerbArgs),
     /// Mark an agent lame-duck (stop accepting new work; keep serving).
@@ -60,6 +67,12 @@ enum Command {
     Resume(verbs::VerbArgs),
     /// Cancel an agent's in-flight run (needs a run id where required).
     Cancel(verbs::VerbArgs),
+}
+
+#[derive(Subcommand)]
+enum CreateCommand {
+    /// Create an Agent from trigger flags (schedule/webhook/loop/…).
+    Agent(create::CreateAgentArgs),
 }
 
 #[derive(Args)]
@@ -97,6 +110,7 @@ async fn main() -> Result<()> {
         Command::Login(args) => auth::run_login(args).await,
         Command::Whoami(args) => auth::run_whoami(args).await,
         Command::Chat(args) => chat::run_chat(args).await,
+        Command::Create(CreateCommand::Agent(args)) => create::run_create_agent(args).await,
         Command::Drain(args) => verbs::run_verb("drain", args).await,
         Command::LameDuck(args) => verbs::run_verb("lame-duck", args).await,
         Command::Pause(args) => verbs::run_verb("pause", args).await,
