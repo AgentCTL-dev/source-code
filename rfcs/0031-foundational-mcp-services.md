@@ -29,13 +29,19 @@ config. Semantics agentd relies on:
   the agent's store timeout (this service's p99 budget: **≤50 ms in-cluster** —
   agentd's reactor does store I/O synchronously; slow state = slow agent).
 
-**Implementation:** Postgres (dedicated database; per-agent rows keyed
-`(org, agent_instance, key)`), via mcpg SQL-backend bindings with server-side
-CAS (`UPDATE … WHERE seq = :expected` → `rows_affected`), and — where binding
-expressiveness runs out — a small Apache-2.0 backend plugin over the same pool.
-**Tenant fencing is server-side**: the prefix/instance is derived from the
-verified caller identity (mcpg's `param_exprs: context.principal_id` pattern),
-never from arguments — an agent cannot name another agent's keys.
+**Implementation (upstream-steered, 2026-08-30):** pure **SQL bindings on the
+backend-sql plugin**, exactly the `agent-shared-memory` template's shape —
+Postgres (dedicated database; per-agent rows keyed `(org, agent_instance,
+key)`), server-side CAS (`UPDATE … WHERE seq = :expected` → `rows_affected` =
+the optimistic version-column pattern). The mcpg team's guidance: graduate to
+a `store`-class plugin **only** for conflict semantics SQL cannot express
+(server-side merge, multi-key atomicity beyond a transaction) — seq-CAS needs
+neither; and the p99 budget is loose against their measurements (the gateway
+proxies ~24–27k QPS; the historical hot-path ceiling was the audit sink's
+fsync, since group-committed). **Tenant fencing is server-side and native to
+the bindings**: the prefix/instance derives from `${identity.subject_id}`,
+resolved host-side from the VERIFIED caller identity — not spoofable by
+arguments — so an agent cannot name another agent's keys.
 
 Also here: **snapshot/restore admin tools** (`state.admin.snapshot/restore/
 export`) used by lifecycle verbs (RFC 0033) — operator/apiserver-only grants.
@@ -58,8 +64,18 @@ per-queue org scoping; DLQ with replay. Agents run agentd's own
 
 ## 5. `sandbox.*` — execution as a service (req. 11)
 
-Our Apache-2.0 mcpg **backend plugin** (the shape mcpg's own draft sandbox RFC
-anticipates) with a Kubernetes provider:
+Our mcpg **backend plugin** with a Kubernetes provider — the shape mcpg's own
+sandbox draft anticipates (**plugin-protocol RFC 0022**,
+`docs/plugin-protocol/rfcs/0022-backend-remote-sandbox.md`,
+`dev.mcpg.backend.sandbox`; cite the plugin-protocol series — mcpg's
+control-plane series has an unrelated RFC 0022). Upstream status
+(2026-08-30): Draft, unimplemented, header pre-dates their ABI freeze — so
+the **baseline our chart states is a self-host cell running our static
+build** (per §7's governance corollary), with config-against-a-blessed-0022
+adopted as an upgrade if upstream ships it in time (prioritization flagged to
+the owner). The draft's provider abstraction (register_profile-owned spec,
+agnostic backend kind, sync + streaming) is stable enough to shape our
+interface against now:
 
 - `sandbox.run {language|image, code|argv, files_in: [artifact refs], timeout,
   resources}` → runs in a **disposable Job** (or warm-pool pod) in a dedicated
@@ -103,7 +119,22 @@ in the registry (RFC 0032) and renders into both halves.
   rate — the dominant load; benchmarked in PLAN P3).
 - **Versioning**: plugins pinned to the mcpg gateway tag (pre-1.0 ABI); the
   store profile is contract-tested against real agentd (SIGKILL/resume matrix
-  from its conformance ideas re-run against `store.kind: mcp`).
+  from its conformance ideas re-run against `store.kind: mcp`). Upstream note
+  (2026-08-30, from the mcpg team): mcpg has shipped release governance —
+  **platform-blessed gateway versions** — constraining which gateway builds
+  our surfaces may assume; the pin must come from that blessed set, not an
+  arbitrary tag. Corollary (upstream-confirmed): a static `declare_plugin!`
+  build compiles INTO the gateway binary, so the blessed gateway version IS
+  the plugin version (no skew possible, capabilities enumerated in the
+  manifest) — while a consumer static-linking their OWN gateway build is a
+  **self-host cell posture entirely outside the blessed set**. Our
+  foundational surfaces therefore prefer config-against-blessed-builds; any
+  custom static plugin (e.g. the sandbox backend) makes that deployment a
+  self-host cell by definition, and the chart must say so. Also: the `agent-shared-memory` template's CAS is
+  **optimistic concurrency by version column** (publish fails on a stale
+  version and the caller re-reads), not a row lock — which happens to be
+  exactly the seq-CAS shape agentd's checkpointer profile wants (§2): map
+  `seq` onto the version column and a CAS miss onto the conflict result.
 
 ## 8. Open questions
 

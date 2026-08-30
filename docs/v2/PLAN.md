@@ -65,7 +65,7 @@ identity + a minimal P3 state path for the supervisor's own store.)
 
 | ID | Item | Definition of done | Status |
 |---|---|---|---|
-| P3-1 | `state.*` service (checkpointer profile on PG via mcpg) | agentd `store.kind: mcp` passes upstream-style SIGKILL/restore matrix; p99 ≤ 50 ms in-cluster | Todo |
+| P3-1 | `state.*` service (checkpointer profile on PG via mcpg) | agentd `store.kind: mcp` passes upstream-style SIGKILL/restore matrix; p99 ≤ 50 ms in-cluster | Todo — mcpg team briefed (2026-08-30): pure SQL bindings on backend-sql first (their steer; store-class plugin only for semantics SQL can't express — seq-CAS needs none), optimistic version-column CAS maps 1:1 onto agentd's seq-CAS, principal injection via host-resolved ${identity.subject_id}; their gateway proxies ~24–27k QPS so the 50ms p99 is loose; gateway pin from the platform-blessed set (custom static plugins ⇒ self-host cell posture) |
 | P3-2 | Server-side tenant fencing + `state.admin.snapshot/restore` | cross-agent key access provably impossible (test); snapshot/restore round-trip | Todo |
 | P3-3 | `artifacts.*` façade over content store (S3) | put/get/list with org quotas | Todo |
 | P3-4 | Store classes in Agent CRD (`ephemeral/local/managed`) + StatefulSet path | all three render + run | Todo |
@@ -92,7 +92,7 @@ identity + a minimal P3 state path for the supervisor's own store.)
 | P5-2 | AAuth verification chain at mcpg (identity JWKS) | unsigned/foreign-signed calls refused | Todo |
 | P5-3 | Our Apache CredentialIssuer plugin → identity `/exchange` | per-user token injected upstream; cache + refresh observed over simulated days | Todo |
 | P5-4 | Connections flow (consent, `connection_required` → HITL card) | user connects a provider once; agent proceeds | Todo |
-| P5-5 | `sandbox.*` backend plugin (K8s Jobs + warm pool, RuntimeClass optional) | code run with caps, no network, artifacts I/O; threat-model doc | Todo |
+| P5-5 | `sandbox.*` backend plugin (K8s Jobs + warm pool, RuntimeClass optional) | code run with caps, no network, artifacts I/O; threat-model doc | Todo — baseline: SELF-HOST CELL with our static build (mcpg governance corollary); upgrade to config-against-blessed mcpg plugin-protocol-0022 if upstream ships pre-P5; shape the interface against their draft's provider abstraction now |
 | P5-6 | HITL fabric (mcpg approvals + agentd gate bridge + channel registry) | gate raised in agentd answered from Slack under the right identity | Todo |
 | P5-7 | `work.*` fabric tools (coordination re-founding) | lease/ack/nack/DLQ + replay e2e | Todo |
 
