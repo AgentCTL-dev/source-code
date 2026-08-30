@@ -64,6 +64,11 @@ state:
 control:
   enabled: true
 
+# Tenant mcpg per org (P5-1): the proxy-only governance gateway (the blessed
+# GATEWAY image boots fine — only the plugin lane is broken upstream).
+tenantMcpg:
+  enabled: true
+
 # Identity plane (P1): the identity service (federated OIDC + principal
 # minting) with durable custody in the bundled Postgres. The api-token Secret
 # is rendered for its ADMIN channel (identity + operator minting) without

@@ -169,6 +169,7 @@ async fn main() -> Result<(), kube::Error> {
         aauth,
         identity,
         identity_http: agentctl_operator::identity::http_client(),
+        tenant_mcpg: agentctl_operator::tenant_mcpg::TenantMcpgConfig::from_env(),
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet + Organization)");

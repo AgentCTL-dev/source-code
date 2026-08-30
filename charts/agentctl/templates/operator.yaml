@@ -112,6 +112,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
+  # Tenant mcpg gateways (P5-1): the org controller renders a per-namespace
+  # governance proxy — its Service rides this rule (Deployment/ConfigMap are
+  # covered above).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "update", "patch"]
 {{- if or .Values.identity.aauth.provider .Values.identity.service.enabled }}
   # Operator-owned Secrets: the per-Agent AAuth Ed25519 key (<name>-aauth-key,
   # RFC 0023, when identity.aauth.provider is set) and/or the per-agent
@@ -316,6 +322,12 @@ spec:
             # agents (trailing-dot FQDN — dodges search-domain capture).
             - name: AGENTCTL_STATE_URL
               value: {{ printf "http://agentctl-state.%s.svc.cluster.local.:8787/mcp" $ns | quote }}
+            {{- end }}
+            {{- if .Values.tenantMcpg.enabled }}
+            # Tenant capability plane (P5-1): the blessed mcpg image every
+            # managed org namespace gets its governance proxy from.
+            - name: AGENTCTL_TENANT_MCPG_IMAGE
+              value: {{ .Values.tenantMcpg.image | quote }}
             {{- end }}
             {{- if .Values.control.enabled }}
             # Control MCP (P4-1): the endpoint seeded as the per-namespace

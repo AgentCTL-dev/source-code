@@ -18,6 +18,7 @@ pub mod reload;
 pub mod render;
 pub mod serve;
 pub mod supervisor;
+pub mod tenant_mcpg;
 
 pub use metrics::Metrics;
 pub use render::{

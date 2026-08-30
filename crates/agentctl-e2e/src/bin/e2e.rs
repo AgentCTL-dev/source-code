@@ -178,7 +178,199 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("work-redelivery", "fleets", work_redelivery),
         // dispatcher: coordinator front door + a2a.delegate fan-out to workers (P6-3)
         scenario!("dispatcher-fanout", "fleets", dispatcher_fanout),
+        // tenant mcpg: org gateway federating the registry, allow-narrowed (P5-1)
+        scenario!("tenant-mcpg", "capability", tenant_mcpg),
     ]
+}
+
+/// P5-1: every org gets ITS OWN mcpg governance proxy. Org create brings the
+/// gateway up (proxy-only config, zero plugins); a registered MCPService
+/// federates under its own tool prefix, narrowed to the entry's allow list;
+/// the platform `control` entry NEVER federates; a governed tools/call
+/// round-trips through the proxy to the real upstream.
+async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use agent_api::v1alpha2 as v2;
+    use kube::api::{Api, Patch, PatchParams};
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-tg";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    let apply_org = |display: &'static str| {
+        let orgs = orgs.clone();
+        async move {
+            orgs.patch(
+                org,
+                &PatchParams::apply("e2e").force(),
+                &Patch::Apply(&Organization::new(
+                    org,
+                    serde_json::from_value::<OrganizationSpec>(
+                        json!({ "displayName": display }),
+                    )?,
+                )),
+            )
+            .await
+            .context("apply Organization")
+        }
+    };
+    apply_org("E2E TenantGw").await?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    // Register an upstream: the coordination /mcp, narrowed to work.stats.
+    let mut entry = v2::MCPService::new(
+        "workstats",
+        v2::MCPServiceSpec {
+            endpoint: Some(
+                "http://agentctl-coordination.agentctl-system.svc.cluster.local.:80/mcp"
+                    .into(),
+            ),
+            allow: vec!["work.stats".into()],
+            ..Default::default()
+        },
+    );
+    entry.metadata.namespace = Some(ns.clone());
+    kh::api::<v2::MCPService>(&ctx.client, &ns)
+        .create(&Default::default(), &entry)
+        .await
+        .context("register workstats MCPService")?;
+    // Nudge the org reconcile so the catalog re-renders now (the gateway
+    // itself hot-reloads the ConfigMap via config_watch).
+    apply_org("E2E TenantGw v2").await?;
+
+    // The gateway trio comes up in the org namespace.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get", "deploy", "-n", &org_namespace("e2e-tg"), "agentctl-mcpg",
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "1")
+    })
+    .await
+    .context("tenant gateway never Ready")?;
+
+    let pf = shell::PortForward::service(&ns, "agentctl-mcpg", 8787, 18107)?;
+    let base = pf.base_url();
+    let call = |body: Value, session: Option<String>| {
+        let base = base.clone();
+        async move {
+            let mut req = ctx
+                .http
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                // Strict streamable-HTTP: the negotiated protocol version
+                // must ride every post-initialize request (400 without it).
+                .header("mcp-protocol-version", "2025-11-25")
+                .header("x-mcpg-subject-id", "agent:e2e-tg:probe")
+                .json(&body);
+            if let Some(s) = &session {
+                req = req.header("mcp-session-id", s.clone());
+            }
+            let resp = req.send().await.context("reach tenant gateway")?;
+            let session = resp
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let text = resp.text().await.unwrap_or_default();
+            let body: Value = if ct.starts_with("text/event-stream") {
+                // The stream interleaves log notifications with the actual
+                // response — take the LAST frame carrying result/error.
+                text.lines()
+                    .filter_map(|l| l.strip_prefix("data:"))
+                    .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+                    .filter(|v| v.get("result").is_some() || v.get("error").is_some())
+                    .next_back()
+                    .unwrap_or(Value::Null)
+            } else {
+                serde_json::from_str(&text).unwrap_or(Value::Null)
+            };
+            anyhow::Ok((body, session))
+        }
+    };
+
+    // Handshake, then the governed inventory: the federated tool appears
+    // under its prefix, NOTHING else from the upstream, and NO control.*
+    // (federation may still be importing on first touch — poll).
+    let (init, session) = call(
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if init.get("result").is_none() {
+        bail!("tenant gateway initialize failed: {init}");
+    }
+    let _ = call(
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        session.clone(),
+    )
+    .await;
+    let names = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let names = names.clone();
+        let call = &call;
+        let session = session.clone();
+        async move {
+            let (tools, _) = call(
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                session,
+            )
+            .await?;
+            let got: Vec<String> = tools["result"]["tools"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t["name"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ok = got.iter().any(|n| n == "workstats.work.stats");
+            *names.lock().unwrap() = got;
+            Ok(ok)
+        }
+    })
+    .await
+    .with_context(|| format!("federated tool never appeared; saw {:?}", names.lock().unwrap()))?;
+    let got = names.lock().unwrap().clone();
+    if got.iter().any(|n| n.starts_with("workstats.") && n != "workstats.work.stats") {
+        bail!("allowlist leaked upstream tools: {got:?}");
+    }
+    if got.iter().any(|n| n.starts_with("control.")) {
+        bail!("the platform control surface federated into the tenant plane: {got:?}");
+    }
+
+    // A governed call round-trips to the real upstream.
+    let (resp, _) = call(
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "workstats.work.stats", "arguments": {} } }),
+        session.clone(),
+    )
+    .await?;
+    let sc = &resp["result"]["structuredContent"];
+    if sc.get("pending").is_none() {
+        bail!("proxied work.stats returned no backlog shape: {resp}");
+    }
+
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
 }
 
 /// P6-3: the dispatcher strategy end to end. A fleet with a COORDINATOR
@@ -2161,6 +2353,7 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
                 .http
                 .post(&mcp)
                 .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-11-25")
                 .json(&body);
             if let Some(s) = &session {
                 req = req.header("mcp-session-id", s.clone());
@@ -2180,8 +2373,10 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
             let text = resp.text().await.unwrap_or_default();
             let body: Value = if ct.starts_with("text/event-stream") {
                 text.lines()
-                    .find_map(|l| l.strip_prefix("data:"))
-                    .and_then(|d| serde_json::from_str(d.trim()).ok())
+                    .filter_map(|l| l.strip_prefix("data:"))
+                    .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+                    .filter(|v| v.get("result").is_some() || v.get("error").is_some())
+                    .next_back()
                     .unwrap_or(Value::Null)
             } else {
                 serde_json::from_str(&text).unwrap_or(Value::Null)
@@ -2192,7 +2387,7 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
 
     let (init, session) = post(
         json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-11-25",
             "capabilities": {},
             "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
         None,

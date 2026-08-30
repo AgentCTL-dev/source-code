@@ -89,6 +89,9 @@ pub struct Ctx {
     pub identity: crate::identity::IdentityConfig,
     /// HTTP client for the identity service (webpki/plain-http, ring).
     pub identity_http: reqwest::Client,
+    /// Tenant mcpg gateways per managed org namespace (P5-1; env
+    /// `AGENTCTL_TENANT_MCPG_IMAGE`). Absent ⇒ the plane is off.
+    pub tenant_mcpg: crate::tenant_mcpg::TenantMcpgConfig,
 }
 
 /// Operator-side wiring for the optional in-cluster bearer-token gate (chart

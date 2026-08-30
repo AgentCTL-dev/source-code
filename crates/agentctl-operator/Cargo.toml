@@ -32,6 +32,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 serde.workspace = true
 serde_json.workspace = true
+# Tenant mcpg config rendering (P5-1): YAML for operator legibility.
+serde_yaml = "0.9"
 # Health/metrics surface: the same axum stack the other control-plane services serve
 # /healthz + /metrics with — no second HTTP/metrics framework.
 axum = "0.8"
@@ -52,7 +54,6 @@ ring = "0.17"
 
 [dev-dependencies]
 # org tests parse RFC-shaped YAML specs verbatim.
-serde_yaml = "0.9"
 serde_json.workspace = true
 # Drive the axum health/metrics router in unit tests (ServiceExt::oneshot).
 tower = { version = "0.5", features = ["util"] }

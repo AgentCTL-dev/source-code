@@ -338,6 +338,11 @@ pub async fn reconcile_org(org: Arc<Organization>, ctx: Arc<Ctx>) -> Result<Acti
         // seeded once, then org-owned.
         seed_namespace_defaults(&ctx, ns).await?;
 
+        // The tenant capability plane (P5-1): this org's OWN mcpg gateway,
+        // federating its registry. Catalog edits hot-reload via the rendered
+        // ConfigMap; the requeue below keeps it converged.
+        crate::tenant_mcpg::ensure_tenant_gateway(&ctx, ns, &org_name, &owner).await?;
+
         let quota_api: Api<ResourceQuota> = Api::namespaced(ctx.client.clone(), ns);
         match desired_quota(ns, org.spec.quotas.as_ref().and_then(|q| q.agents)) {
             Some(quota) => {

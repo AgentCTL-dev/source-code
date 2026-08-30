@@ -556,6 +556,14 @@ control:
     requests: { cpu: 25m, memory: 32Mi }
     limits: { cpu: 500m, memory: 256Mi }
 
+# Tenant mcpg gateways (P5-1): one governance proxy per managed org namespace,
+# federating that org's MCPService registry (proxy-only: NO plugins; the
+# platform `control` entry never federates). Hot catalog via config watch.
+tenantMcpg:
+  enabled: false
+  # The blessed mcpg release — digest-pinned (same pin as the state service).
+  image: "ghcr.io/mcpg-dev/mcpg:0.1.0-beta.24@sha256:64fdc3c1d3abbfceaaddddb3caf84587332964cfc64a0836048cc93e5dedabc0"
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the
