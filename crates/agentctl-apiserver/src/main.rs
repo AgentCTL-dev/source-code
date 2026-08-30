@@ -52,6 +52,74 @@ struct AppState {
     na: reqwest::Client,
     /// Prometheus counters surfaced at `/metrics`.
     metrics: Arc<metrics::Metrics>,
+    /// The metering store (P7-4) — read-only aggregation for the export.
+    /// `None` when DATABASE_URL is unset (export answers 503).
+    metering: Option<deadpool_postgres::Pool>,
+}
+
+/// A read-only pool over the shared Postgres for the metering export.
+/// sslmode=disable → NoTls; anything else → rustls (encrypt, no CA verify —
+/// matching the gateway's default hop; CA pinning is the gateway's writer
+/// concern, the reader follows the same DSN).
+fn metering_pool() -> Option<deadpool_postgres::Pool> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let cfg: tokio_postgres::Config = url.parse().ok()?;
+    let mgr = if cfg.get_ssl_mode() == tokio_postgres::config::SslMode::Disable {
+        deadpool_postgres::Manager::new(cfg, tokio_postgres::NoTls)
+    } else {
+        let tls = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(
+                agentctl_apiserver_noverify::NoVerify,
+            ))
+            .with_no_client_auth();
+        deadpool_postgres::Manager::new(cfg, tokio_postgres_rustls::MakeRustlsConnect::new(tls))
+    };
+    deadpool_postgres::Pool::builder(mgr)
+        .max_size(4)
+        .build()
+        .ok()
+}
+
+/// Encrypt-without-verify rustls verifier for the PG hop (same posture as
+/// the gateway's default `db_tls::make_connector`).
+mod agentctl_apiserver_noverify {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    #[derive(Debug)]
+    pub struct NoVerify;
+    impl ServerCertVerifier for NoVerify {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _m: &[u8],
+            _c: &rustls::pki_types::CertificateDer<'_>,
+            _d: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
 }
 
 #[tokio::main]
@@ -94,10 +162,18 @@ async fn main() {
             "/apis/management.agentctl.dev/v1alpha1/namespaces/{ns}/agentfleets/{name}/{verb}",
             post(handle_fleet_verb),
         )
+        // Metering export (P7-4): period aggregation of the durable usage
+        // events — the invoice pipeline's input. SAR-gated (cluster-scoped
+        // `metering` resource, verb get).
+        .route(
+            "/apis/management.agentctl.dev/v1alpha1/metering/export",
+            get(handle_metering_export),
+        )
         .with_state(AppState {
             client,
             na: na_client::node_agent_client(),
             metrics: Arc::new(metrics::Metrics::new()),
+            metering: metering_pool(),
         })
         .fallback(not_found);
 
@@ -392,6 +468,87 @@ async fn handle_fleet_verb(
 
 /// SubjectAccessReview: may `user` (with `groups`) `create` the `<resource>/<verb>`
 /// subresource on `name` in `ns`?
+/// `GET /apis/management.agentctl.dev/v1alpha1/metering/export?from=&to=&format=`
+/// — the P7-4 export: aggregated usage rows for `[from, to)` (unix seconds;
+/// defaults: the last 24h), as JSON or CSV. SAR-gated: the caller needs
+/// `get` on the cluster-scoped `metering` resource in the management group.
+async fn handle_metering_export(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    state.metrics.inc_request();
+    let user = headers
+        .get("X-Remote-User")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if user.is_empty() {
+        let (c, j) = status(
+            StatusCode::UNAUTHORIZED,
+            "Failure",
+            "no X-Remote-User (not proxied?)",
+        );
+        return (c, j).into_response();
+    }
+    let groups: Vec<String> = headers
+        .get_all("X-Remote-Group")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(str::to_string))
+        .collect();
+    match authorize(&state.client, &user, &groups, "", "", "export", "metering").await {
+        Ok(true) => {}
+        Ok(false) => {
+            let (c, j) = status(StatusCode::FORBIDDEN, "Failure", "metering export denied");
+            return (c, j).into_response();
+        }
+        Err(e) => {
+            let (c, j) = status(StatusCode::INTERNAL_SERVER_ERROR, "Failure", &e);
+            return (c, j).into_response();
+        }
+    }
+    let Some(pool) = &state.metering else {
+        let (c, j) = status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Failure",
+            "metering store not configured (DATABASE_URL unset on the apiserver)",
+        );
+        return (c, j).into_response();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let parse = |k: &str, dflt: i64| q.get(k).and_then(|v| v.parse::<i64>().ok()).unwrap_or(dflt);
+    let from = parse("from", now - 86_400);
+    let to = parse("to", now);
+    match agentctl_metering::pg::export(pool, from, to).await {
+        Ok(rows) => {
+            if q.get("format").map(String::as_str) == Some("csv") {
+                (
+                    StatusCode::OK,
+                    [("content-type", "text/csv")],
+                    agentctl_metering::to_csv(&rows),
+                )
+                    .into_response()
+            } else {
+                Json(json!({
+                    "schema": agentctl_metering::SCHEMA,
+                    "from": from,
+                    "to": to,
+                    "rows": rows,
+                }))
+                .into_response()
+            }
+        }
+        Err(e) => {
+            let (c, j) = status(StatusCode::BAD_GATEWAY, "Failure", &format!("export: {e}"));
+            (c, j).into_response()
+        }
+    }
+}
+
 async fn authorize(
     client: &Client,
     user: &str,

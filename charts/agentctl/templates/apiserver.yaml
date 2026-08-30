@@ -141,6 +141,9 @@ spec:
             - { containerPort: 6443, name: https }
           env:
             {{- include "agentctl.podEnv" (dict "root" $ "comp" "apiserver") | nindent 12 }}
+            # Metering export (P7-4): read-only aggregation over the shared
+            # Postgres (the gateway writes the durable usage events there).
+            {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
           {{- with (index .Values "apiserver").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

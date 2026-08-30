@@ -35,3 +35,7 @@ tracing = "0.1"
 # Shared tracing init + W3C trace propagation across the mTLS hop to agents. fmt-only
 # by default; OTLP export when OTEL_EXPORTER_OTLP_ENDPOINT is set.
 agentctl-telemetry = { path = "../agentctl-telemetry" }
+agentctl-metering = { path = "../agentctl-metering" }
+deadpool-postgres = "0.14"
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+tokio-postgres = "0.7"

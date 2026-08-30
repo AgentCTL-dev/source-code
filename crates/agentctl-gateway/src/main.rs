@@ -100,6 +100,9 @@ async fn main() {
     // after us.
     let pool = build_pool();
     for attempt in 1..=30u32 {
+        if let Err(e) = agentctl_metering::pg::ensure_schema(&pool).await {
+            tracing::warn!(error = %e, "metering schema init failed (billing rows lost until PG recovers)");
+        }
         match store::ensure_schema(&pool).await {
             Ok(()) => break,
             Err(e) if attempt == 30 => panic!("postgres schema after 30 tries: {e}"),
@@ -631,6 +634,23 @@ async fn org_supervisor_rpc(
     // @mentions become the typed orchestration envelope (P4-7); plain prose
     // stays conversational.
     let req = mentionize_request(&req).unwrap_or(req);
+    // Metering (P7-4): a routed supervisor SendMessage is one CONVERSATION
+    // unit (the seat-adjacent metric), owner-attributed.
+    if req.get("method").and_then(Value::as_str) == Some("SendMessage") {
+        let pool = state.pool.clone();
+        let ev = agentctl_metering::Event::new(
+            org.clone(),
+            ns.clone(),
+            name.clone(),
+            agentctl_metering::KIND_SUPERVISOR_CONVERSATIONS,
+            1,
+            "conversations",
+        )
+        .user(user.subject.clone());
+        tokio::spawn(async move {
+            let _ = agentctl_metering::pg::record(&pool, &ev).await;
+        });
+    }
     handle_a2a(state, ns, name, false, decision, headers, req, Some(user)).await
 }
 
@@ -1280,6 +1300,35 @@ async fn handle_a2a_routed(
     org_user: Option<identity::OrgUser>,
 ) -> Response {
     let is_fleet = tier != FleetTier::Agent;
+    // Metering (P7-4): one durable usage event per handled RPC, at the
+    // traffic chokepoint — fire-and-forget, never on the request path.
+    {
+        let method = req
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let pool = state.pool.clone();
+        let mut ev = agentctl_metering::Event::new(
+            // Managed namespaces are `org-<name>` by convention; unmanaged
+            // ones bill under the empty org (still namespace-attributed).
+            ns.strip_prefix("org-").unwrap_or("").to_string(),
+            ns.clone(),
+            name.clone(),
+            agentctl_metering::KIND_A2A_REQUESTS,
+            1,
+            "requests",
+        )
+        .dim("method", method);
+        if let Some(u) = &org_user {
+            ev = ev.user(u.subject.clone());
+        }
+        tokio::spawn(async move {
+            if let Err(e) = agentctl_metering::pg::record(&pool, &ev).await {
+                tracing::debug!(error = %e, "metering record failed");
+            }
+        });
+    }
     state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
 

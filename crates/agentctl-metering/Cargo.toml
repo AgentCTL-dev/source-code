@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "agentctl-metering"
+version = "1.3.0"
+description = "agentctl billing-ready metering: the versioned usage-event vocabulary (attributed {org, namespace, workload, user}), the durable Postgres sink, and the period aggregation/export the invoice pipeline reads. Apache-2.0 — the vocabulary is a public contract."
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tracing = "0.1"
+# The same pure-Rust PG stack the gateway links (no C toolchain).
+deadpool-postgres = "0.14"
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

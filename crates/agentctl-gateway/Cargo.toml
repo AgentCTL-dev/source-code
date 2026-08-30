@@ -47,6 +47,7 @@ tower = { version = "0.5", default-features = false }
 x509-cert = "0.2"
 # CRD types (Agent / AgentFleet) for the mesh discovery registry (GET /agents).
 agent-api = { path = "../agent-api" }
+agentctl-metering = { path = "../agentctl-metering" }
 # The principal Secret-key derivation MUST stay byte-identical to the
 # operator/identity mapping — take it from the shared builder, never re-derive.
 agent-config = { path = "../agent-config" }

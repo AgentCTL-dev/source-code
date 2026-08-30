@@ -182,7 +182,143 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("tenant-mcpg", "capability", tenant_mcpg),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
+        // billing-ready metering: durable events → attributed export (P7-4)
+        scenario!("metering-export", "billing", metering_export),
     ]
+}
+
+/// P7-4: an invoice is computable from the export ALONE. Drive one org's
+/// supervisor conversation; the gateway records durable, attributed usage
+/// events; the management API exports the period aggregation (JSON + CSV)
+/// and the org's line items are right there — org, workload, kind, unit,
+/// totals — no reference back to internal state.
+async fn metering_export(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str| {
+        let exp = now() + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({ "iss": "https://mock-idp:8443", "aud": "agentctl-cli", "sub": sub,
+                     "email": format!("{sub}@example.test"), "groups": ["eng"], "exp": exp }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-bill";
+    let ns = org_namespace(org);
+    let _ = ns;
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({ "displayName": "E2E Billing" }))?,
+        )),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    let started = now();
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18116)?;
+    let url = format!("{}/orgs/{org}/supervisor", pf.base_url());
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let url = url.clone();
+        let token = sign("finn");
+        async move {
+            let resp = ctx
+                .http
+                .post(&url)
+                .bearer_auth(token)
+                .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+                    "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-bill-1",
+                        "parts": [{ "text": "bill me" }] } } }))
+                .send()
+                .await?;
+            let ok_status = resp.status().is_success();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            Ok(ok_status && body.get("result").is_some())
+        }
+    })
+    .await
+    .context("billable conversation never completed")?;
+    drop(pf);
+
+    // The export (JSON): the org's rows appear, attributed to the workload
+    // and the acting user path. Poll — the writes are fire-and-forget.
+    let export_url = format!(
+        "/apis/management.agentctl.dev/v1alpha1/metering/export?from={}&to={}",
+        started - 5,
+        now() + 60
+    );
+    let rows = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+    kh::poll_until(Duration::from_secs(60), Duration::from_secs(3), || {
+        let rows = rows.clone();
+        let export_url = export_url.clone();
+        async move {
+            let out = shell::kubectl(&["get", "--raw", &export_url]).unwrap_or_default();
+            let doc: Value = serde_json::from_str(out.trim()).unwrap_or(Value::Null);
+            let hit = doc["rows"].as_array().is_some_and(|rs| {
+                rs.iter().any(|r| {
+                    r["org"] == json!(org)
+                        && r["kind"] == json!("supervisor_conversations")
+                        && r["total"].as_i64().unwrap_or(0) >= 1
+                })
+            });
+            if hit {
+                *rows.lock().unwrap() = doc;
+            }
+            Ok(hit)
+        }
+    })
+    .await
+    .context("the supervisor conversation never showed in the export")?;
+    let doc = rows.lock().unwrap().clone();
+    let rs = doc["rows"].as_array().unwrap().clone();
+    if !rs
+        .iter()
+        .any(|r| r["org"] == json!(org) && r["kind"] == json!("a2a_requests"))
+    {
+        bail!("a2a_requests rows missing for the org: {rs:?}");
+    }
+    // Invoice math from the export alone.
+    let org_units: i64 = rs
+        .iter()
+        .filter(|r| r["org"] == json!(org))
+        .filter_map(|r| r["total"].as_i64())
+        .sum();
+    if org_units < 2 {
+        bail!("org line items too thin for an invoice: {rs:?}");
+    }
+
+    // The CSV form: same rows, header intact.
+    let csv = shell::kubectl(&["get", "--raw", &format!("{export_url}&format=csv")])?;
+    if !csv.starts_with("org,namespace,workload,kind,unit,total,events") {
+        bail!("CSV export malformed: {}", csv.lines().next().unwrap_or(""));
+    }
+    if !csv.contains(&format!("{org},")) {
+        bail!("CSV lacks the org rows");
+    }
+
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
 }
 
 /// P7-6: a dormant supervisor costs ~0. After the idle window (20s in the

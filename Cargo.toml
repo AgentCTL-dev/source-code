@@ -20,6 +20,7 @@ members = [
     "crates/agentctl-identity",
     "crates/agentctl-coordination",
     "crates/agentctl-control",
+    "crates/agentctl-metering",
     "crates/agentctl-scaler",
 ]
 
