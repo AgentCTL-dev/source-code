@@ -8,6 +8,7 @@
 
 pub mod aauth;
 pub mod controller;
+pub mod identity;
 pub mod lease;
 pub mod metrics;
 pub mod netpol;

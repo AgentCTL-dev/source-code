@@ -122,6 +122,16 @@ spec:
                             required:
                             - issuer
                             type: object
+                          principals:
+                            description: |-
+                              Named A2A principals (RFC 0028 §6): user subjects
+                              (`<provider>:<sub>`) whose per-(user,agent) bearers the operator mints
+                              via the identity service, projects into the `<name>-principals` Secret,
+                              and binds in the agent's `a2a.principals[]`. The gateway injects the
+                              caller's bearer per session, so the agent answers ONLY named users.
+                            items:
+                              type: string
+                            type: array
                         type: object
                       capabilities:
                         description: |-
@@ -545,6 +555,16 @@ spec:
                         required:
                         - issuer
                         type: object
+                      principals:
+                        description: |-
+                          Named A2A principals (RFC 0028 §6): user subjects
+                          (`<provider>:<sub>`) whose per-(user,agent) bearers the operator mints
+                          via the identity service, projects into the `<name>-principals` Secret,
+                          and binds in the agent's `a2a.principals[]`. The gateway injects the
+                          caller's bearer per session, so the agent answers ONLY named users.
+                        items:
+                          type: string
+                        type: array
                     type: object
                   capabilities:
                     description: |-

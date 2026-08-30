@@ -228,6 +228,13 @@ pub struct Access {
     /// OIDC/JWT authentication + authorization for inbound A2A calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcAccess>,
+    /// Named A2A principals (RFC 0028 §6): user subjects
+    /// (`<provider>:<sub>`) whose per-(user,agent) bearers the operator mints
+    /// via the identity service, projects into the `<name>-principals` Secret,
+    /// and binds in the agent's `a2a.principals[]`. The gateway injects the
+    /// caller's bearer per session, so the agent answers ONLY named users.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub principals: Vec<String>,
 }
 
 /// OIDC/JWT verification + claim-based authorization config for the A2A gateway.

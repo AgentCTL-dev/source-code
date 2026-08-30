@@ -43,6 +43,9 @@ pub mod paths {
     pub const AAUTH_KEY: &str = "/etc/agentctl/aauth/agent.key";
     /// The daemon file store root (an emptyDir volume).
     pub const STATE_DIR: &str = "/var/lib/agentd/state";
+    /// Per-(user, agent) A2A principal bearers (the `<name>-principals`
+    /// Secret volume; one file per subject, RFC 0028 §6).
+    pub const PRINCIPALS_DIR: &str = "/etc/agentctl/principals";
 
     /// The full in-pod path of the config document.
     pub fn config_file() -> String {
@@ -148,6 +151,13 @@ pub struct ConfigInput {
     /// rendered agent serves its control surface over mTLS).
     pub serve_a2a: bool,
     pub allow_trifecta: bool,
+    /// Named A2A principal subjects (`spec.access.principals`,
+    /// `<provider>:<sub>`). Non-empty ⇒ `a2a.principals[]` is projected:
+    /// one `user` rule per subject (bearer file under
+    /// [`paths::PRINCIPALS_DIR`]) plus the control-plane `operator` rule —
+    /// REQUIRED because any non-empty principals list switches off agentd's
+    /// implicit loopback/management operator fallback.
+    pub principal_subjects: Vec<String>,
 }
 
 impl ConfigInput {
@@ -176,6 +186,11 @@ impl ConfigInput {
             aauth: aauth_provider.map(|provider| AauthInput { provider }),
             serve_a2a: true,
             allow_trifecta: false,
+            principal_subjects: spec
+                .access
+                .as_ref()
+                .map(|a| a.principals.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -431,7 +446,10 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
 
     // --- serving ----------------------------------------------------------
     if input.serve_a2a {
-        doc.insert("a2a".into(), a2a_block(&input.peers));
+        doc.insert(
+            "a2a".into(),
+            a2a_block(&input.peers, &input.principal_subjects),
+        );
     } else if !input.peers.is_empty() {
         doc.insert("a2a".into(), json!({ "peers": peer_entries(&input.peers) }));
     }
@@ -518,7 +536,7 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
     })
 }
 
-fn a2a_block(peers: &[Peer]) -> Value {
+fn a2a_block(peers: &[Peer], principal_subjects: &[String]) -> Value {
     let mut a2a = Map::new();
     a2a.insert("listen".into(), json!(A2A_LISTEN));
     a2a.insert(
@@ -532,7 +550,62 @@ fn a2a_block(peers: &[Peer]) -> Value {
     if !peers.is_empty() {
         a2a.insert("peers".into(), Value::Array(peer_entries(peers)));
     }
+    if !principal_subjects.is_empty() {
+        a2a.insert(
+            "principals".into(),
+            Value::Array(principal_entries(principal_subjects)),
+        );
+    }
     Value::Object(a2a)
+}
+
+/// The control-plane client-cert identity (the chart's `agentctl-client`
+/// Certificate CN). agentd's `san` matcher also checks the subject CN.
+const OPERATOR_SAN: &str = "agentctl-control-plane";
+
+/// The per-agent principals: one `user` rule per subject FIRST, then the
+/// control-plane `operator` rule LAST. Order is load-bearing twice over:
+/// agentd matches rules first-listed-first, and the gateway presents the
+/// control-plane client cert on EVERY forwarded call — with the operator rule
+/// first, an injected user bearer could never win. And the operator rule must
+/// exist at all because any non-empty principals list disables agentd's
+/// implicit management/loopback operator fallback (omitting it bricks the
+/// management verbs). Each bearer is a `{{secret-file:…}}` TEMPLATE — never a
+/// literal: agentd uses a `bearer_ref` without `{{` VERBATIM as the
+/// credential, so a literal here would embed a secret in the ConfigMap.
+fn principal_entries(subjects: &[String]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(subjects.len() + 1);
+    for subject in subjects {
+        let bearer_ref = format!(
+            "{{{{secret-file:{}/{}}}}}",
+            paths::PRINCIPALS_DIR,
+            principal_secret_key(subject)
+        );
+        debug_assert!(bearer_ref.contains("{{"), "bearer_ref must be a template");
+        out.push(json!({
+            "match": { "bearer_ref": bearer_ref },
+            "role": "user",
+            "labels": { "user": subject },
+        }));
+    }
+    out.push(json!({
+        "match": { "san": OPERATOR_SAN },
+        "role": "operator",
+    }));
+    out
+}
+
+/// A subject's key inside the `<name>-principals` Secret (env/file-safe).
+/// MUST stay byte-identical to `agentctl_identity::principals::
+/// principal_secret_key` — the identity service names the key at mint time and
+/// this builder references it in `bearer_ref`; a divergence produces a
+/// dangling ref that `--validate-config` does NOT catch (startup exit 2 does).
+pub fn principal_secret_key(subject: &str) -> String {
+    let safe: String = subject
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("PRINCIPAL_{}", safe.to_uppercase())
 }
 
 fn peer_entries(peers: &[Peer]) -> Vec<Value> {
@@ -716,6 +789,62 @@ mod tests {
             "/etc/agentctl/workflow/workflow.json"
         );
         assert_eq!(d["lifecycle"]["run_until"], "idle");
+    }
+
+    /// The per-user principal projection (RFC 0028 §6): the exact bearer_ref
+    /// template and the mandatory operator rule are contract surface — agentd
+    /// uses a bearer_ref without `{{` VERBATIM as the credential, and any
+    /// non-empty principals list disables the implicit loopback operator.
+    #[test]
+    fn principals_project_operator_rule_and_file_templates() {
+        let mut input = ConfigInput {
+            mode: Mode::Reactive,
+            serve_a2a: true,
+            ..Default::default()
+        };
+        input.principal_subjects = vec!["okta:alice".into(), "mock:bob-1".into()];
+        let d = build(&input).unwrap().value;
+
+        let principals = d["a2a"]["principals"].as_array().unwrap();
+        assert_eq!(principals.len(), 3);
+        // Subject rules FIRST (first match wins, and the gateway presents the
+        // control-plane cert on every forwarded call — the injected user
+        // bearer must outrank it): role REQUIRED by the schema; bearer_ref is
+        // a secret-file TEMPLATE under the principals mount, never a literal.
+        assert_eq!(
+            principals[0]["match"]["bearer_ref"],
+            "{{secret-file:/etc/agentctl/principals/PRINCIPAL_OKTA_ALICE}}"
+        );
+        assert_eq!(principals[0]["role"], "user");
+        assert_eq!(principals[0]["labels"]["user"], "okta:alice");
+        assert_eq!(
+            principals[1]["match"]["bearer_ref"],
+            "{{secret-file:/etc/agentctl/principals/PRINCIPAL_MOCK_BOB_1}}"
+        );
+        // The control-plane operator rule LAST (management verbs survive —
+        // any non-empty list disables the implicit fallback).
+        assert_eq!(principals[2]["match"]["san"], "agentctl-control-plane");
+        assert_eq!(principals[2]["role"], "operator");
+
+        // No subjects ⇒ NO principals key at all: an empty array would also
+        // disable agentd's loopback-operator fallback.
+        let bare = build(&ConfigInput {
+            mode: Mode::Reactive,
+            serve_a2a: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .value;
+        assert!(bare["a2a"].get("principals").is_none());
+    }
+
+    /// Byte-identical with `agentctl_identity::principals::principal_secret_key`
+    /// (the identity service names the Secret key at mint; this crate
+    /// references it) — pin the mapping so a drift is a test failure here.
+    #[test]
+    fn principal_secret_key_mapping_is_pinned() {
+        assert_eq!(principal_secret_key("okta:alice"), "PRINCIPAL_OKTA_ALICE");
+        assert_eq!(principal_secret_key("a.b-c_d"), "PRINCIPAL_A_B_C_D");
     }
 
     #[test]

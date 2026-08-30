@@ -48,6 +48,20 @@ exercising schedule / webhook / subscribe / a2a-command / stream starts —
   headers/auth) — `intelligence.token` and `mcp.servers[].auth.token` pass
   UNRESOLVED (upstream defect raised; do not depend on either behavior:
   export placeholders for every ref, and check Secret existence separately).
+  Same family (verified 2026-08-30): `a2a.principals[].match.bearer_ref` is
+  NOT checked by `--validate-config` but IS resolved at startup (config.invalid,
+  exit 2 on a dangling ref) — the operator must land the referenced Secret
+  material BEFORE any pod mounts the document. A bearer_ref without `{{` is
+  used VERBATIM as the credential; generators must refuse the literal form.
+- **A2A auth composition** (verified 2026-08-30, upstream-confirmed): setting
+  `a2a.tls.client_ca` makes a CA-signed client certificate MANDATORY for every
+  connection (no unauthenticated fallback in the verifier) — a bearer-only
+  caller cannot even complete the handshake, despite agentd's own validation
+  message suggesting client_ca/bearer/pairing combine freely ("and/or";
+  upstream doc defect raised). Principal rules are FIRST-match-wins in listed
+  order: per-user bearer rules must precede the control-plane operator
+  san-rule, and any non-empty `a2a.principals` list disables the implicit
+  management/loopback operator fallback entirely.
 - **Exit codes** per `exit-codes.table.json`; a clean drain is 0, never 143;
   the drain worst case (drain_timeout 25 s + abandon 3 s = **28 s**) must stay
   below `terminationGracePeriodSeconds`.

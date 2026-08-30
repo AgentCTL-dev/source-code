@@ -84,6 +84,34 @@ pub fn helm_template(release: &str, chart: &str, values_files: &[&str]) -> Resul
     helm(&refs)
 }
 
+/// `kubectl apply -f -` with the manifest on stdin (escaped `\n` sequences in
+/// `yaml` are literal newlines — lets callers build small manifests inline).
+pub fn kubectl_apply_stdin(yaml: &str) -> Result<String> {
+    use std::io::Write as _;
+    let doc = yaml.replace("\\n", "\n");
+    let mut child = Command::new("kubectl")
+        .args(["apply", "-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn kubectl apply -f -")?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(doc.as_bytes())
+        .context("write manifest to kubectl stdin")?;
+    let out = child.wait_with_output().context("kubectl apply -f -")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "kubectl apply -f - failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// A live `kubectl port-forward` child, exposing a remote port on `127.0.0.1`.
 /// The process is killed on drop, so a scenario can scrape/hit a cluster Service
 /// over plain HTTP (the port-forward scrape path plus the coordination `/mcp`

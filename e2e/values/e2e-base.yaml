@@ -41,3 +41,17 @@ scaler:
 metrics:
   serviceMonitor:
     enabled: true
+
+# Identity plane (P1): the identity service (federated OIDC + principal
+# minting) with durable custody in the bundled Postgres. The api-token Secret
+# is rendered for its ADMIN channel (identity + operator minting) without
+# arming the coarse data-plane gate (apiToken.enabled stays off here — the
+# sec-apitoken overlay owns that gate).
+identity:
+  service:
+    enabled: true
+    store: postgres
+    providers:
+      - name: mock
+        issuer: https://idp.invalid
+        client_id: agentctl-cli

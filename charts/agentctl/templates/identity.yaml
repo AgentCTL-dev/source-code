@@ -94,16 +94,16 @@ spec:
                   name: {{ $id.sealKeySecret.name }}
                   key: {{ $id.sealKeySecret.key }}
             {{- end }}
-            {{- if .Values.apiToken.enabled }}
             # Admin bearer for the mutating/validating surfaces (introspect, mint,
-            # verify) — the shared control-plane token. Without it those surfaces
-            # refuse outright (fail closed), so arm apiToken with this service.
+            # verify) — the shared control-plane token (the Secret is rendered
+            # whenever this service is enabled, independent of the coarse
+            # apiToken data-plane gate). Without it those surfaces refuse
+            # outright (fail closed).
             - name: IDENTITY_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: agentctl-api-token
                   key: AGENTCTL_API_TOKEN
-            {{- end }}
           {{- with $id.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

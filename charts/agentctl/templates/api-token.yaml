@@ -1,11 +1,15 @@
 {{- $ns := include "agentctl.namespace" . }}
-{{- if .Values.apiToken.enabled }}
+{{- if or .Values.apiToken.enabled .Values.identity.service.enabled }}
 # Optional in-cluster bearer-token gate (apiToken.enabled). When enabled, the
 # coordination server and A2A gateway require
 # `Authorization: Bearer <AGENTCTL_API_TOKEN>` on their data-plane endpoints
 # (the code reads AGENTCTL_API_TOKEN from env; default off -> services run open).
 # The scaler and control-plane-namespace agents get the token injected; external
-# A2A clients / producers must send it explicitly. Chart-generated and kept
+# A2A clients / producers must send it explicitly. ALSO rendered when
+# identity.service.enabled: the identity service's admin surface
+# (introspect/mint) and the operator's minting channel authenticate with this
+# token even when the coarse data-plane gate stays off (gating still keys on
+# apiToken.enabled alone). Chart-generated and kept
 # across upgrades (helm.sh/resource-policy: keep + lookup-stable) so the value is
 # consistent for every consumer. Override with apiToken.value for a managed token.
 apiVersion: v1

@@ -83,6 +83,12 @@ pub struct Ctx {
     /// `AGENTCTL_AAUTH_ADMIN_TOKEN_FILE`). Read once at startup
     /// ([`crate::aauth::AauthConfig::from_env`]). Inert unless configured.
     pub aauth: crate::aauth::AauthConfig,
+    /// Identity-service wiring for per-user A2A principal minting (RFC 0028
+    /// §6; env `AGENTCTL_IDENTITY_URL` + the shared `AGENTCTL_API_TOKEN`).
+    /// Inert unless configured.
+    pub identity: crate::identity::IdentityConfig,
+    /// HTTP client for the identity service (webpki/plain-http, ring).
+    pub identity_http: reqwest::Client,
 }
 
 /// Operator-side wiring for the optional in-cluster bearer-token gate (chart
@@ -217,6 +223,13 @@ pub enum Error {
     /// failures are best-effort warnings, never reconcile errors.
     #[error("aauth provisioning: {0}")]
     Aauth(String),
+    /// Per-user principal provisioning failed (identity mint or the Secret
+    /// write) — transient, retried with backoff. The config document is NOT
+    /// applied until the Secret holds every referenced key, because a dangling
+    /// `bearer_ref` is a pod-startup exit 2 that `--validate-config` cannot
+    /// catch.
+    #[error("principal provisioning: {0}")]
+    Principals(String),
 }
 
 /// Reconcile one `Agent`, recording the reconcile-total/-errors counters and the
@@ -341,6 +354,45 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
         },
         None => None,
     };
+    // Per-user principals (RFC 0028 §6) need the identity service. Declared
+    // without it configured is a USER/config error (Validated=False), exactly
+    // like the AAuth misconfiguration path — never a half-projection.
+    let principal_subjects: Vec<String> = agent
+        .spec
+        .access
+        .as_ref()
+        .map(|a| a.principals.clone())
+        .unwrap_or_default();
+    if !principal_subjects.is_empty() && !ctx.identity.ready() {
+        let msg = "access.principals requires the identity service: set                    AGENTCTL_IDENTITY_URL on the operator (chart                    identity.service.enabled) and arm apiToken.enabled";
+        warn!(agent = %name, "{msg}");
+        publish_event(
+            ctx.as_ref(),
+            agent.as_ref(),
+            EventType::Warning,
+            "IdentityUnconfigured",
+            "ProvisionPrincipals",
+            msg.to_string(),
+        )
+        .await;
+        let condition = validated_failed_condition(msg);
+        let identity = agent.status.as_ref().and_then(|s| s.identity.clone());
+        let desired = desired_status(
+            &condition,
+            observed,
+            "Invalid",
+            &ContractStatus::default(),
+            identity.as_ref(),
+        )?;
+        if status_changed(agent.status.as_ref(), &desired)? {
+            let patch = serde_json::json!({ "status": desired });
+            agents
+                .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        return Ok(Action::requeue(requeue_after()));
+    }
+
     // Carry forward an already-learned identity; learning fills it below.
     let mut identity: Option<IdentityStatus> =
         agent.status.as_ref().and_then(|s| s.identity.clone());
@@ -377,6 +429,12 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     let (condition, phase, contract) = match composed {
         Ok((doc, rendered)) => {
             let kind = rendered_kind(&rendered);
+            // Per-user principal bearers land FIRST: the document's
+            // bearer_ref templates must resolve the moment a pod mounts it.
+            if !principal_subjects.is_empty() {
+                ensure_principals_secret(ctx.as_ref(), ns, &name, &principal_subjects, &owner)
+                    .await?;
+            }
             // The document the pod mounts — applied BEFORE the workload so a
             // scheduling pod never races an absent ConfigMap.
             ensure_config_configmap(&ctx.client, ns, &name, &owner, &doc).await?;
@@ -687,12 +745,107 @@ fn pod_wiring(
         workflow,
         aauth_key,
         api_token,
+        principals: spec
+            .access
+            .as_ref()
+            .is_some_and(|a| !a.principals.is_empty()),
         extra_env: Vec::new(),
     }
 }
 
 /// SSA the composed document as the `<workload>-config` ConfigMap the pod
 /// mounts at the config path.
+/// Ensure the `<workload>-principals` Secret holds EXACTLY one bearer per
+/// declared subject (RFC 0028 §6): keys already present are kept verbatim
+/// (idempotent — a mint response is the only copy of a bearer, so re-minting
+/// on every reconcile would rotate constantly), missing subjects are minted
+/// via the identity service, and keys for subjects no longer declared are
+/// dropped (spec removal revokes the projection). Runs BEFORE the config
+/// ConfigMap/workload apply: a pod must never mount a document whose
+/// `bearer_ref` templates point at absent files (startup exit 2, invisible to
+/// `--validate-config`).
+async fn ensure_principals_secret(
+    ctx: &Ctx,
+    ns: &str,
+    workload: &str,
+    subjects: &[String],
+    owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
+) -> Result<(), Error> {
+    use k8s_openapi::api::core::v1::Secret;
+    use k8s_openapi::ByteString;
+
+    let secret_name = crate::render::principals_secret_name(workload);
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    let existing: std::collections::BTreeMap<String, ByteString> = secrets
+        .get_opt(&secret_name)
+        .await?
+        .and_then(|s| s.data)
+        .unwrap_or_default();
+
+    // The org label on the namespace scopes the principal record; absent
+    // (an unmanaged namespace) the org field is recorded empty.
+    let org = {
+        let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(ctx.client.clone());
+        namespaces
+            .get_opt(ns)
+            .await?
+            .and_then(|n| n.metadata.labels)
+            .and_then(|l| l.get(crate::org::ORG_LABEL).cloned())
+            .unwrap_or_default()
+    };
+
+    let mut data: std::collections::BTreeMap<String, ByteString> = Default::default();
+    for subject in subjects {
+        let key = agent_config::principal_secret_key(subject);
+        match existing.get(&key) {
+            Some(v) => {
+                data.insert(key, v.clone());
+            }
+            None => {
+                let minted = crate::identity::mint(
+                    &ctx.identity_http,
+                    &ctx.identity,
+                    &org,
+                    ns,
+                    workload,
+                    subject,
+                )
+                .await
+                .map_err(|e| Error::Principals(e.to_string()))?;
+                // The mint names the key by the same mapping; a divergence is
+                // a dangling ref, so trust OUR key (pinned by tests both
+                // sides) and cross-check loudly.
+                if minted.secret_key != key {
+                    return Err(Error::Principals(format!(
+                        "identity named key {:?} but the projection references {:?} —                          version skew between agentctl-identity and agent-config",
+                        minted.secret_key, key
+                    )));
+                }
+                data.insert(key, ByteString(minted.bearer.into_bytes()));
+            }
+        }
+    }
+
+    let desired = Secret {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(secret_name.clone()),
+            namespace: Some(ns.to_string()),
+            owner_references: Some(vec![owner.clone()]),
+            ..Default::default()
+        },
+        data: Some(data),
+        ..Default::default()
+    };
+    secrets
+        .patch(
+            &secret_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&desired),
+        )
+        .await?;
+    Ok(())
+}
+
 async fn ensure_config_configmap(
     client: &Client,
     ns: &str,
@@ -1050,6 +1203,15 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     let (condition, replicas, selector, scaler_condition) = match composed {
         Ok((doc, rendered)) => {
             let kind = rendered_kind(&rendered);
+            let worker_principals: Vec<String> = worker_spec
+                .access
+                .as_ref()
+                .map(|a| a.principals.clone())
+                .unwrap_or_default();
+            if !worker_principals.is_empty() {
+                ensure_principals_secret(ctx.as_ref(), ns, &name, &worker_principals, &owner)
+                    .await?;
+            }
             ensure_config_configmap(&ctx.client, ns, &name, &owner, &doc).await?;
             // Workload PKI (serving Certificate + per-ns CA ConfigMap), so fleet
             // pods' mounts resolve as they schedule.
@@ -1248,6 +1410,14 @@ async fn reconcile_coordinator(
             return Ok(Some(false));
         }
     };
+    let coord_principals: Vec<String> = coord_spec
+        .access
+        .as_ref()
+        .map(|a| a.principals.clone())
+        .unwrap_or_default();
+    if !coord_principals.is_empty() {
+        ensure_principals_secret(ctx, ns, &coord_name, &coord_principals, &owner).await?;
+    }
     ensure_config_configmap(&ctx.client, ns, &coord_name, &owner, &doc).await?;
     // The Certificate/CA are owned by the fleet (GC'd with it), and named for the
     // coordinator workload so the pod's serving-TLS mount resolves.

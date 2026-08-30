@@ -73,11 +73,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update", "patch"]
-{{- if .Values.identity.aauth.provider }}
-  # AAuth house-provisioning (RFC 0023): the operator generates + owns each
-  # opted-in Agent's per-workload Ed25519 key Secret (<name>-aauth-key). The
-  # agent's serving-cert Secrets are cert-manager-owned; this is the only Secret
-  # the operator creates. Owner references drive deletion (GC), so no delete verb.
+{{- if or .Values.identity.aauth.provider .Values.identity.service.enabled }}
+  # Operator-owned Secrets: the per-Agent AAuth Ed25519 key (<name>-aauth-key,
+  # RFC 0023, when identity.aauth.provider is set) and/or the per-agent
+  # principal bearers (<name>-principals, RFC 0028 §6, when
+  # identity.service.enabled). The agent's serving-cert Secrets stay
+  # cert-manager-owned. Owner references drive deletion (GC), so no delete verb.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "update", "patch"]
@@ -223,6 +224,21 @@ spec:
             # secretKeyRef at pod start, not the operator.
             - name: API_TOKEN_ENABLED
               value: {{ .Values.apiToken.enabled | default false | quote }}
+{{- if .Values.identity.service.enabled }}
+            # Per-user A2A principal minting (RFC 0028 §6): the operator mints
+            # bearers for `spec.access.principals` subjects via the identity
+            # service and projects them into `<agent>-principals` Secrets. The
+            # mint surface is admin-gated, so the shared control-plane token
+            # rides along (the api-token Secret is rendered whenever
+            # identity.service.enabled, independent of the coarse gate).
+            - name: AGENTCTL_IDENTITY_URL
+              value: http://agentctl-identity.{{ include "agentctl.namespace" . }}
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+{{- end }}
             # Tenant network isolation: when on, the operator reconciles
             # the per-namespace agent NetworkPolicies into each Agent/Fleet's own
             # namespace (scoped to the control-plane namespace read from

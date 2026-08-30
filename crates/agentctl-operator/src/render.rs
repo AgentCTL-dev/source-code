@@ -202,6 +202,12 @@ pub struct PodWiring {
     pub aauth_key: bool,
     /// Inject the in-cluster `AGENTCTL_API_TOKEN` bearer (chart apiToken).
     pub api_token: bool,
+    /// Mount the `<workload>-principals` Secret at [`paths::PRINCIPALS_DIR`]
+    /// (per-user A2A bearers the document's `a2a.principals[].bearer_ref`
+    /// templates reference; RFC 0028 §6). The operator lands the Secret BEFORE
+    /// the config references it — a dangling ref is a startup exit 2 that
+    /// `--validate-config` does not catch.
+    pub principals: bool,
     /// Extra plain env (fleet work-fabric coordinates for a coordinator).
     pub extra_env: Vec<(String, String)>,
 }
@@ -209,6 +215,13 @@ pub struct PodWiring {
 /// In-pod mount of the AAuth key Secret.
 const AAUTH_MOUNT: &str = "/etc/agentctl/aauth";
 const AAUTH_VOLUME: &str = "agentctl-aauth-key";
+const PRINCIPALS_VOLUME: &str = "agentctl-principals";
+
+/// The per-agent principals Secret (one key per subject; identity mints, the
+/// operator projects).
+pub fn principals_secret_name(workload: &str) -> String {
+    format!("{workload}-principals")
+}
 
 /// Writable scratch over the read-only root filesystem.
 const TMP_MOUNT: &str = "/tmp";
@@ -838,6 +851,25 @@ fn pod_template(
             ..Default::default()
         });
         mounts.push(mount(AAUTH_VOLUME, AAUTH_MOUNT, true));
+    }
+    if wiring.principals {
+        volumes.push(Volume {
+            name: PRINCIPALS_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(principals_secret_name(workload)),
+                // 0444 like the AAuth key mount: the container runs nonroot
+                // (65532) with no fsGroup chown of these files, so group-only
+                // modes are unreadable (observed: startup exit 2 EACCES).
+                default_mode: Some(0o444),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        mounts.push(mount(
+            PRINCIPALS_VOLUME,
+            agent_config::paths::PRINCIPALS_DIR,
+            true,
+        ));
     }
 
     let mut env = downward_env();

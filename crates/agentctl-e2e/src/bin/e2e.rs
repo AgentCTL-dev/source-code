@@ -151,7 +151,162 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("sec-aauth", "security", sec_aauth),
         // tenancy (P1-3)
         scenario!("org-tenancy", "tenancy", org_tenancy),
+        // per-user principals (P1-4)
+        scenario!("a2a-principals-gate", "tenancy", a2a_principals_gate),
     ]
+}
+
+/// Per-(user, agent) principals (RFC 0028 §6): `spec.access.principals` makes
+/// the operator mint a bearer via the identity service, project it into the
+/// `<name>-principals` Secret, mount it, and bind `a2a.principals[]` — after
+/// which the agent answers ONLY named callers: the minted bearer converses
+/// (role `user`), while no bearer and a wrong bearer are anonymous and
+/// refused. Needs identity.service armed (operator AGENTCTL_IDENTITY_URL).
+async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::api::Api;
+
+    let name = "e2e-principals";
+    let subject = "mock:alice";
+    let mut agent = agentd_agent(ctx, name, Mode::Reactive, "idle");
+    agent.spec.instruction = None;
+    agent.spec.surfaces = Some(agent_api::DesiredSurfaces {
+        a2a: true,
+        ..Default::default()
+    });
+    agent.spec.access = Some(agent_api::Access {
+        principals: vec![subject.to_string()],
+        ..Default::default()
+    });
+    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+
+    // The operator mints + projects BEFORE the workload; the pod then mounts
+    // the Secret. If identity isn't armed the Agent goes Validated=False.
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ctx.cfg.ns);
+    let secret_name = format!("{name}-principals");
+    let key = "PRINCIPAL_MOCK_ALICE";
+    let mut bearer = String::new();
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        // Surface the misconfiguration loudly instead of timing out.
+        let a = kh::api::<Agent>(&ctx.client, &ctx.cfg.ns).get(name).await?;
+        if let Some(s) = &a.status {
+            if s.phase.as_deref() == Some("Invalid") {
+                bail!(
+                    "Agent went Invalid — is identity.service armed on the operator? {:?}",
+                    s.conditions.iter().map(|c| c.message.clone()).collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(secrets.get_opt(&secret_name).await?.is_some())
+    })
+    .await
+    .context("principals Secret")?;
+    let secret = secrets.get(&secret_name).await?;
+    let data = secret.data.unwrap_or_default();
+    let raw = data
+        .get(key)
+        .ok_or_else(|| anyhow!("Secret {secret_name} lacks key {key}; has {:?}", data.keys()))?;
+    bearer.push_str(std::str::from_utf8(&raw.0)?);
+    if !bearer.starts_with("pat-") {
+        bail!("projected bearer does not look minted (want pat-…)");
+    }
+    // Sanity: never a template, never empty — the Secret holds the CREDENTIAL,
+    // the config document holds the {{secret-file:…}} TEMPLATE.
+    if bearer.contains("{{") {
+        bail!("Secret holds a template, not a credential");
+    }
+    let pod = wait_for_first_pod(ctx, name).await?;
+    kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
+
+    // The agent's listener REQUIRES a CA-signed client cert (composed
+    // a2a.tls.client_ca; agentd builds a WebPkiClientVerifier with no
+    // unauthenticated fallback). Issue a "nobody" client identity from the
+    // chart CA — CA-valid, matching NO principal rule — so the bearer alone
+    // decides the outcome; and read the control-plane client cert to prove
+    // the projected operator rule keeps management alive.
+    let cert_yaml = format!(
+        "apiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: e2e-nobody-client\n  namespace: {ns}\nspec:\n  secretName: e2e-nobody-client-tls\n  commonName: e2e-nobody\n  usages: [\"client auth\"]\n  issuerRef: {{ name: agentctl-ca, kind: ClusterIssuer }}\n",
+        ns = ctx.cfg.ns
+    );
+    shell::kubectl_apply_stdin(&cert_yaml)?;
+    let tls_secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ctx.cfg.ns);
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(tls_secrets.get_opt("e2e-nobody-client-tls").await?.is_some())
+    })
+    .await
+    .context("nobody client cert issuance")?;
+
+    let identity_pem = |data: &std::collections::BTreeMap<String, k8s_openapi::ByteString>| {
+        let mut pem = Vec::new();
+        pem.extend_from_slice(&data.get("tls.key").expect("tls.key").0);
+        pem.extend_from_slice(&data.get("tls.crt").expect("tls.crt").0);
+        pem
+    };
+    let nobody = tls_secrets.get("e2e-nobody-client-tls").await?.data.unwrap();
+    let cp_secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ctx.cfg.system_ns);
+    let cp = cp_secrets.get("agentctl-client-tls").await?.data.unwrap();
+
+    let client_with = |pem: Vec<u8>| {
+        reqwest::Client::builder()
+            .identity(reqwest::Identity::from_pem(&pem)?)
+            // The serving cert names the service DNS, not 127.0.0.1; the
+            // server-cert validation path is covered by other scenarios.
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(anyhow::Error::from)
+    };
+    let nobody_http = client_with(identity_pem(&nobody))?;
+    let cp_http = client_with(identity_pem(&cp))?;
+
+    let pf = shell::PortForward::pod(&ctx.cfg.ns, &pod, 8443, 18099)?;
+    let send = |http: reqwest::Client, auth: Option<String>| async move {
+        let mut rb = http.post("https://127.0.0.1:18099/").json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "SendMessage",
+            "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-p1", "parts": [{ "text": "ping" }] } },
+        }));
+        if let Some(b) = auth {
+            rb = rb.bearer_auth(b);
+        }
+        let resp = rb.send().await?;
+        let status = resp.status().as_u16();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        anyhow::Ok((status, body))
+    };
+
+    // Named user: the minted bearer converses (subject rule outranks all).
+    let (status, body) = send(nobody_http.clone(), Some(bearer.clone())).await?;
+    if body.get("error").is_some() || body.get("result").is_none() {
+        bail!("minted bearer was refused (status {status}): {body}");
+    }
+
+    // No bearer, unmatched cert: anonymous — refused (any non-empty
+    // principals list removes the implicit operator fallbacks).
+    let (status, body) = send(nobody_http.clone(), None).await?;
+    if body.get("result").is_some() {
+        bail!("anonymous caller was ANSWERED (status {status}) — the gate is open: {body}");
+    }
+
+    // Wrong bearer: equally anonymous, equally refused.
+    let (status, body) = send(nobody_http, Some("pat-not-the-minted-bearer".to_string())).await?;
+    if body.get("result").is_some() {
+        bail!("wrong bearer was ANSWERED (status {status}): {body}");
+    }
+
+    // The control plane still operates: the projected operator rule (last)
+    // matches its client-cert CN, so management survives the named gate.
+    let (status, body) = send(cp_http, None).await?;
+    if body.get("result").is_none() {
+        bail!("control-plane cert was refused (status {status}) — the operator rule is missing: {body}");
+    }
+
+    drop(pf);
+    shell::kubectl(&["delete", "-n", &ctx.cfg.ns, "certificate", "e2e-nobody-client", "--ignore-not-found"])?;
+    shell::kubectl(&["delete", "-n", &ctx.cfg.ns, "secret", "e2e-nobody-client-tls", "--ignore-not-found"])?;
+    cleanup_agent(ctx, name).await?;
+    pass()
 }
 
 /// Organization → managed namespace + agent-count quota + Ready status; org

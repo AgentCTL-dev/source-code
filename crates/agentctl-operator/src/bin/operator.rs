@@ -150,6 +150,12 @@ async fn main() -> Result<(), kube::Error> {
              identity.aauth Agents will be held Validated=False."
         );
     }
+    let identity = agentctl_operator::identity::IdentityConfig::from_env();
+    info!(
+        url = ?identity.url,
+        admin_token = identity.admin_token.is_some(),
+        "identity-service (principal minting) config"
+    );
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         metrics: metrics.clone(),
@@ -160,6 +166,8 @@ async fn main() -> Result<(), kube::Error> {
         pki,
         netpol,
         aauth,
+        identity,
+        identity_http: agentctl_operator::identity::http_client(),
     });
 
     info!("starting agentctl-operator controllers (Agent + AgentFleet + Organization)");
