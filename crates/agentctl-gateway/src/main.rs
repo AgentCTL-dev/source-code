@@ -164,6 +164,9 @@ async fn main() {
         // RPC surface as an agent, but member selection routes to the coordinator
         // (front door) or load-balances across worker replicas.
         .route("/fleets/{ns}/{name}", post(a2a_fleet_rpc))
+        // Workers-only tier (P6-3): the COORDINATOR's own `worker` peer dials
+        // here — the front-door rule would loop it back onto itself.
+        .route("/fleets/{ns}/{name}/workers", post(a2a_fleet_workers_rpc))
         .layer(axum::middleware::from_fn_with_state(
             gate.clone(),
             auth::gate,
@@ -482,6 +485,42 @@ async fn a2a_fleet_rpc(
     Json(req): Json<Value>,
 ) -> Response {
     handle_a2a(state, ns, name, true, decision, headers, req, None).await
+}
+
+/// `POST /fleets/{ns}/{name}/workers` — the dispatcher's DOWNSTREAM tier:
+/// selection skips the coordinator front door (task affinity still binds
+/// continuations to their owner; fresh sends round-robin the workers). The
+/// coordinator's rendered `worker` peer points here, so `a2a.delegate
+/// peer=worker` fans out instead of looping back through its own front door.
+async fn a2a_fleet_workers_rpc(
+    State(state): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+    trusted_proxy::TrustedDecision(decision): trusted_proxy::TrustedDecision,
+    headers: HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
+    handle_a2a_routed(
+        state,
+        ns,
+        name,
+        FleetTier::WorkersOnly,
+        decision,
+        headers,
+        req,
+        None,
+    )
+    .await
+}
+
+/// Fleet member-selection tier for [`handle_a2a_routed`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FleetTier {
+    /// Not a fleet route.
+    Agent,
+    /// The fleet front door (coordinator when declared, else round-robin).
+    Fleet,
+    /// The dispatcher's downstream tier: never the coordinator.
+    WorkersOnly,
 }
 
 /// `POST /orgs/{org}/agents/{name}` — the tenant-scoped route: resolve the
@@ -1150,9 +1189,29 @@ async fn handle_a2a(
     is_fleet: bool,
     decision: trusted_proxy::Decision,
     headers: HeaderMap,
+    req: Value,
+    org_user: Option<identity::OrgUser>,
+) -> Response {
+    let tier = if is_fleet {
+        FleetTier::Fleet
+    } else {
+        FleetTier::Agent
+    };
+    handle_a2a_routed(state, ns, name, tier, decision, headers, req, org_user).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_a2a_routed(
+    state: AppState,
+    ns: String,
+    name: String,
+    tier: FleetTier,
+    decision: trusted_proxy::Decision,
+    headers: HeaderMap,
     mut req: Value,
     org_user: Option<identity::OrgUser>,
 ) -> Response {
+    let is_fleet = tier != FleetTier::Agent;
     state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
 
@@ -1279,7 +1338,7 @@ async fn handle_a2a(
         obj.insert("method".to_string(), json!(reference));
     }
 
-    let pod_ip = match select_member(&state, &ns, &name, is_fleet, &spec, &req).await {
+    let pod_ip = match select_member(&state, &ns, &name, tier, &spec, &req).await {
         Ok(ip) => ip,
         Err(e) => {
             state.metrics.inc_upstream_error();
@@ -2184,11 +2243,11 @@ async fn select_member(
     state: &AppState,
     ns: &str,
     name: &str,
-    is_fleet: bool,
+    tier: FleetTier,
     spec: &str,
     req: &Value,
 ) -> Result<String, String> {
-    if !is_fleet {
+    if tier == FleetTier::Agent {
         return resolve(&state.client, ns, name).await;
     }
 
@@ -2217,14 +2276,18 @@ async fn select_member(
         }
     }
 
-    // (2) The coordinator front door, if the fleet declares one.
-    let fleets: Api<AgentFleet> = Api::namespaced(state.client.clone(), ns);
-    let has_coordinator = matches!(
-        fleets.get_opt(name).await,
-        Ok(Some(f)) if f.spec.coordinator.is_some()
-    );
-    if has_coordinator {
-        return resolve(&state.client, ns, &coordinator_agent_name(name)).await;
+    // (2) The coordinator front door, if the fleet declares one — SKIPPED on
+    // the workers tier (the coordinator's own downstream dial; front-dooring
+    // it would loop the dispatcher onto itself).
+    if tier == FleetTier::Fleet {
+        let fleets: Api<AgentFleet> = Api::namespaced(state.client.clone(), ns);
+        let has_coordinator = matches!(
+            fleets.get_opt(name).await,
+            Ok(Some(f)) if f.spec.coordinator.is_some()
+        );
+        if has_coordinator {
+            return resolve(&state.client, ns, &coordinator_agent_name(name)).await;
+        }
     }
 
     // (3) Load-balance across the worker replicas (round-robin).

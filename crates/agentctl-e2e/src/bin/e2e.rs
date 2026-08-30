@@ -176,7 +176,93 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("shard-resize", "fleets", shard_resize),
         // work fabric: crash-mid-lease redelivery + result + DLQ round-trip (P6-4)
         scenario!("work-redelivery", "fleets", work_redelivery),
+        // dispatcher: coordinator front door + a2a.delegate fan-out to workers (P6-3)
+        scenario!("dispatcher-fanout", "fleets", dispatcher_fanout),
     ]
+}
+
+/// P6-3: the dispatcher strategy end to end. A fleet with a COORDINATOR
+/// (distribution: a2a): the fleet route front-doors the coordinator; the
+/// coordinator's own workflow `a2a.delegate`s to its rendered `worker` peer
+/// — the WORKERS tier of the fleet route, which skips the front door (the
+/// self-loop this scenario would otherwise hang on) — and a WORKER answers
+/// the delegated ask, observable in the worker pods' own run events.
+async fn dispatcher_fanout(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let name = "fleet-dispatch";
+    // The coordinator's workflow: any inbound message → delegate downstream →
+    // answer with the worker's distillate.
+    let coord_wf = json!({
+        "name": "dispatch",
+        "version": 3,
+        "steps": {
+            "start": { "kind": "a2a" },
+            "fan": { "kind": "a2a.delegate", "depends_on": ["start"], "peer": "worker",
+                     "objective": "{{steps.start.output.text}}", "timeout": "60s" },
+            "done": { "kind": "finish", "depends_on": ["fan"], "status": "completed",
+                      "output": "{{steps.fan.output}}" }
+        }
+    });
+    let wf_json = serde_json::to_string(&coord_wf)?.replace('\n', " ");
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha1\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  scaling: {{ mode: shard, shards: 2 }}\n  template:\n    mode: reactive\n    image: \"agentd:1.3.1\"\n    instruction: \"answer the ask in one short line\"\n    surfaces: {{ a2a: true }}\n  coordinator:\n    distribution: a2a\n    template:\n      mode: reactive\n      image: \"agentd:1.3.1\"\n      instruction: \"dispatch inbound asks to the worker pool\"\n      surfaces: {{ a2a: true }}\n      workflow:\n        inline: {}\n",
+        serde_json::to_string(&wf_json)?
+    ))?;
+
+    // Workers 2/2 + the coordinator pod Running.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let w = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        let c = shell::kubectl(&[
+            "get", "deploy", "-n", ns, &format!("{name}-coordinator"),
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(w.trim() == "2" && c.trim() == "1")
+    })
+    .await
+    .context("dispatcher fleet (workers + coordinator) never came up")?;
+
+    // One ask at the FLEET route → coordinator → delegate → a worker answers.
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18106)?;
+    let url = format!("{}/fleets/{ns}/{name}", pf.base_url());
+    let resp = ctx
+        .http
+        .post(&url)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+            "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-disp-1",
+                "parts": [{ "text": "fan this out" }] } } }))
+        .send()
+        .await?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() || body.get("result").is_none() {
+        bail!("fleet-route ask failed ({status}): {body}");
+    }
+
+    // The DELEGATION is the proof: a WORKER's own run events show the
+    // inbound a2a ask that the coordinator fanned out.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        for i in 0..2 {
+            let logs = shell::kubectl(&[
+                "logs", "-n", ns, &format!("{name}-{i}"), "--tail=200",
+            ])
+            .unwrap_or_default();
+            if logs.contains("\"start.a2a.fired\"") || logs.contains("\"inbox.accepted\"") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+    .await
+    .context("no worker ever received the delegated ask")?;
+
+    drop(pf);
+    shell::kubectl(&["delete", "agentfleet", "-n", ns, name, "--wait=false"]).ok();
+    pass()
 }
 
 /// P6-4: the workqueue fabric's crash story, end to end over the wire. A

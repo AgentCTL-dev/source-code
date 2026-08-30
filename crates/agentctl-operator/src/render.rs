@@ -570,8 +570,10 @@ pub fn render_coordinator(
 /// The A2A worker-pool peer endpoint a coordinator's document declares for
 /// `distribution: a2a` (RFC 0022's fleet front door via the gateway).
 pub fn fleet_peer_endpoint(cfg: &RenderConfig, ns: &str, fleet: &str) -> String {
+    // The WORKERS tier (P6-3): the coordinator's downstream dial must skip
+    // the fleet front door (which would route it back onto itself).
     format!(
-        "{}/fleets/{}/{}",
+        "{}/fleets/{}/{}/workers",
         cfg.gateway_url.trim_end_matches('/'),
         ns,
         fleet
@@ -1471,7 +1473,7 @@ mod tests {
     fn fleet_peer_endpoint_shape() {
         assert_eq!(
             fleet_peer_endpoint(&cfg(), "tenant", "pool"),
-            format!("{DEFAULT_GATEWAY_URL}/fleets/tenant/pool")
+            format!("{DEFAULT_GATEWAY_URL}/fleets/tenant/pool/workers")
         );
     }
 
