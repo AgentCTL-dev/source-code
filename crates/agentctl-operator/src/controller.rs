@@ -36,12 +36,14 @@ use kube::{Api, Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
+use crate::render::absolutize_endpoint;
 use crate::{
-    coordinator_name, fleet_selector_string, inject_aauth, inject_api_token, inject_intelligence,
-    inject_mcp_servers, inject_workflow, render_agent, render_coordinator, render_fleet,
-    render_scaled_object, workflow_configmap_name, McpBinding, RenderConfig, RenderError, Rendered,
+    config_configmap_name, coordinator_name, fleet_peer_endpoint, fleet_selector_string,
+    render_agent, render_coordinator, render_fleet, render_scaled_object, workflow_configmap_name,
+    PodWiring, RenderConfig, RenderError, Rendered, SecretEnv, WorkflowMount,
     DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
+use agent_config::{ConfigDoc, ConfigInput, ResolvedIntelligence};
 
 /// Finalizer key gating `Agent` deletion until cleanup runs.
 const FINALIZER: &str = "agentctl.dev/cleanup";
@@ -344,36 +346,41 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     let mut identity: Option<IdentityStatus> =
         agent.status.as_ref().and_then(|s| s.identity.clone());
 
-    // Render + apply the workload, then derive the desired status. A RenderError
-    // is a user error (invalid spec) → Validated=False, not a retried failure.
-    let (condition, phase, contract) = match render_agent(&agent, &ctx.render) {
-        Ok(mut rendered) => {
+    // Resolve facts → compose the config document (the shared `agent-config`
+    // builder) → SSA it as `<name>-config` → render the pod shell around it.
+    // A compose/render rejection is a USER error (invalid spec) →
+    // Validated=False, not a retried failure.
+    let owner = agent
+        .controller_owner_ref(&())
+        .expect("Agent CRs always carry name+uid on the live object");
+    let intelligence = resolve_model_endpoint(&ctx.client, ns, &agent.spec).await;
+    let workflow_mount =
+        ensure_workflow_configmap(&ctx.client, ns, &name, &agent.spec, &owner).await?;
+    let composed = compose_document(
+        &agent.spec,
+        intelligence.as_ref(),
+        workflow_mount.as_ref(),
+        aauth_provider.clone(),
+    )
+    .and_then(|doc| {
+        let wiring = pod_wiring(
+            &doc,
+            &agent.spec,
+            intelligence.as_ref(),
+            workflow_mount.clone(),
+            aauth_provider.is_some(),
+            ctx.api_token.should_inject(ns),
+        );
+        render_agent(&agent, &ctx.render, &wiring)
+            .map(|rendered| (doc, rendered))
+            .map_err(|e| e.to_string())
+    });
+    let (condition, phase, contract) = match composed {
+        Ok((doc, rendered)) => {
             let kind = rendered_kind(&rendered);
-            // Optional in-cluster bearer-token injection (chart apiToken.enabled).
-            // Only fires for agents in the control-plane namespace (a secretKeyRef
-            // cannot cross namespaces — see ApiTokenConfig::should_inject).
-            if ctx.api_token.should_inject(ns) {
-                inject_api_token(&mut rendered);
-            }
-            // Direct intelligence dial: INTELLIGENCE = the bound ModelPool's
-            // provider endpoint (+ its key mounted as INTELLIGENCE_TOKEN, if any).
-            if let Some((endpoint, token)) =
-                resolve_model_endpoint(&ctx.client, ns, &agent.spec).await
-            {
-                inject_intelligence(&mut rendered, &endpoint, token.as_ref());
-            }
-            // Direct MCP tool dials (inline `mcpServers`, no gateway):
-            // `--mcp <name>=<endpoint>` + tags; staticToken bearers mount as
-            // env-secrets. Best-effort per the reconcile discipline.
-            let bindings = mcp_bindings(&agent.spec);
-            inject_mcp_servers(&mut rendered, &bindings);
-            let owner = agent
-                .controller_owner_ref(&())
-                .expect("Agent CRs always carry name+uid on the live object");
-            // Workflow (agentd v2 --mode workflow): materialize the graph
-            // (inline → generated ConfigMap; ref → mount) + --workflow <file>.
-            ensure_and_inject_workflow(&ctx.client, ns, &name, &agent.spec, &owner, &mut rendered)
-                .await?;
+            // The document the pod mounts — applied BEFORE the workload so a
+            // scheduling pod never races an absent ConfigMap.
+            ensure_config_configmap(&ctx.client, ns, &name, &owner, &doc).await?;
             // AAuth identity (RFC 0023): durable key Secret + allowlist
             // pre-registration + the keyless provider dial. The key Secret is
             // load-bearing (Err ⇒ retried reconcile); the admin registration is
@@ -398,7 +405,6 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
                         .await;
                     }
                 }
-                inject_aauth(&mut rendered, provider);
             }
             // Workload PKI (serving Certificate + per-ns CA ConfigMap), so the
             // pod's mounts resolve as it schedules.
@@ -573,26 +579,27 @@ async fn revoke_identity(agent: &Agent, ctx: &Ctx, ns: &str, name: &str, provide
     }
 }
 
-/// Server-side-apply the rendered workload into `ns` under our field manager.
-/// Materialize an agent/fleet-template's workflow source (if any) and inject the
-/// `--workflow <file>` mount into the rendered pod. For an
-/// inline graph the operator server-side-applies a generated ConfigMap
-/// (`<workload>-workflow`, owner-ref'd so GC reclaims it); a `configMapKeyRef` is
-/// mounted directly. No-op when the spec carries no workflow. Errors bubble to
-/// the reconcile (transient apiserver → retried).
-async fn ensure_and_inject_workflow(
+/// Materialize an agent/fleet-template's workflow source (if any) into a
+/// mountable ConfigMap reference. For an inline graph the operator
+/// server-side-applies a generated ConfigMap (`<workload>-workflow`,
+/// owner-ref'd so GC reclaims it); a `configMapKeyRef` is referenced directly.
+/// The returned mount's `file_path()` is what the composed document's
+/// `workflows: [{file: …}]` entry names. `None` when the spec carries no
+/// workflow. NOTE: the document must be **dialect 3** (`name:` + `steps:`) —
+/// pre-rewrite graphs are refused by the agent (and by admission's binary
+/// validation) with the upstream migration message.
+async fn ensure_workflow_configmap(
     client: &Client,
     ns: &str,
     workload: &str,
     spec: &AgentSpec,
     owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
-    rendered: &mut Rendered,
-) -> Result<(), Error> {
+) -> Result<Option<WorkflowMount>, Error> {
     let Some(wf) = &spec.workflow else {
-        return Ok(());
+        return Ok(None);
     };
     // Inline → SSA a generated ConfigMap; ref → mount it directly.
-    let (cm_name, key) = if let Some(inline) = &wf.inline {
+    let mount = if let Some(inline) = &wf.inline {
         use k8s_openapi::api::core::v1::ConfigMap;
         let name = workflow_configmap_name(workload);
         let mut data = std::collections::BTreeMap::new();
@@ -614,14 +621,111 @@ async fn ensure_and_inject_workflow(
             &Patch::Apply(&cm),
         )
         .await?;
-        (name, "workflow.json".to_string())
+        WorkflowMount {
+            config_map: name,
+            key: "workflow.json".to_string(),
+        }
     } else if let Some(r) = &wf.config_map_key_ref {
-        (r.name.clone(), r.key.clone())
+        WorkflowMount {
+            config_map: r.name.clone(),
+            key: r.key.clone(),
+        }
     } else {
         // CEL guarantees exactly one is set; defensively no-op otherwise.
-        return Ok(());
+        return Ok(None);
     };
-    inject_workflow(rendered, &cm_name, &key);
+    Ok(Some(mount))
+}
+
+/// Compose the agent's config document from the spec + resolved facts, with
+/// in-cluster endpoints absolutized (trailing-dot FQDNs — the wildcard-DNS
+/// leak guard). Errors are user errors, surfaced as `Validated=False`.
+fn compose_document(
+    spec: &AgentSpec,
+    intelligence: Option<&(String, Option<agent_api::SecretKeyRef>)>,
+    workflow: Option<&WorkflowMount>,
+    aauth_provider: Option<String>,
+) -> Result<ConfigDoc, String> {
+    let intel = intelligence.map(|(endpoint, token)| ResolvedIntelligence {
+        endpoint: absolutize_endpoint(endpoint),
+        model: spec.model.as_ref().and_then(|m| m.id.clone()),
+        has_token: token.is_some(),
+    });
+    let mut input =
+        ConfigInput::from_spec(spec, intel, workflow.map(|w| w.file_path()), aauth_provider);
+    for m in &mut input.mcp {
+        m.endpoint = absolutize_endpoint(&m.endpoint);
+    }
+    agent_config::build(&input).map_err(|e| e.to_string())
+}
+
+/// The pod-shell wiring matching a composed document: the same resolved facts,
+/// projected as mounts/envs so every `{{secret:…}}` reference resolves.
+fn pod_wiring(
+    doc: &ConfigDoc,
+    spec: &AgentSpec,
+    intelligence: Option<&(String, Option<agent_api::SecretKeyRef>)>,
+    workflow: Option<WorkflowMount>,
+    aauth_key: bool,
+    api_token: bool,
+) -> PodWiring {
+    let mcp_tokens = spec
+        .mcp_servers
+        .iter()
+        .filter_map(|s| {
+            let auth = s.auth.as_ref()?;
+            if auth.mode != agent_api::McpAuthMode::StaticToken {
+                return None;
+            }
+            let r = auth.token_secret_ref.as_ref()?;
+            Some(SecretEnv {
+                env: agent_config::ResolvedMcp::token_env_for(&s.name),
+                secret: r.name.clone(),
+                key: r.key.clone(),
+            })
+        })
+        .collect();
+    PodWiring {
+        config_hash: doc.hash(),
+        intelligence_token: intelligence.and_then(|(_, t)| t.clone()),
+        mcp_tokens,
+        workflow,
+        aauth_key,
+        api_token,
+        extra_env: Vec::new(),
+    }
+}
+
+/// SSA the composed document as the `<workload>-config` ConfigMap the pod
+/// mounts at the config path.
+async fn ensure_config_configmap(
+    client: &Client,
+    ns: &str,
+    workload: &str,
+    owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
+    doc: &ConfigDoc,
+) -> Result<(), Error> {
+    use k8s_openapi::api::core::v1::ConfigMap;
+    let name = config_configmap_name(workload);
+    let mut data = std::collections::BTreeMap::new();
+    data.insert(agent_config::paths::CONFIG_FILE.to_string(), doc.to_json());
+    let cm = ConfigMap {
+        metadata: kube::api::ObjectMeta {
+            name: Some(name.clone()),
+            namespace: Some(ns.to_string()),
+            owner_references: Some(vec![owner.clone()]),
+            ..Default::default()
+        },
+        data: Some(data),
+        ..Default::default()
+    };
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+    cms.patch(
+        &name,
+        &PatchParams::apply(FIELD_MANAGER).force(),
+        &Patch::Apply(&cm),
+    )
+    .await?;
     Ok(())
 }
 
@@ -645,41 +749,6 @@ async fn resolve_model_endpoint(
             None
         }
     }
-}
-
-/// Map an agent/fleet-template's inline `mcpServers` to the renderer's direct
-/// `McpBinding`s (name + endpoint + tags, and — for `staticToken` — the env-var
-/// the bearer `Secret` mounts as). Pure: the operator MOUNTS secret refs, it
-/// never reads them, and the tool servers are declared inline (no cross-object
-/// lookup).
-fn mcp_bindings(spec: &AgentSpec) -> Vec<McpBinding> {
-    spec.mcp_servers
-        .iter()
-        .map(|s| {
-            // staticToken ⇒ mount the bearer onto the pod as AGENT_MCP_<NAME>_TOKEN.
-            let token_env = s.auth.as_ref().and_then(|a| {
-                (a.mode == agent_api::McpAuthMode::StaticToken)
-                    .then_some(a.token_secret_ref.as_ref())
-                    .flatten()
-                    .map(|r| {
-                        (
-                            format!(
-                                "AGENT_MCP_{}_TOKEN",
-                                s.name.to_uppercase().replace(['-', '.'], "_")
-                            ),
-                            r.name.clone(),
-                            r.key.clone(),
-                        )
-                    })
-            });
-            McpBinding {
-                name: s.name.clone(),
-                endpoint: s.endpoint.clone(),
-                tags: s.tags.clone(),
-                token_env,
-            }
-        })
-        .collect()
 }
 
 async fn apply_workload(client: &Client, ns: &str, rendered: &Rendered) -> Result<(), Error> {
@@ -951,38 +1020,42 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // Observed readiness, populated inside the Ok arm from the workload readback.
     let mut ready_replicas: Option<u32> = None;
     let mut desired_replicas: Option<u32> = None;
-    let (condition, replicas, selector, scaler_condition) = match render_fleet(&fleet, &ctx.render)
-    {
-        Ok(mut rendered) => {
+    // Same compose→render pipeline as a singleton Agent, over the fleet's
+    // worker template (coerced Reactive — fleet workers are long-lived
+    // consumers). Every member mounts ONE shared document; per-member identity
+    // is `AGENT_POD_NAME` (the store fence), and partition semantics live in
+    // the fleet's own workflows/config, upstream of the agent (ADR-0009).
+    let owner = fleet
+        .controller_owner_ref(&())
+        .expect("AgentFleet CRs always carry name+uid on the live object");
+    let mut worker_spec = fleet.spec.template.clone();
+    worker_spec.mode = Mode::Reactive;
+    let intelligence = resolve_model_endpoint(&ctx.client, ns, &worker_spec).await;
+    let workflow_mount =
+        ensure_workflow_configmap(&ctx.client, ns, &name, &worker_spec, &owner).await?;
+    let composed = compose_document(
+        &worker_spec,
+        intelligence.as_ref(),
+        workflow_mount.as_ref(),
+        None,
+    )
+    .and_then(|doc| {
+        let wiring = pod_wiring(
+            &doc,
+            &worker_spec,
+            intelligence.as_ref(),
+            workflow_mount.clone(),
+            false,
+            ctx.api_token.should_inject(ns),
+        );
+        render_fleet(&fleet, &ctx.render, &wiring)
+            .map(|rendered| (doc, rendered))
+            .map_err(|e| e.to_string())
+    });
+    let (condition, replicas, selector, scaler_condition) = match composed {
+        Ok((doc, rendered)) => {
             let kind = rendered_kind(&rendered);
-            // Optional in-cluster bearer-token injection (chart apiToken.enabled);
-            // gated to the control-plane namespace (secretKeyRef cannot cross
-            // namespaces). Fleet pods are agents too, so inject before applying.
-            if ctx.api_token.should_inject(ns) {
-                inject_api_token(&mut rendered);
-            }
-            // Direct intelligence + MCP dials for the fleet template (same as a
-            // singleton Agent; the template carries model + mcpServers).
-            if let Some((endpoint, token)) =
-                resolve_model_endpoint(&ctx.client, ns, &fleet.spec.template).await
-            {
-                inject_intelligence(&mut rendered, &endpoint, token.as_ref());
-            }
-            let bindings = mcp_bindings(&fleet.spec.template);
-            inject_mcp_servers(&mut rendered, &bindings);
-            let owner = fleet
-                .controller_owner_ref(&())
-                .expect("AgentFleet CRs always carry name+uid on the live object");
-            // Workflow for the fleet template (same as a singleton Agent).
-            ensure_and_inject_workflow(
-                &ctx.client,
-                ns,
-                &name,
-                &fleet.spec.template,
-                &owner,
-                &mut rendered,
-            )
-            .await?;
+            ensure_config_configmap(&ctx.client, ns, &name, &owner, &doc).await?;
             // Workload PKI (serving Certificate + per-ns CA ConfigMap), so fleet
             // pods' mounts resolve as they schedule.
             if ctx.pki.enabled() {
@@ -1112,9 +1185,61 @@ async fn reconcile_coordinator(
     let Some(coord) = fleet.spec.coordinator.as_ref() else {
         return Ok(None);
     };
-    let mut rendered = match render_coordinator(fleet, &ctx.render) {
-        Some(Ok(r)) => r,
-        Some(Err(e)) => {
+    let coord_name = coordinator_name(fleet_name);
+    let owner = fleet
+        .controller_owner_ref(&())
+        .expect("AgentFleet CRs always carry name+uid on the live object");
+
+    // Compose the coordinator's own document: same pipeline, coerced Reactive,
+    // plus the distribution wiring — `a2a` distribution declares the fleet's
+    // worker-pool endpoint as an A2A peer IN the document (the flag is gone);
+    // `queue` distribution hands the work-fabric coordinates over env, which a
+    // conformant coordinator stamps onto its `work.submit`s.
+    let mut coord_spec = coord.template.clone();
+    coord_spec.mode = Mode::Reactive;
+    let intelligence = resolve_model_endpoint(&ctx.client, ns, &coord_spec).await;
+    let workflow_mount =
+        ensure_workflow_configmap(&ctx.client, ns, &coord_name, &coord_spec, &owner).await?;
+    let composed = compose_document(
+        &coord_spec,
+        intelligence.as_ref(),
+        workflow_mount.as_ref(),
+        None,
+    )
+    .map(|doc| (doc, coordinator_extra_env(fleet)))
+    .and_then(|(mut doc, extra_env)| {
+        if coord.distribution == Some(agent_api::Distribution::A2a) {
+            // Fold the worker-pool peer into the composed document's a2a block.
+            let peer = fleet_peer_endpoint(&ctx.render, ns, fleet_name);
+            if let serde_json::Value::Object(m) = &mut doc.value {
+                let a2a = m
+                    .entry("a2a")
+                    .or_insert_with(|| serde_json::Value::Object(Default::default()));
+                if let serde_json::Value::Object(a) = a2a {
+                    a.insert(
+                        "peers".to_string(),
+                        serde_json::json!([{ "name": "worker", "endpoint": peer }]),
+                    );
+                }
+            }
+        }
+        let mut wiring = pod_wiring(
+            &doc,
+            &coord_spec,
+            intelligence.as_ref(),
+            workflow_mount.clone(),
+            false,
+            ctx.api_token.should_inject(ns),
+        );
+        wiring.extra_env = extra_env;
+        render_coordinator(fleet, &ctx.render, &wiring)
+            .map(|r| (doc, r))
+            .map_err(|e| e.to_string())
+    });
+    let (doc, rendered) = match composed {
+        Ok((doc, Some(r))) => (doc, r),
+        Ok((_, None)) => return Ok(None),
+        Err(e) => {
             warn!(fleet = %fleet_name, error = %e, "coordinator render rejected");
             publish_event(
                 ctx,
@@ -1127,27 +1252,10 @@ async fn reconcile_coordinator(
             .await;
             return Ok(Some(false));
         }
-        None => return Ok(None),
     };
-    let coord_name = coordinator_name(fleet_name);
-    // Same secret-free wiring an agent pod gets: the in-cluster token (only in the
-    // control-plane namespace), and the coordinator template's own MCP tool servers
-    // (this is how `distribution: queue` reaches the coordination server — the
-    // coordinator template references it like any tool).
-    if ctx.api_token.should_inject(ns) {
-        inject_api_token(&mut rendered);
-    }
-    if let Some((endpoint, token)) = resolve_model_endpoint(&ctx.client, ns, &coord.template).await
-    {
-        inject_intelligence(&mut rendered, &endpoint, token.as_ref());
-    }
-    let bindings = mcp_bindings(&coord.template);
-    inject_mcp_servers(&mut rendered, &bindings);
+    ensure_config_configmap(&ctx.client, ns, &coord_name, &owner, &doc).await?;
     // The Certificate/CA are owned by the fleet (GC'd with it), and named for the
     // coordinator workload so the pod's serving-TLS mount resolves.
-    let owner = fleet
-        .controller_owner_ref(&())
-        .expect("AgentFleet CRs always carry name+uid on the live object");
     if ctx.pki.enabled() {
         crate::pki::ensure_workload_pki(&ctx.client, &ctx.pki, ns, &coord_name, &owner).await?;
     }
@@ -1164,6 +1272,34 @@ async fn reconcile_coordinator(
             None => true,
         };
     Ok(Some(ready))
+}
+
+/// The work-fabric coordinates a `distribution: queue` coordinator receives
+/// over env (`AGENT_FLEET_*`), which a conformant coordinator stamps onto each
+/// `work.submit`. Empty for `distribution: a2a` (the peer rides the document).
+fn coordinator_extra_env(fleet: &AgentFleet) -> Vec<(String, String)> {
+    let queue = fleet
+        .spec
+        .coordinator
+        .as_ref()
+        .map(|c| c.distribution.unwrap_or_default() == agent_api::Distribution::Queue)
+        .unwrap_or(false);
+    if !queue {
+        return Vec::new();
+    }
+    let mut env = Vec::new();
+    if let Some(work) = &fleet.spec.work {
+        if let Some(source) = work.source.as_ref().filter(|s| !s.is_empty()) {
+            env.push(("AGENT_FLEET_WORKSOURCE".to_string(), source.clone()));
+        }
+        if let Some(max) = work.max_attempts {
+            env.push(("AGENT_FLEET_MAX_ATTEMPTS".to_string(), max.to_string()));
+        }
+        if let Some(ttl) = work.claim_ttl.as_ref().filter(|s| !s.is_empty()) {
+            env.push(("AGENT_FLEET_CLAIM_TTL".to_string(), ttl.clone()));
+        }
+    }
+    env
 }
 
 /// The fleet-readiness condition when the coordinator is not yet up: the fleet is
@@ -1187,10 +1323,10 @@ const SHARD_RESIZE_POLL: Duration = Duration::from_secs(5);
 /// the live StatefulSet's applied shard count vs the desired one, plus its replica
 /// state. Pure so the state machine is unit-testable without a cluster.
 ///
-/// The key signal is the live pod template's `--shard auto/N` value (`applied`): it
-/// is the OLD `N` until the operator flips it, so it distinguishes "resize not yet
-/// applied" from "already flipped, now converging". A `None` applied means no live
-/// StatefulSet (a fresh fleet) — nothing to guard.
+/// The key signal is the live pod template's shards annotation (`applied`): it
+/// is the OLD `N` until the operator flips it, so it distinguishes "resize not
+/// yet applied" from "already flipped, now converging". A `None` applied means
+/// no live StatefulSet (a fresh fleet) — nothing to guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShardResizeStep {
     /// No guarded action: fresh create, steady state, or already-flipped and
@@ -1206,7 +1342,7 @@ enum ShardResizeStep {
 }
 
 /// Decide the guarded-resize step. `desired` = `spec.scaling.shards`; `applied` =
-/// the live StatefulSet's `--shard auto/N` (None ⇒ no live StatefulSet);
+/// the live StatefulSet's shards annotation (None ⇒ no live StatefulSet);
 /// `spec_replicas`/`running` = its declared vs live-running replica counts.
 fn plan_shard_resize(
     desired: u32,
@@ -1232,24 +1368,21 @@ fn plan_shard_resize(
     }
 }
 
-/// Parse the shard modulus `N` a live StatefulSet's agent container was rendered
-/// with — the value after `--shard` (spelled `auto/N`, and tolerant of a `K/N`
-/// form). `None` when the flag is absent (an older StatefulSet) or unparsable.
+/// The shard partition count `N` a live StatefulSet was rendered with — read
+/// from the pod-template's [`crate::render::SHARDS_ANNOTATION`] (the durable
+/// "applied N" memory; agent-side shard argv no longer exists). `None` when the
+/// annotation is absent (a pre-ACC-2 StatefulSet) or unparsable.
 fn applied_shard_count(sts: &StatefulSet) -> Option<u32> {
-    let args = sts
-        .spec
+    sts.spec
         .as_ref()?
         .template
-        .spec
+        .metadata
         .as_ref()?
-        .containers
-        .first()?
-        .args
-        .as_ref()?;
-    let idx = args.iter().position(|a| a == "--shard")?;
-    let value = args.get(idx + 1)?;
-    // `auto/N` or `K/N` — the modulus is the segment after the last '/'.
-    value.rsplit('/').next()?.parse::<u32>().ok()
+        .annotations
+        .as_ref()?
+        .get(crate::render::SHARDS_ANNOTATION)?
+        .parse::<u32>()
+        .ok()
 }
 
 /// Drive the guarded shard resize. Returns `Ok(Some(action))` when a
@@ -1321,9 +1454,8 @@ async fn drive_shard_resize(
         }
         ShardResizeStep::Flip => {
             // Fully quiesced (0 pods): apply the new-N StatefulSet (the caller's
-            // fully-injected render already carries `--shard auto/<desired>` +
-            // replicas=<desired>, plus MCP/token/workflow wiring). The forced SSA
-            // reclaims `replicas` from the merge-patched 0.
+            // render carries the new shards annotation + replicas=<desired>).
+            // The forced SSA reclaims `replicas` from the merge-patched 0.
             let msg = format!("rebalancing to N={desired} shard(s)");
             apply_workload(&ctx.client, ns, rendered).await?;
             info!(fleet = %name, %msg, "shard resize: flipping N and scaling up");
@@ -1585,13 +1717,23 @@ mod tests {
 
     #[test]
     fn controller_picks_job_for_once() {
-        let rendered = render_agent(&agent(Mode::Once), &RenderConfig::default()).unwrap();
+        let rendered = render_agent(
+            &agent(Mode::Once),
+            &RenderConfig::default(),
+            &PodWiring::default(),
+        )
+        .unwrap();
         assert_eq!(rendered_kind(&rendered), "Job");
     }
 
     #[test]
     fn controller_picks_deployment_for_reactive() {
-        let rendered = render_agent(&agent(Mode::Reactive), &RenderConfig::default()).unwrap();
+        let rendered = render_agent(
+            &agent(Mode::Reactive),
+            &RenderConfig::default(),
+            &PodWiring::default(),
+        )
+        .unwrap();
         assert_eq!(rendered_kind(&rendered), "Deployment");
     }
 
@@ -1599,7 +1741,7 @@ mod tests {
     fn render_error_maps_to_validated_false() {
         let mut a = agent(Mode::Once);
         a.spec.image = None; // classless agent without an image is unrenderable
-        let err = render_agent(&a, &RenderConfig::default()).unwrap_err();
+        let err = render_agent(&a, &RenderConfig::default(), &PodWiring::default()).unwrap_err();
         let c = validated_failed_condition(&err.to_string());
         assert_eq!(c.status, "False");
         assert_eq!(c.type_, "Validated");
@@ -1748,7 +1890,8 @@ mod tests {
         );
         shard.metadata.namespace = Some("agents".into());
         shard.metadata.uid = Some("uid-shard".into());
-        let rendered = render_fleet(&shard, &RenderConfig::default()).unwrap();
+        let rendered =
+            render_fleet(&shard, &RenderConfig::default(), &PodWiring::default()).unwrap();
         assert!(matches!(rendered, Rendered::StatefulSet(_)));
         assert_eq!(fleet_replica_count(&shard, &rendered), 4);
 
@@ -1768,7 +1911,8 @@ mod tests {
         );
         claim.metadata.namespace = Some("agents".into());
         claim.metadata.uid = Some("uid-claim".into());
-        let rendered = render_fleet(&claim, &RenderConfig::default()).unwrap();
+        let rendered =
+            render_fleet(&claim, &RenderConfig::default(), &PodWiring::default()).unwrap();
         assert!(matches!(rendered, Rendered::Deployment(_)));
         // KEDA-safe: the rendered Deployment still carries no .spec.replicas.
         if let Rendered::Deployment(dep) = &rendered {
@@ -1778,7 +1922,8 @@ mod tests {
 
         // claim mode with no spec.replicas → defaults to 0 (deferred to KEDA).
         claim.spec.replicas = None;
-        let rendered = render_fleet(&claim, &RenderConfig::default()).unwrap();
+        let rendered =
+            render_fleet(&claim, &RenderConfig::default(), &PodWiring::default()).unwrap();
         assert_eq!(fleet_replica_count(&claim, &rendered), 0);
     }
 
@@ -1815,19 +1960,20 @@ mod tests {
     }
 
     #[test]
-    fn applied_shard_count_parses_the_shard_flag() {
+    fn applied_shard_count_reads_the_shards_annotation() {
         use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
-        use k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec};
+        use k8s_openapi::api::core::v1::PodTemplateSpec;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta as Meta;
+        use std::collections::BTreeMap;
 
-        let sts = |args: Option<Vec<&str>>| StatefulSet {
+        let sts = |ann: Option<&str>| StatefulSet {
             spec: Some(StatefulSetSpec {
                 template: PodTemplateSpec {
-                    spec: Some(PodSpec {
-                        containers: vec![Container {
-                            name: "agent".into(),
-                            args: args.map(|a| a.into_iter().map(str::to_string).collect()),
-                            ..Default::default()
-                        }],
+                    metadata: ann.map(|v| Meta {
+                        annotations: Some(BTreeMap::from([(
+                            crate::render::SHARDS_ANNOTATION.to_string(),
+                            v.to_string(),
+                        )])),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -1837,23 +1983,41 @@ mod tests {
             ..Default::default()
         };
 
-        // `--shard auto/N` → N.
-        assert_eq!(
-            applied_shard_count(&sts(Some(vec!["--mode", "reactive", "--shard", "auto/4"]))),
-            Some(4)
-        );
-        // Tolerant of a `K/N` form → the modulus N.
-        assert_eq!(
-            applied_shard_count(&sts(Some(vec!["--shard", "2/8"]))),
-            Some(8)
-        );
-        // No --shard flag (an older StatefulSet) → None.
-        assert_eq!(
-            applied_shard_count(&sts(Some(vec!["--mode", "reactive"]))),
-            None
-        );
-        // No args at all → None.
+        // The annotation is the durable "applied N" memory (survives quiesce).
+        assert_eq!(applied_shard_count(&sts(Some("4"))), Some(4));
+        // Unparsable → None (treated as fresh; nothing to guard).
+        assert_eq!(applied_shard_count(&sts(Some("auto/4"))), None);
+        // No annotation (a pre-ACC-2 StatefulSet) → None.
         assert_eq!(applied_shard_count(&sts(None)), None);
+
+        // And the renderer actually stamps it — the two halves must agree.
+        let shard = {
+            use agent_api::{AgentFleet, AgentFleetSpec, AgentSpec, Mode, ScaleMode, Scaling};
+            let mut f = AgentFleet::new(
+                "pool",
+                AgentFleetSpec {
+                    template: AgentSpec {
+                        mode: Mode::Reactive,
+                        image: Some("agentd:test".into()),
+                        ..Default::default()
+                    },
+                    scaling: Scaling {
+                        mode: ScaleMode::Shard,
+                        shards: Some(4),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            f.metadata.uid = Some("u".into());
+            f
+        };
+        let rendered =
+            render_fleet(&shard, &RenderConfig::default(), &PodWiring::default()).unwrap();
+        let Rendered::StatefulSet(live) = rendered else {
+            panic!("statefulset")
+        };
+        assert_eq!(applied_shard_count(&live), Some(4));
     }
 
     #[test]
@@ -1887,7 +2051,8 @@ mod tests {
         );
 
         // every matchLabels entry on the rendered workload appears in the string.
-        let rendered = render_fleet(&fleet, &RenderConfig::default()).unwrap();
+        let rendered =
+            render_fleet(&fleet, &RenderConfig::default(), &PodWiring::default()).unwrap();
         let Rendered::Deployment(dep) = &rendered else {
             panic!("claim fleet should render a Deployment");
         };
@@ -2029,7 +2194,7 @@ mod tests {
     fn unsupported_substrate_is_a_render_error_condition() {
         let mut a = agent(Mode::Once);
         a.spec.substrate = Some(Substrate::KataHybrid);
-        let err = render_agent(&a, &RenderConfig::default()).unwrap_err();
+        let err = render_agent(&a, &RenderConfig::default(), &PodWiring::default()).unwrap_err();
         let c = validated_failed_condition(&err.to_string());
         assert!(c.message.unwrap().to_lowercase().contains("substrate"));
     }

@@ -84,17 +84,20 @@ impl ResolvedMcp {
         )
     }
 
-    /// Map the CRD declaration onto a resolved binding.
+    /// Map the CRD declaration onto a resolved binding. A `{{secret:…}}`
+    /// reference is emitted ONLY when a Secret is actually declared to mount
+    /// (`staticToken` + `tokenSecretRef`) — an unresolved reference is exit 2
+    /// at agent startup, so the doc and the pod wiring must agree exactly.
     pub fn from_spec(s: &McpServer) -> ResolvedMcp {
-        let is_static = s
+        let has_mounted_token = s
             .auth
             .as_ref()
-            .is_some_and(|a| a.mode == McpAuthMode::StaticToken);
+            .is_some_and(|a| a.mode == McpAuthMode::StaticToken && a.token_secret_ref.is_some());
         ResolvedMcp {
             name: s.name.clone(),
             endpoint: s.endpoint.clone(),
             tags: s.tags.clone(),
-            token_env: is_static.then(|| Self::token_env_for(&s.name)),
+            token_env: has_mounted_token.then(|| Self::token_env_for(&s.name)),
             header: s.auth.as_ref().and_then(|a| a.header.clone()),
         }
     }
@@ -665,7 +668,10 @@ mod tests {
             endpoint: "https://b.internal/mcp".into(),
             auth: Some(McpAuth {
                 mode: McpAuthMode::StaticToken,
-                token_secret_ref: None,
+                token_secret_ref: Some(agent_api::SecretKeyRef {
+                    name: "billing-token".into(),
+                    key: "token".into(),
+                }),
                 header: None,
             }),
             tags: vec!["sensitive".into()],

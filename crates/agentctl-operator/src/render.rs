@@ -2,26 +2,31 @@
 //! Pure workload rendering: an [`Agent`]/[`AgentFleet`] → the Kubernetes
 //! workload that runs it.
 //!
-//! This is the deterministic, side-effect-free core the reconcile loop calls.
-//! Keeping it pure makes the mode→workload mapping, the scaling regime, and the
-//! serve wiring all unit-testable without a cluster.
+//! **ACC 2: the agent is a config document, the pod is its shell.** The
+//! rewritten reference agent has no execution-mode flags — everything the v1
+//! renderer said in argv (`--mode`, `--serve-mcp`, `--mcp`, `--shard`, …) now
+//! lives in the `config_version: "1"` document that `agent-config` composes and
+//! the controller ships as a ConfigMap. What remains here is the *workload*
+//! half: shape (Job/CronJob/Deployment/StatefulSet), volumes and env-secret
+//! mounts the document's `{{secret:…}}` references resolve against, probes,
+//! drain-aware termination grace, the `podFailurePolicy` compiled from the
+//! vendored exit-code intents, and the config-hash annotation that turns a
+//! document change into a rolling restart (ADR-0007's safe interim delivery).
 //!
-//! **Contract version 2.0: the network is the substrate; identity is the
-//! boundary.** Every rendered pod SERVES its
-//! management/A2A surface over mTLS-gated HTTPS (`--serve-mcp
-//! https://0.0.0.0:8443`) with a cert-manager-issued serving identity, trusts
-//! the cluster CA for callers (`--serve-client-ca`) and for its own outbound
-//! dials (`--tls-ca`, `INTELLIGENCE=https://<provider>` — the ModelPool
-//! endpoint the agent dials DIRECTLY), and exposes `/readyz` on a separate
-//! metrics listener. No hostPath, no unix sockets, no off-pod broker: the only
-//! key material in the pod is its OWN serving identity (cert-manager Secret,
-//! rotated live by the agent) plus any provider/MCP token the CR mounts.
+//! Invocation is exactly `agentd -c /etc/agentctl/config/agentd.json`; the
+//! only other argv is nothing — even the metrics listener rides the document.
 
 use std::collections::BTreeMap;
 
-use agent_api::{Agent, AgentFleet, AgentSpec, Distribution, Mode, ScaleMode, Substrate};
+use agent_api::{Agent, AgentFleet, Mode, ScaleMode, Substrate};
+use agent_config::paths;
+use agent_contract_client::exit_codes::{Intent, Table};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
-use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec, JobTemplateSpec};
+use k8s_openapi::api::batch::v1::{
+    CronJob, CronJobSpec, Job, JobSpec, JobTemplateSpec, PodFailurePolicy,
+    PodFailurePolicyOnExitCodesRequirement, PodFailurePolicyOnPodConditionsPattern,
+    PodFailurePolicyRule,
+};
 use k8s_openapi::api::core::v1::{
     Capabilities, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
     EnvVarSource, HTTPGetAction, ObjectFieldSelector, PodSecurityContext, PodSpec, PodTemplateSpec,
@@ -36,16 +41,15 @@ const API_VERSION: &str = "agentctl.dev/v1alpha1";
 
 /// In-pod mount of the workload's own serving identity — the cert-manager
 /// `Certificate` Secret ([`serving_secret_name`], keys `tls.crt`/`tls.key`).
-/// The agent re-reads these paths in place on rotation (agentd ≥2.1 live
-/// acceptor), so a cert-manager renewal never restarts the pod.
+/// The document's `a2a.tls` points here. NOTE (upstream ask U2): the rewritten
+/// agent reads A2A TLS material once at listener start — a cert-manager
+/// renewal therefore requires a rolling restart, which the controller drives.
 const TLS_MOUNT: &str = "/etc/agentctl/tls";
 const TLS_VOLUME: &str = "agentctl-serving-tls";
 
 /// In-pod mount of the cluster CA **public certificate** (ConfigMap
-/// [`CA_CONFIGMAP`], key `ca.crt`, ensured per agent namespace by the
-/// operator). Doubles as the agent's client-CA (who may call me = holders of
-/// agentctl-CA client certs → `Management`) and its outbound trust anchor
-/// (`--tls-ca` — the gateways' serving certs chain to the same CA).
+/// [`CA_CONFIGMAP`], key `ca.crt`). Doubles as the A2A `client_ca` (who may
+/// call me) and the outbound trust anchor (`security.tls_ca`).
 const CA_MOUNT: &str = "/etc/agentctl/ca";
 const CA_VOLUME: &str = "agentctl-ca";
 /// The per-namespace ConfigMap carrying the cluster CA cert (public material).
@@ -53,10 +57,33 @@ pub const CA_CONFIGMAP: &str = "agentctl-ca";
 /// Key within [`CA_CONFIGMAP`] (and the mounted filename) holding the CA PEM.
 pub const CA_KEY: &str = "ca.crt";
 
-/// The HTTPS port every rendered agent serves its self-MCP/A2A surface on.
+/// The rendered config document's ConfigMap volume.
+const CONFIG_VOLUME: &str = "agentctl-config";
+/// The daemon file-store volume (an emptyDir at [`paths::STATE_DIR`]'s parent).
+const STATE_VOLUME: &str = "agentd-state";
+const STATE_MOUNT: &str = "/var/lib/agentd";
+
+/// The HTTPS port every rendered agent serves its A2A surface on
+/// (`a2a.listen: https://0.0.0.0:8443` in the document).
 pub const SERVE_PORT: i32 = 8443;
-/// The metrics/readiness listener port (`AGENT_METRICS_ADDR`, `/readyz`).
+/// The probe/scrape listener port (`observability.metrics_addr`).
 pub const METRICS_PORT: i32 = 9090;
+
+/// `terminationGracePeriodSeconds`: strictly above the agent's worst-case
+/// drain (`drain_timeout` 25 s + abandon 3 s = 28 s, per the vendored
+/// contract), so a clean SIGTERM drain always exits 0 — never a kernel 143.
+pub const TERMINATION_GRACE_SECONDS: i64 = 30;
+
+/// Pod-template annotation carrying the config document's hash: a document
+/// change rolls the pods (the safe delivery until upstream reload lands, U1).
+pub const CONFIG_HASH_ANNOTATION: &str = "agentctl.dev/config-hash";
+
+/// Pod-template annotation carrying a shard fleet's applied partition count.
+/// The guarded-resize state machine reads it back from the LIVE StatefulSet as
+/// its durable "applied N" memory (it survives the quiesce-to-zero, which
+/// `spec.replicas` does not) — the role the removed `--shard auto/N` argv
+/// used to play.
+pub const SHARDS_ANNOTATION: &str = "agentctl.dev/shards";
 
 /// The serving-identity Secret name for a workload (cert-manager
 /// `Certificate.spec.secretName`; created by the operator, mounted at
@@ -65,20 +92,25 @@ pub fn serving_secret_name(workload: &str) -> String {
     format!("{workload}-serving-tls")
 }
 
-/// Operator-scoped render inputs that do not live on the CR: the A2A gateway URL
-/// (for coordinator delegation) and the default agent image. Built once by the
+/// The rendered-config ConfigMap name for a workload.
+pub fn config_configmap_name(workload: &str) -> String {
+    format!("{workload}-config")
+}
+
+/// The generated-ConfigMap name for an inline workflow on a workload.
+pub fn workflow_configmap_name(workload: &str) -> String {
+    format!("{workload}-workflow")
+}
+
+/// Operator-scoped render inputs that do not live on the CR. Built once by the
 /// controller from its environment; a test passes a literal.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
-    /// The A2A gateway base URL a coordinator's `--a2a-peer worker=…/fleets/<ns>/<name>`
-    /// is rendered against for `distribution: a2a`. Unused for the default
-    /// `queue` distribution.
+    /// The A2A gateway base URL a coordinator's worker peer
+    /// (`a2a.peers[]` in its document) is rendered against for
+    /// `distribution: a2a`.
     pub gateway_url: String,
-    /// Operator-configured **default agent image**. When an `Agent`/fleet
-    /// template omits `spec.image`, this image is used. A per-resource
-    /// `spec.image` always overrides it.
-    /// `None` (unset / empty `AGENTCTL_DEFAULT_AGENT_IMAGE`) ⇒ `spec.image` is
-    /// required, as before.
+    /// Operator-configured **default agent image**; `spec.image` overrides.
     pub default_agent_image: Option<String>,
 }
 
@@ -97,7 +129,7 @@ impl Default for RenderConfig {
 
 impl RenderConfig {
     /// Build from the operator environment (`AGENTCTL_GATEWAY_URL`,
-    /// `AGENTCTL_DEFAULT_AGENT_IMAGE`), falling back to the in-cluster defaults.
+    /// `AGENTCTL_DEFAULT_AGENT_IMAGE`), falling back to in-cluster defaults.
     pub fn from_env() -> Self {
         let d = Self::default();
         let env = |k: &str, dflt: String| {
@@ -109,7 +141,6 @@ impl RenderConfig {
         };
         RenderConfig {
             gateway_url: env("AGENTCTL_GATEWAY_URL", d.gateway_url),
-            // Empty / unset ⇒ None ⇒ spec.image stays required.
             default_agent_image: std::env::var("AGENTCTL_DEFAULT_AGENT_IMAGE")
                 .ok()
                 .map(|v| v.trim().to_string())
@@ -118,10 +149,8 @@ impl RenderConfig {
     }
 }
 
-/// Resolve the container image for an agent or fleet template: an explicit
-/// `spec.image` always wins; otherwise fall back to the operator's configured
-/// default agent image (`AGENTCTL_DEFAULT_AGENT_IMAGE` / `operator.defaultAgentImage`).
-/// Errors only when neither is set.
+/// Resolve the container image: explicit `spec.image` wins; else the
+/// operator's default; else an error.
 fn resolve_image(image: &Option<String>, cfg: &RenderConfig) -> Result<String, RenderError> {
     image
         .clone()
@@ -129,314 +158,63 @@ fn resolve_image(image: &Option<String>, cfg: &RenderConfig) -> Result<String, R
         .ok_or(RenderError::MissingImage)
 }
 
-/// A resolved MCP server binding for an agent (inline `spec.mcpServers`, RFC
-/// 0024 direct model — no gateway). The agent dials `endpoint` **directly**:
-/// `aauth` servers are signed by the agent's identity (secret-free);
-/// `staticToken` servers get their bearer `Secret` mounted onto the pod as
-/// `token_env` (the agent's config attaches it). Rendered by
-/// [`inject_mcp_servers`].
+/// An env-secret the pod mounts so a `{{secret:<env>}}` reference in the
+/// document resolves (an MCP bearer, the intelligence token, …).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpBinding {
-    pub name: String,
-    pub endpoint: String,
-    pub tags: Vec<String>,
-    /// `Some((env_var, secret_name, secret_key))` ⇒ mount the bearer `Secret`
-    /// onto the agent as `env_var` (`staticToken` mode). `None` ⇒ `none`/`aauth`.
-    pub token_env: Option<(String, String, String)>,
+pub struct SecretEnv {
+    pub env: String,
+    pub secret: String,
+    pub key: String,
 }
 
-/// In-pod mount of the workflow graph (agentd v2 `--mode workflow`). The
-/// operator mounts a ConfigMap holding the graph JSON and passes the file path
-/// as `--workflow`.
-const WORKFLOW_MOUNT: &str = "/etc/agentctl/workflow";
-const WORKFLOW_VOLUME: &str = "agentctl-workflow";
-/// The generated-ConfigMap name for an inline workflow on a workload.
-pub fn workflow_configmap_name(workload: &str) -> String {
-    format!("{workload}-workflow")
+/// A mounted workflow document (ConfigMap key file the document references).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowMount {
+    pub config_map: String,
+    pub key: String,
 }
 
-/// Mount the workflow ConfigMap (key `key` at [`WORKFLOW_MOUNT`]) and pass
-/// `--workflow <mount>/<key>` to the agent (agentd v2). Idempotent. `configmap`
-/// is either the operator-generated `<workload>-workflow` (inline source) or the
-/// user's `configMapKeyRef.name`.
-pub fn inject_workflow(rendered: &mut Rendered, configmap: &str, key: &str) {
-    let pod = match rendered {
-        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj
-            .spec
-            .job_template
-            .spec
-            .as_mut()
-            .map(|js| &mut js.template),
-        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
-        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
-    };
-    let Some(pod) = pod else { return };
-    let Some(spec) = pod.spec.as_mut() else {
-        return;
-    };
-    // Volume (idempotent).
-    let volumes = spec.volumes.get_or_insert_with(Vec::new);
-    if !volumes.iter().any(|v| v.name == WORKFLOW_VOLUME) {
-        volumes.push(Volume {
-            name: WORKFLOW_VOLUME.to_string(),
-            config_map: Some(ConfigMapVolumeSource {
-                name: configmap.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-    }
-    let Some(container) = spec.containers.first_mut() else {
-        return;
-    };
-    let mounts = container.volume_mounts.get_or_insert_with(Vec::new);
-    if !mounts.iter().any(|m| m.name == WORKFLOW_VOLUME) {
-        mounts.push(VolumeMount {
-            name: WORKFLOW_VOLUME.to_string(),
-            mount_path: WORKFLOW_MOUNT.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        });
-    }
-    let args = container.args.get_or_insert_with(Vec::new);
-    if !args.iter().any(|a| a == "--workflow") {
-        args.push("--workflow".to_string());
-        args.push(format!("{WORKFLOW_MOUNT}/{key}"));
+impl WorkflowMount {
+    /// The in-pod file path the config document's `workflows: [{file: …}]`
+    /// entry must reference.
+    pub fn file_path(&self) -> String {
+        format!("{}/{}", paths::WORKFLOW_DIR, self.key)
     }
 }
 
-/// In-pod mount of the AAuth durable key (RFC 0023). The Secret
-/// `<workload>-aauth-key` holds the base64url seed under `agent.key` — exactly
-/// the `--aauth-key-file` format the reference agent reads (load-if-present;
-/// the read-only mount is fine because the key always pre-exists).
+/// Everything the pod shell needs beyond the CR: the document identity and the
+/// mounts/envs its `{{secret:…}}` references and `file:` entries resolve
+/// against. Composed by the controller alongside the `agent-config` document —
+/// the two MUST agree (same secret env names, same file paths), which is why
+/// both derive from the same resolved facts.
+#[derive(Debug, Clone, Default)]
+pub struct PodWiring {
+    /// `ConfigDoc::hash()` — stamps [`CONFIG_HASH_ANNOTATION`].
+    pub config_hash: String,
+    /// Mount for `{{secret:INTELLIGENCE_TOKEN}}` (the bound ModelPool's key).
+    pub intelligence_token: Option<agent_api::SecretKeyRef>,
+    /// Mounts for `{{secret:AGENT_MCP_*_TOKEN}}` references.
+    pub mcp_tokens: Vec<SecretEnv>,
+    /// The workflow ConfigMap the document's `file:` entry references.
+    pub workflow: Option<WorkflowMount>,
+    /// Mount the AAuth key Secret (`<workload>-aauth-key`) at
+    /// [`paths::AAUTH_KEY`] (the document's `security.aauth.key_file`).
+    pub aauth_key: bool,
+    /// Inject the in-cluster `AGENTCTL_API_TOKEN` bearer (chart apiToken).
+    pub api_token: bool,
+    /// Extra plain env (fleet work-fabric coordinates for a coordinator).
+    pub extra_env: Vec<(String, String)>,
+}
+
+/// In-pod mount of the AAuth key Secret.
 const AAUTH_MOUNT: &str = "/etc/agentctl/aauth";
 const AAUTH_VOLUME: &str = "agentctl-aauth-key";
 
-/// Wire the AAuth identity into the rendered pod: mount the per-workload key
-/// Secret and pass `--aauth-provider <issuer>` + `--aauth-key-file <mount>`.
-/// No token, no admin credential — the pod's only identity material is its own
-/// key. Idempotent. A conformant agent without the aauth surface fails
-/// validation loudly (exit 2) rather than running unsigned — the capability
-/// probe reports the missing surface.
-pub fn inject_aauth(rendered: &mut Rendered, provider: &str) {
-    let pod = match rendered {
-        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj
-            .spec
-            .job_template
-            .spec
-            .as_mut()
-            .map(|js| &mut js.template),
-        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
-        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
-    };
-    let Some(pod) = pod else { return };
-    let Some(spec) = pod.spec.as_mut() else {
-        return;
-    };
-    // The workload name is the Secret-name stem; recover it from the pod
-    // label the renderer always stamps (`agentctl.dev/agent`, see
-    // [`managed_labels`]).
-    let workload = pod
-        .metadata
-        .as_ref()
-        .and_then(|m| m.labels.as_ref())
-        .and_then(|l| l.get("agentctl.dev/agent"))
-        .cloned();
-    let Some(workload) = workload else { return };
-    // Volume (idempotent).
-    let volumes = spec.volumes.get_or_insert_with(Vec::new);
-    if !volumes.iter().any(|v| v.name == AAUTH_VOLUME) {
-        volumes.push(Volume {
-            name: AAUTH_VOLUME.to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(crate::aauth::key_secret_name(&workload)),
-                // 0444, not 0400: a Secret volume's files are owned by root, and
-                // a conformant agent runs as an arbitrary non-root uid (agentd is
-                // 65532) that could not read a root-owned 0400 file. The volume
-                // is mounted read-only into the agent's OWN single-container pod,
-                // so world-readable here means "readable by the one process that
-                // is this agent" — no cross-container exposure. (fsGroup would let
-                // us keep 0440, but the operator does not pin the agent's gid.)
-                default_mode: Some(0o444),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-    }
-    let Some(container) = spec.containers.first_mut() else {
-        return;
-    };
-    let mounts = container.volume_mounts.get_or_insert_with(Vec::new);
-    if !mounts.iter().any(|m| m.name == AAUTH_VOLUME) {
-        mounts.push(VolumeMount {
-            name: AAUTH_VOLUME.to_string(),
-            mount_path: AAUTH_MOUNT.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        });
-    }
-    let args = container.args.get_or_insert_with(Vec::new);
-    if !args.iter().any(|a| a == "--aauth-provider") {
-        args.push("--aauth-provider".to_string());
-        args.push(provider.to_string());
-        args.push("--aauth-key-file".to_string());
-        args.push(format!("{AAUTH_MOUNT}/{}", crate::aauth::KEY_FILENAME));
-    }
-}
-
-/// Inject the direct intelligence dial (RFC 0024 — no gateway): set
-/// `INTELLIGENCE=<endpoint>` (the bound `ModelPool`'s provider endpoint,
-/// absolutized) and, when the pool carries a key, mount it as the agent's
-/// `INTELLIGENCE_TOKEN` env-secret. `aauth`-authenticated pools pass
-/// `token: None` (the agent signs; secret-free). Idempotent.
-pub fn inject_intelligence(
-    rendered: &mut Rendered,
-    endpoint: &str,
-    token: Option<&agent_api::SecretKeyRef>,
-) {
-    let pod = match rendered {
-        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj
-            .spec
-            .job_template
-            .spec
-            .as_mut()
-            .map(|js| &mut js.template),
-        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
-        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
-    };
-    let Some(pod) = pod else { return };
-    let Some(spec) = pod.spec.as_mut() else {
-        return;
-    };
-    let Some(container) = spec.containers.first_mut() else {
-        return;
-    };
-    let env = container.env.get_or_insert_with(Vec::new);
-    if !env.iter().any(|e| e.name == "INTELLIGENCE") {
-        env.push(EnvVar {
-            name: "INTELLIGENCE".to_string(),
-            value: Some(absolutize_endpoint(endpoint)),
-            ..Default::default()
-        });
-    }
-    // Key-authenticated provider ⇒ mount the key as INTELLIGENCE_TOKEN (the
-    // contract's env-secret path). The agent holds the key — no off-pod broker.
-    if let Some(t) = token {
-        if !env.iter().any(|e| e.name == "INTELLIGENCE_TOKEN") {
-            env.push(EnvVar {
-                name: "INTELLIGENCE_TOKEN".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: t.name.clone(),
-                        key: t.key.clone(),
-                        optional: Some(false),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
-    }
-}
-
-/// Render the agent's inline MCP servers as **direct dials**
-/// (`--mcp <name>=<endpoint>` + `--mcp-tags <name>=<comma-list>`) — there is no
-/// gateway. `aauth` servers are signed by the agent's identity (secret-free);
-/// `staticToken` servers get their bearer `Secret` mounted onto the pod as an
-/// env var (`token_env`). In-cluster endpoints are absolutized (trailing dot)
-/// so no DNS search list can capture them. Idempotent per server name.
-pub fn inject_mcp_servers(rendered: &mut Rendered, servers: &[McpBinding]) {
-    if servers.is_empty() {
-        return;
-    }
-    let pod = match rendered {
-        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj
-            .spec
-            .job_template
-            .spec
-            .as_mut()
-            .map(|js| &mut js.template),
-        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
-        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
-    };
-    let Some(pod) = pod else { return };
-    let Some(spec) = pod.spec.as_mut() else {
-        return;
-    };
-    let Some(container) = spec.containers.first_mut() else {
-        return;
-    };
-    for s in servers {
-        // staticToken: mount the bearer Secret onto the pod as its env var.
-        if let Some((env_var, secret_name, secret_key)) = &s.token_env {
-            let env = container.env.get_or_insert_with(Vec::new);
-            if !env.iter().any(|e| &e.name == env_var) {
-                env.push(EnvVar {
-                    name: env_var.clone(),
-                    value_from: Some(EnvVarSource {
-                        secret_key_ref: Some(SecretKeySelector {
-                            name: secret_name.clone(),
-                            key: secret_key.clone(),
-                            optional: Some(false),
-                        }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
-            }
-        }
-        let args = container.args.get_or_insert_with(Vec::new);
-        let mcp_val = format!("{}={}", s.name, absolutize_endpoint(&s.endpoint));
-        // Idempotent: never render the same server twice.
-        if args.iter().any(|a| a == &mcp_val) {
-            continue;
-        }
-        args.push("--mcp".to_string());
-        args.push(mcp_val);
-        if !s.tags.is_empty() {
-            args.push("--mcp-tags".to_string());
-            args.push(format!("{}={}", s.name, s.tags.join(",")));
-        }
-    }
-}
-
-/// Absolutize an in-cluster Service FQDN in a direct-dial endpoint: a host
-/// ending in `.svc.cluster.local` (no trailing dot) gets the trailing dot, so
-/// an ndots search list can never rewrite the 4-dot name to a foreign host (the
-/// cluster-DNS-wildcard leak class). External hosts pass through untouched.
-pub(crate) fn absolutize_endpoint(endpoint: &str) -> String {
-    let Some(scheme_end) = endpoint.find("://") else {
-        return endpoint.to_string();
-    };
-    let rest = &endpoint[scheme_end + 3..];
-    let host_end = rest.find(['/', ':', '?']).unwrap_or(rest.len());
-    let host = &rest[..host_end];
-    if host.ends_with(".svc.cluster.local") {
-        let mut out = String::with_capacity(endpoint.len() + 1);
-        out.push_str(&endpoint[..scheme_end + 3]);
-        out.push_str(host);
-        out.push('.');
-        out.push_str(&rest[host_end..]);
-        out
-    } else {
-        endpoint.to_string()
-    }
-}
-
-/// Writable scratch dir mounted over the read-only root filesystem. With
-/// `readOnlyRootFilesystem: true` (see `container_security_context`) the
-/// container cannot write to `/`, so the agent's temp scratch needs an explicit
-/// writable `emptyDir` here.
+/// Writable scratch over the read-only root filesystem.
 const TMP_MOUNT: &str = "/tmp";
 const TMP_VOLUME: &str = "tmp";
 
-/// Secret holding the optional in-cluster bearer token (chart `apiToken.enabled`),
-/// created by the chart in the control-plane namespace. Both the Secret name and
-/// its single key are `AGENTCTL_API_TOKEN`.
+/// Secret holding the optional in-cluster bearer token (chart `apiToken.enabled`).
 pub const API_TOKEN_SECRET: &str = "agentctl-api-token";
 /// Env var (and Secret key) the gated services read the bearer token from.
 pub const API_TOKEN_ENV: &str = "AGENTCTL_API_TOKEN";
@@ -450,44 +228,45 @@ pub enum Rendered {
     CronJob(Box<CronJob>),
     /// `loop`/`reactive` Agent, or a claim-mode AgentFleet → a Deployment.
     Deployment(Box<Deployment>),
-    /// A shard-mode AgentFleet → a StatefulSet (stable shard identity).
+    /// A shard-mode AgentFleet → a StatefulSet (stable per-replica identity —
+    /// `AGENT_POD_NAME` is the store fence; partition semantics live upstream
+    /// of the agent per ADR-0009).
     StatefulSet(Box<StatefulSet>),
 }
 
-/// Why rendering could not proceed (caller surfaces these as a `Validated=False`
-/// condition rather than crashing the reconcile loop).
+/// Why rendering could not proceed (surfaced as `Validated=False`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
     /// The resource has no `.metadata.name`.
     MissingName,
-    /// No image to run: neither `spec.image` nor the operator's default agent
-    /// image is set.
+    /// No image: neither `spec.image` nor the operator default is set.
     MissingImage,
-    /// A shard-mode fleet did not set `scaling.shards` (the partition count `N`).
+    /// A shard-mode fleet did not set `scaling.shards`.
     MissingShards,
     /// A substrate this renderer does not yet implement.
     UnsupportedSubstrate(Substrate),
+    /// `mode: schedule` without `spec.schedule` (CEL also enforces this).
+    MissingSchedule,
 }
 
 impl std::fmt::Display for RenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RenderError::MissingName => write!(f, "resource has no metadata.name"),
-            RenderError::MissingImage => {
-                write!(
-                    f,
-                    "image is required: set spec.image, or configure the operator's \
-                     default agent image (operator.defaultAgentImage / AGENTCTL_DEFAULT_AGENT_IMAGE)"
-                )
-            }
-            RenderError::MissingShards => {
-                write!(
-                    f,
-                    "shard-mode fleet requires scaling.shards (the partition count N)"
-                )
-            }
+            RenderError::MissingImage => write!(
+                f,
+                "image is required: set spec.image, or configure the operator's \
+                 default agent image (operator.defaultAgentImage / AGENTCTL_DEFAULT_AGENT_IMAGE)"
+            ),
+            RenderError::MissingShards => write!(
+                f,
+                "shard-mode fleet requires scaling.shards (the partition count N)"
+            ),
             RenderError::UnsupportedSubstrate(s) => {
                 write!(f, "substrate {s:?} not implemented by this renderer")
+            }
+            RenderError::MissingSchedule => {
+                write!(f, "mode 'schedule' requires spec.schedule.cron")
             }
         }
     }
@@ -495,8 +274,13 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
-/// Render an `Agent` to its workload (mode→workload mapping).
-pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, RenderError> {
+/// Render an `Agent` to its workload (shape mapping — the document itself is
+/// the controller's `agent-config` output, referenced by hash in `wiring`).
+pub fn render_agent(
+    agent: &Agent,
+    cfg: &RenderConfig,
+    wiring: &PodWiring,
+) -> Result<Rendered, RenderError> {
     let name = agent
         .metadata
         .name
@@ -512,79 +296,121 @@ pub fn render_agent(agent: &Agent, cfg: &RenderConfig) -> Result<Rendered, Rende
         &labels,
         owner_ref("Agent", &name, uid_of(&agent.metadata.uid)),
     );
-    let pod = pod_template(&agent.spec, &image, &labels, &name, cfg);
+    let template = pod_template(&name, &image, agent.spec.mode, &labels, wiring);
 
-    match agent.spec.mode {
-        // `workflow` is a supervised one-shot like `once` (→ Job): drive the graph
-        // to a terminal status, then exit. (`reactive` + a workflow stays a
-        // Deployment — the daemon arm below.)
-        Mode::Once | Mode::Workflow => Ok(Rendered::Job(Box::new(Job {
+    Ok(match agent.spec.mode {
+        Mode::Once | Mode::Workflow => Rendered::Job(Box::new(Job {
             metadata: meta,
-            spec: Some(JobSpec {
-                template: pod,
-                backoff_limit: Some(0),
-                ..Default::default()
-            }),
+            spec: Some(job_spec(template)),
             ..Default::default()
-        }))),
-        // `schedule` → a CronJob firing the Job on its cron. CEL guarantees
-        // `spec.schedule` is set for this mode.
+        })),
         Mode::Schedule => {
-            let sched = agent.spec.schedule.clone().unwrap_or_default();
-            Ok(Rendered::CronJob(Box::new(CronJob {
+            let schedule = agent
+                .spec
+                .schedule
+                .as_ref()
+                .ok_or(RenderError::MissingSchedule)?;
+            Rendered::CronJob(Box::new(CronJob {
                 metadata: meta,
                 spec: CronJobSpec {
-                    schedule: sched.cron,
-                    time_zone: sched.timezone,
-                    // Don't stack runs if one overruns its interval.
+                    schedule: schedule.cron.clone(),
+                    time_zone: schedule.timezone.clone(),
                     concurrency_policy: Some("Forbid".to_string()),
                     job_template: JobTemplateSpec {
-                        spec: Some(JobSpec {
-                            template: pod,
-                            backoff_limit: Some(0),
+                        metadata: Some(ObjectMeta {
+                            labels: Some(labels.clone()),
                             ..Default::default()
                         }),
-                        ..Default::default()
+                        spec: Some(job_spec(template)),
                     },
                     ..Default::default()
                 },
                 ..Default::default()
-            })))
+            }))
         }
-        Mode::Loop | Mode::Reactive => Ok(Rendered::Deployment(Box::new(Deployment {
+        Mode::Loop | Mode::Reactive => Rendered::Deployment(Box::new(Deployment {
             metadata: meta,
             spec: Some(DeploymentSpec {
-                // A singleton Agent runs one replica. An AgentFleet omits replicas
-                // entirely in claim mode (KEDA owns it) — see `render_fleet`.
                 replicas: Some(1),
                 selector: label_selector(&labels),
-                template: pod,
+                template,
                 ..Default::default()
             }),
             ..Default::default()
-        }))),
+        })),
+    })
+}
+
+/// The Job spec around a template: no in-cluster retries beyond the policy
+/// (`backoffLimit: 0` keeps the run-or-not decision with `podFailurePolicy` +
+/// the CR owner), and the exit-code intents compiled per the vendored table.
+fn job_spec(template: PodTemplateSpec) -> JobSpec {
+    JobSpec {
+        backoff_limit: Some(0),
+        pod_failure_policy: Some(pod_failure_policy()),
+        template,
+        ..Default::default()
     }
 }
 
-/// Render an `AgentFleet` to its workload (scaling regime): claim mode
-/// → a Deployment with **`replicas` omitted** (KEDA's HPA owns it); shard mode →
-/// a StatefulSet whose replica count is the fixed partition count `N`.
-pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, RenderError> {
+/// Compile the vendored exit-code intent table into a `podFailurePolicy`:
+/// `terminal` codes fail the Job outright (a retry never helps), `retriable`
+/// and `policy` codes count against `backoffLimit`, and a SIGTERM'd pod that
+/// was disrupted (node drain, preemption) is counted rather than failed —
+/// exactly the division agentd's own manifests document, derived here from the
+/// contract instead of hand-copied.
+fn pod_failure_policy() -> PodFailurePolicy {
+    let table = Table::vendored();
+    let on_codes = |codes: Vec<i32>, action: &str| PodFailurePolicyRule {
+        action: action.to_string(),
+        on_exit_codes: Some(PodFailurePolicyOnExitCodesRequirement {
+            container_name: Some("agent".to_string()),
+            operator: "In".to_string(),
+            values: codes,
+        }),
+        on_pod_conditions: None,
+    };
+    let mut retriable = table.codes_with_intent(Intent::Retriable);
+    retriable.extend(table.codes_with_intent(Intent::Policy));
+    retriable.sort_unstable();
+    PodFailurePolicy {
+        rules: vec![
+            on_codes(table.codes_with_intent(Intent::Terminal), "FailJob"),
+            on_codes(retriable, "Count"),
+            PodFailurePolicyRule {
+                action: "Count".to_string(),
+                on_exit_codes: None,
+                on_pod_conditions: Some(vec![PodFailurePolicyOnPodConditionsPattern {
+                    status: Some("True".to_string()),
+                    type_: "DisruptionTarget".to_string(),
+                }]),
+            },
+        ],
+    }
+}
+
+/// Render an `AgentFleet`'s worker workload. Claim mode → a Deployment whose
+/// replicas KEDA owns (`replicas: None`); shard mode → a StatefulSet with the
+/// fixed partition count. Per-member identity is `AGENT_POD_NAME` (the store
+/// fence); there is NO agent-side shard flag any more — partition semantics
+/// live in the fleet's own workflows/config (ADR-0009, RFC 0034).
+pub fn render_fleet(
+    fleet: &AgentFleet,
+    cfg: &RenderConfig,
+    wiring: &PodWiring,
+) -> Result<Rendered, RenderError> {
     let name = fleet
         .metadata
         .name
         .clone()
         .ok_or(RenderError::MissingName)?;
-    // A fleet member is a long-lived worker — claim members poll the work queue,
-    // shard members own a partition — so the effective mode MUST be reactive. The
-    // per-replica `template.mode` defaults to `once` (and once/loop/schedule/workflow
-    // all run to exit), which would CrashLoop under the Deployment/StatefulSet. Pin
-    // it here so a fleet with an unset or mismatched template mode still runs.
-    let mut template = fleet.spec.template.clone();
-    template.mode = Mode::Reactive;
-    let spec = &template;
-    let image = resolve_image(&spec.image, cfg)?;
-    require_stock_unix(spec.substrate)?;
+    let mut template_spec = fleet.spec.template.clone();
+    // Fleet workers are long-lived consumers regardless of what the template
+    // says (the v1 coercion, unchanged): the document the controller composed
+    // for the fleet already reflects Reactive.
+    template_spec.mode = Mode::Reactive;
+    let image = resolve_image(&template_spec.image, cfg)?;
+    require_stock_unix(template_spec.substrate)?;
 
     let labels = managed_labels(&name);
     let meta = owned_meta(
@@ -593,110 +419,78 @@ pub fn render_fleet(fleet: &AgentFleet, cfg: &RenderConfig) -> Result<Rendered, 
         &labels,
         owner_ref("AgentFleet", &name, uid_of(&fleet.metadata.uid)),
     );
-    let mut pod = pod_template(spec, &image, &labels, &name, cfg);
+    let template = pod_template(&name, &image, Mode::Reactive, &labels, wiring);
 
-    match fleet.spec.scaling.mode {
-        ScaleMode::Claim => Ok(Rendered::Deployment(Box::new(Deployment {
+    Ok(match fleet.spec.scaling.mode {
+        ScaleMode::Claim => Rendered::Deployment(Box::new(Deployment {
             metadata: meta,
             spec: Some(DeploymentSpec {
-                // replicas OMITTED: KEDA's HPA is the sole owner.
+                // KEDA owns replicas: leave unset so SSA never fights it.
                 replicas: None,
                 selector: label_selector(&labels),
-                template: pod,
+                template,
                 ..Default::default()
             }),
             ..Default::default()
-        }))),
+        })),
         ScaleMode::Shard => {
             let shards = fleet
                 .spec
                 .scaling
                 .shards
                 .ok_or(RenderError::MissingShards)?;
-            // Shard identity: inject only `N` (identical across
-            // every StatefulSet pod, as a shared template requires); the agent
-            // derives its own `K` from the ordinal in `AGENT_POD_NAME`
-            // (`<sts>-<ordinal>`). `--shard auto/N` is the contract spelling of that.
-            inject_shard_identity(&mut pod, shards);
-            Ok(Rendered::StatefulSet(Box::new(StatefulSet {
+            let mut template = template;
+            template
+                .metadata
+                .get_or_insert_with(Default::default)
+                .annotations
+                .get_or_insert_with(Default::default)
+                .insert(SHARDS_ANNOTATION.to_string(), shards.to_string());
+            Rendered::StatefulSet(Box::new(StatefulSet {
                 metadata: meta,
                 spec: Some(StatefulSetSpec {
-                    // shard mode: replicas = N (the partition count), NOT KEDA-owned.
                     replicas: Some(shards as i32),
-                    // headless Service for stable per-shard network identity.
                     service_name: Some(name.clone()),
                     selector: label_selector(&labels),
-                    template: pod,
+                    template,
                     ..Default::default()
                 }),
                 ..Default::default()
-            })))
+            }))
         }
-    }
+    })
 }
 
-/// Inject `--shard auto/N` into a shard StatefulSet pod's agent container.
-/// Only `N` is templated — it is identical across all ordinals, which a
-/// shared pod template requires; the agent self-derives its `K` from the ordinal in
-/// `AGENT_POD_NAME`. Idempotent (no-op if a `--shard` flag is already present).
-fn inject_shard_identity(pod: &mut PodTemplateSpec, shards: u32) {
-    let Some(container) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) else {
-        return;
-    };
-    let args = container.args.get_or_insert_with(Vec::new);
-    if args.iter().any(|a| a == "--shard") {
-        return;
-    }
-    args.push("--shard".to_string());
-    args.push(format!("auto/{shards}"));
-}
-
-/// The label distinguishing a fleet's coordinator workload from its worker pool.
-/// Worker pods keep only the `agentctl.dev/agent=<fleet>` label; the coordinator
-/// carries its own name label PLUS these two.
+/// Label distinguishing a fleet's coordinator pods from its workers.
 pub const FLEET_ROLE_LABEL: &str = "agentctl.dev/fleet-role";
-/// The label tying a coordinator back to its fleet (for cross-member discovery).
+/// Label carrying the owning fleet's name on auxiliary workloads.
 pub const FLEET_LABEL: &str = "agentctl.dev/fleet";
 
-/// The coordinator workload's name for a fleet: `<fleet>-coordinator`. Distinct
-/// from the fleet name so the worker Deployment's `agentctl.dev/agent=<fleet>`
-/// selector never captures coordinator pods (and vice-versa), and so the gateway
-/// can address the coordinator by `agentctl.dev/agent=<fleet>-coordinator`.
+/// The coordinator Deployment name for a fleet.
 pub fn coordinator_name(fleet: &str) -> String {
     format!("{fleet}-coordinator")
 }
 
-/// Render an `AgentFleet`'s **coordinator** ("main agent") when one is
-/// declared; `None` for a coordinatorless fleet. The coordinator is a long-lived
-/// reactive front door rendered as its own Deployment `<fleet>-coordinator`,
-/// labeled `fleet-role: coordinator`, replicas `coordinator.replicas` (default 1),
-/// wired to fan work out per `distribution` (queue ⇒ a work-source env hint; a2a ⇒
-/// an `--a2a-peer worker=…/fleets/<ns>/<name>` through the gateway PEP).
+/// Render a fleet's coordinator ("main agent") Deployment, if declared. Its
+/// document (with `a2a.peers` for `distribution: a2a`) is composed by the
+/// controller; the queue-distribution work-fabric coordinates ride
+/// `wiring.extra_env`.
 pub fn render_coordinator(
     fleet: &AgentFleet,
     cfg: &RenderConfig,
-) -> Option<Result<Rendered, RenderError>> {
-    let coord = fleet.spec.coordinator.as_ref()?;
-    Some(render_coordinator_inner(fleet, coord, cfg))
-}
-
-fn render_coordinator_inner(
-    fleet: &AgentFleet,
-    coord: &agent_api::Coordinator,
-    cfg: &RenderConfig,
-) -> Result<Rendered, RenderError> {
+    wiring: &PodWiring,
+) -> Result<Option<Rendered>, RenderError> {
+    let Some(coord) = &fleet.spec.coordinator else {
+        return Ok(None);
+    };
     let fleet_name = fleet
         .metadata
         .name
         .clone()
         .ok_or(RenderError::MissingName)?;
     let name = coordinator_name(&fleet_name);
-    // The coordinator is a long-lived A2A front door: coerce to reactive so a
-    // run-to-exit mode does not CrashLoop under the Deployment (admission already
-    // forbids `once`). Driving a workflow from a coordinator is not supported.
-    let mut template = coord.template.clone();
-    template.mode = Mode::Reactive;
-    let spec = &template;
+    let mut spec = coord.template.clone();
+    spec.mode = Mode::Reactive; // long-lived front door, like v1
     let image = resolve_image(&spec.image, cfg)?;
     require_stock_unix(spec.substrate)?;
 
@@ -709,195 +503,61 @@ fn render_coordinator_inner(
         &labels,
         owner_ref("AgentFleet", &fleet_name, uid_of(&fleet.metadata.uid)),
     );
-    let mut pod = pod_template(spec, &image, &labels, &name, cfg);
-    apply_distribution(
-        &mut pod,
-        coord.distribution.unwrap_or_default(),
-        fleet,
-        cfg,
-        &fleet_name,
-    );
-
+    let template = pod_template(&name, &image, Mode::Reactive, &labels, wiring);
     let replicas = coord.replicas.unwrap_or(1).max(1) as i32;
-    Ok(Rendered::Deployment(Box::new(Deployment {
+
+    Ok(Some(Rendered::Deployment(Box::new(Deployment {
         metadata: meta,
         spec: Some(DeploymentSpec {
             replicas: Some(replicas),
             selector: label_selector(&labels),
-            template: pod,
+            template,
             ..Default::default()
         }),
         ..Default::default()
-    })))
+    }))))
 }
 
-/// Wire the coordinator's work fan-out into its pod. `queue` (the
-/// default): inject `AGENT_FLEET_WORKSOURCE` (the fleet `workSource`) as a config
-/// hint so a conformant coordinator knows where to `work.submit`/`work.result`.
-/// `a2a`: append `--a2a-peer worker=<gateway>/fleets/<ns>/<fleet>` so the
-/// coordinator's `a2a.delegate` reaches the worker pool through the gateway PEP.
-fn apply_distribution(
-    pod: &mut PodTemplateSpec,
-    distribution: Distribution,
-    fleet: &AgentFleet,
-    cfg: &RenderConfig,
-    fleet_name: &str,
-) {
-    let Some(container) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) else {
-        return;
-    };
-    match distribution {
-        Distribution::Queue => {
-            let env = container.env.get_or_insert_with(Vec::new);
-            if let Some(ws) = fleet.spec.work.as_ref().and_then(|w| w.source.as_deref()) {
-                env.push(EnvVar {
-                    name: "AGENT_FLEET_WORKSOURCE".to_string(),
-                    value: Some(ws.to_string()),
-                    ..Default::default()
-                });
-            }
-            // Deliver the redelivery/lease policy to the coordinator, which a
-            // conformant coordinator stamps onto each `work.submit`. Absent ⇒
-            // omitted (server defaults apply).
-            if let Some(ma) = fleet.spec.work.as_ref().and_then(|w| w.max_attempts) {
-                env.push(EnvVar {
-                    name: "AGENT_FLEET_MAX_ATTEMPTS".to_string(),
-                    value: Some(ma.to_string()),
-                    ..Default::default()
-                });
-            }
-            if let Some(ttl) = fleet
-                .spec
-                .work
-                .as_ref()
-                .and_then(|w| w.claim_ttl.as_deref())
-            {
-                env.push(EnvVar {
-                    name: "AGENT_FLEET_CLAIM_TTL".to_string(),
-                    value: Some(ttl.to_string()),
-                    ..Default::default()
-                });
-            }
-        }
-        Distribution::A2a => {
-            let ns = fleet.metadata.namespace.as_deref().unwrap_or("default");
-            let peer = format!(
-                "{}/fleets/{}/{}",
-                cfg.gateway_url.trim_end_matches('/'),
-                ns,
-                fleet_name
-            );
-            let args = container.args.get_or_insert_with(Vec::new);
-            args.push("--a2a-peer".to_string());
-            args.push(format!("worker={peer}"));
-        }
-    }
+/// The A2A worker-pool peer endpoint a coordinator's document declares for
+/// `distribution: a2a` (RFC 0022's fleet front door via the gateway).
+pub fn fleet_peer_endpoint(cfg: &RenderConfig, ns: &str, fleet: &str) -> String {
+    format!(
+        "{}/fleets/{}/{}",
+        cfg.gateway_url.trim_end_matches('/'),
+        ns,
+        fleet
+    )
 }
 
-/// Inject the optional in-cluster bearer token (`AGENTCTL_API_TOKEN`, `valueFrom`
-/// a `secretKeyRef` on [`API_TOKEN_SECRET`]) into the rendered agent pod's first
-/// container env, so a conformant agent can present it to the token-gated
-/// coordination server (chart `apiToken.enabled`). Idempotent: a no-op if the
-/// env var is already set (e.g. a user `extraEnv`).
-///
-/// LIMITATION (documented, not silently broken): a `secretKeyRef` resolves only
-/// within the pod's OWN namespace. The chart creates [`API_TOKEN_SECRET`] in the
-/// control-plane namespace, so this injection only yields a *resolvable* ref for
-/// agents in that namespace. The caller therefore gates injection on the agent
-/// being in the control-plane namespace (see
-/// `controller::ApiTokenConfig::should_inject`); agents in other namespaces need
-/// the Secret replicated there before the operator should inject it.
-pub fn inject_api_token(rendered: &mut Rendered) {
-    let pod = match rendered {
-        Rendered::Job(job) => job.spec.as_mut().map(|s| &mut s.template),
-        Rendered::CronJob(cj) => cj
-            .spec
-            .job_template
-            .spec
-            .as_mut()
-            .map(|js| &mut js.template),
-        Rendered::Deployment(dep) => dep.spec.as_mut().map(|s| &mut s.template),
-        Rendered::StatefulSet(sts) => sts.spec.as_mut().map(|s| &mut s.template),
-    };
-    let Some(pod) = pod else { return };
-    let Some(spec) = pod.spec.as_mut() else {
-        return;
-    };
-    let Some(container) = spec.containers.first_mut() else {
-        return;
-    };
-    let env = container.env.get_or_insert_with(Vec::new);
-    // Idempotent: never duplicate (or shadow) an existing AGENTCTL_API_TOKEN.
-    if env.iter().any(|e| e.name == API_TOKEN_ENV) {
-        return;
-    }
-    env.push(EnvVar {
-        name: API_TOKEN_ENV.to_string(),
-        value_from: Some(EnvVarSource {
-            secret_key_ref: Some(SecretKeySelector {
-                name: API_TOKEN_SECRET.to_string(),
-                key: API_TOKEN_ENV.to_string(),
-                optional: None,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    });
-}
+// ---------------------------------------------------------------------------
+// KEDA ScaledObject (claim-mode fleets) — unchanged mechanics from v1
+// ---------------------------------------------------------------------------
 
-/// Default in-cluster address of the agentctl KEDA external scaler (gRPC). The
-/// operator overrides this from `SCALER_ADDRESS`; KEDA dials it for the external
-/// trigger.
+/// Default scaler gRPC address for the KEDA external trigger.
 pub const DEFAULT_SCALER_ADDRESS: &str = "agentctl-scaler.agentctl-system:9100";
-/// Default in-cluster coordination-server base URL the scaler reads the claim
-/// backlog (`work.stats`) from. Overridden from `COORDINATION_URL`, or per-fleet
-/// by `spec.work.source` when set.
+/// Default in-cluster coordination-server base URL (claim backlog source).
 pub const DEFAULT_COORDINATION_URL: &str = "http://agentctl-coordination.agentctl-system/";
-/// Fallback per-replica backlog target KEDA scales toward when a claim fleet does
-/// not set `scaling.target.value`.
+/// Fallback per-replica backlog target.
 const DEFAULT_SCALE_THRESHOLD: &str = "5";
 
-/// Render the KEDA `ScaledObject` that autoscales a **claim-mode** fleet's
-/// Deployment off the coordination backlog, or `None` for shard mode
-/// (a StatefulSet with a fixed partition count `N` is NOT KEDA-driven, so the
-/// caller emits no ScaledObject for it).
-///
-/// Built as an untyped [`serde_json::Value`] (a kube `DynamicObject` body) so the
-/// operator carries **no hard dependency on the KEDA CRD types**: a cluster
-/// without KEDA simply never has this object applied (the controller gates on a
-/// config flag and applies it best-effort).
-///
-/// The KEDA-safe invariant holds: this object — not the rendered Deployment —
-/// owns the replica count (`scaleTargetRef` → the Deployment, whose
-/// `.spec.replicas` stays unset; see [`render_fleet`]).
-///
-/// - `scaler_address` — gRPC address KEDA dials for the external trigger
-///   (operator `SCALER_ADDRESS`, default [`DEFAULT_SCALER_ADDRESS`]).
-/// - `coordination_url` — coordination base URL the scaler reads the backlog
-///   from; the fleet's own `spec.work.source` wins when set, else this operator
-///   default (`COORDINATION_URL`, default [`DEFAULT_COORDINATION_URL`]).
+/// Render the KEDA `ScaledObject` autoscaling a claim-mode fleet, or `None`
+/// for shard mode. Untyped body (no hard KEDA CRD dependency).
 pub fn render_scaled_object(
     fleet: &AgentFleet,
     scaler_address: &str,
     coordination_url: &str,
 ) -> Option<serde_json::Value> {
-    // Shard mode is a fixed partition count — no KEDA autoscaling.
     if fleet.spec.scaling.mode != ScaleMode::Claim {
         return None;
     }
     let name = fleet.metadata.name.clone()?;
     let scaling = &fleet.spec.scaling;
-
-    // minReplicaCount defaults to 0 (scale-to-zero); maxReplicaCount is emitted
-    // only when set (else KEDA's own default applies).
     let min = scaling.min_replicas.unwrap_or(0);
-    // threshold: the per-replica backlog target (scaling.target.value, default 5).
     let threshold = scaling
         .target
         .as_ref()
         .map(|t| t.value.clone())
         .unwrap_or_else(|| DEFAULT_SCALE_THRESHOLD.to_string());
-    // coordinationUrl: the fleet's own work source wins; else the operator default.
     let coordination_url = fleet
         .spec
         .work
@@ -907,7 +567,6 @@ pub fn render_scaled_object(
         .unwrap_or_else(|| coordination_url.to_string());
 
     let mut spec = serde_json::json!({
-        // scaleTargetRef.name = the rendered Deployment (same name as the fleet).
         "scaleTargetRef": { "name": name },
         "minReplicaCount": min,
         "triggers": [{
@@ -927,7 +586,6 @@ pub fn render_scaled_object(
     let mut metadata = serde_json::json!({
         "name": name,
         "labels": managed_labels(&name),
-        // ownerRef → the AgentFleet so GC reclaims the ScaledObject with the fleet.
         "ownerReferences": [{
             "apiVersion": API_VERSION,
             "kind": "AgentFleet",
@@ -949,11 +607,13 @@ pub fn render_scaled_object(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// The pod shell
+// ---------------------------------------------------------------------------
+
 fn require_stock_unix(substrate: Option<Substrate>) -> Result<(), RenderError> {
     match substrate.unwrap_or(Substrate::StockUnix) {
         Substrate::StockUnix => Ok(()),
-        // Kata-hybrid swaps the volume source only; sidecar adds a sibling
-        // container. Both reuse the rest of this shape; neither is wired yet.
         other => Err(RenderError::UnsupportedSubstrate(other)),
     }
 }
@@ -976,18 +636,11 @@ fn label_selector(labels: &BTreeMap<String, String>) -> LabelSelector {
     }
 }
 
-/// The label-selector STRING matching a fleet's pods, for the scale
-/// subresource's `labelSelectorPath` (`.status.selector`). Built from the SAME
-/// [`managed_labels`] the rendered workload's `.spec.selector.matchLabels` and
-/// pod template carry, so an HPA reading `.status.selector` resolves exactly the
-/// operator-managed pods. Formatted as comma-separated `key=value` pairs in the
-/// `BTreeMap`'s sorted key order, so the string is deterministic.
+/// The label-selector STRING matching a fleet's pods (scale subresource).
 pub fn fleet_selector_string(name: &str) -> String {
     selector_string(&managed_labels(name))
 }
 
-/// Serialize a `matchLabels` map to the equality-based label-selector string
-/// form Kubernetes uses (`k1=v1,k2=v2`, keys sorted).
 fn selector_string(labels: &BTreeMap<String, String>) -> String {
     labels
         .iter()
@@ -1012,8 +665,6 @@ fn owned_meta(
 }
 
 fn uid_of(uid: &Option<String>) -> String {
-    // uid may be empty before the apiserver assigns it; that's fine for a
-    // dry-run render and is populated on the live object.
     uid.clone().unwrap_or_default()
 }
 
@@ -1028,196 +679,31 @@ fn owner_ref(kind: &str, name: &str, uid: String) -> OwnerReference {
     }
 }
 
-fn pod_template(
-    spec: &AgentSpec,
-    image: &str,
-    labels: &BTreeMap<String, String>,
-    workload: &str,
-    cfg: &RenderConfig,
-) -> PodTemplateSpec {
-    let restart_policy = match spec.mode {
-        Mode::Once | Mode::Schedule | Mode::Workflow => Some("Never".to_string()),
-        // Deployments/StatefulSets require Always.
-        Mode::Loop | Mode::Reactive => None,
+/// Normalize an in-cluster Service endpoint to its ABSOLUTE (trailing-dot)
+/// FQDN form so pod `ndots`/search-domain resolution can never leak the
+/// lookup to an external wildcard domain.
+pub(crate) fn absolutize_endpoint(endpoint: &str) -> String {
+    let Some(scheme_end) = endpoint.find("://") else {
+        return endpoint.to_string();
     };
-
-    let mut env = downward_env();
-    // `INTELLIGENCE` is injected by the controller from the bound `ModelPool`'s
-    // endpoint (the agent dials the provider DIRECTLY — no gateway); see
-    // [`inject_intelligence`].
-    let _ = cfg;
-    // Metrics + readiness listener (`/readyz`), probed below and scraped directly
-    // (the pod is network-attached; there is no scrape proxy).
-    env.push(EnvVar {
-        name: "AGENT_METRICS_ADDR".to_string(),
-        value: Some(format!("0.0.0.0:{METRICS_PORT}")),
-        ..Default::default()
-    });
-
-    let volume_mounts = vec![
-        // The workload's OWN serving identity (cert-manager Secret; tls.crt/tls.key).
-        // Read-only; the agent re-reads it in place on rotation (agentd ≥2.1).
-        VolumeMount {
-            name: TLS_VOLUME.to_string(),
-            mount_path: TLS_MOUNT.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        },
-        // The cluster CA public cert (client-CA + outbound trust anchor).
-        VolumeMount {
-            name: CA_VOLUME.to_string(),
-            mount_path: CA_MOUNT.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        },
-        // Writable scratch: `readOnlyRootFilesystem` makes `/` read-only, so
-        // give the agent an explicit writable `/tmp`.
-        VolumeMount {
-            name: TMP_VOLUME.to_string(),
-            mount_path: TMP_MOUNT.to_string(),
-            ..Default::default()
-        },
-    ];
-    let volumes = vec![
-        Volume {
-            name: TLS_VOLUME.to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(serving_secret_name(workload)),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        Volume {
-            name: CA_VOLUME.to_string(),
-            config_map: Some(ConfigMapVolumeSource {
-                name: CA_CONFIGMAP.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        // Backs the writable `/tmp` mount above.
-        Volume {
-            name: TMP_VOLUME.to_string(),
-            empty_dir: Some(EmptyDirVolumeSource::default()),
-            ..Default::default()
-        },
-    ];
-
-    let mut args = agent_args(spec);
-    args.extend(serve_args());
-
-    let container = Container {
-        name: "agent".to_string(),
-        image: Some(image.to_string()),
-        args: Some(args),
-        env: Some(env),
-        ports: Some(vec![
-            ContainerPort {
-                name: Some("mcp".to_string()),
-                container_port: SERVE_PORT,
-                ..Default::default()
-            },
-            ContainerPort {
-                name: Some("metrics".to_string()),
-                container_port: METRICS_PORT,
-                ..Default::default()
-            },
-        ]),
-        // Readiness = the contract's `/readyz` on the metrics listener (drain /
-        // lame-duck / all-endpoints-down flip it, so ready == accepting work).
-        readiness_probe: Some(Probe {
-            http_get: Some(HTTPGetAction {
-                path: Some("/readyz".to_string()),
-                port: IntOrString::Int(METRICS_PORT),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
-        // Confine the tenant container (hostile multi-tenancy).
-        security_context: Some(container_security_context()),
-        volume_mounts: Some(volume_mounts),
-        ..Default::default()
-    };
-
-    PodTemplateSpec {
-        metadata: Some(ObjectMeta {
-            labels: Some(labels.clone()),
-            ..Default::default()
-        }),
-        spec: Some(PodSpec {
-            containers: vec![container],
-            restart_policy,
-            // Pod-level hardening (hostile multi-tenancy).
-            security_context: Some(pod_security_context()),
-            // The pod holds NO borrowed credential — and no ambient one either:
-            // never auto-mount the namespace default ServiceAccount token.
-            automount_service_account_token: Some(false),
-            // Share the pod PID namespace so the pod's infra (pause) container is
-            // PID 1 and the agent is NOT. A conformant agent (e.g. agentd) forks a
-            // worker subagent guarded by an orphan check (`getppid() == 1` ⇒ the
-            // supervisor died, bail): with the agent running as PID 1 (scratch
-            // image, agent as ENTRYPOINT) that check misfires — the worker's parent
-            // IS pid 1 — so EVERY run aborts before doing any work. Sharing the PID
-            // namespace gives the agent a non-1 pid so the guard is correct.
-            share_process_namespace: Some(true),
-            volumes: Some(volumes),
-            ..Default::default()
-        }),
+    let rest = &endpoint[scheme_end + 3..];
+    let host_end = rest.find(['/', ':', '?']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    if host.ends_with(".svc.cluster.local") {
+        let mut out = String::with_capacity(endpoint.len() + 1);
+        out.push_str(&endpoint[..scheme_end + 3]);
+        out.push_str(host);
+        out.push('.');
+        out.push_str(&rest[host_end..]);
+        out
+    } else {
+        endpoint.to_string()
     }
 }
 
-/// The HTTPS serve + trust args every rendered agent gets (contract 1.0): serve
-/// the self-MCP/A2A surface mTLS-gated on [`SERVE_PORT`], trust cluster-CA
-/// client certs (`Management` = the control plane), and trust the same CA for
-/// outbound dials (the gateways).
-fn serve_args() -> Vec<String> {
-    vec![
-        "--serve-mcp".to_string(),
-        format!("https://0.0.0.0:{SERVE_PORT}"),
-        "--serve-cert".to_string(),
-        format!("{TLS_MOUNT}/tls.crt"),
-        "--serve-key".to_string(),
-        format!("{TLS_MOUNT}/tls.key"),
-        "--serve-client-ca".to_string(),
-        format!("{CA_MOUNT}/{CA_KEY}"),
-        "--tls-ca".to_string(),
-        format!("{CA_MOUNT}/{CA_KEY}"),
-    ]
-}
-
-/// Container-level confinement for the tenant agent (hostile multi-tenancy):
-/// **nonroot enforced**, no privilege escalation, all Linux capabilities
-/// dropped, read-only root filesystem (writable paths are explicit volumes —
-/// `/tmp`). The reference image's native `USER 65532` runs unchanged and the
-/// whole render satisfies the `restricted` Pod Security Standard.
-fn container_security_context() -> SecurityContext {
-    SecurityContext {
-        run_as_non_root: Some(true),
-        allow_privilege_escalation: Some(false),
-        read_only_root_filesystem: Some(true),
-        capabilities: Some(Capabilities {
-            drop: Some(vec!["ALL".to_string()]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-/// Pod-level confinement: pin the seccomp profile to the runtime default so the
-/// kernel syscall surface is filtered for every container in the pod.
-fn pod_security_context() -> PodSecurityContext {
-    PodSecurityContext {
-        seccomp_profile: Some(SeccompProfile {
-            type_: "RuntimeDefault".to_string(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-/// The downward-API instance-identity env, emitted with the `AGENT_*` spelling
-/// the reference agent reads. The serve instruction is not an env var; it is
-/// the `--serve-mcp https://…` argv ([`serve_args`]).
+/// Kubernetes downward-API identity env (the ACC env convention):
+/// `AGENT_POD_NAME` is load-bearing — it becomes `agent.name`, the durable
+/// store's per-replica identity fence.
 fn downward_env() -> Vec<EnvVar> {
     let field = |name: &str, path: &str| EnvVar {
         name: name.to_string(),
@@ -1238,1001 +724,647 @@ fn downward_env() -> Vec<EnvVar> {
     ]
 }
 
-/// Container args derived from the spec (mode + instruction + model +
-/// subscriptions). A later step renders the full config via a ConfigMap; args
-/// keep the render self-contained and testable.
-fn agent_args(spec: &AgentSpec) -> Vec<String> {
-    let mut args = vec!["--mode".to_string(), mode_str(spec.mode).to_string()];
-    if let Some(instruction) = &spec.instruction {
-        args.push("--instruction".to_string());
-        args.push(instruction.clone());
+fn secret_env(name: &str, secret: &str, key: &str) -> EnvVar {
+    EnvVar {
+        name: name.to_string(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: secret.to_string(),
+                key: key.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
     }
-    if let Some(model_id) = spec.model.as_ref().and_then(|m| m.id.as_deref()) {
-        args.push("--model".to_string());
-        args.push(model_id.to_string());
-    }
-    for sub in &spec.subscribe {
-        args.push("--subscribe".to_string());
-        args.push(sub.clone());
-    }
-    // Deliver the declared bounding box to the agent, so subagent step/token caps
-    // set on the CR reach agentd (which consumes these flags): `max_tokens`,
-    // `max_depth`, and `max_steps` each map to an agentd flag, plus the
-    // per-instance `lifetime_tokens` (RFC 0025) → `--budget-tokens-lifetime`.
-    if let Some(limits) = &spec.limits {
-        if let Some(v) = limits.max_tokens {
-            args.push("--max-tokens".to_string());
-            args.push(v.to_string());
-        }
-        if let Some(v) = limits.max_depth {
-            args.push("--max-depth".to_string());
-            args.push(v.to_string());
-        }
-        if let Some(v) = limits.max_steps {
-            args.push("--max-steps".to_string());
-            args.push(v.to_string());
-        }
-        if let Some(v) = limits.lifetime_tokens {
-            args.push("--budget-tokens-lifetime".to_string());
-            args.push(v.to_string());
-        }
-    }
-    args
 }
 
-fn mode_str(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Once => "once",
-        Mode::Loop => "loop",
-        Mode::Reactive => "reactive",
-        Mode::Schedule => "schedule",
-        Mode::Workflow => "workflow",
+fn container_security_context() -> SecurityContext {
+    SecurityContext {
+        run_as_non_root: Some(true),
+        allow_privilege_escalation: Some(false),
+        read_only_root_filesystem: Some(true),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".to_string()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn pod_security_context() -> PodSecurityContext {
+    PodSecurityContext {
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn http_probe(path: &str, period: i32, failures: i32) -> Probe {
+    Probe {
+        http_get: Some(HTTPGetAction {
+            path: Some(path.to_string()),
+            port: IntOrString::Int(METRICS_PORT),
+            ..Default::default()
+        }),
+        period_seconds: Some(period),
+        failure_threshold: Some(failures),
+        ..Default::default()
+    }
+}
+
+/// The one pod template every shape shares. The container runs
+/// `agentd -c <config file>`; everything else is mounts/env the document's
+/// references resolve against.
+fn pod_template(
+    workload: &str,
+    image: &str,
+    mode: Mode,
+    labels: &BTreeMap<String, String>,
+    wiring: &PodWiring,
+) -> PodTemplateSpec {
+    let daemon = agent_config::is_daemon(mode);
+
+    let mut volumes = vec![
+        Volume {
+            name: CONFIG_VOLUME.to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: config_configmap_name(workload),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: TLS_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(serving_secret_name(workload)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: CA_VOLUME.to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: CA_CONFIGMAP.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: TMP_VOLUME.to_string(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        },
+    ];
+    let mut mounts = vec![
+        mount(CONFIG_VOLUME, paths::CONFIG_DIR, true),
+        mount(TLS_VOLUME, TLS_MOUNT, true),
+        mount(CA_VOLUME, CA_MOUNT, true),
+        mount(TMP_VOLUME, TMP_MOUNT, false),
+    ];
+
+    if daemon {
+        volumes.push(Volume {
+            name: STATE_VOLUME.to_string(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        });
+        mounts.push(mount(STATE_VOLUME, STATE_MOUNT, false));
+    }
+    if let Some(wf) = &wiring.workflow {
+        volumes.push(Volume {
+            name: "agentctl-workflow".to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: wf.config_map.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        mounts.push(mount("agentctl-workflow", paths::WORKFLOW_DIR, true));
+    }
+    if wiring.aauth_key {
+        volumes.push(Volume {
+            name: AAUTH_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(format!("{workload}-aauth-key")),
+                default_mode: Some(0o444),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        mounts.push(mount(AAUTH_VOLUME, AAUTH_MOUNT, true));
+    }
+
+    let mut env = downward_env();
+    if let Some(r) = &wiring.intelligence_token {
+        env.push(secret_env(
+            agent_config::INTELLIGENCE_TOKEN_ENV,
+            &r.name,
+            &r.key,
+        ));
+    }
+    for t in &wiring.mcp_tokens {
+        env.push(secret_env(&t.env, &t.secret, &t.key));
+    }
+    if wiring.api_token {
+        env.push(secret_env(API_TOKEN_ENV, API_TOKEN_SECRET, API_TOKEN_ENV));
+    }
+    for (k, v) in &wiring.extra_env {
+        env.push(EnvVar {
+            name: k.clone(),
+            value: Some(v.clone()),
+            ..Default::default()
+        });
+    }
+
+    let container = Container {
+        name: "agent".to_string(),
+        image: Some(image.to_string()),
+        args: Some(vec!["-c".to_string(), paths::config_file()]),
+        env: Some(env),
+        ports: Some(vec![
+            ContainerPort {
+                name: Some("a2a".to_string()),
+                container_port: SERVE_PORT,
+                ..Default::default()
+            },
+            ContainerPort {
+                name: Some("probes".to_string()),
+                container_port: METRICS_PORT,
+                ..Default::default()
+            },
+        ]),
+        volume_mounts: Some(mounts),
+        // Liveness = the supervisor reactor heartbeat (an idle reactive agent
+        // is healthy; a stuck subagent must NOT fail pod liveness); readiness
+        // flips on drain/lame-duck/intel-down — both per the agent's own
+        // documented probe semantics.
+        liveness_probe: Some(http_probe("/healthz", 10, 3)),
+        readiness_probe: Some(http_probe("/readyz", 5, 2)),
+        security_context: Some(container_security_context()),
+        ..Default::default()
+    };
+
+    let mut annotations = BTreeMap::new();
+    if !wiring.config_hash.is_empty() {
+        annotations.insert(
+            CONFIG_HASH_ANNOTATION.to_string(),
+            wiring.config_hash.clone(),
+        );
+    }
+
+    PodTemplateSpec {
+        metadata: Some(ObjectMeta {
+            labels: Some(labels.clone()),
+            annotations: (!annotations.is_empty()).then_some(annotations),
+            ..Default::default()
+        }),
+        spec: Some(PodSpec {
+            containers: vec![container],
+            volumes: Some(volumes),
+            restart_policy: (!daemon).then(|| "Never".to_string()),
+            automount_service_account_token: Some(false),
+            // agentd is its own pid-1 with a subreaper; sharing the pid
+            // namespace keeps the orphan story intact under sidecars.
+            share_process_namespace: Some(true),
+            security_context: Some(pod_security_context()),
+            termination_grace_period_seconds: Some(TERMINATION_GRACE_SECONDS),
+            ..Default::default()
+        }),
+    }
+}
+
+fn mount(name: &str, path: &str, read_only: bool) -> VolumeMount {
+    VolumeMount {
+        name: name.to_string(),
+        mount_path: path.to_string(),
+        read_only: Some(read_only),
+        ..Default::default()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_api::{AgentFleetSpec, DesiredSurfaces, Scaling};
+    use agent_api::{
+        AgentFleetSpec, AgentSpec, Coordinator, LoopParams, ModelBinding, Scaling, Schedule,
+        SecretKeyRef,
+    };
 
     fn agent(mode: Mode) -> Agent {
         let mut a = Agent::new(
             "demo",
             AgentSpec {
                 mode,
-                image: Some("ghcr.io/example/agent@sha256:abc".into()),
-                instruction: Some("do the thing".into()),
-                surfaces: Some(DesiredSurfaces {
-                    management: true,
-                    metrics: false,
-                    a2a: false,
+                image: Some("agentd:test".to_string()),
+                instruction: Some("Do the thing.".to_string()),
+                schedule: (mode == Mode::Schedule).then(|| Schedule {
+                    cron: "0 * * * *".to_string(),
+                    timezone: None,
+                }),
+                loop_: (mode == Mode::Loop).then(|| LoopParams {
+                    interval: "5m".to_string(),
+                    deadline: None,
+                }),
+                model: Some(ModelBinding {
+                    pool: Some("pool".to_string()),
+                    id: Some("m1".to_string()),
                 }),
                 ..Default::default()
             },
         );
-        a.metadata.namespace = Some("agents".into());
-        a.metadata.uid = Some("uid-1".into());
+        a.metadata.namespace = Some("tenant".to_string());
+        a.metadata.uid = Some("uid-1".to_string());
         a
     }
 
     fn fleet(mode: ScaleMode, shards: Option<u32>) -> AgentFleet {
         let mut f = AgentFleet::new(
-            "workers",
+            "pool",
             AgentFleetSpec {
-                template: AgentSpec {
-                    mode: Mode::Reactive,
-                    image: Some("ghcr.io/example/agent@sha256:abc".into()),
-                    subscribe: vec!["queue://jobs".into()],
-                    ..Default::default()
-                },
+                template: agent(Mode::Reactive).spec,
                 scaling: Scaling {
                     mode,
                     shards,
-                    max_replicas: if mode == ScaleMode::Claim {
-                        Some(10)
-                    } else {
-                        None
-                    },
                     ..Default::default()
                 },
-                work: Some(agent_api::Work {
-                    source: Some("queue://jobs".into()),
-                    ..Default::default()
-                }),
-                replicas: None,
                 ..Default::default()
             },
         );
-        f.metadata.namespace = Some("agents".into());
-        f.metadata.uid = Some("fleet-uid".into());
+        f.metadata.namespace = Some("tenant".to_string());
+        f.metadata.uid = Some("uid-2".to_string());
         f
-    }
-
-    fn container_of(pod: &PodTemplateSpec) -> &Container {
-        &pod.spec.as_ref().unwrap().containers[0]
     }
 
     fn cfg() -> RenderConfig {
         RenderConfig::default()
     }
 
-    fn has_arg_pair(c: &Container, k: &str, v: &str) -> bool {
-        c.args
-            .as_ref()
-            .unwrap()
-            .windows(2)
-            .any(|w| w == [k.to_string(), v.to_string()])
+    fn wiring() -> PodWiring {
+        PodWiring {
+            config_hash: "abc123".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn pod_of(r: &Rendered) -> &PodTemplateSpec {
+        match r {
+            Rendered::Job(j) => &j.spec.as_ref().unwrap().template,
+            Rendered::CronJob(c) => &c.spec.job_template.spec.as_ref().unwrap().template,
+            Rendered::Deployment(d) => &d.spec.as_ref().unwrap().template,
+            Rendered::StatefulSet(s) => &s.spec.as_ref().unwrap().template,
+        }
+    }
+
+    fn container_of(pod: &PodTemplateSpec) -> &Container {
+        &pod.spec.as_ref().unwrap().containers[0]
     }
 
     #[test]
-    fn once_renders_a_job() {
-        let r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
-        let Rendered::Job(job) = r else {
-            panic!("expected a Job")
-        };
-        assert_eq!(job.metadata.name.as_deref(), Some("demo"));
-        assert_eq!(job.metadata.namespace.as_deref(), Some("agents"));
-        let spec = job.spec.unwrap();
-        assert_eq!(spec.backoff_limit, Some(0));
-        let pod = spec.template;
-        assert_eq!(
-            pod.spec.as_ref().unwrap().restart_policy.as_deref(),
-            Some("Never")
-        );
-        let c = container_of(&pod);
-        assert_eq!(c.image.as_deref(), Some("ghcr.io/example/agent@sha256:abc"));
-        let owners = job.metadata.owner_references.unwrap();
-        assert_eq!(owners[0].kind, "Agent");
-        assert_eq!(owners[0].controller, Some(true));
-    }
-
-    #[test]
-    fn reactive_renders_a_singleton_deployment() {
-        let mut a = agent(Mode::Reactive);
-        a.spec.subscribe = vec!["file:///data/inbox".into()];
-        let r = render_agent(&a, &cfg()).unwrap();
-        let Rendered::Deployment(dep) = r else {
-            panic!("expected a Deployment")
-        };
-        let spec = dep.spec.unwrap();
-        assert_eq!(spec.replicas, Some(1));
-        assert_eq!(
-            spec.selector
-                .match_labels
-                .as_ref()
-                .unwrap()
-                .get("agentctl.dev/agent")
-                .map(String::as_str),
-            Some("demo")
-        );
-        let c = container_of(&spec.template);
-        assert!(has_arg_pair(c, "--subscribe", "file:///data/inbox"));
-    }
-
-    #[test]
-    fn serve_wiring_v2() {
-        // Every rendered pod SERVES mTLS-gated HTTPS (contract 1.0): the serve
-        // argv, its own serving-identity Secret mount, the cluster-CA ConfigMap
-        // mount (client-CA + outbound trust), ports, and the /readyz probe.
-        let r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
-        let Rendered::Job(job) = r else {
-            unreachable!()
-        };
-        let pod = job.spec.unwrap().template;
-        let podspec = pod.spec.as_ref().unwrap();
-        let c = container_of(&pod);
-
-        // Serve + trust argv.
-        assert!(has_arg_pair(c, "--serve-mcp", "https://0.0.0.0:8443"));
-        assert!(has_arg_pair(c, "--serve-cert", "/etc/agentctl/tls/tls.crt"));
-        assert!(has_arg_pair(c, "--serve-key", "/etc/agentctl/tls/tls.key"));
-        assert!(has_arg_pair(
-            c,
-            "--serve-client-ca",
-            "/etc/agentctl/ca/ca.crt"
-        ));
-        assert!(has_arg_pair(c, "--tls-ca", "/etc/agentctl/ca/ca.crt"));
-
-        // The workload's OWN serving identity, mounted read-only.
-        let mounts = c.volume_mounts.as_ref().unwrap();
-        let tls = mounts
-            .iter()
-            .find(|m| m.name == TLS_VOLUME)
-            .expect("serving-tls mounted");
-        assert_eq!(tls.mount_path, "/etc/agentctl/tls");
-        assert_eq!(tls.read_only, Some(true));
-        let volumes = podspec.volumes.as_ref().unwrap();
-        let tls_vol = volumes.iter().find(|v| v.name == TLS_VOLUME).unwrap();
-        assert_eq!(
-            tls_vol.secret.as_ref().unwrap().secret_name.as_deref(),
-            Some("demo-serving-tls")
-        );
-
-        // The cluster CA (public), mounted read-only from the per-ns ConfigMap.
-        let ca = mounts
-            .iter()
-            .find(|m| m.name == CA_VOLUME)
-            .expect("ca mounted");
-        assert_eq!(ca.mount_path, "/etc/agentctl/ca");
-        assert_eq!(ca.read_only, Some(true));
-        let ca_vol = volumes.iter().find(|v| v.name == CA_VOLUME).unwrap();
-        assert_eq!(ca_vol.config_map.as_ref().unwrap().name, CA_CONFIGMAP);
-
-        // NO sockets, NO hostPath anywhere (restricted-PSS-clean).
-        assert!(volumes.iter().all(|v| v.host_path.is_none()));
-        assert!(!c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|e| e.name == "AGENT_SERVE_MCP"));
-
-        // Ports + the /readyz readiness probe on the metrics listener.
-        let ports = c.ports.as_ref().unwrap();
-        assert!(ports.iter().any(|p| p.container_port == SERVE_PORT));
-        assert!(ports.iter().any(|p| p.container_port == METRICS_PORT));
-        let probe = c.readiness_probe.as_ref().unwrap();
-        let get = probe.http_get.as_ref().unwrap();
-        assert_eq!(get.path.as_deref(), Some("/readyz"));
-        assert_eq!(get.port, IntOrString::Int(METRICS_PORT));
-
-        // Downward-API identity env intact.
-        let env = c.env.as_ref().unwrap();
-        let uid = env.iter().find(|e| e.name == "AGENT_POD_UID").unwrap();
-        assert_eq!(
-            uid.value_from
-                .as_ref()
-                .unwrap()
-                .field_ref
-                .as_ref()
-                .unwrap()
-                .field_path,
-            "metadata.uid"
-        );
-    }
-
-    #[test]
-    fn inject_intelligence_dials_the_pool_directly() {
-        // AAuth pool (no credential) ⇒ INTELLIGENCE set, secret-free.
-        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
-        inject_intelligence(&mut r, "https://api.anthropic.com", None);
-        let Rendered::Deployment(dep) = &r else {
-            unreachable!()
-        };
-        let c = container_of(&dep.spec.as_ref().unwrap().template).clone();
-        let env = c.env.as_ref().unwrap();
-        assert_eq!(
-            env.iter()
-                .find(|e| e.name == "INTELLIGENCE")
-                .unwrap()
-                .value
-                .as_deref(),
-            Some("https://api.anthropic.com")
-        );
-        // No key ⇒ no INTELLIGENCE_TOKEN (secret-free AAuth path).
-        assert!(!env.iter().any(|e| e.name == "INTELLIGENCE_TOKEN"));
-        // Metrics listener env is still rendered.
-        assert_eq!(
-            env.iter()
-                .find(|e| e.name == "AGENT_METRICS_ADDR")
-                .unwrap()
-                .value
-                .as_deref(),
-            Some("0.0.0.0:9090")
-        );
-
-        // Key-authenticated pool ⇒ INTELLIGENCE_TOKEN mounted from the Secret.
-        let mut r2 = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
-        let key = agent_api::SecretKeyRef {
-            name: "anthropic-key".into(),
-            key: "token".into(),
-        };
-        inject_intelligence(&mut r2, "https://api.anthropic.com", Some(&key));
-        let Rendered::Deployment(dep2) = &r2 else {
-            unreachable!()
-        };
-        let c2 = container_of(&dep2.spec.as_ref().unwrap().template).clone();
-        let tok = c2
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|e| e.name == "INTELLIGENCE_TOKEN")
-            .expect("INTELLIGENCE_TOKEN mounted for a key pool");
-        assert_eq!(
-            tok.value_from
-                .as_ref()
-                .unwrap()
-                .secret_key_ref
-                .as_ref()
-                .unwrap()
-                .name,
-            "anthropic-key"
-        );
-    }
-
-    #[test]
-    fn rendered_pod_is_confined() {
-        // Hardening must apply to every rendered workload; exercise the Job path
-        // (all kinds share `pod_template`).
-        let r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
-        let Rendered::Job(job) = r else {
-            unreachable!()
-        };
-        let pod = job.spec.unwrap().template;
-        let podspec = pod.spec.as_ref().unwrap();
-
-        // Pod-level: seccomp pinned; no ambient SA credential; PID ns shared
-        // (the agentd orphan-guard, see pod_template).
-        let psc = podspec
-            .security_context
-            .as_ref()
-            .expect("pod securityContext present");
-        assert_eq!(
-            psc.seccomp_profile.as_ref().unwrap().type_,
-            "RuntimeDefault"
-        );
-        assert_eq!(podspec.automount_service_account_token, Some(false));
-        assert_eq!(podspec.share_process_namespace, Some(true));
-
-        // Container-level: NONROOT (restricted PSS), no priv-esc, drop ALL caps,
-        // read-only root fs.
-        let c = container_of(&pod);
-        let sc = c
-            .security_context
-            .as_ref()
-            .expect("container securityContext present");
-        assert_eq!(sc.run_as_non_root, Some(true));
-        assert_eq!(sc.run_as_user, None);
-        assert_eq!(sc.allow_privilege_escalation, Some(false));
-        assert_eq!(sc.read_only_root_filesystem, Some(true));
-        assert_eq!(
-            sc.capabilities.as_ref().unwrap().drop.as_deref(),
-            Some(["ALL".to_string()].as_slice())
-        );
-
-        // Writable /tmp emptyDir backs the read-only root filesystem.
-        let mounts = c.volume_mounts.as_ref().unwrap();
-        let tmp_mount = mounts
-            .iter()
-            .find(|m| m.mount_path == "/tmp")
-            .expect("/tmp mount present");
-        assert_eq!(tmp_mount.name, "tmp");
-        assert_ne!(tmp_mount.read_only, Some(true));
-        let volumes = podspec.volumes.as_ref().unwrap();
-        let tmp_vol = volumes
-            .iter()
-            .find(|v| v.name == "tmp")
-            .expect("tmp volume present");
-        assert!(tmp_vol.empty_dir.is_some(), "tmp volume is an emptyDir");
-    }
-
-    #[test]
-    fn inject_api_token_adds_secret_key_ref_env() {
-        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
-        inject_api_token(&mut r);
-        let Rendered::Deployment(dep) = &r else {
-            unreachable!()
-        };
-        let c = container_of(&dep.spec.as_ref().unwrap().template);
-        let token = c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|e| e.name == API_TOKEN_ENV)
-            .expect("AGENTCTL_API_TOKEN env injected");
-        let sel = token
-            .value_from
-            .as_ref()
-            .unwrap()
-            .secret_key_ref
-            .as_ref()
-            .unwrap();
-        assert_eq!(sel.name, API_TOKEN_SECRET);
-        assert_eq!(sel.key, API_TOKEN_ENV);
-        // The downward-API identity env is preserved alongside the injected token.
-        assert!(c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|e| e.name == "AGENT_POD_UID"));
-    }
-
-    #[test]
-    fn inject_mcp_servers_renders_direct_dials_tags_and_token_mounts() {
-        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
-        let servers = vec![
-            // aauth / none: direct dial, no credential.
-            McpBinding {
-                name: "github".into(),
-                endpoint: "https://mcp.github.example/mcp".into(),
-                tags: vec!["untrusted_input".into(), "egress".into()],
-                token_env: None,
-            },
-            // in-cluster endpoint gets the trailing-dot absolutization.
-            McpBinding {
-                name: "local".into(),
-                endpoint: "https://tools.team-a.svc.cluster.local:8443/mcp".into(),
-                tags: vec![],
-                token_env: None,
-            },
-            // staticToken: the bearer Secret mounts as an env var.
-            McpBinding {
-                name: "paid".into(),
-                endpoint: "https://mcp.paid.example/mcp".into(),
-                tags: vec![],
-                token_env: Some((
-                    "AGENT_MCP_PAID_TOKEN".into(),
-                    "paid-tok".into(),
-                    "token".into(),
-                )),
-            },
-        ];
-        inject_mcp_servers(&mut r, &servers);
-        inject_mcp_servers(&mut r, &servers); // idempotent
-        let Rendered::Deployment(dep) = &r else {
-            unreachable!()
-        };
-        let c = container_of(&dep.spec.as_ref().unwrap().template);
-        // Direct dials — no facade path anywhere.
-        assert!(has_arg_pair(
-            c,
-            "--mcp",
-            "github=https://mcp.github.example/mcp"
-        ));
-        assert!(has_arg_pair(
-            c,
-            "--mcp-tags",
-            "github=untrusted_input,egress"
-        ));
-        assert!(has_arg_pair(
-            c,
-            "--mcp",
-            "local=https://tools.team-a.svc.cluster.local.:8443/mcp"
-        ));
-        assert!(!c.args.as_ref().unwrap().iter().any(|a| a.contains("/s/")));
-        // Idempotent: exactly one --mcp entry for github.
-        assert_eq!(
-            c.args
-                .as_ref()
-                .unwrap()
-                .iter()
-                .filter(|a| a.as_str() == "github=https://mcp.github.example/mcp")
-                .count(),
-            1
-        );
-        // staticToken: the bearer Secret is mounted as the server's env var.
-        let tok = c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|e| e.name == "AGENT_MCP_PAID_TOKEN")
-            .expect("staticToken bearer env mounted");
-        assert_eq!(
-            tok.value_from
-                .as_ref()
-                .unwrap()
-                .secret_key_ref
-                .as_ref()
-                .unwrap()
-                .name,
-            "paid-tok"
-        );
-    }
-
-    #[test]
-    fn absolutize_endpoint_dots_only_cluster_local_hosts() {
-        assert_eq!(
-            absolutize_endpoint("https://x.ns.svc.cluster.local/mcp"),
-            "https://x.ns.svc.cluster.local./mcp"
-        );
-        assert_eq!(
-            absolutize_endpoint("https://x.ns.svc.cluster.local:8443"),
-            "https://x.ns.svc.cluster.local.:8443"
-        );
-        // Already-absolute and external hosts pass through untouched.
-        assert_eq!(
-            absolutize_endpoint("https://x.ns.svc.cluster.local./mcp"),
-            "https://x.ns.svc.cluster.local./mcp"
-        );
-        assert_eq!(
-            absolutize_endpoint("https://mcp.github.example/mcp"),
-            "https://mcp.github.example/mcp"
-        );
-    }
-
-    #[test]
-    fn inject_aauth_mounts_the_key_and_renders_the_provider_dial() {
-        let mut r = render_agent(&agent(Mode::Reactive), &cfg()).unwrap();
-        inject_aauth(&mut r, "https://ap.example.com");
-        inject_aauth(&mut r, "https://ap.example.com"); // idempotent
-        let Rendered::Deployment(dep) = &r else {
-            unreachable!()
-        };
-        let tpl = &dep.spec.as_ref().unwrap().template;
-        let c = container_of(tpl);
-        assert!(has_arg_pair(
-            c,
-            "--aauth-provider",
-            "https://ap.example.com"
-        ));
-        assert!(has_arg_pair(
-            c,
-            "--aauth-key-file",
-            "/etc/agentctl/aauth/agent.key"
-        ));
-        // Exactly one provider flag (idempotent), and NEVER a token/secret arg.
-        let args = c.args.as_ref().unwrap();
-        assert_eq!(args.iter().filter(|a| *a == "--aauth-provider").count(), 1);
-        assert!(!args.iter().any(|a| a == "--aauth-enroll-token"));
-        // The key Secret is mounted read-only at the aauth mount.
-        let mounts = c.volume_mounts.as_ref().unwrap();
-        let m = mounts.iter().find(|m| m.name == AAUTH_VOLUME).unwrap();
-        assert_eq!(m.mount_path, AAUTH_MOUNT);
-        assert_eq!(m.read_only, Some(true));
-        let volumes = tpl.spec.as_ref().unwrap().volumes.as_ref().unwrap();
-        let v = volumes.iter().find(|v| v.name == AAUTH_VOLUME).unwrap();
-        let src = v.secret.as_ref().unwrap();
-        // Secret-name stem = the workload name from the agentctl.dev/agent label.
-        assert_eq!(src.secret_name.as_deref(), Some("demo-aauth-key"));
-        assert_eq!(src.default_mode, Some(0o444));
-    }
-
-    #[test]
-    fn workflow_mode_renders_a_job_with_workflow_mount() {
-        let mut a = agent(Mode::Once);
-        a.spec.mode = Mode::Workflow;
-        a.spec.workflow = Some(agent_api::WorkflowSource {
-            inline: Some(r#"{"nodes":[]}"#.into()),
-            config_map_key_ref: None,
-        });
-        let mut r = render_agent(&a, &cfg()).unwrap();
-        // workflow is a supervised one-shot → a Job.
-        let Rendered::Job(job) = &r else {
-            panic!("workflow mode must render a Job")
-        };
-        let c = container_of(&job.spec.as_ref().unwrap().template);
-        assert!(has_arg_pair(c, "--mode", "workflow"));
-
-        // The controller injects the mount (inline → the generated ConfigMap).
-        inject_workflow(&mut r, &workflow_configmap_name("demo"), "workflow.json");
-        inject_workflow(&mut r, &workflow_configmap_name("demo"), "workflow.json"); // idempotent
-        let Rendered::Job(job) = &r else {
-            unreachable!()
-        };
-        let pod = &job.spec.as_ref().unwrap().template;
-        let c = container_of(pod);
-        assert!(has_arg_pair(
-            c,
-            "--workflow",
-            "/etc/agentctl/workflow/workflow.json"
-        ));
-        let mounts = c.volume_mounts.as_ref().unwrap();
-        let wf = mounts
-            .iter()
-            .find(|m| m.mount_path == "/etc/agentctl/workflow")
-            .expect("workflow mount present");
-        assert_eq!(wf.read_only, Some(true));
-        let vol = pod
-            .spec
-            .as_ref()
-            .unwrap()
-            .volumes
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|v| v.name == "agentctl-workflow")
-            .expect("workflow volume present");
-        assert_eq!(vol.config_map.as_ref().unwrap().name, "demo-workflow");
-        // Idempotent: exactly one --workflow flag.
-        let n = c
-            .args
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter(|a| a.as_str() == "--workflow")
-            .count();
-        assert_eq!(n, 1);
-    }
-
-    #[test]
-    fn inject_api_token_is_idempotent() {
-        let mut r = render_agent(&agent(Mode::Once), &cfg()).unwrap();
-        inject_api_token(&mut r);
-        inject_api_token(&mut r);
-        let Rendered::Job(job) = &r else {
-            unreachable!()
-        };
-        let c = container_of(&job.spec.as_ref().unwrap().template);
-        let n = c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter(|e| e.name == API_TOKEN_ENV)
-            .count();
-        assert_eq!(n, 1, "token env must not be duplicated");
-    }
-
-    #[test]
-    fn missing_image_is_an_error() {
-        // No spec.image AND no operator default ⇒ still an error.
-        let mut a = agent(Mode::Once);
-        a.spec.image = None;
-        assert_eq!(render_agent(&a, &cfg()), Err(RenderError::MissingImage));
-    }
-
-    #[test]
-    fn image_falls_back_to_operator_default() {
-        // No spec.image, but the operator has a configured default ⇒ it is used.
-        let mut a = agent(Mode::Once);
-        a.spec.image = None;
-        let mut c = cfg();
-        c.default_agent_image = Some("ghcr.io/agentd-dev/agentd:1.0.0".into());
-        let Rendered::Job(job) = render_agent(&a, &c).expect("renders with the default image")
-        else {
-            panic!("expected a Job")
-        };
-        let pod = job.spec.unwrap().template;
-        assert_eq!(
-            container_of(&pod).image.as_deref(),
-            Some("ghcr.io/agentd-dev/agentd:1.0.0")
-        );
-    }
-
-    #[test]
-    fn explicit_image_overrides_the_operator_default() {
-        // A per-Agent spec.image always wins over the operator default.
-        let a = agent(Mode::Once); // sets an explicit image
-        let mut c = cfg();
-        c.default_agent_image = Some("ghcr.io/agentd-dev/agentd:1.0.0".into());
-        let Rendered::Job(job) = render_agent(&a, &c).unwrap() else {
-            panic!("expected a Job")
-        };
-        let pod = job.spec.unwrap().template;
-        assert_eq!(
-            container_of(&pod).image.as_deref(),
-            Some("ghcr.io/example/agent@sha256:abc")
-        );
-    }
-
-    #[test]
-    fn non_stock_substrate_not_yet_supported() {
-        let mut a = agent(Mode::Once);
-        a.spec.substrate = Some(Substrate::KataHybrid);
-        assert_eq!(
-            render_agent(&a, &cfg()),
-            Err(RenderError::UnsupportedSubstrate(Substrate::KataHybrid))
-        );
-    }
-
-    #[test]
-    fn claim_fleet_renders_deployment_with_replicas_omitted() {
-        let r = render_fleet(&fleet(ScaleMode::Claim, None), &cfg()).unwrap();
-        let Rendered::Deployment(dep) = r else {
-            panic!("expected a Deployment")
-        };
-        let spec = dep.spec.unwrap();
-        // KEDA owns replicas → omitted from the rendered workload.
-        assert_eq!(spec.replicas, None);
-        assert_eq!(dep.metadata.owner_references.unwrap()[0].kind, "AgentFleet");
-    }
-
-    #[test]
-    fn shard_fleet_renders_statefulset_with_n_replicas() {
-        let r = render_fleet(&fleet(ScaleMode::Shard, Some(3)), &cfg()).unwrap();
-        let Rendered::StatefulSet(sts) = r else {
-            panic!("expected a StatefulSet")
-        };
-        let spec = sts.spec.unwrap();
-        assert_eq!(spec.replicas, Some(3)); // replicas = N (partition count)
-        assert_eq!(spec.service_name.as_deref(), Some("workers"));
-    }
-
-    #[test]
-    fn shard_fleet_without_shards_is_an_error() {
-        assert_eq!(
-            render_fleet(&fleet(ScaleMode::Shard, None), &cfg()),
-            Err(RenderError::MissingShards)
-        );
-    }
-
-    #[test]
-    fn schedule_mode_renders_a_cronjob() {
-        // mode:schedule must render a CronJob firing on its cron — not a one-shot Job
-        // (which would run exactly once, never on cadence).
-        let mut a = agent(Mode::Schedule);
-        a.spec.schedule = Some(agent_api::Schedule {
-            cron: "*/5 * * * *".into(),
-            timezone: Some("UTC".into()),
-        });
-        let r = render_agent(&a, &cfg()).unwrap();
-        let Rendered::CronJob(cj) = r else {
-            panic!("mode:schedule must render a CronJob, got {r:?}");
-        };
-        let spec = cj.spec;
-        assert_eq!(spec.schedule, "*/5 * * * *");
-        assert_eq!(spec.time_zone.as_deref(), Some("UTC"));
-        assert_eq!(spec.concurrency_policy.as_deref(), Some("Forbid"));
-        // The jobTemplate carries the agent pod.
-        let pod = spec.job_template.spec.unwrap().template;
-        assert!(has_arg_pair(container_of(&pod), "--mode", "schedule"));
-    }
-
-    #[test]
-    fn fleet_template_mode_is_coerced_to_reactive() {
-        // A fleet whose template carries the DEFAULT `once` mode (or any non-reactive
-        // mode) must render a long-lived reactive member — else the Deployment pods
-        // exit and CrashLoop. Both regimes go through the coercion.
-        for mode in [ScaleMode::Claim, ScaleMode::Shard] {
-            let mut f = fleet(mode, Some(2));
-            f.spec.template.mode = Mode::Once; // the CrashLoop-inducing default
-            let r = render_fleet(&f, &cfg()).unwrap();
-            let pod = match &r {
-                Rendered::Deployment(d) => d.spec.as_ref().unwrap().template.clone(),
-                Rendered::StatefulSet(s) => s.spec.as_ref().unwrap().template.clone(),
-                _ => panic!("fleet renders a Deployment or StatefulSet"),
-            };
-            assert!(
-                has_arg_pair(container_of(&pod), "--mode", "reactive"),
-                "fleet {mode:?} member must run --mode reactive"
+    fn the_only_argv_is_the_config_file() {
+        for mode in [Mode::Once, Mode::Loop, Mode::Reactive, Mode::Schedule] {
+            let r = render_agent(&agent(mode), &cfg(), &wiring()).unwrap();
+            let c = container_of(pod_of(&r));
+            assert_eq!(
+                c.args.as_deref(),
+                Some(
+                    &[
+                        "-c".to_string(),
+                        "/etc/agentctl/config/agentd.json".to_string()
+                    ][..]
+                ),
+                "mode {mode:?}: no execution-mode flags exist any more"
             );
         }
     }
 
     #[test]
-    fn agent_args_render_declared_limits() {
-        // The bounding box (spec.limits) must reach agentd.
-        let mut a = agent(Mode::Reactive);
-        a.spec.limits = Some(agent_api::Limits {
-            max_tokens: Some(500_000),
-            max_depth: Some(3),
-            max_steps: Some(40),
-            lifetime_tokens: Some(2_000_000),
-        });
-        let r = render_agent(&a, &cfg()).unwrap();
-        let Rendered::Deployment(dep) = r else {
-            unreachable!()
-        };
-        let c = container_of(&dep.spec.as_ref().unwrap().template).clone();
-        assert!(has_arg_pair(&c, "--max-tokens", "500000"));
-        assert!(has_arg_pair(&c, "--max-depth", "3"));
-        assert!(has_arg_pair(&c, "--max-steps", "40"));
-        // RFC 0025 per-instance lifetime budget.
-        assert!(has_arg_pair(&c, "--budget-tokens-lifetime", "2000000"));
-    }
-
-    #[test]
-    fn claim_fleet_renders_a_scaled_object() {
-        let f = fleet(ScaleMode::Claim, None);
-        let so = render_scaled_object(&f, DEFAULT_SCALER_ADDRESS, DEFAULT_COORDINATION_URL)
-            .expect("claim mode produces a ScaledObject");
-
-        assert_eq!(so["apiVersion"], "keda.sh/v1alpha1");
-        assert_eq!(so["kind"], "ScaledObject");
-        assert_eq!(so["metadata"]["name"], "workers");
-        assert_eq!(so["metadata"]["namespace"], "agents");
-        // Owns the Deployment of the same name; ownerRef back to the AgentFleet.
-        assert_eq!(so["spec"]["scaleTargetRef"]["name"], "workers");
-        let owner = &so["metadata"]["ownerReferences"][0];
-        assert_eq!(owner["kind"], "AgentFleet");
-        assert_eq!(owner["name"], "workers");
-        assert_eq!(owner["uid"], "fleet-uid");
-        assert_eq!(owner["controller"], true);
-
-        // minReplicas defaults to 0 (scale-to-zero); max from scaling.maxReplicas (10 here).
-        assert_eq!(so["spec"]["minReplicaCount"], 0);
-        assert_eq!(so["spec"]["maxReplicaCount"], 10);
-
-        // External trigger → the scaler, carrying the coordination + threshold knobs.
-        let trigger = &so["spec"]["triggers"][0];
-        assert_eq!(trigger["type"], "external");
-        let md = &trigger["metadata"];
-        assert_eq!(md["scalerAddress"], DEFAULT_SCALER_ADDRESS);
-        // the fleet helper sets work.source = "queue://jobs", which wins over the
-        // operator COORDINATION_URL default.
-        assert_eq!(md["coordinationUrl"], "queue://jobs");
-        // no scaling.target set → default threshold "5".
-        assert_eq!(md["threshold"], "5");
-        assert_eq!(md["activationThreshold"], "1");
-    }
-
-    #[test]
-    fn scaled_object_falls_back_to_default_coordination_url() {
-        // No per-fleet work.source → the operator COORDINATION_URL default is used.
-        let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.work = None;
-        let so =
-            render_scaled_object(&f, DEFAULT_SCALER_ADDRESS, DEFAULT_COORDINATION_URL).unwrap();
-        assert_eq!(
-            so["spec"]["triggers"][0]["metadata"]["coordinationUrl"],
-            DEFAULT_COORDINATION_URL
-        );
-    }
-
-    #[test]
-    fn shard_fleet_renders_no_scaled_object() {
-        // Shard mode is a fixed StatefulSet partition count — never KEDA-driven.
-        let f = fleet(ScaleMode::Shard, Some(3));
-        assert!(
-            render_scaled_object(&f, DEFAULT_SCALER_ADDRESS, DEFAULT_COORDINATION_URL).is_none()
-        );
-    }
-
-    #[test]
-    fn scaled_object_honors_target_value_and_work_source() {
-        let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.scaling.target = Some(agent_api::ScaleTarget {
-            metric: "backlog".into(),
-            value: "12".into(),
-        });
-        f.spec.work = Some(agent_api::Work {
-            source: Some("http://my-coordination.custom.svc/".into()),
-            ..Default::default()
-        });
-
-        let so = render_scaled_object(&f, "scaler:9100", DEFAULT_COORDINATION_URL).unwrap();
-        let md = &so["spec"]["triggers"][0]["metadata"];
-        // scaling.target.value wins over the default threshold.
-        assert_eq!(md["threshold"], "12");
-        // the fleet's own work.source wins over the operator coordination default.
-        assert_eq!(md["coordinationUrl"], "http://my-coordination.custom.svc/");
-        assert_eq!(md["scalerAddress"], "scaler:9100");
-    }
-
-    // ── Coordinator ("main agent") rendering ──────────────────────
-
-    fn coord_template() -> AgentSpec {
-        AgentSpec {
-            mode: Mode::Reactive,
-            image: Some("ghcr.io/example/coordinator@sha256:def".into()),
-            instruction: Some("decompose and delegate".into()),
-            ..Default::default()
+    fn mode_to_workload_mapping_is_stable() {
+        assert!(matches!(
+            render_agent(&agent(Mode::Once), &cfg(), &wiring()).unwrap(),
+            Rendered::Job(_)
+        ));
+        assert!(matches!(
+            render_agent(&agent(Mode::Workflow), &cfg(), &wiring()).unwrap(),
+            Rendered::Job(_)
+        ));
+        assert!(matches!(
+            render_agent(&agent(Mode::Schedule), &cfg(), &wiring()).unwrap(),
+            Rendered::CronJob(_)
+        ));
+        for m in [Mode::Loop, Mode::Reactive] {
+            assert!(matches!(
+                render_agent(&agent(m), &cfg(), &wiring()).unwrap(),
+                Rendered::Deployment(_)
+            ));
         }
     }
 
     #[test]
-    fn shard_fleet_injects_shard_identity() {
-        // A shard StatefulSet pod carries `--shard auto/N` (N only, identical
-        // across ordinals); the agent derives K from AGENT_POD_NAME.
-        let f = fleet(ScaleMode::Shard, Some(4));
-        let r = render_fleet(&f, &cfg()).unwrap();
-        let Rendered::StatefulSet(sts) = r else {
-            panic!("shard mode renders a StatefulSet");
-        };
-        let pod = sts.spec.unwrap().template;
-        assert!(has_arg_pair(container_of(&pod), "--shard", "auto/4"));
-    }
-
-    #[test]
-    fn claim_fleet_has_no_shard_flag() {
-        let f = fleet(ScaleMode::Claim, None);
-        let r = render_fleet(&f, &cfg()).unwrap();
-        let Rendered::Deployment(dep) = r else {
-            unreachable!()
-        };
-        let c = container_of(&dep.spec.as_ref().unwrap().template);
-        assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--shard"));
-    }
-
-    #[test]
-    fn coordinatorless_fleet_renders_no_coordinator() {
-        let f = fleet(ScaleMode::Claim, None);
-        assert!(render_coordinator(&f, &cfg()).is_none());
-    }
-
-    #[test]
-    fn coordinator_renders_a_named_labeled_deployment() {
-        let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.coordinator = Some(agent_api::Coordinator {
-            template: coord_template(),
-            replicas: Some(2),
-            distribution: None, // default queue
-        });
-        let r = render_coordinator(&f, &cfg())
-            .expect("coordinator present")
-            .unwrap();
-        let Rendered::Deployment(dep) = r else {
-            panic!("coordinator renders a Deployment, got {r:?}");
-        };
-        // Named `<fleet>-coordinator`, distinct from the worker Deployment name.
-        assert_eq!(dep.metadata.name.as_deref(), Some("workers-coordinator"));
-        let spec = dep.spec.as_ref().unwrap();
-        assert_eq!(spec.replicas, Some(2));
-        // Pod labels carry the fleet-role + fleet labels AND the coordinator's own
-        // agent label (so the worker `agent=workers` selector never grabs it).
-        let labels = spec
-            .template
-            .metadata
+    fn jobs_compile_the_exit_code_intents_into_pod_failure_policy() {
+        let r = render_agent(&agent(Mode::Once), &cfg(), &wiring()).unwrap();
+        let Rendered::Job(job) = r else { panic!("job") };
+        let policy = job
+            .spec
             .as_ref()
             .unwrap()
-            .labels
+            .pod_failure_policy
             .as_ref()
             .unwrap();
-        assert_eq!(labels[FLEET_ROLE_LABEL], "coordinator");
-        assert_eq!(labels[FLEET_LABEL], "workers");
-        assert_eq!(labels["agentctl.dev/agent"], "workers-coordinator");
-        // Long-lived: coerced to reactive so it does not CrashLoop under a Deployment.
-        assert!(has_arg_pair(
-            container_of(&spec.template),
-            "--mode",
-            "reactive"
-        ));
-        // Owned by the fleet (GC'd with it).
-        let owner = &dep.metadata.owner_references.as_ref().unwrap()[0];
-        assert_eq!(owner.kind, "AgentFleet");
-        assert_eq!(owner.name, "workers");
+        // terminal ⇒ FailJob on exactly the contract's terminal codes (2, 5).
+        assert_eq!(policy.rules[0].action, "FailJob");
+        assert_eq!(
+            policy.rules[0].on_exit_codes.as_ref().unwrap().values,
+            vec![2, 5]
+        );
+        // retriable + policy ⇒ Count.
+        assert_eq!(policy.rules[1].action, "Count");
+        assert_eq!(
+            policy.rules[1].on_exit_codes.as_ref().unwrap().values,
+            vec![1, 3, 4, 6, 7, 124]
+        );
+        // disruption ⇒ Count (never FailJob a node drain).
+        assert_eq!(
+            policy.rules[2].on_pod_conditions.as_ref().unwrap()[0].type_,
+            "DisruptionTarget"
+        );
+        assert_eq!(job.spec.as_ref().unwrap().backoff_limit, Some(0));
     }
 
     #[test]
-    fn coordinator_replicas_default_to_one() {
-        let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.coordinator = Some(agent_api::Coordinator {
-            template: coord_template(),
-            replicas: None,
-            distribution: None,
-        });
-        let r = render_coordinator(&f, &cfg()).unwrap().unwrap();
-        let Rendered::Deployment(dep) = r else {
-            unreachable!()
-        };
+    fn config_volume_and_hash_annotation_are_wired() {
+        let r = render_agent(&agent(Mode::Reactive), &cfg(), &wiring()).unwrap();
+        let pod = pod_of(&r);
+        let vols = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        assert!(vols.iter().any(
+            |v| v.name == CONFIG_VOLUME && v.config_map.as_ref().unwrap().name == "demo-config"
+        ));
         assert_eq!(
-            dep.spec.unwrap().replicas,
-            Some(1),
-            "singleton main agent by default"
+            pod.metadata
+                .as_ref()
+                .unwrap()
+                .annotations
+                .as_ref()
+                .unwrap()
+                .get(CONFIG_HASH_ANNOTATION)
+                .map(String::as_str),
+            Some("abc123")
         );
     }
 
     #[test]
-    fn coordinator_queue_distribution_injects_worksource_env() {
-        let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.work = Some(agent_api::Work {
-            source: Some("https://coord.svc/mcp".into()),
-            ..Default::default()
-        });
-        f.spec.coordinator = Some(agent_api::Coordinator {
-            template: coord_template(),
-            replicas: None,
-            distribution: Some(agent_api::Distribution::Queue),
-        });
-        let r = render_coordinator(&f, &cfg()).unwrap().unwrap();
-        let Rendered::Deployment(dep) = r else {
-            unreachable!()
+    fn daemons_get_a_state_volume_jobs_do_not() {
+        let daemon = render_agent(&agent(Mode::Reactive), &cfg(), &wiring()).unwrap();
+        let vols = |r: &Rendered| {
+            pod_of(r)
+                .spec
+                .as_ref()
+                .unwrap()
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|v| v.name.clone())
+                .collect::<Vec<_>>()
         };
-        let c = container_of(&dep.spec.as_ref().unwrap().template);
-        let env = c.env.as_ref().unwrap();
-        let ws = env
-            .iter()
-            .find(|e| e.name == "AGENT_FLEET_WORKSOURCE")
-            .expect("worksource env");
-        assert_eq!(ws.value.as_deref(), Some("https://coord.svc/mcp"));
-        // Queue mode does NOT add an --a2a-peer.
-        assert!(!c.args.as_ref().unwrap().iter().any(|a| a == "--a2a-peer"));
+        assert!(vols(&daemon).contains(&STATE_VOLUME.to_string()));
+        let job = render_agent(&agent(Mode::Once), &cfg(), &wiring()).unwrap();
+        assert!(!vols(&job).contains(&STATE_VOLUME.to_string()));
     }
 
     #[test]
-    fn coordinator_a2a_distribution_injects_worker_peer() {
-        let mut f = fleet(ScaleMode::Claim, None);
-        f.spec.coordinator = Some(agent_api::Coordinator {
-            template: coord_template(),
-            replicas: None,
-            distribution: Some(agent_api::Distribution::A2a),
+    fn drain_aware_grace_and_both_probes() {
+        let r = render_agent(&agent(Mode::Reactive), &cfg(), &wiring()).unwrap();
+        let pod = pod_of(&r);
+        assert_eq!(
+            pod.spec.as_ref().unwrap().termination_grace_period_seconds,
+            Some(TERMINATION_GRACE_SECONDS)
+        );
+        let c = container_of(pod);
+        let live = c.liveness_probe.as_ref().unwrap();
+        assert_eq!(
+            live.http_get.as_ref().unwrap().path.as_deref(),
+            Some("/healthz")
+        );
+        let ready = c.readiness_probe.as_ref().unwrap();
+        assert_eq!(
+            ready.http_get.as_ref().unwrap().path.as_deref(),
+            Some("/readyz")
+        );
+    }
+
+    #[test]
+    fn secret_envs_resolve_the_documents_references() {
+        let mut w = wiring();
+        w.intelligence_token = Some(SecretKeyRef {
+            name: "pool-cred".to_string(),
+            key: "token".to_string(),
         });
-        let mut c = cfg();
-        c.gateway_url = "http://gw.svc:8080".into();
-        let r = render_coordinator(&f, &c).unwrap().unwrap();
-        let Rendered::Deployment(dep) = r else {
-            unreachable!()
+        w.mcp_tokens = vec![SecretEnv {
+            env: "AGENT_MCP_BILLING_TOKEN".to_string(),
+            secret: "billing".to_string(),
+            key: "token".to_string(),
+        }];
+        w.api_token = true;
+        let r = render_agent(&agent(Mode::Once), &cfg(), &w).unwrap();
+        let env = container_of(pod_of(&r)).env.as_ref().unwrap();
+        let get = |n: &str| env.iter().find(|e| e.name == n).unwrap();
+        assert_eq!(
+            get("INTELLIGENCE_TOKEN")
+                .value_from
+                .as_ref()
+                .unwrap()
+                .secret_key_ref
+                .as_ref()
+                .unwrap()
+                .name,
+            "pool-cred"
+        );
+        assert!(env.iter().any(|e| e.name == "AGENT_MCP_BILLING_TOKEN"));
+        assert!(env.iter().any(|e| e.name == API_TOKEN_ENV));
+        // Downward identity is always present — the store fence.
+        assert!(env.iter().any(|e| e.name == "AGENT_POD_NAME"));
+    }
+
+    #[test]
+    fn workflow_and_aauth_mounts_follow_the_wiring() {
+        let mut w = wiring();
+        w.workflow = Some(WorkflowMount {
+            config_map: "demo-workflow".to_string(),
+            key: "workflow.json".to_string(),
+        });
+        w.aauth_key = true;
+        assert_eq!(
+            w.workflow.as_ref().unwrap().file_path(),
+            "/etc/agentctl/workflow/workflow.json"
+        );
+        let r = render_agent(&agent(Mode::Workflow), &cfg(), &w).unwrap();
+        let vols = pod_of(&r).spec.as_ref().unwrap().volumes.as_ref().unwrap();
+        assert!(vols.iter().any(|v| v.name == "agentctl-workflow"));
+        assert!(vols.iter().any(|v| v.name == AAUTH_VOLUME));
+    }
+
+    #[test]
+    fn schedule_renders_cron_with_forbid() {
+        let r = render_agent(&agent(Mode::Schedule), &cfg(), &wiring()).unwrap();
+        let Rendered::CronJob(cj) = r else {
+            panic!("cronjob")
         };
-        let container = container_of(&dep.spec.as_ref().unwrap().template);
-        // `--a2a-peer worker=<gateway>/fleets/<ns>/<fleet>`.
-        assert!(has_arg_pair(
-            container,
-            "--a2a-peer",
-            "worker=http://gw.svc:8080/fleets/agents/workers"
-        ));
+        let spec = &cj.spec;
+        assert_eq!(spec.schedule, "0 * * * *");
+        assert_eq!(spec.concurrency_policy.as_deref(), Some("Forbid"));
+        assert!(spec
+            .job_template
+            .spec
+            .as_ref()
+            .unwrap()
+            .pod_failure_policy
+            .is_some());
+    }
+
+    #[test]
+    fn claim_fleet_leaves_replicas_to_keda_and_carries_no_shard_flag() {
+        let r = render_fleet(&fleet(ScaleMode::Claim, None), &cfg(), &wiring()).unwrap();
+        let Rendered::Deployment(d) = r else {
+            panic!("deployment")
+        };
+        assert_eq!(d.spec.as_ref().unwrap().replicas, None);
+        let args = d
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .args
+            .as_ref()
+            .unwrap()
+            .join(" ");
+        assert!(
+            !args.contains("--shard"),
+            "agent-side sharding is gone upstream"
+        );
+    }
+
+    #[test]
+    fn shard_fleet_renders_statefulset_with_n_replicas_no_agent_side_identity() {
+        let r = render_fleet(&fleet(ScaleMode::Shard, Some(3)), &cfg(), &wiring()).unwrap();
+        let Rendered::StatefulSet(s) = r else {
+            panic!("statefulset")
+        };
+        assert_eq!(s.spec.as_ref().unwrap().replicas, Some(3));
+        let args = s
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .args
+            .as_ref()
+            .unwrap();
+        assert_eq!(args, &["-c", "/etc/agentctl/config/agentd.json"]);
+    }
+
+    #[test]
+    fn shard_fleet_without_shards_is_refused() {
+        assert_eq!(
+            render_fleet(&fleet(ScaleMode::Shard, None), &cfg(), &wiring()).unwrap_err(),
+            RenderError::MissingShards
+        );
+    }
+
+    #[test]
+    fn coordinator_renders_with_role_labels_and_fleet_env() {
+        let mut f = fleet(ScaleMode::Claim, None);
+        f.spec.coordinator = Some(Coordinator {
+            template: agent(Mode::Reactive).spec,
+            replicas: None,
+            distribution: None,
+        });
+        let mut w = wiring();
+        w.extra_env = vec![(
+            "AGENT_FLEET_WORKSOURCE".to_string(),
+            "queue://jobs".to_string(),
+        )];
+        let r = render_coordinator(&f, &cfg(), &w).unwrap().unwrap();
+        let Rendered::Deployment(d) = r else {
+            panic!("deployment")
+        };
+        let labels = d.metadata.labels.as_ref().unwrap();
+        assert_eq!(
+            labels.get(FLEET_ROLE_LABEL).map(String::as_str),
+            Some("coordinator")
+        );
+        let env = d
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .env
+            .as_ref()
+            .unwrap();
+        assert!(env
+            .iter()
+            .any(|e| e.name == "AGENT_FLEET_WORKSOURCE"
+                && e.value.as_deref() == Some("queue://jobs")));
+    }
+
+    #[test]
+    fn fleet_peer_endpoint_shape() {
+        assert_eq!(
+            fleet_peer_endpoint(&cfg(), "tenant", "pool"),
+            format!("{DEFAULT_GATEWAY_URL}/fleets/tenant/pool")
+        );
+    }
+
+    #[test]
+    fn scaled_object_only_for_claim_mode() {
+        assert!(render_scaled_object(
+            &fleet(ScaleMode::Shard, Some(3)),
+            DEFAULT_SCALER_ADDRESS,
+            DEFAULT_COORDINATION_URL
+        )
+        .is_none());
+        let so = render_scaled_object(
+            &fleet(ScaleMode::Claim, None),
+            DEFAULT_SCALER_ADDRESS,
+            DEFAULT_COORDINATION_URL,
+        )
+        .unwrap();
+        assert_eq!(so["spec"]["scaleTargetRef"]["name"], "pool");
+    }
+
+    #[test]
+    fn hardened_pod_shell_survives() {
+        let r = render_agent(&agent(Mode::Once), &cfg(), &wiring()).unwrap();
+        let pod = pod_of(&r).spec.as_ref().unwrap();
+        assert_eq!(pod.automount_service_account_token, Some(false));
+        assert_eq!(pod.share_process_namespace, Some(true));
+        let sc = container_of(pod_of(&r)).security_context.as_ref().unwrap();
+        assert_eq!(sc.read_only_root_filesystem, Some(true));
+        assert_eq!(sc.run_as_non_root, Some(true));
+    }
+
+    #[test]
+    fn absolutize_appends_trailing_dot_to_cluster_fqdns() {
+        assert_eq!(
+            absolutize_endpoint("https://svc.ns.svc.cluster.local:8443/mcp"),
+            "https://svc.ns.svc.cluster.local.:8443/mcp"
+        );
+        assert_eq!(
+            absolutize_endpoint("https://api.example.com/v1"),
+            "https://api.example.com/v1"
+        );
     }
 }

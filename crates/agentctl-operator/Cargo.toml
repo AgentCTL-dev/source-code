@@ -13,6 +13,11 @@ path = "src/bin/operator.rs"
 
 [dependencies]
 agent-api = { path = "../agent-api" }
+# The shared spec→config-document builder (ACC 2): the controller composes the
+# document, the renderer only shells it. Admission uses the SAME builder.
+agent-config = { path = "../agent-config" }
+# Vendored contract tables (exit-code intents → podFailurePolicy).
+agent-contract-client = { path = "../agent-contract-client" }
 # Shared tracing init: fmt layer (default) + OTLP export when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set.
 agentctl-telemetry = { path = "../agentctl-telemetry" }
