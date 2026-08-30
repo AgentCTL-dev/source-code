@@ -388,8 +388,34 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
         principals: vec!["mock:alice".to_string()],
         ..Default::default()
     });
+    // P2-7: an org-unique @handle distinct from the CR name; the org route
+    // resolves it, and admission refuses a second holder.
+    agent.spec.handle = Some("helper".to_string());
+    agent.spec.display_name = Some("Helper Assistant".to_string());
     agent.metadata.namespace = Some(ns.clone());
     kh::apply(&ctx.client, &ns, name, &agent).await?;
+
+    // A duplicate handle is refused at admission, naming the holder.
+    let mut dupe = agentd_agent(ctx, "impostor", Mode::Reactive, "idle");
+    dupe.spec.instruction = None;
+    dupe.spec.surfaces = Some(agent_api::DesiredSurfaces {
+        a2a: true,
+        ..Default::default()
+    });
+    dupe.spec.handle = Some("helper".to_string());
+    dupe.metadata.namespace = Some(ns.clone());
+    match kh::api::<Agent>(&ctx.client, &ns)
+        .create(&Default::default(), &dupe)
+        .await
+    {
+        Ok(_) => bail!("a duplicate handle was ADMITTED — uniqueness rung is not enforcing"),
+        Err(e) => {
+            let msg = format!("{e}");
+            if !msg.contains("already held") {
+                bail!("duplicate handle refused with an unexpected message: {msg}");
+            }
+        }
+    }
     let pod = {
         // wait_for_first_pod is pinned to ctx.cfg.ns; poll the org ns directly.
         let mut found = String::new();
@@ -406,7 +432,8 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
     let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18098)?;
     let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
         "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-org-1", "parts": [{ "text": "ping" }] } } });
-    let url = format!("{}/orgs/{org}/agents/{name}", pf.base_url());
+    // The route segment is the HANDLE, not the CR name (P2-7).
+    let url = format!("{}/orgs/{org}/agents/helper", pf.base_url());
 
     // Named user end-to-end: token → introspection → principal bearer → answer.
     let resp = ctx
@@ -484,7 +511,7 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
     let resp = ctx
         .http
         .get(format!(
-            "{}/orgs/{org}/agents/{name}/.well-known/agent-card.json",
+            "{}/orgs/{org}/agents/helper/.well-known/agent-card.json",
             pf.base_url()
         ))
         .send()

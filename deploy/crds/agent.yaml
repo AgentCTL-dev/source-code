@@ -140,6 +140,19 @@ spec:
                     nullable: true
                     type: array
                 type: object
+              displayName:
+                description: Human-facing display name (cards, listings, dashboards).
+                nullable: true
+                type: string
+              handle:
+                description: |-
+                  The agent's org-unique @handle (RFC 0033 §2): the token users type in
+                  supervisor chat and the gateway's `/orgs/<org>/agents/<handle>` route
+                  segment. Defaults to the CR name; admission enforces uniqueness within
+                  the namespace against every other agent's EFFECTIVE handle
+                  (`handle` or name). DNS-label characters only.
+                nullable: true
+                type: string
               identity:
                 description: |-
                   Portable agent identity (RFC 0023). `aauth` opts the agent into an

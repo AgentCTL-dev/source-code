@@ -32,6 +32,12 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["modelpools"]
     verbs: ["get", "list"]
+  # Handle uniqueness (RFC 0033 §2, P2-7): the effective @handle must be
+  # unique per namespace across Agents AND AgentFleets — the webhook lists
+  # both to detect collisions (CEL cannot express cross-object uniqueness).
+  - apiGroups: ["agentctl.dev"]
+    resources: ["agents", "agentfleets"]
+    verbs: ["get", "list"]
   # Referenced-Secret EXISTENCE check (rung 3b): a dangling
   # credentialSecretRef/tokenSecretRef is not caught by --validate-config
   # (upstream-confirmed) and would surface as a pod that cannot start. The

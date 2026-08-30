@@ -23,6 +23,28 @@ pub use org::{Organization, OrganizationSpec, OrganizationStatus};
 /// Group for all agentctl CRDs.
 pub const GROUP: &str = "agentctl.dev";
 
+/// An agent's EFFECTIVE handle: `spec.handle` when set, else the CR name.
+/// The single token the gateway routes on and supervisors resolve `@handle`
+/// against; admission enforces org-uniqueness over this value.
+pub fn effective_handle<'a>(handle: Option<&'a str>, name: &'a str) -> &'a str {
+    match handle {
+        Some(h) if !h.is_empty() => h,
+        _ => name,
+    }
+}
+
+/// Handle syntax: a DNS-1123 label (lowercase alphanumerics + `-`, no
+/// leading/trailing `-`, ≤63 chars) — the same token class as CR names, so a
+/// handle can always stand where a name does (routes, mentions).
+pub fn valid_handle(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 63
+        && h.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !h.starts_with('-')
+        && !h.ends_with('-')
+}
+
 // ===========================================================================
 // Agent
 // ===========================================================================
@@ -73,6 +95,18 @@ pub const GROUP: &str = "agentctl.dev";
 pub struct AgentSpec {
     /// The run shape. Determines the rendered workload kind.
     pub mode: Mode,
+
+    /// The agent's org-unique @handle (RFC 0033 §2): the token users type in
+    /// supervisor chat and the gateway's `/orgs/<org>/agents/<handle>` route
+    /// segment. Defaults to the CR name; admission enforces uniqueness within
+    /// the namespace against every other agent's EFFECTIVE handle
+    /// (`handle` or name). DNS-label characters only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+
+    /// Human-facing display name (cards, listings, dashboards).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 
     /// The conformant-agent image to run. When omitted, the operator falls back
     /// to its configured **default agent image** (`operator.defaultAgentImage` /
@@ -537,6 +571,15 @@ pub struct Condition {
     }
 ]))]
 pub struct AgentFleetSpec {
+    /// The fleet's org-unique @handle (see [`AgentSpec::handle`]); routes as
+    /// `/orgs/<org>/fleets/<handle>`. Defaults to the CR name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+
+    /// Human-facing display name (cards, listings, dashboards).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
     /// The per-replica **worker** agent definition.
     pub template: AgentSpec,
     /// The **worker** scaling regime.

@@ -429,6 +429,10 @@ async fn org_card_common(
         Ok((_, ns)) => ns,
         Err(resp) => return *resp,
     };
+    let name = match resolve_handle(&state, &ns, &name, kind == Some("AgentFleet")).await {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
     let base_url = base_url(&headers);
     match build_signed_card(&state, &ns, &name, &base_url, kind).await {
         Ok(card) => (StatusCode::OK, Json(card)).into_response(),
@@ -559,6 +563,13 @@ async fn org_rpc_common(
     };
     state.metrics.inc_oidc_allow();
 
+    // Handle → CR name (P2-7). Resolved only for AUTHENTICATED callers, so
+    // an anonymous probe cannot enumerate handles.
+    let name = match resolve_handle(&state, &ns, &name, is_fleet).await {
+        Ok(n) => n,
+        Err(resp) => return *resp,
+    };
+
     // Org access policy (P1-8): roles over label selectors, resolved from the
     // caller's groups, BEFORE any principal/bearer work — "engineering
     // operates engineering, marketing is refused, admins see all".
@@ -618,6 +629,54 @@ async fn resolve_org(
                 .into_response(),
         )),
     }
+}
+
+/// Resolve an org-route path segment to the CR name (P2-7): the segment is
+/// the EFFECTIVE handle (`spec.handle`, defaulting to the CR name), so an
+/// exact CR-name hit wins only when that CR declares no different handle.
+/// Unknown handles are 404s that say "handle", not "agent".
+async fn resolve_handle(
+    state: &AppState,
+    ns: &str,
+    token: &str,
+    is_fleet: bool,
+) -> Result<String, Box<Response>> {
+    let found: Option<String> = if is_fleet {
+        let fleets: Api<AgentFleet> = Api::namespaced(state.client.clone(), ns);
+        match fleets.list(&Default::default()).await {
+            Ok(list) => list.items.into_iter().find_map(|f| {
+                let n = f.metadata.name.clone().unwrap_or_default();
+                (agent_api::effective_handle(f.spec.handle.as_deref(), &n) == token).then_some(n)
+            }),
+            Err(e) => return Err(Box::new(handle_lookup_error(ns, &e))),
+        }
+    } else {
+        let agents: Api<Agent> = Api::namespaced(state.client.clone(), ns);
+        match agents.list(&Default::default()).await {
+            Ok(list) => list.items.into_iter().find_map(|a| {
+                let n = a.metadata.name.clone().unwrap_or_default();
+                (agent_api::effective_handle(a.spec.handle.as_deref(), &n) == token).then_some(n)
+            }),
+            Err(e) => return Err(Box::new(handle_lookup_error(ns, &e))),
+        }
+    };
+    found.ok_or_else(|| {
+        Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("no agent with handle {token:?} in this organization") })),
+            )
+                .into_response(),
+        )
+    })
+}
+
+fn handle_lookup_error(ns: &str, e: &kube::Error) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({ "error": format!("resolve handle in {ns}: {e}") })),
+    )
+        .into_response()
 }
 
 /// The org-policy role a gateway-forwarded A2A method needs (RFC 0029 §3):

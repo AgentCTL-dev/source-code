@@ -274,7 +274,12 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     // coordinator template when present). The first denial is the verdict — a
     // fleet is admitted only if BOTH its members pass.
     let is_template = kind == "AgentFleet";
-    let mut verdict = evaluate_view(&state, view, annotations, &namespace, is_template).await;
+    let name = object["metadata"]["name"].as_str().unwrap_or_default();
+    let mut verdict =
+        check_handle_uniqueness(&state, &kind, &namespace, name, spec.get("handle")).await;
+    if verdict.is_ok() {
+        verdict = evaluate_view(&state, view, annotations, &namespace, is_template).await;
+    }
     if verdict.is_ok() {
         if let Some(coord) = coordinator_view {
             verdict = evaluate_view(&state, coord, annotations, &namespace, true)
@@ -324,6 +329,74 @@ async fn evaluate_view(
     // when no binary is wired; transient cross-object failures fail OPEN (like
     // the pool lookup) — a spec defect the binary names fails CLOSED.
     binary_validate_view(state, view, namespace, is_template).await
+}
+
+/// Handle uniqueness (RFC 0033 §2, P2-7): the EFFECTIVE handle
+/// (`spec.handle`, else the CR name) must be unique within the namespace
+/// across Agents AND AgentFleets — it is the org route segment and the
+/// supervisor `@handle` token, so a collision would make routing ambiguous.
+/// Syntax is a DNS-1123 label. Duplicates fail CLOSED naming the holder;
+/// transient list errors fail OPEN (the cross-object-read posture; CEL cannot
+/// express cross-object uniqueness).
+async fn check_handle_uniqueness(
+    state: &AppState,
+    kind: &str,
+    namespace: &str,
+    name: &str,
+    handle: Option<&Value>,
+) -> Result<(), String> {
+    if kind != "Agent" && kind != "AgentFleet" {
+        return Ok(());
+    }
+    let declared = handle.and_then(Value::as_str);
+    if let Some(h) = declared {
+        if !agent_api::valid_handle(h) {
+            return Err(format!(
+                "spec.handle {h:?} is not a DNS-1123 label (lowercase alphanumerics and '-')"
+            ));
+        }
+    }
+    let effective = agent_api::effective_handle(declared, name);
+
+    let mut holders: Vec<(String, String, String)> = Vec::new(); // (kind, name, handle)
+    let agents: kube::Api<agent_api::Agent> =
+        kube::Api::namespaced(state.client.clone(), namespace);
+    match agents.list(&Default::default()).await {
+        Ok(list) => {
+            for a in list.items {
+                let n = a.metadata.name.clone().unwrap_or_default();
+                let h = agent_api::effective_handle(a.spec.handle.as_deref(), &n).to_string();
+                holders.push(("Agent".into(), n, h));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "handle-uniqueness list Agents failed; failing open");
+            return Ok(());
+        }
+    }
+    let fleets: kube::Api<agent_api::AgentFleet> =
+        kube::Api::namespaced(state.client.clone(), namespace);
+    match fleets.list(&Default::default()).await {
+        Ok(list) => {
+            for f in list.items {
+                let n = f.metadata.name.clone().unwrap_or_default();
+                let h = agent_api::effective_handle(f.spec.handle.as_deref(), &n).to_string();
+                holders.push(("AgentFleet".into(), n, h));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "handle-uniqueness list AgentFleets failed; failing open");
+            return Ok(());
+        }
+    }
+    for (hk, hn, hh) in holders {
+        if hh == effective && !(hk == kind && hn == name) {
+            return Err(format!(
+                "handle {effective:?} is already held by {hk} {hn:?} in this namespace                  (handles route /orgs/<org>/… and resolve @mentions, so they must be unique)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Every Secret the spec's credential wiring will mount must exist in the
