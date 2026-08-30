@@ -101,8 +101,24 @@ fn filter_patterns(patterns: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The verified-tier caller-auth facts (P5-2): the identity provider's
+/// published JWKS (inline — no fetch at gateway runtime), the issuer agents'
+/// tokens carry, and THIS org's audience. `None` ⇒ the header-asserted tier
+/// (bootstrap / identity unreachable).
+#[derive(Clone, Debug)]
+pub struct VerifiedTier {
+    pub keys_json: String,
+    pub issuer: String,
+    pub audience: String,
+}
+
+/// The audience a tenant gateway binds its callers' tokens to.
+pub fn gateway_audience(ns: &str) -> String {
+    format!("mcpg:{ns}")
+}
+
 /// Render the tenant gateway's whole config document. Pure.
-pub fn render_config(entries: &[FederationEntry]) -> String {
+pub fn render_config(entries: &[FederationEntry], tier: Option<&VerifiedTier>) -> String {
     let federations: Vec<Value> = entries
         .iter()
         .map(|e| {
@@ -123,9 +139,14 @@ pub fn render_config(entries: &[FederationEntry]) -> String {
                     "token": format!("${{env.{env}}}"),
                 });
             }
+            let trust = if tier.is_some() {
+                "verified"
+            } else {
+                "header_asserted"
+            };
             let mut fed = json!({
                 "name": e.name,
-                "governance": { "minimum_trust": "header_asserted" },
+                "governance": { "minimum_trust": trust },
                 "upstream": upstream,
                 "import": { "tools": true },
                 // The prefix is REQUIRED with >1 federation and is the
@@ -149,22 +170,28 @@ pub fn render_config(entries: &[FederationEntry]) -> String {
         })
         .collect();
 
-    let doc = json!({
+    let floor = if tier.is_some() {
+        "verified"
+    } else {
+        "header_asserted"
+    };
+    let mut doc = json!({
         "gateway": {
             "server": {
                 "bind_address": "0.0.0.0:8787",
                 "mcp_path": "/mcp",
                 "health_path": "/health",
-                // Header-asserted callers (x-mcpg-subject-id) — safe ONLY
-                // behind the NetworkPolicy perimeter; P5-2 upgrades this to
-                // JWKS-verified per-agent tokens.
-                "trust_subject_header": true,
+                // The header tier exists ONLY while the verified tier is
+                // unavailable (bootstrap / identity blip): behind the
+                // NetworkPolicy perimeter, callers self-assert; with jwks
+                // active the header is ignored and unsigned callers refuse.
+                "trust_subject_header": tier.is_none(),
             },
             "config_watch": { "enabled": true, "poll_interval_ms": 5000 },
         },
         "cluster": { "kind": "single_node" },
         "governance": {
-            "policy": { "tool_access": { "default_minimum_trust": "header_asserted" } },
+            "policy": { "tool_access": { "default_minimum_trust": floor } },
             "audit": {
                 "enabled": true,
                 "required": true,
@@ -179,6 +206,17 @@ pub fn render_config(entries: &[FederationEntry]) -> String {
             "logs": { "level": "info", "sinks": [{ "kind": "stderr", "config": { "format": "json" } }] },
         },
     });
+    if let Some(t) = tier {
+        // P5-2: callers present identity-minted EdDSA JWTs (audience-bound
+        // to THIS org's gateway); unsigned or foreign-signed calls refuse.
+        doc["governance"]["access"] = json!({
+            "jwks": {
+                "keys_json": t.keys_json,
+                "issuer": t.issuer,
+                "audience": t.audience,
+            }
+        });
+    }
     // YAML for operator legibility (`kubectl get cm -o yaml` reads well);
     // mcpg parses YAML as a superset of this JSON-shaped tree.
     serde_yaml::to_string(&doc).expect("static config tree serializes")
@@ -407,12 +445,47 @@ pub async fn ensure_tenant_gateway(
     let list = services.list(&Default::default()).await?;
     let (entries, token_refs) = eligible_entries(&list.items);
 
+    // The verified tier (P5-2): inline the identity provider's JWKS so the
+    // gateway verifies caller tokens with NO runtime fetch. Unfetchable ⇒
+    // render the header tier and warn — an identity blip must not take the
+    // org's tool plane down, only downgrade its trust floor.
+    let tier = match (&ctx.identity.url, &ctx.aauth.provider) {
+        (Some(identity_url), Some(issuer)) => {
+            let jwks_url = format!("{}/aauth-jwks.json", identity_url.trim_end_matches('/'));
+            match ctx.identity_http.get(&jwks_url).send().await {
+                Ok(resp) if resp.status().is_success() => match resp.text().await {
+                    Ok(keys_json) if keys_json.contains("\"keys\"") => Some(VerifiedTier {
+                        keys_json,
+                        issuer: issuer.clone(),
+                        audience: gateway_audience(ns),
+                    }),
+                    _ => {
+                        tracing::warn!(
+                            ns,
+                            "identity JWKS unreadable; tenant gateway stays header-tier"
+                        );
+                        None
+                    }
+                },
+                other => {
+                    tracing::warn!(
+                        ns,
+                        ?other,
+                        "identity JWKS fetch failed; tenant gateway stays header-tier"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
     let pp = PatchParams::apply(FIELD_MANAGER).force();
     let cm = ConfigMap {
         metadata: meta(ns, org, owner),
         data: Some(BTreeMap::from([(
             "config.yaml".to_string(),
-            render_config(&entries),
+            render_config(&entries, tier.as_ref()),
         )])),
         ..Default::default()
     };
@@ -469,13 +542,16 @@ mod tests {
     /// private/insecure upstream opt-ins.
     #[test]
     fn config_is_proxy_only_and_governed() {
-        let yaml = render_config(&[
-            entry("state", &["state.*"]),
-            FederationEntry {
-                token_env: Some(federation_token_env("crm")),
-                ..entry("crm", &["search_*"])
-            },
-        ]);
+        let yaml = render_config(
+            &[
+                entry("state", &["state.*"]),
+                FederationEntry {
+                    token_env: Some(federation_token_env("crm")),
+                    ..entry("crm", &["search_*"])
+                },
+            ],
+            None,
+        );
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert!(
             doc.get("plugins").is_none(),
@@ -507,6 +583,40 @@ mod tests {
             feds[1]["upstream"]["auth"]["token"],
             "${env.FEDERATION_CRM_TOKEN}"
         );
+    }
+
+    /// P5-2: with the verified tier, the jwks block is inline (issuer +
+    /// audience bound to THIS org), the trust floors rise to `verified`, and
+    /// the self-asserted subject header is OFF.
+    #[test]
+    fn verified_tier_raises_floors_and_binds_audience() {
+        let tier = VerifiedTier {
+            keys_json:
+                r#"{"keys":[{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"k1","x":"AA"}]}"#
+                    .into(),
+            issuer: "http://agentctl-identity.agentctl-system".into(),
+            audience: gateway_audience("org-acme"),
+        };
+        let yaml = render_config(&[entry("state", &["state.*"])], Some(&tier));
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            doc["gateway"]["server"]["trust_subject_header"],
+            serde_yaml::Value::Bool(false)
+        );
+        assert_eq!(
+            doc["governance"]["policy"]["tool_access"]["default_minimum_trust"],
+            "verified"
+        );
+        assert_eq!(
+            doc["governance"]["access"]["jwks"]["audience"],
+            "mcpg:org-acme"
+        );
+        assert!(doc["governance"]["access"]["jwks"]["keys_json"]
+            .as_str()
+            .unwrap()
+            .contains("Ed25519"));
+        let feds = doc["mcp"]["federations"].as_sequence().unwrap();
+        assert_eq!(feds[0]["governance"]["minimum_trust"], "verified");
     }
 
     /// The platform `control` entry NEVER federates (identity laundering);

@@ -120,6 +120,38 @@ impl ProviderKey {
     }
 }
 
+impl ProviderKey {
+    /// Mint a TENANT-GATEWAY access token (P5-2): a plain EdDSA JWT the
+    /// per-org mcpg verifies against this provider's published JWKS.
+    /// Audience-bound to ONE org's gateway — a token for org A is refused at
+    /// org B's. `sub` is the operator-registered workload (`<ns>/<name>`),
+    /// so the gateway's audit + CEL see the real caller.
+    pub fn mint_gateway_token(
+        &self,
+        issuer: &str,
+        workload: &str,
+        audience: &str,
+        ttl_secs: i64,
+    ) -> String {
+        let now = now_unix();
+        let header =
+            B64URL.encode(json!({ "alg": "EdDSA", "typ": "JWT", "kid": self.kid }).to_string());
+        let claims = B64URL.encode(
+            json!({
+                "iss": issuer,
+                "sub": workload,
+                "aud": audience,
+                "iat": now,
+                "exp": now + ttl_secs,
+            })
+            .to_string(),
+        );
+        let signing_input = format!("{header}.{claims}");
+        let sig = self.pair.sign(signing_input.as_bytes());
+        format!("{signing_input}.{}", B64URL.encode(sig.as_ref()))
+    }
+}
+
 /// The verified caller of a signed agent request.
 #[derive(Debug, Clone)]
 pub struct SignedCaller {

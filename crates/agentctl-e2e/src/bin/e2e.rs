@@ -260,7 +260,36 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
 
     let pf = shell::PortForward::service(&ns, "agentctl-mcpg", 8787, 18107)?;
     let base = pf.base_url();
-    let call = |body: Value, session: Option<String>| {
+    // The VERIFIED tier (P5-2): callers present identity-minted, audience-
+    // bound EdDSA JWTs. Mint one through the operator admin channel.
+    let admin_token = {
+        let b64 = shell::kubectl(&[
+            "get", "secret", "-n", &ctx.cfg.system_ns, "agentctl-api-token",
+            "-o", "jsonpath={.data.AGENTCTL_API_TOKEN}",
+        ])?;
+        String::from_utf8(base64_decode(b64.trim())?)?
+    };
+    let pf_id = shell::PortForward::service(&ctx.cfg.system_ns, "agentctl-identity", 80, 18114)?;
+    let mint = |audience: String| {
+        let idb = pf_id.base_url();
+        let admin = admin_token.clone();
+        async move {
+            let resp = ctx
+                .http
+                .post(format!("{idb}/admin/mcpg-token"))
+                .bearer_auth(admin)
+                .json(&json!({ "workload": "org-e2e-tg/probe", "audience": audience }))
+                .send()
+                .await?;
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok(body["token"].as_str().unwrap_or_default().to_string())
+        }
+    };
+    let good_token = mint(format!("mcpg:{ns}")).await?;
+    if good_token.is_empty() {
+        bail!("identity refused the gateway-token mint");
+    }
+    let call = |bearer: Option<String>, body: Value, session: Option<String>| {
         let base = base.clone();
         async move {
             let mut req = ctx
@@ -270,8 +299,10 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
                 // Strict streamable-HTTP: the negotiated protocol version
                 // must ride every post-initialize request (400 without it).
                 .header("mcp-protocol-version", "2025-11-25")
-                .header("x-mcpg-subject-id", "agent:e2e-tg:probe")
                 .json(&body);
+            if let Some(b) = &bearer {
+                req = req.bearer_auth(b.clone());
+            }
             if let Some(s) = &session {
                 req = req.header("mcp-session-id", s.clone());
             }
@@ -304,12 +335,50 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
         }
     };
 
+    // Refusals FIRST (the P5-2 DoD): unsigned and wrong-audience callers
+    // never reach the tool surface.
+    let (unsigned, _) = call(
+        None,
+        json!({ "jsonrpc": "2.0", "id": 90, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "e2e-unsigned", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if unsigned.get("result").is_some() {
+        let (t, _) = call(
+            None,
+            json!({ "jsonrpc": "2.0", "id": 91, "method": "tools/list" }),
+            None,
+        )
+        .await?;
+        if t.pointer("/result/tools")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        {
+            bail!("an UNSIGNED caller saw tools through the verified tier: {t}");
+        }
+    }
+    let wrong_aud = mint("mcpg:org-other".into()).await?;
+    let (foreign, _) = call(
+        Some(wrong_aud),
+        json!({ "jsonrpc": "2.0", "id": 92, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "e2e-foreign", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if foreign.get("result").is_some() {
+        bail!("a WRONG-AUDIENCE token initialized against this org's gateway: {foreign}");
+    }
+
     // Handshake, then the governed inventory: the federated tool appears
     // under its prefix, NOTHING else from the upstream, and NO control.*
     // (federation may still be importing on first touch — poll).
     let (init, session) = call(
+        Some(good_token.clone()),
         json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-            "protocolVersion": "2025-03-26", "capabilities": {},
+            "protocolVersion": "2025-11-25", "capabilities": {},
             "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
         None,
     )
@@ -318,6 +387,7 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
         bail!("tenant gateway initialize failed: {init}");
     }
     let _ = call(
+        Some(good_token.clone()),
         json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
         session.clone(),
     )
@@ -327,8 +397,10 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
         let names = names.clone();
         let call = &call;
         let session = session.clone();
+        let good_token = good_token.clone();
         async move {
             let (tools, _) = call(
+                Some(good_token.clone()),
                 json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
                 session,
             )
@@ -358,6 +430,7 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
 
     // A governed call round-trips to the real upstream.
     let (resp, _) = call(
+        Some(good_token.clone()),
         json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": { "name": "workstats.work.stats", "arguments": {} } }),
         session.clone(),
@@ -368,6 +441,7 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
         bail!("proxied work.stats returned no backlog shape: {resp}");
     }
 
+    drop(pf_id);
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
     pass()
@@ -1008,6 +1082,12 @@ async fn mention_orchestration(ctx: &Ctx) -> Result<Outcome> {
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
     pass()
+}
+
+/// Standard-alphabet base64 decode (kubectl secret data).
+fn base64_decode(s: &str) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.decode(s.trim())?)
 }
 
 /// Every text found under `result`, joined (message parts, artifacts, data).

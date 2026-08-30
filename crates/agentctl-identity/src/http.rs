@@ -72,6 +72,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(admin_allowed_keys_delete),
         )
         .route("/admin/agents", get(admin_agents_get))
+        .route("/admin/mcpg-token", post(admin_mcpg_token))
         .route("/admin/agents/{local}/revoke", post(admin_agent_revoke))
         .with_state(state)
 }
@@ -433,6 +434,39 @@ fn with_aauth_error(e: ApiError) -> Response {
         resp.headers_mut().insert("aauth-error", v);
     }
     resp
+}
+
+/// `POST /admin/mcpg-token` (P5-2, operator channel): mint an
+/// AUDIENCE-BOUND tenant-gateway access token — a plain EdDSA JWT signed by
+/// the provider key, verifiable against the published `/aauth-jwks.json`.
+/// `{workload, audience, ttl?}` → `{token, expires_in}`. Admin-gated: the
+/// OPERATOR names the workload (the caller cannot mint for someone else).
+async fn admin_mcpg_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    let aauth = aauth_state(&state)?;
+    let workload = body
+        .get("workload")
+        .and_then(Value::as_str)
+        .filter(|w| !w.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "workload is required"))?;
+    let audience = body
+        .get("audience")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "audience is required"))?;
+    let ttl = body
+        .get("ttl")
+        .and_then(Value::as_i64)
+        .unwrap_or(24 * 3600)
+        .clamp(60, 30 * 24 * 3600);
+    let token = aauth
+        .key
+        .mint_gateway_token(&aauth.issuer, workload, audience, ttl);
+    Ok(Json(json!({ "token": token, "expires_in": ttl })))
 }
 
 // -- AAuth admin (operator channel) -----------------------------------------
