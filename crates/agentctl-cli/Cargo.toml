@@ -19,4 +19,14 @@ kube = { version = "4", features = ["derive"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
+serde.workspace = true
 serde_json.workspace = true
+# `agentctl login` dials the identity service: reqwest over rustls with the
+# EXPLICIT ring provider + webpki roots (the control-plane client pattern —
+# no aws-lc-rs, no C toolchain).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-manual-roots-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"

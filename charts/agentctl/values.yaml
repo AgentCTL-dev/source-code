@@ -464,6 +464,51 @@ identity:
     adminTokenSecret:
       name: ""
       key: "token"
+  # The agentctl-identity SERVICE (RFC 0028) — the human-identity plane: federated
+  # OIDC validation (introspection for the gateway/apiserver), RFC 8628 device-flow
+  # login for `agentctl login`, and per-(user,agent) A2A principal minting for the
+  # operator. Distinct from identity.aauth above (portable AGENT identity).
+  # Default off: arm it once at least one OIDC provider below is configured (the
+  # service starts without providers but refuses introspection/login).
+  service:
+    enabled: false
+    replicas: 1
+    logLevel: info
+    # Federated OIDC providers, rendered verbatim (JSON) into IDENTITY_PROVIDERS.
+    # Issuers must be https:// (loopback http is a dev-only carve-out).
+    #   - name: okta                       # short name; prefixes subjects "okta:<sub>"
+    #     issuer: https://acme.okta.com
+    #     client_id: agentctl-cli          # the device-flow client
+    #     client_secret: ""                # optional (public clients omit)
+    #     audiences: []                    # accepted `aud`; empty = [client_id]
+    #     scopes: [openid, profile, email]
+    #     groups_claim: groups             # claim carrying group memberships
+    providers: []
+    # Custody store. memory (default) keeps device sessions + principal hashes in
+    # process — dev only, custody dies with the pod. postgres reuses the
+    # bundled-or-external Postgres (the DATABASE_URL helper): principals survive
+    # restarts and replicas can be raised for HA.
+    store: memory                # memory | postgres
+    # Secret holding the 32-byte base64 seal key (IDENTITY_SEAL_KEY) for
+    # envelope-encrypting custody material at rest. Empty name = ephemeral
+    # per-pod key with a loud startup warning (grants die with the pod).
+    sealKeySecret:
+      name: ""
+      key: IDENTITY_SEAL_KEY
+    resources:
+      requests: { cpu: 25m, memory: 32Mi }
+      limits: { cpu: 300m, memory: 128Mi }
+    nodeSelector: {}
+    affinity: {}
+    tolerations: []
+    topologySpreadConstraints: []
+    priorityClassName: ""
+    podAnnotations: {}
+    podLabels: {}
+    extraEnv: []
+    envFrom: []
+    serviceAccount:
+      annotations: {}
 
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release

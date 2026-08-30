@@ -1127,6 +1127,9 @@ fn build_pool() -> Pool {
 ///      is forwarded to the agent.
 ///   2. `spec.access.oidc` set: a bearer JWT is required + validated for THIS agent.
 ///   3. otherwise the coarse bearer gate the middleware enforces is applied inline.
+// The Err IS the terminal HTTP response (the axum idiom); boxing it would
+// churn every `?`/`return Err` site for a cold path taken once per request.
+#[allow(clippy::result_large_err)]
 async fn enforce_access(
     state: &AppState,
     ns: &str,

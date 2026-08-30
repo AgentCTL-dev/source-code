@@ -1,0 +1,49 @@
+# agentctl-identity — the identity plane (RFC 0028).
+#
+# The standalone broker: external-IdP federation (OIDC discovery, device flow,
+# JWKS validation), grant custody (envelope-encrypted at rest), the exchange
+# that keeps a days-old agent's credentials fresh, and per-(user, agent) A2A
+# principal minting. P1 ships federation + validation + principal minting; the
+# RFC 8693 exchange and the AAuth provider role land on this same skeleton.
+[package]
+name = "agentctl-identity"
+version = "1.3.0"
+description = "agentctl identity service: OIDC federation, token validation, principal minting, grant custody (RFC 0028)"
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+repository.workspace = true
+
+[[bin]]
+name = "agentctl-identity"
+path = "src/main.rs"
+
+[dependencies]
+agentctl-telemetry = { path = "../agentctl-telemetry" }
+axum = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+# Outbound to IdPs: discovery, JWKS, device/token endpoints. Same rustls
+# manual-roots posture as the operator's AAuth client (webpki roots, no C).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-manual-roots-no-provider",
+] }
+webpki-roots = "0.26"
+jsonwebtoken = "9"
+# Durable custody: same PG stack as gateway/coordination (pure Rust).
+deadpool-postgres = "0.14"
+tokio-postgres = "0.7"
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+# Envelope encryption for grants at rest + principal bearer hashing.
+ring = "0.17"
+base64 = "0.22"
+async-trait = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+tracing = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -146,7 +146,7 @@ topologySpreadConstraints, priorityClassName); empty -> "" so callers can guard
 with `with` and emit nothing for the default install.
 */}}
 {{- define "agentctl.scheduling" -}}
-{{- $c := index .root.Values .comp | default dict -}}
+{{- $c := .vals | default (index .root.Values (.comp | default "")) | default dict -}}
 {{- with $c.nodeSelector }}
 nodeSelector:
   {{- toYaml . | nindent 2 }}
@@ -176,7 +176,7 @@ template via {{- with $c.envFrom }}. Usage (at container env: level):
     {{- include "agentctl.podEnv" (dict "root" $ "comp" "operator") | nindent 12 }}
 */}}
 {{- define "agentctl.podEnv" -}}
-{{- $c := index .root.Values .comp | default dict -}}
+{{- $c := .vals | default (index .root.Values (.comp | default "")) | default dict -}}
 - name: RUST_LOG
   value: {{ $c.logLevel | default "info" | quote }}
 {{- with $c.extraEnv }}

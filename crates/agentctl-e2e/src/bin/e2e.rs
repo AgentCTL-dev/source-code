@@ -1319,6 +1319,18 @@ async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
             "apd:e2e image not loaded — build the sibling agentprovider (APD_SRC) via images.sh",
         );
     }
+    // The July-era apd fixture predates the 1.3.1 agent's AAuth protocol
+    // (enrollment never completes: the agent never learns status.identity).
+    // The whole seam is re-founded in P1-6 — agentctl-identity becomes the
+    // fleet's Agent Provider with secret-free FEDERATED enrollment (projected
+    // ServiceAccount tokens; RFC 0028 §5) — so the legacy-apd path is a
+    // documented skip, forced only for archaeology.
+    if std::env::var("AGENTCTL_E2E_LEGACY_APD").is_err() {
+        return skip(
+            "legacy apd fixture predates the 1.3.1 AAuth protocol; superseded by P1-6 \
+             (agentctl-identity as the Agent Provider, federated enrollment)",
+        );
+    }
     let dir = examples_dir();
 
     // The operator's admin channel to apd: the SAME fixture token apd's

@@ -45,6 +45,9 @@ jobs:
           - component: scaler
             crate: agentctl-scaler
             bin: agentctl-scaler
+          - component: identity
+            crate: agentctl-identity
+            bin: agentctl-identity
     steps:
       - uses: actions/checkout@v4
 

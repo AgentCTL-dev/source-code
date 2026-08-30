@@ -17,6 +17,7 @@ members = [
     "crates/agentctl-gateway",
     "crates/agentctl-admission",
     "crates/agentctl-telemetry",
+    "crates/agentctl-identity",
     "crates/agentctl-coordination",
     "crates/agentctl-scaler",
 ]

@@ -11,6 +11,7 @@
 //! argv0 dispatch can route that without changing this logic. The table columns
 //! deliberately mirror the `Agent` CRD printer columns declared in `agent-api`.
 
+mod auth;
 mod install;
 
 use agent_api::{Agent, AgentStatus, Mode, Substrate};
@@ -41,6 +42,10 @@ enum Command {
     Install(install::InstallArgs),
     /// Uninstall the agentctl control plane via Helm.
     Uninstall(install::UninstallArgs),
+    /// Sign in via your identity provider (RFC 8628 device flow).
+    Login(auth::LoginArgs),
+    /// Show the signed-in identity from the saved session.
+    Whoami(auth::WhoamiArgs),
 }
 
 #[derive(Args)]
@@ -75,6 +80,8 @@ async fn main() -> Result<()> {
         Command::Describe(args) => run_describe(args).await,
         Command::Install(args) => install::run_install(args).await,
         Command::Uninstall(args) => install::run_uninstall(args).await,
+        Command::Login(args) => auth::run_login(args).await,
+        Command::Whoami(args) => auth::run_whoami(args).await,
     }
 }
 

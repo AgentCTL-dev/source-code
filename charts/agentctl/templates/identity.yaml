@@ -1,0 +1,155 @@
+{{- $ns := include "agentctl.namespace" . }}
+{{- $id := .Values.identity.service }}
+{{- if $id.enabled }}
+# The agentctl-identity service (RFC 0028): federated OIDC introspection,
+# RFC 8628 device-flow login, and per-(user,agent) A2A principal minting.
+# It holds NO cluster RBAC — custody lives in its own store (memory or the
+# shared Postgres); the operator/gateway reach it over its Service with the
+# shared control-plane admin bearer (apiToken).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-identity
+  namespace: {{ $ns }}
+  {{- with $id.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: agentctl-identity
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-identity
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-identity
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{ $id.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-identity
+  template:
+    metadata:
+      {{- $podAnnotations := merge (deepCopy ($id.podAnnotations | default dict)) (.Values.commonAnnotations | default dict) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: agentctl-identity
+        {{- $podLabels := merge (deepCopy ($id.podLabels | default dict)) (.Values.commonLabels | default dict) }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: agentctl-identity
+      {{- include "agentctl.pullSecrets" . | nindent 6 }}
+      {{- with (include "agentctl.scheduling" (dict "root" $ "vals" $id)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: identity
+          image: {{ include "agentctl.image" (dict "root" $ "component" "identity") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { containerPort: 8087, name: http }
+          env:
+            {{- include "agentctl.podEnv" (dict "root" $ "vals" $id) | nindent 12 }}
+            {{- with $id.providers }}
+            # Federated OIDC providers (identity.service.providers), one JSON doc.
+            - name: IDENTITY_PROVIDERS
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- if eq $id.store "postgres" }}
+            # Durable custody (identity.service.store=postgres): device sessions +
+            # principal hashes in the shared Postgres, surviving restarts (the
+            # service reads the conventional DATABASE_URL). Default memory injects
+            # nothing — custody dies with the pod (dev only; the binary warns).
+            {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            {{- with (include "agentctl.pgCaEnv" $) }}
+            # verify-full: pin the chart CA for the Postgres hop (postgres.bundled.tls.verifyFull).
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- if $id.sealKeySecret.name }}
+            # Envelope-encryption seal key (32 bytes base64). Absent, the binary
+            # derives an EPHEMERAL key and warns loudly.
+            - name: IDENTITY_SEAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $id.sealKeySecret.name }}
+                  key: {{ $id.sealKeySecret.key }}
+            {{- end }}
+            {{- if .Values.apiToken.enabled }}
+            # Admin bearer for the mutating/validating surfaces (introspect, mint,
+            # verify) — the shared control-plane token. Without it those surfaces
+            # refuse outright (fail closed), so arm apiToken with this service.
+            - name: IDENTITY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentctl-api-token
+                  key: AGENTCTL_API_TOKEN
+            {{- end }}
+          {{- with $id.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- $pgMount := "" }}
+          {{- if eq $id.store "postgres" }}{{ $pgMount = include "agentctl.pgCaVolumeMount" $ }}{{- end }}
+          {{- with (trim $pgMount) }}
+          volumeMounts:
+            {{- include "agentctl.pgCaVolumeMount" $ | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8087 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8087 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml $id.resources | nindent 12 }}
+      {{- $pgVol := "" }}
+      {{- if eq $id.store "postgres" }}{{ $pgVol = include "agentctl.pgCaVolume" $ }}{{- end }}
+      {{- with (trim $pgVol) }}
+      volumes:
+        {{- include "agentctl.pgCaVolume" $ | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-identity
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-identity
+    {{- include "agentctl.labels" . | nindent 4 }}
+    {{- with (include "agentctl.commonLabels" $) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-identity
+  ports:
+    - { port: 80, targetPort: 8087, name: http }
+{{- end }}
