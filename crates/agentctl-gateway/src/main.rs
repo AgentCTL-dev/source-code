@@ -589,6 +589,9 @@ async fn org_supervisor_rpc(
         Err(resp) => return *resp,
     };
 
+    // @mentions become the typed orchestration envelope (P4-7); plain prose
+    // stays conversational.
+    let req = mentionize_request(&req).unwrap_or(req);
     handle_a2a(state, ns, name, false, decision, headers, req, Some(user)).await
 }
 
@@ -707,6 +710,73 @@ async fn org_approve(
 enum SupervisorTarget {
     Ready(String),
     Provisioning,
+}
+
+/// Extract @handle mentions from prose (P4-7). Lowercase DNS-ish handles
+/// after a bare `@`; `@skill:` stays the composer's namespace (upstream
+/// hardcodes that prefix), so a match immediately followed by `:` is not a
+/// mention. Deduped in order, capped at 8 (the workflow fan-out band).
+fn extract_mentions(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_lowercase()
+                    || bytes[end].is_ascii_digit()
+                    || bytes[end] == b'-')
+            {
+                end += 1;
+            }
+            let followed_by_colon = end < bytes.len() && bytes[end] == b':';
+            if end > start && !followed_by_colon {
+                let handle = &text[start..end];
+                if !handle.starts_with('-')
+                    && !handle.ends_with('-')
+                    && !out.iter().any(|h| h == handle)
+                    && out.len() < 8
+                {
+                    out.push(handle.to_string());
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Rewrite a SendMessage whose text carries @mentions into the TYPED
+/// `mention` envelope the supervisor's orchestration workflow fires on
+/// (`{"data": {"agentd": {"op": "mention", …}}}` — the same DataPart shape
+/// agentd's own delegate client sends). Plain prose passes through untouched
+/// and rides the ordinary agent loop. `hops` starts the supervisor's OWN
+/// ceiling counter — agentd's depth limits never cross pod boundaries.
+fn mentionize_request(req: &Value) -> Option<Value> {
+    let parts = req.pointer("/params/message/parts")?.as_array()?;
+    let text: String = parts
+        .iter()
+        .filter_map(|p| p.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mentions = extract_mentions(&text);
+    if mentions.is_empty() {
+        return None;
+    }
+    let mut out = req.clone();
+    out["params"]["message"]["parts"] = json!([{
+        "data": { "agentd": {
+            "op": "mention",
+            "text": text,
+            "mentions": mentions,
+            "hops": 2,
+        } }
+    }]);
+    Some(out)
 }
 
 /// A DNS-safe supervisor CR name for a subject (`mock:alice` → `sup-mock-alice`).

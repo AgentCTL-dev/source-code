@@ -56,6 +56,15 @@ spec:
                     description: Per-agent access policy (named principals, per-agent OIDC).
                     nullable: true
                     properties:
+                      grants:
+                        description: |-
+                          Typed A2A command grants for the named principals (agentd checks a
+                          command DataPart's `op` against the caller's grant patterns; natural
+                          language needs none). E.g. `mention` for the supervisor's
+                          orchestration envelope.
+                        items:
+                          type: string
+                        type: array
                       oidc:
                         description: OIDC/JWT authentication + authorization for inbound A2A calls.
                         nullable: true

@@ -13,13 +13,16 @@
 #   state.delete idempotent delete
 #
 # TENANCY (interim): the store.profile tenancy rule wants the permissible key
-# prefix derived from the VERIFIED caller identity. The pinned backend-sql
-# plugin does not yet expose `identity.*` in `param_exprs` (fixed upstream in
-# mcpg PR #659; adopt on the next blessed pin) — until then the fence is
-# prefix-trust: the OPERATOR renders each agent's `store.prefix`
-# (orgs/<ns>/<name>) into config the agent cannot edit, and NetworkPolicy
-# admits only agent namespaces. Callers are therefore `unauthenticated` trust
-# here, and every call is audited (fail-closed local-file sink).
+# prefix derived from the VERIFIED caller identity. The re-blessed protocol-1
+# plugin (2026-08-30, digest 908687fe…, mcpg #659) DOES expose `identity.*`
+# in param_exprs now — but mcpg-verified identity means a jwks-verified
+# BEARER on the store dial, and agentd's store-over-MCP dial carries none
+# today. Until per-agent store bearers are minted (identity JWKS →
+# governance.access.jwks here, then param_exprs fencing + trust `verified`),
+# the fence stays prefix-trust: the OPERATOR renders each agent's
+# `store.prefix` (orgs/<ns>/<name>) into config the agent cannot edit, and
+# NetworkPolicy admits only agent namespaces. Every call is audited
+# (fail-closed local-file sink).
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap

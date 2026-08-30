@@ -50,6 +50,10 @@ pub mod paths {
     /// Per-(user, agent) A2A principal bearers (the `<name>-principals`
     /// Secret volume; one file per subject, RFC 0028 §6).
     pub const PRINCIPALS_DIR: &str = "/etc/agentctl/principals";
+    /// Outbound peer bearers (P4-7 @mention): per-peer copies of THE OWNER's
+    /// principal bearer for each target, projected by the operator into the
+    /// `<name>-peer-bearers` Secret — never another user's bearer.
+    pub const PEER_BEARERS_DIR: &str = "/etc/agentctl/peer-bearers";
 
     /// The full in-pod path of the config document.
     pub fn config_file() -> String {
@@ -130,10 +134,22 @@ pub struct ResolvedIntelligence {
 }
 
 /// An A2A peer wiring (coordinator → fleet endpoint, declared `spec.peers`, …).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Peer {
     pub name: String,
     pub endpoint: String,
+    /// Static bearer credential reference (`{{secret-file:…}}` template,
+    /// resolved by agentd at dial time) — the @mention path carries the
+    /// OWNER's principal bearer this way, so the callee attributes the hop
+    /// to the human, never the calling pod. Rendered as
+    /// `auth: {kind: static, token: …}` (the unified credential provider);
+    /// header maps would be resolution-CHECKED by `--validate-config` and
+    /// the file only exists in the workload pod.
+    pub auth_bearer_ref: Option<String>,
+    /// mTLS client cert/key paths presented on dial (the workload's own
+    /// serving pair — the callee's `client_ca` admits the chart CA).
+    pub client_cert: Option<String>,
+    pub client_key: Option<String>,
 }
 
 /// AAuth enrollment facts (RFC 0023 house-provisioning path).
@@ -194,6 +210,9 @@ pub struct ConfigInput {
     /// REQUIRED because any non-empty principals list switches off agentd's
     /// implicit loopback/management operator fallback.
     pub principal_subjects: Vec<String>,
+    /// Typed-command grant patterns for the named principals (spec
+    /// `access.grants`) — a command DataPart's `op` needs one; prose none.
+    pub principal_grants: Vec<String>,
 }
 
 impl ConfigInput {
@@ -230,6 +249,11 @@ impl ConfigInput {
                 .access
                 .as_ref()
                 .map(|a| a.principals.clone())
+                .unwrap_or_default(),
+            principal_grants: spec
+                .access
+                .as_ref()
+                .map(|a| a.grants.clone())
                 .unwrap_or_default(),
         }
     }
@@ -584,13 +608,13 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
                 .workflow_file
                 .clone()
                 .ok_or(ConfigError::MissingWorkflow)?;
-            workflows.push(json!({ "file": file }));
+            workflows.push(workflow_file_entry(&file));
         }
     }
     // A reactive daemon may ALSO carry a user workflow graph.
     if input.mode == Mode::Reactive {
         if let Some(file) = &input.workflow_file {
-            workflows.push(json!({ "file": file }));
+            workflows.push(workflow_file_entry(file));
         }
     }
     workflows.extend(input.generated_workflows.iter().cloned());
@@ -608,7 +632,11 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
     if input.serve_a2a {
         doc.insert(
             "a2a".into(),
-            a2a_block(&input.peers, &input.principal_subjects),
+            a2a_block(
+                &input.peers,
+                &input.principal_subjects,
+                &input.principal_grants,
+            ),
         );
     } else if !input.peers.is_empty() {
         doc.insert("a2a".into(), json!({ "peers": peer_entries(&input.peers) }));
@@ -714,7 +742,7 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
     })
 }
 
-fn a2a_block(peers: &[Peer], principal_subjects: &[String]) -> Value {
+fn a2a_block(peers: &[Peer], principal_subjects: &[String], principal_grants: &[String]) -> Value {
     let mut a2a = Map::new();
     a2a.insert("listen".into(), json!(A2A_LISTEN));
     a2a.insert(
@@ -735,7 +763,7 @@ fn a2a_block(peers: &[Peer], principal_subjects: &[String]) -> Value {
     // caller is never silently the operator on any rendered agent.
     a2a.insert(
         "principals".into(),
-        Value::Array(principal_entries(principal_subjects)),
+        Value::Array(principal_entries(principal_subjects, principal_grants)),
     );
     Value::Object(a2a)
 }
@@ -754,7 +782,7 @@ const OPERATOR_SAN: &str = "agentctl-control-plane";
 /// management verbs). Each bearer is a `{{secret-file:…}}` TEMPLATE — never a
 /// literal: agentd uses a `bearer_ref` without `{{` VERBATIM as the
 /// credential, so a literal here would embed a secret in the ConfigMap.
-fn principal_entries(subjects: &[String]) -> Vec<Value> {
+fn principal_entries(subjects: &[String], grants: &[String]) -> Vec<Value> {
     let mut out = Vec::with_capacity(subjects.len() + 1);
     for subject in subjects {
         let bearer_ref = format!(
@@ -763,11 +791,15 @@ fn principal_entries(subjects: &[String]) -> Vec<Value> {
             principal_secret_key(subject)
         );
         debug_assert!(bearer_ref.contains("{{"), "bearer_ref must be a template");
-        out.push(json!({
+        let mut entry = json!({
             "match": { "bearer_ref": bearer_ref },
             "role": "user",
             "labels": { "user": subject },
-        }));
+        });
+        if !grants.is_empty() {
+            entry["grants"] = json!(grants);
+        }
+        out.push(entry);
     }
     out.push(json!({
         "match": { "san": OPERATOR_SAN },
@@ -789,10 +821,35 @@ pub fn principal_secret_key(subject: &str) -> String {
     format!("PRINCIPAL_{}", safe.to_uppercase())
 }
 
+/// A `{name, file}` workflow reference — agentd refuses a bare `{file}`
+/// ("workflows[0] has no name", caught by the gated binary test). The entry
+/// name is the file stem; the document keeps its own internal `name`.
+fn workflow_file_entry(file: &str) -> Value {
+    let stem = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workflow");
+    json!({ "name": stem, "file": file })
+}
+
 fn peer_entries(peers: &[Peer]) -> Vec<Value> {
     peers
         .iter()
-        .map(|p| json!({ "name": p.name, "endpoint": p.endpoint }))
+        .map(|p| {
+            let mut e = Map::new();
+            e.insert("name".into(), json!(p.name));
+            e.insert("endpoint".into(), json!(p.endpoint));
+            if let Some(token) = &p.auth_bearer_ref {
+                e.insert("auth".into(), json!({ "kind": "static", "token": token }));
+            }
+            if let Some(cert) = &p.client_cert {
+                e.insert("client_cert".into(), json!(cert));
+            }
+            if let Some(key) = &p.client_key {
+                e.insert("client_key".into(), json!(key));
+            }
+            Value::Object(e)
+        })
         .collect()
 }
 
@@ -1245,6 +1302,65 @@ triggers:
         .expect("ten-kind compile");
         let mut cases = cases;
         cases.push(ten_input);
+
+        // The P4-7 supervisor shape: a daemon with a HAND-AUTHORED mention
+        // workflow (a2a start + switch hop guard + foreach a2a.delegate +
+        // template gather), owner-authenticated peers (static-auth
+        // secret-file bearer + mTLS client pair), and a principal-gated a2a
+        // surface — the exact document the supervisor controller renders.
+        {
+            let sup_spec: agent_api::v1alpha2::AgentSpec = serde_yaml::from_str(
+                r#"
+shape: daemon
+instruction: { text: "supervisor persona" }
+expose: { a2a: true }
+access: { principals: ["mock:carol"] }
+"#,
+            )
+            .unwrap();
+            let wf_path = dir.path().join("mention-workflow.json");
+            let mention = serde_json::json!({
+                "name": "mention",
+                "version": 3,
+                "concurrency": { "max_runs": 1, "on_overflow": "queue", "scope": "workflow" },
+                "steps": {
+                    "start": { "kind": "a2a", "command": "mention" },
+                    "guard": { "kind": "switch", "depends_on": ["start"],
+                               "on": "{{steps.start.output.args.hops}}",
+                               "cases": { "0": "stopped" }, "default": "fan" },
+                    "stopped": { "kind": "finish", "depends_on": ["guard"], "status": "completed",
+                                 "output": "mention hop ceiling reached — not fanning out" },
+                    "fan": { "kind": "foreach", "depends_on": ["guard"],
+                             "over": "{{steps.start.output.args.mentions}}",
+                             "as": "item", "on_error": "continue",
+                             "body": { "steps": { "ask": { "kind": "a2a.delegate", "peer": "{{item}}",
+                                                "objective": "{{steps.start.output.args.text}}",
+                                                "timeout": "60s" } } } },
+                    "render": { "kind": "template", "depends_on": ["fan"],
+                                "value": { "mentions": "{{steps.start.output.args.mentions}}",
+                                           "answers": "{{steps.fan.output}}" } },
+                    "done": { "kind": "finish", "depends_on": ["render"], "status": "completed",
+                              "output": "{{steps.render.output}}" }
+                }
+            });
+            std::fs::write(&wf_path, serde_json::to_string_pretty(&mention).unwrap()).unwrap();
+            let (mut sup_input, _) = v2::from_v2_spec(
+                &sup_spec,
+                None,
+                Some(wf_path.to_string_lossy().into_owned()),
+                None,
+                Vec::new(),
+            )
+            .expect("supervisor compile");
+            sup_input.peers = vec![Peer {
+                name: "helper".into(),
+                endpoint: "https://helper.org-acme.svc.cluster.local.:8443".into(),
+                auth_bearer_ref: Some("{{secret-file:/etc/agentctl/peer-bearers/helper}}".into()),
+                client_cert: Some(paths::TLS_CERT.into()),
+                client_key: Some(paths::TLS_KEY.into()),
+            }];
+            cases.push(sup_input);
+        }
 
         for (n, input) in cases.iter().enumerate() {
             // The document validates VERBATIM — the binary stats neither the

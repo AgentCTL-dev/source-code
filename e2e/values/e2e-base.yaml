@@ -50,11 +50,11 @@ operator:
 
 # Managed state service (P3): the mcpg-backed checkpointer for
 # store.class: managed agents (durability + SIGKILL/restore scenarios).
-# PARKED OFF until mcpg re-blesses the gateway↔backend-sql pairing (the
-# public protocol-1 artifact needs GLIBC_2.38, the blessed image ships 2.36 —
-# their mirror sweep is in flight): a crash-looping state pod fails EVERY
-# `helm --wait`, which broke the whole sec-overlay lane. Flip back on with
-# the new pin; `state-durability` then unskips itself.
+# PARKED OFF: two broken upstream pairings in a row (protocol-1 needed
+# GLIBC_2.38 the image lacks; the 2026-08-30 rebuild then missed the
+# beta.24 plugin-host's `mcpg_plugin_abi_layout` ABI symbol — reported).
+# A crash-looping state pod wedges every `helm --wait`, so this flips on
+# only when a pairing actually BOOTS; `state-durability` then unskips.
 state:
   enabled: false
 

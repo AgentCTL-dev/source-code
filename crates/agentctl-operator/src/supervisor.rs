@@ -59,15 +59,56 @@ pub fn compose_instruction(platform: Option<&str>, user_override: Option<&str>) 
     out
 }
 
+/// The @mention orchestration workflow (P4-7, RFC 0027 §7): fires ONLY on
+/// the typed `mention` envelope the GATEWAY mints when the owner's message
+/// carries @handles (plain prose still rides the ordinary agent loop). Hop
+/// guard first (the supervisor's OWN counter — agentd's depth limits never
+/// cross pod boundaries), then a bounded-parallel fan-out of `a2a.delegate`
+/// asks to the mentioned peers with `on_error: continue` (an unknown or
+/// unauthorized handle surfaces as that slot's error — the forbidden-handle
+/// report), then a deterministic gather (template, not a model call) so the
+/// answer accounts for every mention even with no intelligence bound.
+pub fn mention_workflow() -> serde_json::Value {
+    serde_json::json!({
+        "name": "mention",
+        "version": 3,
+        // One mention run at a time per supervisor — and a supervisor IS
+        // per-user, so this is per-user serialization.
+        "concurrency": { "max_runs": 1, "on_overflow": "queue", "scope": "workflow" },
+        "steps": {
+            "start": { "kind": "a2a", "command": "mention" },
+            "guard": { "kind": "switch", "depends_on": ["start"],
+                       "on": "{{steps.start.output.args.hops}}",
+                       "cases": { "0": "stopped" }, "default": "fan" },
+            "stopped": { "kind": "finish", "depends_on": ["guard"], "status": "completed",
+                         "output": "mention hop ceiling reached — not fanning out" },
+            "fan": { "kind": "foreach", "depends_on": ["guard"],
+                     "over": "{{steps.start.output.args.mentions}}",
+                     "as": "item", "on_error": "continue",
+                     "body": { "steps": { "ask": { "kind": "a2a.delegate", "peer": "{{item}}",
+                                        "objective": "{{steps.start.output.args.text}}",
+                                        "timeout": "60s" } } } },
+            "render": { "kind": "template", "depends_on": ["fan"],
+                        "value": { "mentions": "{{steps.start.output.args.mentions}}",
+                                   "answers": "{{steps.fan.output}}" } },
+            "done": { "kind": "finish", "depends_on": ["render"], "status": "completed",
+                      "output": "{{steps.render.output}}" }
+        }
+    })
+}
+
 /// The Agent a Supervisor renders to. Pure — unit-tested below. `aauth` arms
 /// the workload identity (RFC 0028 §5) — set iff the operator has a
 /// configured Agent Provider; the supervisor then signs its control-MCP
 /// dials, which is how the control server knows WHO is calling.
+/// `peer_handles` is the owner-reachable estate (agents naming the owner as
+/// a principal) — the @mention fan-out's dialable set.
 pub fn desired_agent(
     supervisor: &Supervisor,
     profile: Option<&SupervisorProfile>,
     class_exists: bool,
     aauth: bool,
+    peer_handles: &[String],
 ) -> v2::Agent {
     let name = supervisor.name_any();
     let spec = &supervisor.spec;
@@ -107,6 +148,9 @@ pub fn desired_agent(
                 // their bearer, agentd answers them as user:<subject>, and
                 // everyone else is anonymous (refused).
                 principals: vec![spec.user.clone()],
+                // Typed-command grant: the mention envelope's `op` (agentd
+                // refuses ungranted command DataParts; prose needs none).
+                grants: vec!["mention".into()],
             }),
             identity: aauth.then(|| v2::IdentitySpec {
                 aauth: Some(agent_api::AauthIdentity::default()),
@@ -121,6 +165,19 @@ pub fn desired_agent(
                 drain_timeout: None,
                 paused: spec.paused,
             }),
+            // @mention (P4-7): the owner-reachable estate as dialable peers +
+            // the orchestration workflow. The compose path dials each peer AS
+            // the owner (its principal bearer), so authorization stays the
+            // owner's — never the pod's.
+            peers: peer_handles
+                .iter()
+                .map(|h| v2::PeerRef { agent: h.clone() })
+                .collect(),
+            workflows: vec![v2::WorkflowSource {
+                set_ref: None,
+                inline: Some(mention_workflow()),
+                config_map_ref: None,
+            }],
             ..Default::default()
         },
     );
@@ -150,11 +207,38 @@ pub async fn reconcile_supervisor(
     let class = classes.get_opt(SUPERVISOR_CLASS).await?;
     let profile = class.as_ref().and_then(|c| c.spec.supervisor.clone());
 
+    // The owner-reachable estate (P4-7): every same-namespace agent that
+    // names the owner as a principal is @mention-dialable. Sorted for a
+    // stable render (peer-set churn = restart, so determinism matters).
+    let agents_api: Api<v2::Agent> = Api::namespaced(ctx.client.clone(), &ns);
+    let mut peer_handles: Vec<String> = agents_api
+        .list(&Default::default())
+        .await?
+        .items
+        .iter()
+        .filter(|a| {
+            let a_name = a.metadata.name.as_deref().unwrap_or_default();
+            a_name != agent_name(&name)
+                && a.spec
+                    .access
+                    .as_ref()
+                    .is_some_and(|acc| acc.principals.contains(&supervisor.spec.user))
+        })
+        .map(|a| {
+            a.spec
+                .handle
+                .clone()
+                .unwrap_or_else(|| a.metadata.name.clone().unwrap_or_default())
+        })
+        .collect();
+    peer_handles.sort();
+
     let mut agent = desired_agent(
         &supervisor,
         profile.as_ref(),
         class.is_some(),
         ctx.aauth.provider.is_some(),
+        &peer_handles,
     );
     agent.metadata.owner_references = Some(vec![owner]);
     let agents: Api<v2::Agent> = Api::namespaced(ctx.client.clone(), &ns);
@@ -276,6 +360,7 @@ mod tests {
             Some(&profile),
             true,
             true,
+            &["helper".to_string(), "digest".to_string()],
         );
         let spec = &agent.spec;
         assert_eq!(spec.class.as_deref(), Some("supervisor"));
@@ -298,7 +383,7 @@ mod tests {
 
     #[test]
     fn missing_class_renders_a_classless_default() {
-        let agent = desired_agent(&sup("mock:bob", None), None, false, false);
+        let agent = desired_agent(&sup("mock:bob", None), None, false, false, &[]);
         assert!(
             agent.spec.identity.is_none(),
             "no provider configured ⇒ no aauth opt-in (admission would deny it)"

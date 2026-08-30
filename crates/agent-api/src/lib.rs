@@ -272,6 +272,12 @@ pub struct Access {
     /// caller's bearer per session, so the agent answers ONLY named users.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub principals: Vec<String>,
+    /// Typed A2A command grants for the named principals (agentd checks a
+    /// command DataPart's `op` against the caller's grant patterns; natural
+    /// language needs none). E.g. `mention` for the supervisor's
+    /// orchestration envelope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<String>,
 }
 
 /// OIDC/JWT verification + claim-based authorization config for the A2A gateway.

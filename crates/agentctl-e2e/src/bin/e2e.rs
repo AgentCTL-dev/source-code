@@ -167,7 +167,276 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("state-durability", "durability", state_durability),
         // control MCP: AAuth-verified, namespace-scoped control.* tools (P4-1)
         scenario!("control-mcp", "control", control_mcp),
+        // @mention orchestration: gateway envelope → supervisor workflow
+        // fan-out → owner-authenticated delegates → gathered answer (P4-7)
+        scenario!("mention-orchestration", "control", mention_orchestration),
     ]
+}
+
+/// P4-7: "@a and @b" through the supervisor, end to end. The gateway turns
+/// the owner's prose into the typed `mention` envelope; the supervisor's
+/// workflow fans `a2a.delegate` out to the mentioned peers — dialed at their
+/// mTLS a2a as THE OWNER (per-target principal bearers) — and gathers an
+/// answer accounting for every mention. A mention of a handle the owner
+/// cannot reach reports as that slot's error; hops=0 short-circuits without
+/// fanning out (the supervisor's OWN ceiling — agentd's depth never crosses
+/// pods).
+async fn mention_orchestration(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use agent_api::v1alpha2 as v2;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str| {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({ "iss": "https://mock-idp:8443", "aud": "agentctl-cli", "sub": sub,
+                     "email": format!("{sub}@example.test"), "groups": ["eng"], "exp": exp }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-m";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({ "displayName": "E2E Mention" }))?,
+        )),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    // Two mentionable targets: real agentd daemons, a2a-exposed, naming the
+    // OWNER as principal (that is what makes them @mention-dialable).
+    for handle in ["alpha", "beta"] {
+        shell::kubectl_apply_stdin(&format!(
+            "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {handle}, namespace: {ns} }}\nspec:\n  shape: daemon\n  handle: {handle}\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"answer in one short line\" }}\n  expose: {{ a2a: true }}\n  access: {{ principals: [\"mock:dana\"] }}\n"
+        ))?;
+    }
+    for handle in ["alpha", "beta"] {
+        kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async move {
+            Ok(!first_pod(&org_namespace("e2e-m"), &agent_label(handle))
+                .unwrap_or_default()
+                .is_empty())
+        })
+        .await
+        .with_context(|| format!("{handle} pod"))?;
+        let pod = first_pod(&ns, &agent_label(handle))?;
+        kh::wait_pod_running(&ctx.client, &ns, &pod, READY_TIMEOUT).await?;
+    }
+
+    // First supervisor touch as dana — auto-ensure, then poll the SAME send
+    // until the supervisor converses (it renders AFTER the targets, so its
+    // peer set already includes them).
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18104)?;
+    let url = format!("{}/orgs/{org}/supervisor", pf.base_url());
+    let send = |text: &str, id: u64| {
+        let url = url.clone();
+        let token = sign("dana");
+        let text = text.to_string();
+        async move {
+            let resp = ctx
+                .http
+                .post(&url)
+                .bearer_auth(token)
+                .json(&json!({ "jsonrpc": "2.0", "id": id, "method": "SendMessage",
+                    "params": { "message": { "role": "ROLE_USER",
+                        "messageId": format!("e2e-m-{id}"),
+                        "parts": [{ "text": text }] } } }))
+                .send()
+                .await?;
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok((status, body))
+        }
+    };
+    let hello = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let hello = hello.clone();
+        let send = &send;
+        async move {
+            let (status, body) = send("hello", 1).await?;
+            *hello.lock().unwrap() = format!("{status}: {body}");
+            Ok(status.is_success() && body.get("result").is_some())
+        }
+    })
+    .await
+    .with_context(|| format!("supervisor never conversed; last: {}", hello.lock().unwrap()))?;
+
+    // The @mention turn: both handles + one the owner cannot reach. The
+    // workflow run outlives the SendMessage round-trip, so poll GetTask (the
+    // same recovery agentd's own delegate client uses) to the terminal
+    // artifact.
+    let (status, body) = send("please ping @alpha and @beta (and @ghost)", 2).await?;
+    if !status.is_success() {
+        bail!("mention send failed ({status}): {body}");
+    }
+    // Terminal = the task's CURRENT status state (the history keeps earlier
+    // WORKING entries, so string-scanning the whole reply never settles).
+    let terminal_text = |body: &Value| {
+        let state = body
+            .pointer("/result/task/status/state")
+            .or_else(|| body.pointer("/result/status/state"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        (!state.contains("WORKING") && !state.contains("SUBMITTED"))
+            .then(|| crate_reply_text(body))
+    };
+    let text = match terminal_text(&body) {
+        Some(t) => t,
+        None => {
+            let task_id = body
+                .pointer("/result/task/id")
+                .or_else(|| body.pointer("/result/id"))
+                .and_then(Value::as_str)
+                .context("task id in the working reply")?
+                .to_string();
+            let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+                let out = out.clone();
+                let url = url.clone();
+                let token = sign("dana");
+                let task_id = task_id.clone();
+                async move {
+                    let resp = ctx
+                        .http
+                        .post(&url)
+                        .bearer_auth(token)
+                        .json(&json!({ "jsonrpc": "2.0", "id": 99, "method": "GetTask",
+                                       "params": { "id": task_id } }))
+                        .send()
+                        .await?;
+                    let body: Value = resp.json().await.unwrap_or(Value::Null);
+                    match terminal_text(&body) {
+                        Some(t) => {
+                            *out.lock().unwrap() = t;
+                            Ok(true)
+                        }
+                        None => Ok(false),
+                    }
+                }
+            })
+            .await
+            .context("mention task never reached a terminal state")?;
+            let t = out.lock().unwrap().clone();
+            t
+        }
+    };
+    let ok_both = text.contains("alpha") && text.contains("beta");
+    if !ok_both {
+        bail!("mention answer does not account for both handles: {text}");
+    }
+    if !text.contains("ghost") {
+        bail!("the unreachable @ghost is not reported: {text}");
+    }
+
+    // Hop ceiling: the typed envelope with hops=0 (what a re-delegating
+    // supervisor would receive) short-circuits before any fan-out.
+    let resp = ctx
+        .http
+        .post(&url)
+        .bearer_auth(sign("dana"))
+        .json(&json!({ "jsonrpc": "2.0", "id": 3, "method": "SendMessage",
+            "params": { "message": { "role": "ROLE_USER", "messageId": "e2e-m-3",
+                "parts": [{ "data": { "agentd": {
+                    "op": "mention", "text": "loop", "mentions": ["alpha"], "hops": 0
+                } } }] } } }))
+        .send()
+        .await?;
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let text = match terminal_text(&body) {
+        Some(t) => t,
+        None => {
+            // Short-circuit runs still surface as a (fast) task; poll it.
+            let task_id = body
+                .pointer("/result/task/id")
+                .or_else(|| body.pointer("/result/id"))
+                .and_then(Value::as_str)
+                .context("task id in the hops=0 reply")?
+                .to_string();
+            let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || {
+                let out = out.clone();
+                let url = url.clone();
+                let token = sign("dana");
+                let task_id = task_id.clone();
+                async move {
+                    let resp = ctx
+                        .http
+                        .post(&url)
+                        .bearer_auth(token)
+                        .json(&json!({ "jsonrpc": "2.0", "id": 100, "method": "GetTask",
+                                       "params": { "id": task_id } }))
+                        .send()
+                        .await?;
+                    let body: Value = resp.json().await.unwrap_or(Value::Null);
+                    match terminal_text(&body) {
+                        Some(t) => {
+                            *out.lock().unwrap() = t;
+                            Ok(true)
+                        }
+                        None => Ok(false),
+                    }
+                }
+            })
+            .await
+            .context("hops=0 task never terminal")?;
+            let t = out.lock().unwrap().clone();
+            t
+        }
+    };
+    if !text.contains("hop ceiling") {
+        bail!("hops=0 did not short-circuit: {text}");
+    }
+
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// Every text found under `result`, joined (message parts, artifacts, data).
+fn crate_reply_text(resp: &Value) -> String {
+    fn collect(v: &Value, out: &mut String) {
+        match v {
+            Value::Object(m) => {
+                for (_, v) in m {
+                    collect(v, out);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|v| collect(v, out)),
+            Value::String(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    collect(resp.get("result").unwrap_or(resp), &mut out);
+    out
 }
 
 /// P4-1: the control MCP end to end, as a REAL enrolled AAuth agent.

@@ -265,6 +265,22 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     let spec = object.get("spec").unwrap_or(&empty);
     let kind = reviewed_kind(request, object);
 
+    // Metadata-only updates and tear-down updates are POLICY-INERT: nothing
+    // the rungs below evaluate can have changed, and denying them wedges
+    // deletion — a finalizer-removal UPDATE during namespace termination
+    // arrives AFTER cross-object anchors (classes, registry entries) are
+    // gone, so "class not found" here deadlocks the namespace (bitten live
+    // 2026-08-30: org-e2e-sup stuck Terminating on exactly that).
+    let spec_unchanged = request["operation"].as_str() == Some("UPDATE")
+        && request["oldObject"].get("spec") == object.get("spec");
+    let being_deleted = !object["metadata"]["deletionTimestamp"].is_null();
+    if spec_unchanged || being_deleted {
+        tracing::info!(%uid, %namespace, %kind, spec_unchanged, being_deleted,
+            "admit (policy-inert update: unchanged spec or tear-down)");
+        state.metrics.record(true);
+        return Json(admission_response_with_warnings(&uid, Ok(()), Vec::new()));
+    }
+
     // MCPService UPDATE: only the tag-laundering guard applies.
     if kind == "MCPService" {
         let name = object["metadata"]["name"].as_str().unwrap_or_default();

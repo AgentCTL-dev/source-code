@@ -422,7 +422,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     )
     .await
     {
-        Ok((doc, _mcp, shape, grant_refs)) => {
+        Ok((doc, _mcp, shape, grant_refs, peer_bearers)) => {
             let mut render_obj = agent.as_ref().clone();
             render_obj.spec.mode = match &shape {
                 agent_config::v2::RenderShape::Daemon => agent_api::Mode::Reactive,
@@ -452,20 +452,26 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
                     key: r.key.clone(),
                 });
             }
+            wiring.peer_bearers = !peer_bearers.is_empty();
             render_agent(&render_obj, &ctx.render, &wiring)
-                .map(|rendered| (doc, rendered))
+                .map(|rendered| (doc, rendered, peer_bearers))
                 .map_err(|e| e.to_string())
         }
         Err(e) => Err(e),
     };
     let (condition, phase, contract) = match composed {
-        Ok((doc, rendered)) => {
+        Ok((doc, rendered, peer_bearers)) => {
             let kind = rendered_kind(&rendered);
             // Per-user principal bearers land FIRST: the document's
             // bearer_ref templates must resolve the moment a pod mounts it.
             if !principal_subjects.is_empty() {
                 ensure_principals_secret(ctx.as_ref(), ns, &name, &principal_subjects, &owner)
                     .await?;
+            }
+            // Peer bearers (P4-7): same rule — the peers' secret-file
+            // templates must resolve before any pod mounts the document.
+            if !peer_bearers.is_empty() {
+                ensure_peer_bearers_secret(ctx.as_ref(), ns, &name, &peer_bearers, &owner).await?;
             }
             // The document the pod mounts — applied BEFORE the workload so a
             // scheduling pod never races an absent ConfigMap.
@@ -778,6 +784,7 @@ async fn compose_document_v2(
         Vec<agent_config::ResolvedMcp>,
         agent_config::v2::RenderShape,
         Vec<(String, agent_api::SecretKeyRef)>,
+        Vec<(String, Vec<u8>)>,
     ),
     String,
 > {
@@ -877,7 +884,7 @@ async fn compose_document_v2(
         _ => agent_config::StoreSelector::File,
     };
 
-    let (input, shape) = agent_config::v2::from_v2_spec_with_store(
+    let (mut input, shape) = agent_config::v2::from_v2_spec_with_store(
         &v2_spec,
         intel,
         workflow.map(|w| w.file_path()),
@@ -886,8 +893,98 @@ async fn compose_document_v2(
         store,
     )
     .map_err(|e| e.to_string())?;
+
+    // A2A peers (P4-7 @mention): each `spec.peers[].agent` handle resolves to
+    // a same-namespace agent, dialed DIRECTLY at its mTLS a2a service with
+    // this workload's own cert — and authenticated as THE OWNER (this agent's
+    // first named principal): the owner's bearer for each target is copied
+    // into the `<name>-peer-bearers` Secret, so a mention can only reach
+    // agents the owner is already a principal on. A target that does not
+    // name the owner is skipped here and surfaces at run time as the
+    // workflow's "no such peer" error — the forbidden-handle report.
+    let (peers, peer_bearers) = resolve_peers(client, ns, name, &v2_spec)
+        .await
+        .map_err(|e| e.to_string())?;
+    input.peers = peers;
+
     let projection = agent_config::build_projection(&input).map_err(|e| e.to_string())?;
-    Ok((projection, mcp, shape, grant_secret_refs))
+    Ok((projection, mcp, shape, grant_secret_refs, peer_bearers))
+}
+
+/// Resolve `spec.peers[]` (see the call-site comment). Returns the rendered
+/// peer entries plus the `(secret key → bearer)` copies to project.
+async fn resolve_peers(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    v2_spec: &agent_api::v1alpha2::AgentSpec,
+) -> Result<(Vec<agent_config::Peer>, Vec<(String, Vec<u8>)>), String> {
+    use k8s_openapi::api::core::v1::Secret;
+    if v2_spec.peers.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let Some(owner) = v2_spec
+        .access
+        .as_ref()
+        .and_then(|a| a.principals.first())
+        .cloned()
+    else {
+        return Err(
+            "spec.peers needs a named principal to dial AS (access.principals[0] is the \
+             acting owner)"
+                .into(),
+        );
+    };
+    let v2_api: Api<agent_api::v1alpha2::Agent> = Api::namespaced(client.clone(), ns);
+    let all = v2_api
+        .list(&Default::default())
+        .await
+        .map_err(|e| format!("list agents for peer resolution: {e}"))?;
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
+    let owner_key = agent_config::principal_secret_key(&owner);
+
+    let mut peers = Vec::new();
+    let mut bearers = Vec::new();
+    for peer_ref in &v2_spec.peers {
+        let handle = &peer_ref.agent;
+        let Some(target) = all.items.iter().find(|a| {
+            let target_name = a.metadata.name.as_deref().unwrap_or_default();
+            target_name != name
+                && a.spec.handle.as_deref().unwrap_or(target_name) == handle.as_str()
+        }) else {
+            tracing::info!(peer = %handle, "peer handle resolves to no agent; the workflow will report it");
+            continue;
+        };
+        let target_name = target.metadata.name.clone().unwrap_or_default();
+        let bearer = secrets
+            .get_opt(&crate::render::principals_secret_name(&target_name))
+            .await
+            .map_err(|e| format!("read {target_name} principals: {e}"))?
+            .and_then(|s| s.data)
+            .and_then(|d| d.get(&owner_key).map(|b| b.0.clone()));
+        let Some(bearer) = bearer else {
+            // The owner is not a named principal on the target — dialing it
+            // would only ever be refused, so it is not a peer. (Forbidden
+            // handles surface as the workflow's no-such-peer error.)
+            tracing::info!(peer = %handle, target = %target_name, owner = %owner,
+                "owner holds no principal bearer on target; peer omitted");
+            continue;
+        };
+        let key = agent_config::principal_secret_key(handle);
+        peers.push(agent_config::Peer {
+            name: handle.clone(),
+            endpoint: format!("https://{target_name}.{ns}.svc.cluster.local.:8443"),
+            auth_bearer_ref: Some(format!(
+                "{{{{secret-file:{}/{}}}}}",
+                agent_config::paths::PEER_BEARERS_DIR,
+                key
+            )),
+            client_cert: Some(agent_config::paths::TLS_CERT.into()),
+            client_key: Some(agent_config::paths::TLS_KEY.into()),
+        });
+        bearers.push((key, bearer));
+    }
+    Ok((peers, bearers))
 }
 
 /// The pod-shell wiring matching a composed document: the same resolved facts,
@@ -927,6 +1024,8 @@ fn pod_wiring(
             .access
             .as_ref()
             .is_some_and(|a| !a.principals.is_empty()),
+        // Set by the caller once compose resolved the peer set.
+        peer_bearers: false,
         extra_env: Vec::new(),
     }
 }
@@ -1014,6 +1113,46 @@ async fn ensure_principals_secret(
         data: Some(data),
         ..Default::default()
     };
+    secrets
+        .patch(
+            &secret_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&desired),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Ensure the `<workload>-peer-bearers` Secret (P4-7): per-peer copies of
+/// the OWNER's bearer for each dialable target — the peers' `secret-file`
+/// templates reference it. Copies (not mints): the bearer must be byte-equal
+/// to the TARGET's mounted one, and copying only the owner's key keeps other
+/// users' bearers out of this pod.
+async fn ensure_peer_bearers_secret(
+    ctx: &Ctx,
+    ns: &str,
+    workload: &str,
+    bearers: &[(String, Vec<u8>)],
+    owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
+) -> Result<(), Error> {
+    use k8s_openapi::api::core::v1::Secret;
+    use k8s_openapi::ByteString;
+    let secret_name = crate::render::peer_bearers_secret_name(workload);
+    let data: std::collections::BTreeMap<String, ByteString> = bearers
+        .iter()
+        .map(|(k, v)| (k.clone(), ByteString(v.clone())))
+        .collect();
+    let desired = Secret {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(secret_name.clone()),
+            namespace: Some(ns.to_string()),
+            owner_references: Some(vec![owner.clone()]),
+            ..Default::default()
+        },
+        data: Some(data),
+        ..Default::default()
+    };
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     secrets
         .patch(
             &secret_name,

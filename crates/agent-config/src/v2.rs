@@ -149,6 +149,11 @@ pub fn from_v2_spec_with_store(
             .as_ref()
             .map(|a| a.principals.clone())
             .unwrap_or_default(),
+        principal_grants: spec
+            .access
+            .as_ref()
+            .map(|a| a.grants.clone())
+            .unwrap_or_default(),
     };
     Ok((input, shape))
 }

@@ -208,6 +208,10 @@ pub struct PodWiring {
     /// the config references it — a dangling ref is a startup exit 2 that
     /// `--validate-config` does not catch.
     pub principals: bool,
+    /// Mount the `<workload>-peer-bearers` Secret at
+    /// [`paths::PEER_BEARERS_DIR`] (P4-7: the OWNER's bearer per dialable
+    /// peer, referenced by the peers' header `secret-file` templates).
+    pub peer_bearers: bool,
     /// Extra plain env (fleet work-fabric coordinates for a coordinator).
     pub extra_env: Vec<(String, String)>,
 }
@@ -221,6 +225,13 @@ const PRINCIPALS_VOLUME: &str = "agentctl-principals";
 /// operator projects).
 pub fn principals_secret_name(workload: &str) -> String {
     format!("{workload}-principals")
+}
+
+const PEER_BEARERS_VOLUME: &str = "agentctl-peer-bearers";
+
+/// The per-agent OUTBOUND peer-bearer Secret (P4-7; one key per peer handle).
+pub fn peer_bearers_secret_name(workload: &str) -> String {
+    format!("{workload}-peer-bearers")
 }
 
 /// Writable scratch over the read-only root filesystem.
@@ -868,6 +879,23 @@ fn pod_template(
         mounts.push(mount(
             PRINCIPALS_VOLUME,
             agent_config::paths::PRINCIPALS_DIR,
+            true,
+        ));
+    }
+    if wiring.peer_bearers {
+        volumes.push(Volume {
+            name: PEER_BEARERS_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(peer_bearers_secret_name(workload)),
+                // 0444 for the same nonroot-read reason as the principals mount.
+                default_mode: Some(0o444),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        mounts.push(mount(
+            PEER_BEARERS_VOLUME,
+            agent_config::paths::PEER_BEARERS_DIR,
             true,
         ));
     }
