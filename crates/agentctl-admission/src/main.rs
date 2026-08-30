@@ -571,13 +571,18 @@ async fn binary_validate_view(
 /// binary requires them to RESOLVE; validity is not checked at this stage).
 fn run_validate_config(
     bin: &std::path::Path,
-    doc: &agent_config::ConfigDoc,
+    projection: &agent_config::Projection,
     workflow_content: Option<&str>,
     workflow_file: &str,
 ) -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(|e| format!("binary validation tempdir: {e}"))?;
+    // The EXACT invocation shape the pod uses: catalog layer first, instance
+    // last (RFC 7396 layering; folders adopt beside the last file).
+    let svc_path = dir.path().join(agent_config::paths::SERVICES_FILE);
     let cfg_path = dir.path().join(agent_config::paths::CONFIG_FILE);
-    std::fs::write(&cfg_path, doc.to_json())
+    std::fs::write(&svc_path, projection.services.to_json())
+        .map_err(|e| format!("binary validation write services: {e}"))?;
+    std::fs::write(&cfg_path, projection.instance.to_json())
         .map_err(|e| format!("binary validation write: {e}"))?;
     if let Some(content) = workflow_content {
         std::fs::write(dir.path().join(workflow_file), content)
@@ -585,10 +590,12 @@ fn run_validate_config(
     }
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("-c")
+        .arg(&svc_path)
+        .arg("-c")
         .arg(&cfg_path)
         .arg("--validate-config")
         .current_dir(dir.path());
-    for name in doc.secret_refs() {
+    for name in projection.secret_refs() {
         cmd.env(name, "admission-placeholder");
     }
     let out = cmd

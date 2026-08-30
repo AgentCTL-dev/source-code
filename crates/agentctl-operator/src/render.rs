@@ -897,7 +897,14 @@ fn pod_template(
     let container = Container {
         name: "agent".to_string(),
         image: Some(image.to_string()),
-        args: Some(vec!["-c".to_string(), paths::config_file()]),
+        // Catalog layer first, instance last (RFC 7396 layering; folders —
+        // when the projection emits them — adopt beside the LAST file).
+        args: Some(vec![
+            "-c".to_string(),
+            paths::services_file(),
+            "-c".to_string(),
+            paths::config_file(),
+        ]),
         env: Some(env),
         ports: Some(vec![
             ContainerPort {
@@ -1047,10 +1054,12 @@ mod tests {
                 Some(
                     &[
                         "-c".to_string(),
+                        "/etc/agentctl/config/services.json".to_string(),
+                        "-c".to_string(),
                         "/etc/agentctl/config/agentd.json".to_string()
                     ][..]
                 ),
-                "mode {mode:?}: no execution-mode flags exist any more"
+                "mode {mode:?}: only the two config layers, no flags"
             );
         }
     }
@@ -1285,7 +1294,15 @@ mod tests {
             .args
             .as_ref()
             .unwrap();
-        assert_eq!(args, &["-c", "/etc/agentctl/config/agentd.json"]);
+        assert_eq!(
+            args,
+            &[
+                "-c",
+                "/etc/agentctl/config/services.json",
+                "-c",
+                "/etc/agentctl/config/agentd.json"
+            ]
+        );
     }
 
     #[test]

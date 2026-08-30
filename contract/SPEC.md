@@ -25,9 +25,13 @@ through. Nine artifacts, each authoritative for its plane:
 | `schemas/manifest.schema.json` | `--capabilities` (informational only — §3) |
 
 Fixtures: `fixtures/capabilities/agentd-1.3.1-{default,configured}.json`
-(real captures) and `fixtures/config/full-featured.yml` (a known-valid config
+(real captures), `fixtures/config/full-featured.yml` (a known-valid config
 exercising schedule / webhook / subscribe / a2a-command / stream starts —
-`--validate-config` exit 0 is asserted by conformance).
+`--validate-config` exit 0 is asserted by conformance), and
+`fixtures/config/services-{catalog,instance}.json` +
+`effective-server.ndjson` — the two-layer catalog invocation with the
+binary's REAL `config.effective_server` resolution captured (allow narrowed
+by the consumer, tags inherited from the catalog; 2026-08-30, agentd 1.3.1).
 
 ## 2. The process contract
 

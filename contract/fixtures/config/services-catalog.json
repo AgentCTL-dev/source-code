@@ -1,0 +1,1 @@
+{"config_version":"1","services":{"billing":{"kind":"mcp","endpoint":"https://billing.tools.svc.cluster.local.:8443/mcp","tags":{"*":["egress"]},"allow":["invoice_*","ledger_read"],"headers":{"Authorization":"Bearer {{secret:AGENT_MCP_BILLING_TOKEN}}"}}}}

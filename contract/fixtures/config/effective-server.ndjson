@@ -1,0 +1,1 @@
+{"allow": ["invoice_read"], "endpoint": "https://billing.tools.svc.cluster.local.:8443/mcp", "event": "config.effective_server", "exclude": [], "server": "billing", "service": "billing", "tags": {"*": ["egress"]}}

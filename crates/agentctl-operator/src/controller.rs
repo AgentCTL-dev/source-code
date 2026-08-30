@@ -42,7 +42,7 @@ use crate::{
     PodWiring, RenderConfig, RenderError, Rendered, SecretEnv, WorkflowMount,
     DEFAULT_COORDINATION_URL, DEFAULT_SCALER_ADDRESS,
 };
-use agent_config::{ConfigDoc, ResolvedIntelligence};
+use agent_config::{Projection, ResolvedIntelligence};
 
 /// Finalizer key gating `Agent` deletion until cleanup runs.
 const FINALIZER: &str = "agentctl.dev/cleanup";
@@ -438,6 +438,20 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             // The document the pod mounts — applied BEFORE the workload so a
             // scheduling pod never races an absent ConfigMap.
             ensure_config_configmap(&ctx.client, ns, &name, &owner, &doc).await?;
+            // Content-addressed rollouts (RFC 0032 §5): the projection hash in
+            // v1alpha2 status (the storage version carries it; the v1 view
+            // simply omits the field). Best-effort — the annotation on the
+            // pod template is the load-bearing change detector.
+            let v2: Api<agent_api::v1alpha2::Agent> = Api::namespaced(ctx.client.clone(), ns);
+            let _ = v2
+                .patch_status(
+                    &name,
+                    &PatchParams::default(),
+                    &Patch::Merge(&serde_json::json!({
+                        "status": { "renderedHash": doc.hash() }
+                    })),
+                )
+                .await;
             // AAuth identity (RFC 0023): durable key Secret + allowlist
             // pre-registration + the keyless provider dial. The key Secret is
             // load-bearing (Err ⇒ retried reconcile); the admin registration is
@@ -702,7 +716,7 @@ fn compose_document(
     intelligence: Option<&(String, Option<agent_api::SecretKeyRef>)>,
     workflow: Option<&WorkflowMount>,
     aauth_provider: Option<String>,
-) -> Result<ConfigDoc, String> {
+) -> Result<Projection, String> {
     let intel = intelligence.map(|(endpoint, token)| ResolvedIntelligence {
         endpoint: endpoint.clone(),
         model: spec.model.as_ref().and_then(|m| m.id.clone()),
@@ -715,7 +729,7 @@ fn compose_document(
 /// The pod-shell wiring matching a composed document: the same resolved facts,
 /// projected as mounts/envs so every `{{secret:…}}` reference resolves.
 fn pod_wiring(
-    doc: &ConfigDoc,
+    doc: &Projection,
     spec: &AgentSpec,
     intelligence: Option<&(String, Option<agent_api::SecretKeyRef>)>,
     workflow: Option<WorkflowMount>,
@@ -851,12 +865,21 @@ async fn ensure_config_configmap(
     ns: &str,
     workload: &str,
     owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
-    doc: &ConfigDoc,
+    doc: &Projection,
 ) -> Result<(), Error> {
     use k8s_openapi::api::core::v1::ConfigMap;
     let name = config_configmap_name(workload);
     let mut data = std::collections::BTreeMap::new();
-    data.insert(agent_config::paths::CONFIG_FILE.to_string(), doc.to_json());
+    // Both layers in one ConfigMap: the pod mounts the dir and agentd is
+    // invoked `-c services.json -c agentd.json` (catalog first).
+    data.insert(
+        agent_config::paths::SERVICES_FILE.to_string(),
+        doc.services.to_json(),
+    );
+    data.insert(
+        agent_config::paths::CONFIG_FILE.to_string(),
+        doc.instance.to_json(),
+    );
     let cm = ConfigMap {
         metadata: kube::api::ObjectMeta {
             name: Some(name.clone()),
@@ -1368,7 +1391,7 @@ async fn reconcile_coordinator(
         if coord.distribution == Some(agent_api::Distribution::A2a) {
             // Fold the worker-pool peer into the composed document's a2a block.
             let peer = fleet_peer_endpoint(&ctx.render, ns, fleet_name);
-            if let serde_json::Value::Object(m) = &mut doc.value {
+            if let serde_json::Value::Object(m) = &mut doc.instance.value {
                 let a2a = m
                     .entry("a2a")
                     .or_insert_with(|| serde_json::Value::Object(Default::default()));

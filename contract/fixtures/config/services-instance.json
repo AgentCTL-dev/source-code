@@ -1,0 +1,30 @@
+{
+ "config_version": "1",
+ "agent": {
+  "name": "fixture",
+  "instruction": "work"
+ },
+ "intelligence": {
+  "endpoints": "http://127.0.0.1:9999/v1"
+ },
+ "mcp": {
+  "servers": [
+   {
+    "name": "billing",
+    "service": "billing",
+    "allow": [
+     "invoice_read"
+    ]
+   }
+  ]
+ },
+ "store": {
+  "kind": "file",
+  "file": {
+   "path": "/var/lib/agentd/state"
+  }
+ },
+ "lifecycle": {
+  "run_until": "idle"
+ }
+}

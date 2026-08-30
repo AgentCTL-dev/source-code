@@ -30,8 +30,12 @@ use serde_json::{json, Map, Value};
 pub mod paths {
     /// The rendered config directory (a ConfigMap volume).
     pub const CONFIG_DIR: &str = "/etc/agentctl/config";
-    /// The config document inside [`CONFIG_DIR`].
+    /// The instance-layer config document inside [`CONFIG_DIR`].
     pub const CONFIG_FILE: &str = "agentd.json";
+    /// The catalog layer (RFC 0032 §4): the `services:` map. Layered FIRST
+    /// (`-c services.json -c agentd.json`); folders adopt beside the LAST
+    /// file (both live in [`CONFIG_DIR`], so the distinction is moot here).
+    pub const SERVICES_FILE: &str = "services.json";
     /// Serving keypair (cert-manager Secret volume).
     pub const TLS_CERT: &str = "/etc/agentctl/tls/tls.crt";
     pub const TLS_KEY: &str = "/etc/agentctl/tls/tls.key";
@@ -50,6 +54,11 @@ pub mod paths {
     /// The full in-pod path of the config document.
     pub fn config_file() -> String {
         format!("{CONFIG_DIR}/{CONFIG_FILE}")
+    }
+
+    /// The full in-pod path of the services catalog layer.
+    pub fn services_file() -> String {
+        format!("{CONFIG_DIR}/{SERVICES_FILE}")
     }
 }
 
@@ -299,6 +308,38 @@ impl ConfigDoc {
     }
 }
 
+/// The rendered two-layer projection (RFC 0032 §4): the `services:` catalog
+/// layer plus the instance layer, invoked as
+/// `-c services.json -c agentd.json` (RFC 7396 merge; folders adopt beside
+/// the LAST file). The catalog layer is ALWAYS emitted — an empty catalog
+/// keeps argv/mounts uniform across every agent.
+#[derive(Debug, Clone)]
+pub struct Projection {
+    pub services: ConfigDoc,
+    pub instance: ConfigDoc,
+}
+
+impl Projection {
+    /// Change-detector hash over BOTH layers (the pod-template annotation).
+    pub fn hash(&self) -> String {
+        ConfigDoc {
+            value: json!({ "services": self.services.value, "instance": self.instance.value }),
+        }
+        .hash()
+    }
+
+    /// Every `{{secret:NAME}}` referenced by either layer, deduplicated.
+    pub fn secret_refs(&self) -> Vec<String> {
+        let mut out = self.services.secret_refs();
+        for r in self.instance.secret_refs() {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        out
+    }
+}
+
 /// Is this a daemon (Deployment/StatefulSet) or a job shape (Job/CronJob)?
 /// The workload kind and `lifecycle.run_until` both derive from THIS answer —
 /// never from agentd's `lifecycle.daemon` manifest hint (unreliable, U3/U4).
@@ -336,7 +377,7 @@ pub fn compose_from_spec(
     intelligence: Option<ResolvedIntelligence>,
     workflow_file: Option<String>,
     aauth_provider: Option<String>,
-) -> Result<ConfigDoc, ConfigError> {
+) -> Result<Projection, ConfigError> {
     let intelligence = intelligence.map(|mut i| {
         i.endpoint = absolutize_endpoint(&i.endpoint);
         i
@@ -345,7 +386,46 @@ pub fn compose_from_spec(
     for m in &mut input.mcp {
         m.endpoint = absolutize_endpoint(&m.endpoint);
     }
-    build(&input)
+    build_projection(&input)
+}
+
+/// Compose the two-layer projection: the services catalog (connection facts,
+/// tags-as-floors, credential headers) + the instance layer whose
+/// `mcp.servers[]` REFERENCE catalog entries (`service:` — restating
+/// endpoint/auth in a consumer is refused by agentd, the reference-never-
+/// restate law).
+pub fn build_projection(input: &ConfigInput) -> Result<Projection, ConfigError> {
+    Ok(Projection {
+        services: services_layer(input),
+        instance: build(input)?,
+    })
+}
+
+/// The catalog layer: one `services:` entry per MCP binding. Kind is always
+/// `mcp` — agentd 1.3.1's catalog accepts only that (schema "phase A"); the
+/// registry's peer/http kinds project by other means until upstream U5.
+fn services_layer(input: &ConfigInput) -> ConfigDoc {
+    let mut services = Map::new();
+    for m in &input.mcp {
+        let mut entry = Map::new();
+        entry.insert("kind".into(), json!("mcp"));
+        entry.insert("endpoint".into(), json!(m.endpoint));
+        if !m.tags.is_empty() {
+            entry.insert("tags".into(), json!({ "*": m.tags }));
+        }
+        if let Some(env) = &m.token_env {
+            let value = match &m.header {
+                Some(_) => format!("{{{{secret:{env}}}}}"),
+                None => format!("Bearer {{{{secret:{env}}}}}"),
+            };
+            let header = m.header.clone().unwrap_or_else(|| "Authorization".into());
+            entry.insert("headers".into(), json!({ header: value }));
+        }
+        services.insert(m.name.clone(), Value::Object(entry));
+    }
+    ConfigDoc {
+        value: json!({ "config_version": "1", "services": services }),
+    }
 }
 
 /// Compose the document. Pure; the only failure modes are spec defects.
@@ -392,8 +472,15 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
     }
 
     // --- mcp --------------------------------------------------------------
+    // Consumers REFERENCE the catalog (services layer) — never restate
+    // endpoint/auth (agentd refuses restating; the catalog's tags/allow are
+    // floors/ceilings the reference inherits).
     if !input.mcp.is_empty() {
-        let servers: Vec<Value> = input.mcp.iter().map(mcp_server_entry).collect();
+        let servers: Vec<Value> = input
+            .mcp
+            .iter()
+            .map(|m| json!({ "name": m.name, "service": m.name }))
+            .collect();
         doc.insert("mcp".into(), json!({ "servers": servers }));
     }
 
@@ -616,26 +703,6 @@ fn peer_entries(peers: &[Peer]) -> Vec<Value> {
         .iter()
         .map(|p| json!({ "name": p.name, "endpoint": p.endpoint }))
         .collect()
-}
-
-fn mcp_server_entry(m: &ResolvedMcp) -> Value {
-    let mut entry = Map::new();
-    entry.insert("name".into(), json!(m.name));
-    entry.insert("endpoint".into(), json!(m.endpoint));
-    if !m.tags.is_empty() {
-        entry.insert("tags".into(), json!({ "*": m.tags }));
-    }
-    if let Some(env) = &m.token_env {
-        let value = match &m.header {
-            // A named header carries the raw token; the default carries the
-            // conventional `Bearer` scheme on `Authorization`.
-            Some(_) => format!("{{{{secret:{env}}}}}"),
-            None => format!("Bearer {{{{secret:{env}}}}}"),
-        };
-        let header = m.header.clone().unwrap_or_else(|| "Authorization".into());
-        entry.insert("headers".into(), json!({ header: value }));
-    }
-    Value::Object(entry)
 }
 
 /// Reactive mode: one workflow, one `subscribe` start per URI, a single agent
@@ -898,20 +965,28 @@ mod tests {
         assert_eq!(r.token_env.as_deref(), Some("AGENT_MCP_BILLING_API_TOKEN"));
         let mut input = base(Mode::Once);
         input.mcp = vec![r];
-        let d = doc(&input);
-        let entry = &d["mcp"]["servers"][0];
-        assert_eq!(entry["name"], "billing-api");
-        assert_eq!(entry["tags"]["*"][0], "sensitive");
+        // Connection facts (endpoint/tags/headers) live in the CATALOG layer
+        // now; the instance entry only references (`service:`).
+        let proj = build_projection(&input).unwrap();
+        let cat = &proj.services.value["services"]["billing-api"];
+        assert_eq!(cat["kind"], "mcp");
+        assert_eq!(cat["tags"]["*"][0], "sensitive");
         assert_eq!(
-            entry["headers"]["Authorization"],
+            cat["headers"]["Authorization"],
             "Bearer {{secret:AGENT_MCP_BILLING_API_TOKEN}}"
         );
         // PINNED SPELLING (upstream-confirmed asymmetry): only HEADER-map
         // secret refs are enforced by --validate-config; the `auth.token`
         // spelling passes unresolved. The builder must therefore never emit
-        // `auth:`/`token:` on an MCP entry — headers are the enforced form.
-        assert!(entry.get("auth").is_none());
-        assert!(entry.get("token").is_none());
+        // `auth:`/`token:` on a catalog entry — headers are the enforced form.
+        assert!(cat.get("auth").is_none());
+        assert!(cat.get("token").is_none());
+        let entry = &proj.instance.value["mcp"]["servers"][0];
+        assert_eq!(entry["name"], "billing-api");
+        assert_eq!(entry["service"], "billing-api");
+        // Reference-never-restate: no endpoint/headers on the consumer.
+        assert!(entry.get("endpoint").is_none());
+        assert!(entry.get("headers").is_none());
     }
 
     #[test]
@@ -1008,15 +1083,20 @@ mod tests {
                 model: Some("t".into()),
                 has_token: true,
             });
-            let d = build(&input).expect("build");
+            // The REAL invocation shape: catalog first, instance last.
+            let proj = build_projection(&input).expect("build");
+            let svc_path = dir.path().join(format!("case{n}-services.json"));
             let path = dir.path().join(format!("case{n}.json"));
-            std::fs::write(&path, d.to_json()).unwrap();
+            std::fs::write(&svc_path, proj.services.to_json()).unwrap();
+            std::fs::write(&path, proj.instance.to_json()).unwrap();
             let mut cmd = std::process::Command::new(&bin);
             cmd.arg("-c")
+                .arg(&svc_path)
+                .arg("-c")
                 .arg(&path)
                 .arg("--validate-config")
                 .current_dir(dir.path());
-            for name in d.secret_refs() {
+            for name in proj.secret_refs() {
                 cmd.env(name, "validation-placeholder");
             }
             let out = cmd.output().expect("run agentd");
@@ -1043,8 +1123,10 @@ mod tests {
             token_env: Some("AGENT_MCP_BILLING_TOKEN".into()),
             header: None,
         }];
-        let d = build(&input).unwrap();
-        let refs = d.secret_refs();
+        // Refs span BOTH layers: the intelligence token in the instance, the
+        // MCP header token in the catalog — the projection unions them.
+        let proj = build_projection(&input).unwrap();
+        let refs = proj.secret_refs();
         assert!(refs.contains(&"INTELLIGENCE_TOKEN".to_string()));
         assert!(refs.contains(&"AGENT_MCP_BILLING_TOKEN".to_string()));
         assert_eq!(refs.len(), 2);
@@ -1075,12 +1157,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            d.value["intelligence"]["endpoints"],
+            d.instance.value["intelligence"]["endpoints"],
             "https://llm.ns.svc.cluster.local./v1"
         );
+        // The connection fact lives in the CATALOG layer; the instance entry
+        // only references it.
         assert_eq!(
-            d.value["mcp"]["servers"][0]["endpoint"],
+            d.services.value["services"]["fs"]["endpoint"],
             "https://fs.tenant.svc.cluster.local.:8443/mcp"
         );
+        assert_eq!(d.instance.value["mcp"]["servers"][0]["service"], "fs");
     }
 }
