@@ -90,6 +90,12 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Readiness readback: the /status subresource needs its OWN rule (a rule on
+  # the resource does NOT cover it) — without this the fleet readback 403s
+  # silently and every fleet reports 0 ready forever (bitten live).
+  - apiGroups: ["apps"]
+    resources: ["deployments/status", "statefulsets/status"]
+    verbs: ["get"]
   # KEDA ScaledObjects for claim-mode AgentFleets. The operator applies
   # these best-effort; a cluster without the KEDA CRDs simply never has them
   # created (the operator gates emission on SCALER_ENABLED and tolerates absence).

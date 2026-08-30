@@ -1225,6 +1225,151 @@ mod tests {
         }
     }
 
+    /// P6-4: the RESULT + DLQ wire surface (previously store-tested only).
+    /// Full lifecycle over `tools/call`: submit(max_attempts=1) → claim →
+    /// ack{result} → work.result returns the parsed result; a poison item's
+    /// expiry past budget lands in `work.deadletter list` as EXACTLY that
+    /// item, requeue re-offers it, drop tombstones it.
+    #[test]
+    fn result_and_deadletter_ride_the_wire() {
+        let (store, metrics) = ctx();
+        // Happy path: result recorded + retrievable, structured.
+        let s = call(
+            &store,
+            &metrics,
+            1,
+            "work.submit",
+            json!({ "item": "e2e://ok/1", "claim_key": "ok-1" }),
+            Value::Null,
+        );
+        assert_eq!(s["result"]["structuredContent"]["submitted"], json!(true));
+        let c = call(
+            &store,
+            &metrics,
+            2,
+            "work.claim",
+            json!({ "item": "e2e://ok/1", "ttl_ms": 60_000 }),
+            json!({ META_CLAIM_KEY: "ok-1" }),
+        );
+        let lease = c["result"]["structuredContent"]["lease_id"]
+            .as_str()
+            .expect("granted lease")
+            .to_string();
+        let a = call(
+            &store,
+            &metrics,
+            3,
+            "work.ack",
+            json!({ "lease_id": lease, "result": { "rows": 7 } }),
+            json!({ META_CLAIM_KEY: "ok-1" }),
+        );
+        assert_eq!(a["result"]["structuredContent"]["acked"], json!(true));
+        let r = call(
+            &store,
+            &metrics,
+            4,
+            "work.result",
+            json!({ "work_id": "ok-1" }),
+            Value::Null,
+        );
+        assert_eq!(r["result"]["structuredContent"]["state"], "done");
+        assert_eq!(r["result"]["structuredContent"]["result"]["rows"], 7);
+
+        // Poison path: one delivery budget, expiry retires to the DLQ.
+        call(
+            &store,
+            &metrics,
+            5,
+            "work.submit",
+            json!({ "item": "e2e://poison/1", "claim_key": "poison-1", "max_attempts": 1 }),
+            Value::Null,
+        );
+        call(
+            &store,
+            &metrics,
+            6,
+            "work.claim",
+            json!({ "item": "e2e://poison/1", "ttl_ms": 5 }),
+            json!({ META_CLAIM_KEY: "poison-1" }),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert_eq!(store.sweep_expired(), 1);
+        let d = call(
+            &store,
+            &metrics,
+            7,
+            "work.deadletter",
+            json!({ "action": "list" }),
+            Value::Null,
+        );
+        let items = d["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(items.len(), 1, "exactly the poison item is dead: {items:?}");
+        assert_eq!(items[0]["work_id"], "poison-1");
+        assert_eq!(items[0]["attempts"], 1);
+        // The dead item's state is queryable over the wire too.
+        let r = call(
+            &store,
+            &metrics,
+            8,
+            "work.result",
+            json!({ "work_id": "poison-1" }),
+            Value::Null,
+        );
+        assert_eq!(r["result"]["structuredContent"]["state"], "deadletter");
+        // Requeue re-offers; drop tombstones (both report found).
+        let rq = call(
+            &store,
+            &metrics,
+            9,
+            "work.deadletter",
+            json!({ "action": "requeue", "work_id": "poison-1" }),
+            Value::Null,
+        );
+        assert_eq!(rq["result"]["structuredContent"]["found"], json!(true));
+        let c2 = call(
+            &store,
+            &metrics,
+            10,
+            "work.claim",
+            json!({ "item": "e2e://poison/1", "ttl_ms": 5 }),
+            json!({ META_CLAIM_KEY: "poison-1" }),
+        );
+        assert_eq!(
+            c2["result"]["structuredContent"]["granted"],
+            json!(true),
+            "requeued item claims again: {c2}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        store.sweep_expired();
+        let dr = call(
+            &store,
+            &metrics,
+            11,
+            "work.deadletter",
+            json!({ "action": "drop", "work_id": "poison-1" }),
+            Value::Null,
+        );
+        assert_eq!(dr["result"]["structuredContent"]["found"], json!(true));
+        let d2 = call(
+            &store,
+            &metrics,
+            12,
+            "work.deadletter",
+            json!({ "action": "list" }),
+            Value::Null,
+        );
+        assert_eq!(
+            d2["result"]["structuredContent"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
     // work.submit / work.stats are NOT hard-blocked by attestation — an unresolved
     // caller still succeeds (producers/scaler may be external; token-gated only).
     #[test]

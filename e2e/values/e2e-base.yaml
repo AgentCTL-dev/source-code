@@ -50,11 +50,12 @@ operator:
 
 # Managed state service (P3): the mcpg-backed checkpointer for
 # store.class: managed agents (durability + SIGKILL/restore scenarios).
-# PARKED OFF: two broken upstream pairings in a row (protocol-1 needed
-# GLIBC_2.38 the image lacks; the 2026-08-30 rebuild then missed the
-# beta.24 plugin-host's `mcpg_plugin_abi_layout` ABI symbol — reported).
-# A crash-looping state pod wedges every `helm --wait`, so this flips on
-# only when a pairing actually BOOTS; `state-durability` then unskips.
+# PARKED OFF — three broken pairings in a row (GLIBC floor; missing entry
+# exports; then alpha.20's bundled sql_polling watch-strategy COLLIDING with
+# beta.24's built-in: "watch-strategy kind 'sql_polling' already registered").
+# The pairing needs backend-sql built from the SAME line as the gateway, not
+# a promoted older artifact. Flip on ONLY when a pairing actually BOOTS
+# (a crash-looping state pod wedges every `helm --wait`).
 state:
   enabled: false
 

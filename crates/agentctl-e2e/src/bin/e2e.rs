@@ -172,7 +172,245 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("mention-orchestration", "control", mention_orchestration),
         // static fleet: vars overlays + ordinal-0 singleton (P6-1)
         scenario!("fleet-static", "fleets", fleet_static),
+        // guarded shard re-partition: quiesce-then-flip, never mixed moduli (P6-2)
+        scenario!("shard-resize", "fleets", shard_resize),
+        // work fabric: crash-mid-lease redelivery + result + DLQ round-trip (P6-4)
+        scenario!("work-redelivery", "fleets", work_redelivery),
     ]
+}
+
+/// P6-4: the workqueue fabric's crash story, end to end over the wire. A
+/// holder claims an item and VANISHES mid-lease (never renews, never
+/// releases — the crash); the server re-offers it (visible on its OWN
+/// pending counter, not by asking), and the SAME work unit is granted
+/// again — attempt 2 of the same claim_key. A poison unit with a one-
+/// delivery budget dead-letters instead (exactly it), is requeued by an
+/// admin, completes, and its result is retrievable via `work.result`.
+async fn work_redelivery(ctx: &Ctx) -> Result<Outcome> {
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_COORDINATION, PORT_HTTP, 18105)?;
+    let base = pf.base_url();
+
+    // --- Crash mid-lease → redelivery of exactly the leased unit ----------
+    let item = "e2e://redeliver/1";
+    mcp_structured(
+        &ctx.http,
+        &base,
+        "work.submit",
+        json!({ "item": item, "claim_key": "rd-1", "max_attempts": 3 }),
+        Value::Null,
+    )
+    .await?;
+    let grant = mcp_structured(
+        &ctx.http,
+        &base,
+        "work.claim",
+        json!({ "item": item, "ttl_ms": 900 }),
+        json!({ "agent/claim_key": "rd-1", "agent/instance": "crash-victim" }),
+    )
+    .await?;
+    if grant["granted"] != json!(true) {
+        bail!("initial claim not granted: {grant}");
+    }
+    // The holder crashes here: no renew, no release, no ack.
+    // The SERVER re-offers after expiry — observed on its own backlog count.
+    kh::poll_until(Duration::from_secs(30), Duration::from_millis(500), || async {
+        let stats = mcp_structured(&ctx.http, &base, "work.stats", json!({}), Value::Null).await?;
+        Ok(stats["pending"].as_u64().unwrap_or(0) >= 1)
+    })
+    .await
+    .context("expired lease never re-offered (pending stayed 0)")?;
+    // The redelivered unit is EXACTLY the leased one: the same claim_key
+    // grants again, as its second attempt.
+    let regrant = mcp_structured(
+        &ctx.http,
+        &base,
+        "work.claim",
+        json!({ "item": item, "ttl_ms": 30_000 }),
+        json!({ "agent/claim_key": "rd-1", "agent/instance": "survivor" }),
+    )
+    .await?;
+    if regrant["granted"] != json!(true) {
+        bail!("redelivered unit not re-granted to the same claim_key: {regrant}");
+    }
+    let lease = regrant["lease_id"].as_str().context("lease id")?.to_string();
+    let acked = mcp_structured(
+        &ctx.http,
+        &base,
+        "work.ack",
+        json!({ "lease_id": lease, "result": { "processed": true, "attempt": 2 } }),
+        json!({ "agent/claim_key": "rd-1" }),
+    )
+    .await?;
+    if acked["acked"] != json!(true) {
+        bail!("survivor ack refused: {acked}");
+    }
+    let result = mcp_structured(
+        &ctx.http,
+        &base,
+        "work.result",
+        json!({ "work_id": "rd-1" }),
+        Value::Null,
+    )
+    .await?;
+    if result["state"] != json!("done") || result["result"]["attempt"] != json!(2) {
+        bail!("work.result does not show the survivor's outcome: {result}");
+    }
+
+    // --- Poison → DLQ (exactly it) → admin requeue → completes -----------
+    let poison = "e2e://poison/1";
+    mcp_structured(
+        &ctx.http,
+        &base,
+        "work.submit",
+        json!({ "item": poison, "claim_key": "px-1", "max_attempts": 1 }),
+        Value::Null,
+    )
+    .await?;
+    let g = mcp_structured(
+        &ctx.http,
+        &base,
+        "work.claim",
+        json!({ "item": poison, "ttl_ms": 900 }),
+        json!({ "agent/claim_key": "px-1", "agent/instance": "crash-victim" }),
+    )
+    .await?;
+    if g["granted"] != json!(true) {
+        bail!("poison claim not granted: {g}");
+    }
+    kh::poll_until(Duration::from_secs(30), Duration::from_millis(500), || async {
+        let d = mcp_structured(
+            &ctx.http,
+            &base,
+            "work.deadletter",
+            json!({ "action": "list" }),
+            Value::Null,
+        )
+        .await?;
+        Ok(d["items"]
+            .as_array()
+            .is_some_and(|i| i.iter().any(|x| x["work_id"] == json!("px-1"))))
+    })
+    .await
+    .context("poison unit never dead-lettered")?;
+    let rq = mcp_structured(
+        &ctx.http,
+        &base,
+        "work.deadletter",
+        json!({ "action": "requeue", "work_id": "px-1" }),
+        Value::Null,
+    )
+    .await?;
+    if rq["found"] != json!(true) {
+        bail!("DLQ requeue found nothing: {rq}");
+    }
+    let g2 = mcp_structured(
+        &ctx.http,
+        &base,
+        "work.claim",
+        json!({ "item": poison, "ttl_ms": 30_000 }),
+        json!({ "agent/claim_key": "px-1", "agent/instance": "survivor" }),
+    )
+    .await?;
+    if g2["granted"] != json!(true) {
+        bail!("requeued poison not claimable: {g2}");
+    }
+    let lease2 = g2["lease_id"].as_str().context("lease2")?.to_string();
+    mcp_structured(
+        &ctx.http,
+        &base,
+        "work.ack",
+        json!({ "lease_id": lease2, "result": "fixed" }),
+        json!({ "agent/claim_key": "px-1" }),
+    )
+    .await?;
+
+    drop(pf);
+    pass()
+}
+
+/// P6-2: the GUARDED shard resize. Changing N on a shard fleet must never
+/// roll into mixed moduli (double-owned / orphaned keys): the operator
+/// quiesces the old-N pods to zero, then flips N and scales back up. The
+/// guard's signature is observable: the fleet surfaces `Ready=False /
+/// Resizing` while in flight, and every pod that EVER runs carries one
+/// consistent shards annotation — ending at the new N, fully ready.
+async fn shard_resize(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let name = "fleet-resize";
+    let apply = |shards: u32| {
+        shell::kubectl_apply_stdin(&format!(
+            "apiVersion: agentctl.dev/v1alpha1\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  scaling: {{ mode: shard, shards: {shards} }}\n  template:\n    mode: reactive\n    image: \"agentd:1.3.1\"\n    instruction: \"hold this partition\"\n    surfaces: {{ a2a: true }}\n"
+        ))
+    };
+    apply(2)?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "2")
+    })
+    .await
+    .context("shard fleet 2/2 ready")?;
+
+    // Resize under a running fleet: 2 → 3.
+    apply(3)?;
+
+    // The guard engages: Ready=False / Resizing surfaces on the fleet (a
+    // naive rolling update would never set it).
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(1), || async {
+        let out = shell::kubectl(&[
+            "get", "agentfleet", "-n", ns, name,
+            "-o", r#"jsonpath={.status.conditions[?(@.type=="Ready")].reason}"#,
+        ])
+        .unwrap_or_default();
+        Ok(out.contains("Resizing"))
+    })
+    .await
+    .context("guarded resize never surfaced Ready=False/Resizing")?;
+
+    // It completes: 3/3 ready with the NEW modulus on the pod template.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let ready = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o", "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        let ann = shell::kubectl(&[
+            "get", "statefulset", "-n", ns, name,
+            "-o",
+            r#"jsonpath={.spec.template.metadata.annotations.agentctl\.dev/shards}"#,
+        ])
+        .unwrap_or_default();
+        Ok(ready.trim() == "3" && ann.trim() == "3")
+    })
+    .await
+    .context("resize to N=3 never completed")?;
+
+    // Post-resize sanity: every live pod runs under the same modulus (no
+    // mixed-N seam survives) and the fleet is Ready again.
+    let pods = shell::kubectl(&[
+        "get", "pods", "-n", ns,
+        "-l", &format!("agentctl.dev/agent={name}"),
+        "-o", "jsonpath={.items[*].metadata.name}",
+    ])?;
+    if pods.split_whitespace().count() != 3 {
+        bail!("want exactly 3 member pods after resize, got: {pods}");
+    }
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        let out = shell::kubectl(&[
+            "get", "agentfleet", "-n", ns, name,
+            "-o", r#"jsonpath={.status.conditions[?(@.type=="Ready")].status}"#,
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "True")
+    })
+    .await
+    .context("fleet not Ready after resize")?;
+
+    shell::kubectl(&["delete", "agentfleet", "-n", ns, name, "--wait=false"]).ok();
+    pass()
 }
 
 /// P6-1: a 3-member STATIC fleet — one shared document, per-member `vars`

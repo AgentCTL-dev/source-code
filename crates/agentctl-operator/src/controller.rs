@@ -1450,7 +1450,10 @@ async fn workload_readiness(
                     let desired = st.replicas.map(|r| r.max(0) as u32).unwrap_or(desired_hint);
                     (ready, desired)
                 }
-                Err(_) => (0, desired_hint),
+                Err(e) => {
+                    warn!(workload = name, error = %e, "deployment status readback failed");
+                    (0, desired_hint)
+                }
             };
             Some((ready, desired))
         }
@@ -1463,7 +1466,13 @@ async fn workload_readiness(
                     .ready_replicas
                     .unwrap_or(0)
                     .max(0) as u32,
-                Err(_) => 0,
+                // NEVER swallow this: a /status RBAC gap reads as
+                // "0 ready forever" (bitten live — statefulsets/status
+                // needs its own RBAC rule).
+                Err(e) => {
+                    warn!(workload = name, error = %e, "statefulset status readback failed");
+                    0
+                }
             };
             Some((ready, desired_hint))
         }
@@ -1619,8 +1628,40 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // template (the v1 down-view drops triggers/services/store — composing
     // from it would silently lose a v2 fleet's wake sources).
     let v2_fleets: Api<agent_api::v1alpha2::AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
-    let static_ctx = match v2_fleets.get_opt(&name).await {
-        Ok(Some(f)) => f.spec.partitioning.clone().and_then(|p| {
+    let v2_view = v2_fleets.get_opt(&name).await.ok().flatten();
+    // The v2 strategies MAP onto their engines: `static` composes below;
+    // `dispatcher` IS the coordinator + fleet-route machinery (RFC 0022) and
+    // `workqueue` IS the claim work-fabric — both demand the surface that
+    // engine runs on, refused loudly when absent (a silent fallthrough would
+    // render a fleet that never behaves as declared).
+    if let Some(p) = v2_view.as_ref().and_then(|f| f.spec.partitioning.as_ref()) {
+        use agent_api::v1alpha2::PartitionStrategy;
+        let strategy_error = match p.strategy {
+            PartitionStrategy::Dispatcher if fleet.spec.coordinator.is_none() => Some(
+                "partitioning.strategy: dispatcher needs spec.coordinator (the owner agent \
+                 fronting the pool)",
+            ),
+            PartitionStrategy::Workqueue if fleet.spec.scaling.mode != ScaleMode::Claim => Some(
+                "partitioning.strategy: workqueue rides the claim work-fabric — set \
+                 scaling.mode: claim (+ spec.work)",
+            ),
+            _ => None,
+        };
+        if let Some(msg) = strategy_error {
+            let condition = validated_failed_condition(msg);
+            let desired = desired_fleet_status(&condition, observed, None, None, None, None, None)?;
+            let _ = fleets
+                .patch_status(
+                    &name,
+                    &PatchParams::default(),
+                    &Patch::Merge(&serde_json::json!({ "status": desired })),
+                )
+                .await;
+            return Ok(Action::requeue(requeue_after()));
+        }
+    }
+    let static_ctx = v2_view.as_ref().and_then(|f| {
+        f.spec.partitioning.clone().and_then(|p| {
             (p.strategy == agent_api::v1alpha2::PartitionStrategy::Static).then(|| {
                 (
                     f.spec.template.clone(),
@@ -1628,9 +1669,8 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
                     f.spec.replicas.unwrap_or(1),
                 )
             })
-        }),
-        _ => None,
-    };
+        })
+    });
     let static_members = static_ctx.as_ref().map(|(_, _, n)| *n);
     let member_keys: Vec<(String, String)> = static_ctx
         .as_ref()
@@ -1793,7 +1833,17 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     } else {
         debug!(fleet = %name, "fleet status unchanged; skipped patch");
     }
-    Ok(Action::requeue(requeue_after()))
+    // Converging replicas re-check on a SHORT leash: the `.owns()` watch can
+    // observe the workload's intermediate states and then go quiet before
+    // final readiness (bitten live: 3/3 pods Ready with a 0/3 fleet status
+    // stuck for the whole 300s resync). A not-yet-ready fleet re-reads in
+    // seconds; a settled one keeps the long resync.
+    let converging = matches!((ready_replicas, desired_replicas), (Some(r), Some(d)) if r < d);
+    Ok(Action::requeue(if converging {
+        std::time::Duration::from_secs(10)
+    } else {
+        requeue_after()
+    }))
 }
 
 /// Render + apply the fleet's **coordinator** workload when one is
