@@ -12,7 +12,9 @@
 //! deliberately mirror the `Agent` CRD printer columns declared in `agent-api`.
 
 mod auth;
+mod chat;
 mod install;
+mod verbs;
 
 use agent_api::{Agent, AgentStatus, Mode, Substrate};
 use anyhow::Result;
@@ -46,6 +48,18 @@ enum Command {
     Login(auth::LoginArgs),
     /// Show the signed-in identity from the saved session.
     Whoami(auth::WhoamiArgs),
+    /// Chat with an agent through the gateway, as the signed-in user.
+    Chat(chat::ChatArgs),
+    /// Gracefully drain an agent (finish in-flight work, then stop).
+    Drain(verbs::VerbArgs),
+    /// Mark an agent lame-duck (stop accepting new work; keep serving).
+    LameDuck(verbs::VerbArgs),
+    /// Pause an agent's work loop.
+    Pause(verbs::VerbArgs),
+    /// Resume a paused agent.
+    Resume(verbs::VerbArgs),
+    /// Cancel an agent's in-flight run (needs a run id where required).
+    Cancel(verbs::VerbArgs),
 }
 
 #[derive(Args)]
@@ -82,6 +96,12 @@ async fn main() -> Result<()> {
         Command::Uninstall(args) => install::run_uninstall(args).await,
         Command::Login(args) => auth::run_login(args).await,
         Command::Whoami(args) => auth::run_whoami(args).await,
+        Command::Chat(args) => chat::run_chat(args).await,
+        Command::Drain(args) => verbs::run_verb("drain", args).await,
+        Command::LameDuck(args) => verbs::run_verb("lame-duck", args).await,
+        Command::Pause(args) => verbs::run_verb("pause", args).await,
+        Command::Resume(args) => verbs::run_verb("resume", args).await,
+        Command::Cancel(args) => verbs::run_verb("cancel", args).await,
     }
 }
 

@@ -140,6 +140,33 @@ pub async fn run_whoami(_args: WhoamiArgs) -> Result<()> {
     Ok(())
 }
 
+/// Load the saved session for API calls (`agentctl chat`), refusing loudly
+/// when absent or expired — a dead token would just bounce off the gateway.
+pub fn load_session() -> Result<Credentials> {
+    let path = credentials_path()?;
+    let raw = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "no saved session at {} — run `agentctl login`",
+            path.display()
+        )
+    })?;
+    let creds: Credentials = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "unreadable session file {} — run `agentctl login`",
+            path.display()
+        )
+    })?;
+    if creds.expires_unix <= now_unix() {
+        bail!("your session has expired — run `agentctl login`");
+    }
+    Ok(creds)
+}
+
+/// The HTTP client other commands reuse (same TLS posture as login).
+pub fn api_client() -> Result<reqwest::Client> {
+    http_client()
+}
+
 // ===========================================================================
 // Pure helpers (unit-tested below).
 // ===========================================================================
