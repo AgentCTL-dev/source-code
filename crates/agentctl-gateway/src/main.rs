@@ -818,6 +818,53 @@ fn mentionize_request(req: &Value) -> Option<Value> {
     Some(out)
 }
 
+/// Seconds-precision RFC3339 UTC (`%Y-%m-%dT%H:%M:%SZ`) — the grammar the
+/// operator's idle-park parser reads back.
+fn unix_to_rfc3339(mut secs: u64) -> String {
+    // Civil-from-days (Howard Hinnant), the inverse of the operator's parse.
+    let days = (secs / 86400) as i64;
+    secs %= 86400;
+    let (hh, mm, ss) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Parse the stamp above back to unix seconds (`None` on foreign formats).
+fn httpdate_unix(s: &str) -> Option<u64> {
+    let s = s.trim_end_matches('Z');
+    let (date, time) = s.split_once('T')?;
+    let mut dp = date.split('-');
+    let (y, m, d): (i64, i64, i64) = (
+        dp.next()?.parse().ok()?,
+        dp.next()?.parse().ok()?,
+        dp.next()?.parse().ok()?,
+    );
+    let time = time.split('.').next()?;
+    let mut tp = time.split(':');
+    let (hh, mm, ss): (i64, i64, i64) = (
+        tp.next()?.parse().ok()?,
+        tp.next()?.parse().ok()?,
+        tp.next()?.parse().ok()?,
+    );
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(days * 86400 + hh * 3600 + mm * 60 + ss).ok()
+}
+
 /// A DNS-safe supervisor CR name for a subject (`mock:alice` → `sup-mock-alice`).
 fn supervisor_name_for(subject: &str) -> String {
     let slug: String = subject
@@ -870,18 +917,39 @@ async fn ensure_supervisor(
             .as_ref()
             .map(|st| st.owner_groups.clone())
             .unwrap_or_default();
-        if stamped != user.groups {
+        // Activity stamp (P7-6): every touch refreshes lastConversation —
+        // the idle-park clock AND the wake signal (a parked supervisor's
+        // next touch re-stamps, the operator unparks, the caller rides the
+        // ordinary 503-provisioning window meanwhile). Rate-limited to one
+        // write per 30s so chatty sessions don't hammer the status.
+        let now_stamp = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let stale = sup
+                .status
+                .as_ref()
+                .and_then(|st| st.last_conversation.as_deref())
+                .and_then(|t| httpdate_unix(t))
+                .map(|t| now.saturating_sub(t) > 30)
+                .unwrap_or(true);
+            stale.then(|| unix_to_rfc3339(now))
+        };
+        if stamped != user.groups || now_stamp.is_some() {
+            let mut status = json!({ "ownerGroups": user.groups });
+            if let Some(ts) = &now_stamp {
+                status["lastConversation"] = json!(ts);
+            }
             let _ = sups
                 .patch_status(
                     &sup_name,
                     &Default::default(),
-                    &kube::api::Patch::Merge(
-                        &json!({ "status": { "ownerGroups": user.groups } }),
-                    ),
+                    &kube::api::Patch::Merge(&json!({ "status": status })),
                 )
                 .await
                 .map_err(
-                    |e| tracing::warn!(error = %e, "owner-groups stamp failed (stale grants until next call)"),
+                    |e| tracing::warn!(error = %e, "supervisor stamp failed (stale grants/clock until next call)"),
                 );
         }
         let agent_ref = sup

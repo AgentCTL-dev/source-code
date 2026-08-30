@@ -414,6 +414,15 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     // grants, shapes); the trigger compiler decides the render shape, which
     // overrides the v1 mode for the one inference the schema default hides
     // (a defaulted daemon whose only triggers are once/manual renders a Job).
+    // The v2 view's lifecycle.paused (declared-only until P7-6): drives the
+    // zero-replica park below.
+    let paused = {
+        let v2_api: Api<agent_api::v1alpha2::Agent> = Api::namespaced(ctx.client.clone(), ns);
+        matches!(
+            v2_api.get_opt(&name).await,
+            Ok(Some(a)) if a.spec.lifecycle.as_ref().is_some_and(|l| l.paused)
+        )
+    };
     let composed = match compose_document_v2(
         &ctx.client,
         ns,
@@ -457,7 +466,19 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             }
             wiring.peer_bearers = !peer_bearers.is_empty();
             render_agent(&render_obj, &ctx.render, &wiring)
-                .map(|rendered| (doc, rendered, peer_bearers))
+                .map(|mut rendered| {
+                    // v2 `lifecycle.paused` (P7-6 park): a paused DAEMON
+                    // scales to zero — config, identity and Secrets all stay
+                    // rendered, so unparking is one replica flip away.
+                    if paused {
+                        if let crate::render::Rendered::Deployment(d) = &mut rendered {
+                            if let Some(spec) = d.spec.as_mut() {
+                                spec.replicas = Some(0);
+                            }
+                        }
+                    }
+                    (doc, rendered, peer_bearers)
+                })
                 .map_err(|e| e.to_string())
         }
         Err(e) => Err(e),

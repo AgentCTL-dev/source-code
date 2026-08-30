@@ -139,6 +139,10 @@ operator:
   # overrides it. Empty (default) => `spec.image` is required, as before.
   # e.g. defaultAgentImage: ghcr.io/agentd-dev/agentd:1.0.0
   defaultAgentImage: ""
+  # Supervisor scale-to-zero (P7-6): park a supervisor whose owner has been
+  # silent this many seconds (its daemon scales to 0; the next conversation
+  # wakes it through the normal provisioning flow). 0 = never park.
+  supervisorIdleParkSeconds: 0
   # Leader-elected singleton: default to the small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }

@@ -180,7 +180,125 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("dispatcher-fanout", "fleets", dispatcher_fanout),
         // tenant mcpg: org gateway federating the registry, allow-narrowed (P5-1)
         scenario!("tenant-mcpg", "capability", tenant_mcpg),
+        // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
+        scenario!("supervisor-park", "control", supervisor_park),
     ]
+}
+
+/// P7-6: a dormant supervisor costs ~0. After the idle window (20s in the
+/// e2e values) with no conversations, the supervisor's daemon scales to
+/// ZERO and the CR reports Parked; the owner's next message wakes it — the
+/// gateway re-stamps activity, the operator unparks, and the caller rides
+/// the ordinary provisioning window to a live answer.
+async fn supervisor_park(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str| {
+        let exp = now() + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({ "iss": "https://mock-idp:8443", "aud": "agentctl-cli", "sub": sub,
+                     "email": format!("{sub}@example.test"), "groups": ["eng"], "exp": exp }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-park";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({ "displayName": "E2E Park" }))?,
+        )),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18115)?;
+    let url = format!("{}/orgs/{org}/supervisor", pf.base_url());
+    let send = |text: &'static str, id: u64| {
+        let url = url.clone();
+        let token = sign("erin");
+        async move {
+            let resp = ctx
+                .http
+                .post(&url)
+                .bearer_auth(token)
+                .json(&json!({ "jsonrpc": "2.0", "id": id, "method": "SendMessage",
+                    "params": { "message": { "role": "ROLE_USER",
+                        "messageId": format!("e2e-park-{id}"),
+                        "parts": [{ "text": text }] } } }))
+                .send()
+                .await?;
+            let status = resp.status();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok((status, body))
+        }
+    };
+
+    // First conversation: auto-ensure through to a live answer.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let send = &send;
+        async move {
+            let (status, body) = send("hello", 1).await?;
+            Ok(status.is_success() && body.get("result").is_some())
+        }
+    })
+    .await
+    .context("supervisor never conversed")?;
+
+    // Silence past the window (20s) + the park sweep: the daemon reaches
+    // ZERO replicas and the CR reports Parked.
+    let sup = "sup-mock-erin";
+    kh::poll_until(Duration::from_secs(120), Duration::from_secs(5), || async {
+        let replicas = shell::kubectl(&[
+            "get", "deploy", "-n", &org_namespace("e2e-park"), sup,
+            "-o", "jsonpath={.spec.replicas}",
+        ])
+        .unwrap_or_default();
+        let phase = shell::kubectl(&[
+            "get", "supervisors", "-n", &org_namespace("e2e-park"), sup,
+            "-o", "jsonpath={.status.phase}",
+        ])
+        .unwrap_or_default();
+        Ok(replicas.trim() == "0" && phase.trim() == "Parked")
+    })
+    .await
+    .context("idle supervisor never parked to zero")?;
+
+    // The wake: one message brings it back — provisioning first, then live.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let send = &send;
+        async move {
+            let (status, body) = send("are you there?", 2).await?;
+            Ok(status.is_success() && body.get("result").is_some())
+        }
+    })
+    .await
+    .context("parked supervisor never woke")?;
+
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
 }
 
 /// P5-1: every org gets ITS OWN mcpg governance proxy. Org create brings the
@@ -1082,6 +1200,14 @@ async fn mention_orchestration(ctx: &Ctx) -> Result<Outcome> {
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
     pass()
+}
+
+/// Unix seconds.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Standard-alphabet base64 decode (kubectl secret data).

@@ -329,6 +329,12 @@ spec:
             - name: AGENTCTL_TENANT_MCPG_IMAGE
               value: {{ .Values.tenantMcpg.image | quote }}
             {{- end }}
+            {{- if .Values.operator.supervisorIdleParkSeconds }}
+            # Supervisor scale-to-zero (P7-6): park after this many idle
+            # seconds; the gateway's next touch wakes it. 0/unset = never.
+            - name: AGENTCTL_SUPERVISOR_IDLE_PARK
+              value: {{ .Values.operator.supervisorIdleParkSeconds | quote }}
+            {{- end }}
             {{- if .Values.control.enabled }}
             # Control MCP (P4-1): the endpoint seeded as the per-namespace
             # `control` MCPService (org tenancy controller, create-if-absent).

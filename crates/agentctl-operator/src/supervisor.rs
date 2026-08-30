@@ -31,6 +31,62 @@ const FIELD_MANAGER: &str = "agentctl-operator";
 /// The conventional class the supervisor profile lives on.
 pub const SUPERVISOR_CLASS: &str = "supervisor";
 
+/// Idle-park window (P7-6): a supervisor whose owner has not conversed for
+/// this many seconds renders PAUSED (its daemon scales to zero — config,
+/// identity, peers all stay; the gateway's next touch wakes it through the
+/// ordinary 503-provisioning flow). `AGENTCTL_SUPERVISOR_IDLE_PARK` seconds;
+/// absent/0 = never park.
+pub fn idle_park_secs() -> Option<i64> {
+    std::env::var("AGENTCTL_SUPERVISOR_IDLE_PARK")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+}
+
+/// Is this supervisor idle-parked? Pure: parked when a lastConversation
+/// stamp EXISTS (the gateway stamps every touch — including the wake touch,
+/// which is what unparks) and is older than the window. A supervisor that
+/// has never conversed stays active (its first render must be reachable).
+pub fn is_parked(last_conversation: Option<&str>, window_secs: Option<i64>, now_unix: i64) -> bool {
+    let (Some(stamp), Some(window)) = (last_conversation, window_secs) else {
+        return false;
+    };
+    let Ok(t) = chrono_lite_parse(stamp) else {
+        return false;
+    };
+    now_unix - t > window
+}
+
+/// RFC3339 UTC seconds parse without a date dependency (`%Y-%m-%dT%H:%M:%SZ`,
+/// fractional seconds tolerated). The GATEWAY writes these stamps, so the
+/// grammar is ours end to end.
+fn chrono_lite_parse(s: &str) -> Result<i64, ()> {
+    let s = s.trim_end_matches('Z');
+    let (date, time) = s.split_once('T').ok_or(())?;
+    let mut dp = date.split('-');
+    let (y, m, d): (i64, i64, i64) = (
+        dp.next().ok_or(())?.parse().map_err(|_| ())?,
+        dp.next().ok_or(())?.parse().map_err(|_| ())?,
+        dp.next().ok_or(())?.parse().map_err(|_| ())?,
+    );
+    let time = time.split('.').next().ok_or(())?;
+    let mut tp = time.split(':');
+    let (hh, mm, ss): (i64, i64, i64) = (
+        tp.next().ok_or(())?.parse().map_err(|_| ())?,
+        tp.next().ok_or(())?.parse().map_err(|_| ())?,
+        tp.next().ok_or(())?.parse().map_err(|_| ())?,
+    );
+    // Days since epoch (civil-from-days inverse, Howard Hinnant's algorithm).
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Ok(days * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
 /// The rendered Agent's name for a Supervisor CR (1:1, same name).
 pub fn agent_name(supervisor: &str) -> String {
     supervisor.to_string()
@@ -233,6 +289,26 @@ pub async fn reconcile_supervisor(
         .collect();
     peer_handles.sort();
 
+    // Idle park (P7-6): the owner's silence beyond the window scales the
+    // supervisor to zero; the gateway's next touch re-stamps
+    // lastConversation, which unparks on the next reconcile.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let parked = is_parked(
+        supervisor
+            .status
+            .as_ref()
+            .and_then(|s| s.last_conversation.as_deref()),
+        idle_park_secs(),
+        now,
+    );
+
+    let mut supervisor_for_render = supervisor.as_ref().clone();
+    supervisor_for_render.spec.paused = supervisor.spec.paused || parked;
+    let supervisor = std::sync::Arc::new(supervisor_for_render);
+
     let mut agent = desired_agent(
         &supervisor,
         profile.as_ref(),
@@ -253,7 +329,9 @@ pub async fn reconcile_supervisor(
 
     // Status: phase from the rendered Agent's own condition.
     let rendered = agents.get_opt(&agent_ref).await?;
-    let phase = if supervisor.spec.paused {
+    let phase = if parked {
+        "Parked"
+    } else if supervisor.spec.paused {
         "Paused"
     } else {
         match rendered
@@ -298,7 +376,16 @@ pub async fn reconcile_supervisor(
         )
         .await?;
 
-    Ok(Action::requeue(requeue_after()))
+    // Idle-park sweeps need a leash tighter than the long resync: half the
+    // window, floored at 10s (no parking armed ⇒ the ordinary cadence).
+    let requeue = match idle_park_secs() {
+        Some(w) => std::cmp::min(
+            requeue_after(),
+            std::time::Duration::from_secs((w / 2).max(10) as u64),
+        ),
+        None => requeue_after(),
+    };
+    Ok(Action::requeue(requeue))
 }
 
 pub fn error_policy_supervisor(_s: Arc<Supervisor>, err: &Error, _ctx: Arc<Ctx>) -> Action {
@@ -323,6 +410,25 @@ mod tests {
         );
         s.metadata.namespace = Some("org-acme".into());
         s
+    }
+
+    /// P7-6: parked iff a stamp exists AND is older than the window; never
+    /// parked without a stamp (first render must be reachable) or without a
+    /// window (the plane is off).
+    #[test]
+    fn idle_park_predicate() {
+        let stamp = "2026-08-30T22:00:00Z";
+        let t = chrono_lite_parse(stamp).unwrap();
+        assert!(!is_parked(None, Some(600), t + 10_000));
+        assert!(!is_parked(Some(stamp), None, t + 10_000));
+        assert!(!is_parked(Some(stamp), Some(600), t + 300));
+        assert!(is_parked(Some(stamp), Some(600), t + 601));
+        assert!(is_parked(
+            Some("2026-08-30T22:00:00.123Z"),
+            Some(600),
+            t + 601
+        ));
+        assert!(!is_parked(Some("not-a-time"), Some(600), t + 601));
     }
 
     /// The P4-4 DoD: a `:::` fence smuggled into the user override must stay
