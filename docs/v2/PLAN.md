@@ -33,7 +33,7 @@ identity + a minimal P3 state path for the supervisor's own store.)
 | P0-3 | **Operator: rendered-directory launch path** | flags-era rendering deleted; `-c services.yaml -c agentd.yml` + folders; explicit `run_until`; probes/drain/podFailurePolicy per intent table | **Done(2026-08-30)** — commit `37af063`; new `agent-config` shared builder (proven via real `--validate-config`), single-document layer for now (the services.yaml catalog layer + conventional folders land with the registry, P2-3); shard fleets keep the guarded resize via the `agentctl.dev/shards` annotation |
 | P0-4 | **Admission: binary validation step** | `agentd --validate-config` sandbox job wired; effective surfaces recorded in status | **Done(2026-08-30)** (rung) — in-webhook spawn_blocking run over the SAME composed document (shared builder), secret-ref placeholders auto-derived, binary's config.invalid diagnosis travels into the deny message; chart `admission.binaryValidation` (staging image needed until U9). Effective-surfaces recording moves to P2-3 (needs the services catalog) |
 | P0-5 | **e2e vs real agentd** | mock-agent retired where possible; `mock:` intelligence used; provision→converse→drain→delete green in kind | In progress — e2e crate ported to ACC 2 (vendored oracles, runtime-1 manifest gate, a2a wake sources replace bare subscribes, store-fence identity check replaces shard-identity check); images.sh builds agentd 1.3.1 +internal-mocks and the agentd-staging rung-4 image; claim-deployment manifest retired. Remaining: the live kind run |
-| P0-6 | **Upstream asks filed** (U1–U7 below) | issues filed with repro + proposal; tracked links here | Todo |
+| P0-6 | **Upstream asks filed** (U1–U7 below) | issues filed with repro + proposal; tracked links here | **Done(2026-08-30)** — delivered to the upstream owners' working sessions with repro + proposals: U1–U5 as a formal batch to agentd (2026-08-30); U6 conveyed to mcpg (store façade alignment + sandbox 0022 status obtained); U7 carried by the standing RFC 0023–0025 asks; U8/U9 already resolved. Statuses tracked per-row below |
 
 ## P1 — Identity core, tenancy, gateway routing
 
@@ -132,11 +132,11 @@ identity + a minimal P3 state path for the supervisor's own store.)
 
 | ID | Upstream | Ask | Status |
 |---|---|---|---|
-| U1 | agentd | A2A admin `reload` verb, or verified `--watch-config` on kubelet ConfigMap symlink swaps | Todo |
-| U2 | agentd | A2A TLS hot-rotation (webhook listener already rotates) | Todo |
-| U3 | agentd | `--capabilities`: restore contract/surfaces info; include webhooks + stream/webhook start kinds; tier catalogue | Todo |
-| U4 | agentd | `run_until: auto` webhook/stream misclassification; unify the three long-lived lists | Todo |
-| U5 | agentd | published config schema catch-up ($defs Service.kind/methods/breaker, A2aPeer.service); image license label (says Apache-2.0, is AGPL) | Todo |
+| U1 | agentd | A2A admin `reload` verb, or verified `--watch-config` on kubelet ConfigMap symlink swaps | Delivered 2026-08-30 (batch, priority #1) |
+| U2 | agentd | A2A TLS hot-rotation (webhook listener already rotates) | Delivered 2026-08-30 (batch) |
+| U3 | agentd | `--capabilities`: restore contract/surfaces info; include webhooks + stream/webhook start kinds; tier catalogue | Delivered 2026-08-30 (batch) |
+| U4 | agentd | `run_until: auto` webhook/stream misclassification; unify the three long-lived lists | Delivered 2026-08-30 (batch) |
+| U5 | agentd | published config schema catch-up ($defs Service.kind/methods/breaker, A2aPeer.service); image license label (says Apache-2.0, is AGPL) | Delivered 2026-08-30 (batch) |
 | U6 | mcpg | store-profile MCP tool façade upstreamable; sandbox backend (their RFC 0022) offered back | Todo |
 | U7 | aauth/agentd | delegation chains; agentd inbound verification (A2A leg) — carries RFCs 0023–0025 asks forward | Todo |
 | U9 | agentd | a stock-image way to stage the binary for out-of-image use | **Done(2026-08-30) — declined upstream** (the binary stays single-purpose; packaging is not its problem). Resolution: chart supports BOTH `binaryValidation.mode: staging` (busybox-derived image) and `mode: imageVolume` (KEP-4639 image-typed volume, beta ~K8s 1.33 + containerd 2.0 — mounts the STOCK signed image, nothing derived). Bonus finding folded into the contract: --validate-config enforces secret resolution ONLY in header maps (intelligence.token passes unresolved — upstream defect raised); admission gained a referenced-Secret existence rung in response |

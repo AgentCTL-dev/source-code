@@ -77,9 +77,13 @@ kubectl -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=
 log "installing KEDA (chart appVersion $KEDA_VERSION)"
 helm repo add kedacore https://kedacore.github.io/charts >/dev/null 2>&1 || true
 helm repo update kedacore >/dev/null
+# Pin the CHART version (its default image tag matches its appVersion). Pinning
+# only the image while the chart floats produces flag skew — a 2.20 chart
+# passes flags a 2.16 binary does not know (observed: --enable-webhook-patching
+# → CrashLoopBackOff printing usage).
 helm upgrade --install keda kedacore/keda \
   --namespace keda --create-namespace \
-  --set "image.keda.tag=${KEDA_VERSION}" --wait --timeout 300s
+  --version "${KEDA_VERSION}" --wait --timeout 300s
 wait_crd scaledobjects.keda.sh
 
 # ---- 4. metrics-server ---------------------------------------------------
