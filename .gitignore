@@ -3,3 +3,4 @@
 /crates/agentctl-e2e/target
 **/*.rs.bk
 Cargo.lock.orig
+target-mcpg/

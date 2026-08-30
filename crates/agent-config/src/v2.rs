@@ -59,6 +59,27 @@ pub fn from_v2_spec(
     aauth_provider: Option<String>,
     mcp: Vec<ResolvedMcp>,
 ) -> Result<(ConfigInput, RenderShape), ConfigError> {
+    from_v2_spec_with_store(
+        spec,
+        intelligence,
+        workflow_file,
+        aauth_provider,
+        mcp,
+        crate::StoreSelector::File,
+    )
+}
+
+/// [`from_v2_spec`] with the operator-resolved store placement (`class:
+/// managed` → the state-service selector the operator computes; the compiler
+/// itself cannot know the org/agent prefix).
+pub fn from_v2_spec_with_store(
+    spec: &api::AgentSpec,
+    intelligence: Option<ResolvedIntelligence>,
+    workflow_file: Option<String>,
+    aauth_provider: Option<String>,
+    mcp: Vec<ResolvedMcp>,
+    store: crate::StoreSelector,
+) -> Result<(ConfigInput, RenderShape), ConfigError> {
     let shape = derive_shape(spec)?;
     let persona = spec.instruction.as_ref().and_then(|i| i.text.clone());
 
@@ -119,6 +140,7 @@ pub fn from_v2_spec(
         aauth: aauth_provider.map(|provider| crate::AauthInput { provider }),
         serve_a2a: spec.expose.as_ref().map(|e| e.a2a).unwrap_or(true),
         allow_trifecta: false,
+        store,
         generated_workflows: generated,
         webhooks_block,
         streams_block: (!streams.is_empty()).then_some(Value::Object(streams)),
@@ -350,6 +372,7 @@ mod tests {
             tags: vec![],
             token_env: None,
             header: None,
+            allow: Vec::new(),
         }
     }
 

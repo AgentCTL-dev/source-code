@@ -85,6 +85,9 @@ pub struct ResolvedMcp {
     pub token_env: Option<String>,
     /// Header carrying the token. `None` ⇒ `Authorization: Bearer <token>`.
     pub header: Option<String>,
+    /// The consumer's NARROWED tool allow list (grant ∩ registry ceiling —
+    /// resolved by the operator; empty = the catalog's full surface).
+    pub allow: Vec<String>,
 }
 
 impl ResolvedMcp {
@@ -111,6 +114,7 @@ impl ResolvedMcp {
             tags: s.tags.clone(),
             token_env: has_mounted_token.then(|| Self::token_env_for(&s.name)),
             header: s.auth.as_ref().and_then(|a| a.header.clone()),
+            allow: Vec::new(),
         }
     }
 }
@@ -138,6 +142,19 @@ pub struct AauthInput {
     pub provider: String,
 }
 
+/// Where the agent's durable state lives (P3: the store classes).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StoreSelector {
+    /// The in-pod file store (ephemeral — an emptyDir; today's default).
+    #[default]
+    File,
+    /// The managed state service: `store.kind: mcp` against a declared
+    /// server, keys under `prefix` (the operator renders
+    /// `orgs/<ns>/<agent>`; the AGENT_POD_NAME instance fence still applies
+    /// inside the key).
+    Mcp { server: String, prefix: String },
+}
+
 /// Everything the builder needs — pre-resolved, no I/O behind it.
 #[derive(Clone, Debug, Default)]
 pub struct ConfigInput {
@@ -160,6 +177,8 @@ pub struct ConfigInput {
     /// rendered agent serves its control surface over mTLS).
     pub serve_a2a: bool,
     pub allow_trifecta: bool,
+    /// Durable-state placement (P3 store classes).
+    pub store: StoreSelector,
     /// Generated trigger workflows (P2-8: the v2 `triggers[]` compiler's
     /// output — full dialect-3 documents appended to `workflows`).
     pub generated_workflows: Vec<Value>,
@@ -203,6 +222,7 @@ impl ConfigInput {
             aauth: aauth_provider.map(|provider| AauthInput { provider }),
             serve_a2a: true,
             allow_trifecta: false,
+            store: StoreSelector::File,
             generated_workflows: Vec::new(),
             webhooks_block: None,
             streams_block: None,
@@ -514,7 +534,18 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
         let servers: Vec<Value> = input
             .mcp
             .iter()
-            .map(|m| json!({ "name": m.name, "service": m.name }))
+            .map(|m| {
+                let mut e = Map::new();
+                e.insert("name".into(), json!(m.name));
+                e.insert("service".into(), json!(m.name));
+                if !m.allow.is_empty() {
+                    // The consumer's NARROWED tool surface (grant ∩ registry
+                    // ceiling, resolved by the operator) — references may
+                    // narrow the catalog, never widen it.
+                    e.insert("allow".into(), json!(m.allow));
+                }
+                Value::Object(e)
+            })
             .collect();
         doc.insert("mcp".into(), json!({ "servers": servers }));
     }
@@ -589,10 +620,23 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
     // $XDG_STATE_HOME/agentd/state — a read-only rootfs in our pods (observed:
     // exit 6 "store dir ...: Read-only file system"). The workload layer
     // mounts a writable emptyDir at the parent of STATE_DIR for every shape.
-    doc.insert(
-        "store".into(),
-        json!({ "kind": "file", "file": { "path": paths::STATE_DIR } }),
-    );
+    match &input.store {
+        StoreSelector::File => {
+            doc.insert(
+                "store".into(),
+                json!({ "kind": "file", "file": { "path": paths::STATE_DIR } }),
+            );
+        }
+        StoreSelector::Mcp { server, prefix } => {
+            // The managed state service (checkpointer profile). The named
+            // server MUST be a declared mcp.servers entry — agentd refuses an
+            // undeclared name; the operator appends the synthetic binding.
+            doc.insert(
+                "store".into(),
+                json!({ "kind": "mcp", "prefix": prefix, "mcp": { "server": server } }),
+            );
+        }
+    }
     let run_until = if is_daemon(input.mode) {
         "drained"
     } else {
@@ -867,6 +911,7 @@ mod tests {
                 tags: vec![],
                 token_env: None,
                 header: None,
+                allow: Vec::new(),
             },
             ResolvedMcp {
                 name: "fs".into(),
@@ -874,6 +919,7 @@ mod tests {
                 tags: vec![],
                 token_env: None,
                 header: None,
+                allow: Vec::new(),
             },
         ];
         input.subscribe = vec!["queue://inbox".into()];
@@ -966,6 +1012,38 @@ mod tests {
     fn principal_secret_key_mapping_is_pinned() {
         assert_eq!(principal_secret_key("okta:alice"), "PRINCIPAL_OKTA_ALICE");
         assert_eq!(principal_secret_key("a.b-c_d"), "PRINCIPAL_A_B_C_D");
+    }
+
+    /// The managed store class (P3): `store.kind: mcp` against the declared
+    /// `state` binding with the operator-computed prefix — the exact shape
+    /// agentd's checkpointer profile dials.
+    #[test]
+    fn managed_store_renders_the_mcp_checkpointer() {
+        let mut input = base(Mode::Reactive);
+        input.store = StoreSelector::Mcp {
+            server: "state".into(),
+            prefix: "orgs/org-acme/triage".into(),
+        };
+        input.mcp = vec![ResolvedMcp {
+            name: "state".into(),
+            endpoint: "http://agentctl-state.agentctl-system.svc.cluster.local.:8787/mcp".into(),
+            tags: vec![],
+            token_env: None,
+            header: None,
+            allow: vec!["state.*".into()],
+        }];
+        let proj = build_projection(&input).unwrap();
+        let store = &proj.instance.value["store"];
+        assert_eq!(store["kind"], "mcp");
+        assert_eq!(store["prefix"], "orgs/org-acme/triage");
+        assert_eq!(store["mcp"]["server"], "state");
+        // The narrowed allow rides the reference entry.
+        assert_eq!(proj.instance.value["mcp"]["servers"][0]["allow"][0], "state.*");
+        // The catalog carries the connection fact.
+        assert!(proj.services.value["services"]["state"]["endpoint"]
+            .as_str()
+            .unwrap()
+            .contains(":8787/mcp"));
     }
 
     #[test]
@@ -1114,6 +1192,7 @@ mod tests {
                     tags: vec![],
                     token_env: None,
                     header: None,
+                    allow: Vec::new(),
                 }];
                 i.subscribe = vec!["queue://inbox".into()];
                 i
@@ -1157,6 +1236,7 @@ triggers:
                 tags: vec![],
                 token_env: None,
                 header: None,
+                allow: Vec::new(),
             }],
         )
         .expect("ten-kind compile");
@@ -1213,6 +1293,7 @@ triggers:
             tags: vec![],
             token_env: Some("AGENT_MCP_BILLING_TOKEN".into()),
             header: None,
+            allow: Vec::new(),
         }];
         // Refs span BOTH layers: the intelligence token in the instance, the
         // MCP header token in the catalog — the projection unions them.

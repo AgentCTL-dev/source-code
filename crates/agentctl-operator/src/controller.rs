@@ -824,6 +824,14 @@ async fn compose_document_v2(
                 tags: entry.spec.tags.clone(),
                 token_env,
                 header: None,
+                // The narrowed tool surface: the grant's allow (admission has
+                // already refused anything past the registry ceiling); empty
+                // grant = the entry's own ceiling.
+                allow: if grant.allow.is_empty() {
+                    entry.spec.allow.clone()
+                } else {
+                    grant.allow.clone()
+                },
             });
         }
     }
@@ -836,12 +844,46 @@ async fn compose_document_v2(
         model: v2_spec.intelligence.as_ref().and_then(|i| i.model.clone()),
         has_token: token.is_some(),
     });
-    let (input, shape) = agent_config::v2::from_v2_spec(
+    // Store class (P3): `managed` renders the state-service checkpointer —
+    // a synthetic `state` MCP binding (the endpoint from the operator env;
+    // chart-wired to the in-cluster state gateway) + `store.kind: mcp` with
+    // the org/agent prefix. `local` (PVC/StatefulSet) is not yet rendered —
+    // refused loudly rather than silently degraded to ephemeral.
+    let store = match v2_spec.store.as_ref().map(|s| s.class) {
+        Some(agent_api::v1alpha2::StoreClass::Managed) => {
+            let state_url = std::env::var("AGENTCTL_STATE_URL").map_err(|_| {
+                "store.class: managed needs the state service (operator env                  AGENTCTL_STATE_URL; chart state.enabled)"
+                    .to_string()
+            })?;
+            mcp.push(agent_config::ResolvedMcp {
+                name: "state".into(),
+                endpoint: agent_config::absolutize_endpoint(&state_url),
+                tags: Vec::new(),
+                token_env: None,
+                header: None,
+                allow: vec!["state.*".into()],
+            });
+            agent_config::StoreSelector::Mcp {
+                server: "state".into(),
+                prefix: format!("orgs/{ns}/{name}"),
+            }
+        }
+        Some(agent_api::v1alpha2::StoreClass::Local) => {
+            return Err(
+                "store.class: local (PVC-backed) is not rendered yet — use ephemeral or managed"
+                    .to_string(),
+            );
+        }
+        _ => agent_config::StoreSelector::File,
+    };
+
+    let (input, shape) = agent_config::v2::from_v2_spec_with_store(
         &v2_spec,
         intel,
         workflow.map(|w| w.file_path()),
         aauth_provider,
         mcp.clone(),
+        store,
     )
     .map_err(|e| e.to_string())?;
     let projection = agent_config::build_projection(&input).map_err(|e| e.to_string())?;
