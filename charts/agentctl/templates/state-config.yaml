@@ -1,0 +1,201 @@
+{{- if .Values.state.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+{{- $st := .Values.state }}
+# Managed state service (P3, RFC 0031 §2): the durable checkpointer agents
+# with `store.class: managed` dial. An mcpg gateway (blessed digest-pinned
+# image) serving the agentd store-over-MCP "checkpointer profile"
+# (contract/schemas/store.profile.json) from SQL bindings over the chart
+# Postgres — four tools, zero mapping config on the agent side:
+#
+#   state.put    seq-CAS write ({ok, latest}; latest non-null = conflict)
+#   state.get    read (structuredContent null = absent, never an error)
+#   state.list   prefix scan → {keys: [{key, seq}]}
+#   state.delete idempotent delete
+#
+# TENANCY (interim): the store.profile tenancy rule wants the permissible key
+# prefix derived from the VERIFIED caller identity. The pinned backend-sql
+# plugin does not yet expose `identity.*` in `param_exprs` (fixed upstream in
+# mcpg PR #659; adopt on the next blessed pin) — until then the fence is
+# prefix-trust: the OPERATOR renders each agent's `store.prefix`
+# (orgs/<ns>/<name>) into config the agent cannot edit, and NetworkPolicy
+# admits only agent namespaces. Callers are therefore `unauthenticated` trust
+# here, and every call is audited (fail-closed local-file sink).
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentctl-state-config
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-state
+    {{- include "agentctl.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    gateway:
+      server:
+        bind_address: "0.0.0.0:8787"
+        mcp_path: "/mcp"
+        health_path: "/health"
+        max_request_body_mb: 4
+      plugin_registry:
+        # OCI plugin cache on the pod's writable emptyDir (root fs is RO).
+        cache_dir: /var/cache/mcpg
+
+    governance:
+      policy:
+        tool_access:
+          # Interim prefix-trust posture (see header). Raise to `verified`
+          # when the identity-fenced plugin pin lands.
+          default_minimum_trust: unauthenticated
+      audit:
+        enabled: true
+        required: true
+        on_failure: fail_closed
+        sinks:
+          - kind: dev.mcpg.builtin.audit.local-file
+            config:
+              path: /var/log/mcpg/audit.log
+
+    plugins:
+      - id: dev.mcpg.backend.sql
+        class: backend
+        source: { oci: "{{ $st.pluginImage }}" }
+        granted_capabilities: ["network_outbound"]
+
+    mcp:
+      capabilities:
+        tools:
+          - name: state.put
+            title: "Checkpoint write (seq CAS)"
+            description: >-
+              Compare-and-set one state envelope: accepted iff the stored seq
+              for the key is exactly seq-1 (or seq=1 into an absent key).
+              Replays of an accepted write (same seq, identical state) stay
+              accepted — the fence trips only on a REAL divergence, which is
+              split-brain and must surface as {latest}.
+            annotations: { read_only: false, idempotent: true, destructive: false, open_world: false }
+            input_schema:
+              type: object
+              required: [key, seq, state]
+              properties:
+                key: { type: string, minLength: 1, maxLength: 1024 }
+                seq: { type: integer, minimum: 1 }
+                state: { type: object, description: "The agentd state envelope." }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                # One statement, one row out: {ok, latest}. `cur` snapshots the
+                # stored row; `attempt` performs the guarded CAS (insert only
+                # valid firsts, update only exact successors); `idem` accepts a
+                # byte-identical replay of the already-stored seq (agentd's
+                # _meta idempotency key does not reach SQL bindings, so the
+                # binding self-idempotates). Conflict returns the stored seq —
+                # COALESCE 0 when the key is absent but seq>1 (still a CAS
+                # refusal, never an insert).
+                sql: |
+                  WITH cur AS (
+                    SELECT seq, state FROM agent_state WHERE key = :key
+                  ), attempt AS (
+                    INSERT INTO agent_state (key, seq, state, updated_at)
+                    SELECT :key, :seq, CAST(:state AS jsonb), now()
+                    WHERE :seq = 1 OR EXISTS (SELECT 1 FROM cur WHERE cur.seq = :seq - 1)
+                    ON CONFLICT (key) DO UPDATE
+                      SET seq = EXCLUDED.seq, state = EXCLUDED.state, updated_at = now()
+                      WHERE agent_state.seq = EXCLUDED.seq - 1
+                    RETURNING seq
+                  ), idem AS (
+                    SELECT 1 AS hit FROM cur
+                    WHERE cur.seq = :seq AND cur.state = CAST(:state AS jsonb)
+                  )
+                  SELECT
+                    (EXISTS (SELECT 1 FROM attempt) OR EXISTS (SELECT 1 FROM idem)) AS ok,
+                    CASE
+                      WHEN EXISTS (SELECT 1 FROM attempt) OR EXISTS (SELECT 1 FROM idem)
+                        THEN NULL
+                      ELSE COALESCE((SELECT cur.seq FROM cur), 0)
+                    END AS latest
+                params: [key, seq, state]
+                row_mode: single
+                timeout_ms: 5000
+
+          - name: state.get
+            title: "Checkpoint read"
+            description: >-
+              Fetch the state envelope for a key (optionally pinned to an
+              exact seq). Absent keys return null, never an error.
+            annotations: { read_only: true, idempotent: true, open_world: false }
+            input_schema:
+              type: object
+              required: [key]
+              properties:
+                key: { type: string, minLength: 1, maxLength: 1024 }
+                seq: { type: integer, minimum: 1 }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                sql: |
+                  SELECT state, seq FROM agent_state
+                  WHERE key = :key
+                    AND (CAST(:seq AS bigint) IS NULL OR seq = CAST(:seq AS bigint))
+                params: [key, seq]
+                param_exprs:
+                  # `seq` is optional on the wire; SQL params are not — bind
+                  # SQL NULL when absent (and the cast keeps NULL bigint-typed).
+                  seq: "has(arguments.seq) ? arguments.seq : null"
+                row_mode: single
+                read_only: true
+                timeout_ms: 5000
+
+          - name: state.list
+            title: "Checkpoint key scan"
+            description: "List {key, seq} under a key prefix, ordered by key."
+            annotations: { read_only: true, idempotent: true, open_world: false }
+            input_schema:
+              type: object
+              required: [prefix]
+              properties:
+                prefix: { type: string, minLength: 1, maxLength: 1024 }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                sql: |
+                  SELECT COALESCE(
+                           jsonb_agg(jsonb_build_object('key', key, 'seq', seq) ORDER BY key),
+                           '[]'::jsonb
+                         ) AS keys
+                  FROM agent_state
+                  WHERE starts_with(key, :prefix)
+                params: [prefix]
+                row_mode: single
+                read_only: true
+                timeout_ms: 5000
+
+          - name: state.delete
+            title: "Checkpoint delete"
+            description: "Delete one key. Idempotent; deleting an absent key succeeds."
+            annotations: { read_only: false, idempotent: true, destructive: true, open_world: false }
+            input_schema:
+              type: object
+              required: [key]
+              properties:
+                key: { type: string, minLength: 1, maxLength: 1024 }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                sql: "DELETE FROM agent_state WHERE key = :key"
+                params: [key]
+                row_mode: affected_rows
+                timeout_ms: 5000
+{{- end }}

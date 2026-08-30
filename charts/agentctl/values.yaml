@@ -530,6 +530,22 @@ identity:
     serviceAccount:
       annotations: {}
 
+# Managed state service (P3, RFC 0031): the durable checkpointer for agents
+# with `store.class: managed` — an mcpg MCP gateway serving the agentd
+# store profile (state.put/get/list/delete) from SQL bindings over the chart
+# Postgres. Off by default; when on, the operator gets AGENTCTL_STATE_URL and
+# a helm hook Job bootstraps the agent_state table.
+state:
+  enabled: false
+  # The blessed mcpg release — digest-pinned; bump only to a newer blessed pin.
+  image: "ghcr.io/mcpg-dev/mcpg:0.1.0-beta.24@sha256:64fdc3c1d3abbfceaaddddb3caf84587332964cfc64a0836048cc93e5dedabc0"
+  # backend-sql plugin (arch-suffix resolved by mcpg at boot; publicly pullable).
+  pluginImage: "ghcr.io/mcpg-dev/plugins/backend-sql:protocol-1"
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the

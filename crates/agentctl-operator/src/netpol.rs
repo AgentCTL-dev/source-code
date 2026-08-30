@@ -63,9 +63,14 @@ const P_INTERNET_EGRESS: &str = "agent-internet-egress";
 /// The control-plane component app names an agent is permitted to egress to — and
 /// ONLY these (a bare namespaceSelector would also expose the admission webhook /
 /// apiserver to a tenant agent). After the gateway removal these are the A2A
-/// gateway (delegation) and the coordination server (the claim-mode work fabric);
+/// gateway (delegation), the coordination server (the claim-mode work fabric),
+/// and the managed state service (the `store.class: managed` checkpointer);
 /// intelligence + MCP are dialed DIRECTLY (see [`agent_internet_egress`]).
-const CONTROL_PLANE_APP_NAMES: [&str; 2] = ["agentctl-gateway", "agentctl-coordination"];
+const CONTROL_PLANE_APP_NAMES: [&str; 3] = [
+    "agentctl-gateway",
+    "agentctl-coordination",
+    "agentctl-state",
+];
 
 /// Operator-side wiring for the per-namespace agent NetworkPolicies. Read once at
 /// startup ([`NetPolConfig::from_env`]) and carried on the reconcile context.
@@ -187,9 +192,10 @@ fn allow_controlplane_and_dns(cp_ns: &str) -> NetworkPolicy {
             ..Default::default()
         }]),
         // 8080: the A2A gateway (delegation-out) + the coordination server
-        // (claims), both plaintext HTTP. Intelligence + MCP are dialed DIRECTLY
-        // over public HTTPS (see `agent_internet_egress`), not through here.
-        ports: Some(vec![port("TCP", 8080)]),
+        // (claims), both plaintext HTTP; 8787: the managed state service
+        // (checkpointer). Intelligence + MCP are dialed DIRECTLY over public
+        // HTTPS (see `agent_internet_egress`), not through here.
+        ports: Some(vec![port("TCP", 8080), port("TCP", 8787)]),
     };
     NetworkPolicy {
         metadata: meta(P_ALLOW_CP_DNS),
@@ -409,9 +415,9 @@ mod tests {
         assert!(dns_ports.contains(&("UDP".to_string(), 53)));
         assert!(dns_ports.contains(&("TCP".to_string(), 53)));
 
-        // Gateway rule: scoped to the control-plane namespace AND the gateway pods,
-        // port 8080 only (the surviving A2A gateway + coordination serve plaintext
-        // there; the removed Model/MCP gateways' 443 HTTPS listeners are gone).
+        // Gateway rule: scoped to the control-plane namespace AND the sanctioned
+        // pods — A2A gateway + coordination (8080) and the managed state
+        // service (8787); the removed Model/MCP gateways' 443 listeners are gone.
         let gw = &egress[1];
         let peer = &gw.to.as_ref().unwrap()[0];
         assert_eq!(
@@ -441,8 +447,8 @@ mod tests {
         let gw_ports: Vec<i32> = gw.ports.as_ref().unwrap().iter().map(int_port).collect();
         assert_eq!(
             gw_ports,
-            vec![8080],
-            "only 8080 survives the gateway removal"
+            vec![8080, 8787],
+            "8080 (A2A + coordination) and 8787 (managed state) only"
         );
     }
 

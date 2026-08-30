@@ -548,6 +548,31 @@
           }
         }
       }
+    },
+    "state": {
+      "type": "object",
+      "description": "Managed state service (P3): the mcpg-backed checkpointer for store.class: managed agents.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "string",
+          "description": "Blessed mcpg image, digest-pinned."
+        },
+        "pluginImage": {
+          "type": "string",
+          "description": "backend-sql plugin OCI reference."
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resources": {
+          "type": "object"
+        }
+      }
     }
   }
 }

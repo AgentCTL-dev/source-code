@@ -1,0 +1,146 @@
+{{- if .Values.state.enabled }}
+{{- $ns := include "agentctl.namespace" . }}
+{{- $st := .Values.state }}
+# Schema bootstrap: mcpg has no config-declared DDL, so a hook Job lands the
+# table before/with each rollout (idempotent CREATE IF NOT EXISTS; retries
+# through Postgres startup). Runs on the SAME DSN the service uses.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentctl-state-schema
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-state-schema
+    {{- include "agentctl.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-state-schema
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.postgres.bundled.runAsUser }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: schema
+          image: {{ .Values.postgres.bundled.image }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              for i in $(seq 1 30); do
+                psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+                  CREATE TABLE IF NOT EXISTS agent_state (
+                    key        text PRIMARY KEY,
+                    seq        bigint NOT NULL,
+                    state      jsonb NOT NULL,
+                    updated_at timestamptz NOT NULL DEFAULT now()
+                  );" && exit 0
+                echo "postgres not ready ($i/30); retrying in 5s" >&2
+                sleep 5
+              done
+              exit 1
+          env:
+            {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-state
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-state
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $st.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-state
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-state
+        {{- include "agentctl.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/state-config.yaml") . | sha256sum | trunc 32 }}
+    spec:
+      # ndots:1 — the pod dials PUBLIC registries (the plugin OCI pull) by
+      # 2-label names; the default ndots:5 sends those through the search
+      # domains first, where a host wildcard domain can capture them (the
+      # e2e cluster's tsok.org wildcard does). In-cluster names still resolve
+      # via the search list.
+      dnsConfig:
+        options:
+          - { name: ndots, value: "1" }
+      securityContext:
+        runAsNonRoot: true
+        # The blessed image's `mcpg` user (uid 10001) — numeric so the kubelet
+        # can verify non-root (the image names the user symbolically).
+        runAsUser: 10001
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: state
+          image: {{ $st.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { containerPort: 8787, name: http }
+          env:
+            # MCPG_CONFIG default (/etc/mcpg/config.yaml) matches the mount.
+            {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            {{- toYaml $st.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/mcpg, readOnly: true }
+            - { name: plugin-cache, mountPath: /var/cache/mcpg }
+            - { name: audit, mountPath: /var/log/mcpg }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: agentctl-state-config }
+        - name: plugin-cache
+          emptyDir: {}
+        - name: audit
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-state
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-state
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-state
+  ports:
+    - { name: http, port: 8787, targetPort: http }
+{{- end }}

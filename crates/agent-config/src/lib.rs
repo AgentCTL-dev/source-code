@@ -1038,7 +1038,10 @@ mod tests {
         assert_eq!(store["prefix"], "orgs/org-acme/triage");
         assert_eq!(store["mcp"]["server"], "state");
         // The narrowed allow rides the reference entry.
-        assert_eq!(proj.instance.value["mcp"]["servers"][0]["allow"][0], "state.*");
+        assert_eq!(
+            proj.instance.value["mcp"]["servers"][0]["allow"][0],
+            "state.*"
+        );
         // The catalog carries the connection fact.
         assert!(proj.services.value["services"]["state"]["endpoint"]
             .as_str()

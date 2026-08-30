@@ -111,11 +111,58 @@ spec:
   policyTypes: ["Ingress"]
   ingress:
     - from:
+        # Every sanctioned SQL consumer, scoped per-pod: the gateway (task
+        # store), identity (durable custody), coordination (store=postgres),
+        # and the managed state service (agent checkpoints).
         - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: agentctl-gateway
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - agentctl-gateway
+                  - agentctl-identity
+                  - agentctl-coordination
+                  - agentctl-state
+                  - agentctl-state-schema
       ports:
         - { protocol: TCP, port: 5432 }
+{{- end }}
+{{- if .Values.state.enabled }}
+---
+# Managed state service: accepts only agent-pod callers — the listed
+# agentNamespaces plus every operator-managed org namespace (labelled
+# agentctl.dev/organization). Interim prefix-trust tenancy (state.yaml header)
+# leans on this perimeter.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-state-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-state
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- range $agentNs := $agentNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $agentNs }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+        {{- end }}
+        - namespaceSelector:
+            matchExpressions:
+              - { key: agentctl.dev/organization, operator: Exists }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - { protocol: TCP, port: 8787 }
 {{- end }}
 # -----------------------------------------------------------------------------
 # Data plane: per-tenant-namespace agent isolation. An agent pod may egress to
@@ -166,7 +213,8 @@ spec:
     # multi-tenancy: a bare namespaceSelector would also let a tenant agent reach
     # e.g. the admission webhook; the podSelector forbids that. Port 8080 only:
     # the A2A gateway (delegation-out) + the coordination server (claims), both
-    # plaintext HTTP. Intelligence + MCP are dialed DIRECTLY over public HTTPS
+    # plaintext HTTP; 8787 is the managed state service (checkpointer).
+    # Intelligence + MCP are dialed DIRECTLY over public HTTPS
     # (the agent-internet-egress policy below), not through the control plane.
     - to:
         - namespaceSelector:
@@ -176,9 +224,10 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: ["agentctl-gateway", "agentctl-coordination"]
+                values: ["agentctl-gateway", "agentctl-coordination", "agentctl-state"]
       ports:
         - { protocol: TCP, port: 8080 }  # A2A gateway + coordination (plaintext)
+        - { protocol: TCP, port: 8787 }  # managed state service (checkpointer)
 ---
 # Tenant isolation: agent pods accept ingress only from the control plane
 # (no cross-tenant pod-to-pod traffic).
