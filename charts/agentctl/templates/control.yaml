@@ -25,11 +25,21 @@ metadata:
   labels:
     {{- include "agentctl.labels" . | nindent 4 }}
 rules:
-  # The five P4-1 verbs: list/get/status/resolve read; create is the one
-  # write (non-destructive; delete/pause wait for P4-5 approval gates).
+  # list/get/status/resolve read; create + subagents.create write; delete
+  # executes ONLY behind the owner-approval gate (P4-5) and patch records the
+  # pending marker.
   - apiGroups: ["agentctl.dev"]
     resources: ["agents"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # P4-2 binding checks: the acting user comes from the caller's Supervisor
+  # CR; the role ladder from the namespace's Organization (via its label).
+  # All read-only.
+  - apiGroups: ["agentctl.dev"]
+    resources: ["supervisors", "organizations"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

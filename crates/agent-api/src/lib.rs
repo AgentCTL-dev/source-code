@@ -17,6 +17,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod approval;
 pub mod org;
 pub mod registry;
 pub mod v1alpha2;

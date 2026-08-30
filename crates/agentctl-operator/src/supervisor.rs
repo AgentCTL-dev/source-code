@@ -189,6 +189,13 @@ pub async fn reconcile_supervisor(
             .status
             .as_ref()
             .and_then(|s| s.last_conversation.clone()),
+        // The gateway's stamp (owner's identity-resolved groups) — carried
+        // forward untouched; only the gateway writes it.
+        owner_groups: supervisor
+            .status
+            .as_ref()
+            .map(|s| s.owner_groups.clone())
+            .unwrap_or_default(),
         conditions: vec![Condition {
             type_: "Rendered".into(),
             status: "True".into(),

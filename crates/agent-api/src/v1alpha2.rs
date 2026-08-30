@@ -865,6 +865,12 @@ pub struct SupervisorStatus {
     pub phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_conversation: Option<String>,
+    /// The owner's identity-resolved groups, stamped by the GATEWAY at each
+    /// introspection (P4-2). The control MCP evaluates org accessPolicies
+    /// against these — the supervisor never asserts its owner's groups
+    /// itself, and stale grants age out at the owner's next conversation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }

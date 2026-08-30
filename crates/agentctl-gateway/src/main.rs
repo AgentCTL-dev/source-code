@@ -152,6 +152,10 @@ async fn main() {
         // authenticated subject; auto-ensured on first touch when the org
         // policy allows.
         .route("/orgs/{org}/supervisor", post(org_supervisor_rpc))
+        // Owner approval for destructive control verbs (P4-5): only the HUMAN
+        // whose supervisor asked can approve — verified by THEIR bearer here,
+        // a token the supervisor never holds.
+        .route("/orgs/{org}/approvals/{nonce}", post(org_approve))
         .route(
             "/orgs/{org}/fleets/{name}/.well-known/agent-card.json",
             get(org_fleet_card),
@@ -569,7 +573,7 @@ async fn org_supervisor_rpc(
     };
     state.metrics.inc_oidc_allow();
 
-    let name = match ensure_supervisor(&state, &org_cr, &ns, &user.subject).await {
+    let name = match ensure_supervisor(&state, &org_cr, &ns, &user).await {
         Ok(SupervisorTarget::Ready(name)) => name,
         Ok(SupervisorTarget::Provisioning) => {
             return (
@@ -586,6 +590,118 @@ async fn org_supervisor_rpc(
     };
 
     handle_a2a(state, ns, name, false, decision, headers, req, Some(user)).await
+}
+
+/// `POST /orgs/{org}/approvals/{nonce}` — the OWNER says yes to a pending
+/// destructive request (P4-5). The bearer must introspect to the SAME subject
+/// that asked (recorded in the pending marker); the gateway then writes the
+/// approved marker the control server executes on. 404 for an unknown or
+/// expired nonce; 403 for anyone but the requester.
+#[tracing::instrument(skip_all, fields(org = %org))]
+async fn org_approve(
+    State(state): State<AppState>,
+    Path((org, nonce)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    use agent_api::approval::{
+        approval_marker, parse_approval, APPROVAL_TTL_SECS, APPROVED_DELETE_ANNOTATION,
+        PENDING_DELETE_ANNOTATION,
+    };
+    let (_org_cr, ns) = match resolve_org(&state, &org).await {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    if !state.identity.ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "approvals require the identity service" })),
+        )
+            .into_response();
+    }
+    let Some(token) = bearer_token(&headers).map(str::to_string) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "a bearer token is required" })),
+        )
+            .into_response();
+    };
+    let user = match identity::introspect(&state.na, &state.identity, &token).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "bearer token is not active" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::warn!(%org, error = %e, "identity introspection failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "identity introspection failed" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Find the target carrying this pending nonce in the org's namespace.
+    let agents: Api<agent_api::v1alpha2::Agent> = Api::namespaced(state.client.clone(), &ns);
+    let list = match agents.list(&Default::default()).await {
+        Ok(l) => l,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("list agents: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let pending = list.items.into_iter().find_map(|a| {
+        let marker = a
+            .metadata
+            .annotations
+            .as_ref()?
+            .get(PENDING_DELETE_ANNOTATION)?
+            .clone();
+        let (n, requester, exp) = parse_approval(&marker)?;
+        (n == nonce && exp > now).then_some((a, requester))
+    });
+    let Some((target, requester)) = pending else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no live pending approval with that code" })),
+        )
+            .into_response();
+    };
+    if requester != user.subject {
+        // Addressed to the OWNER alone — not even another admin.
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "this approval is addressed to the requesting owner" })),
+        )
+            .into_response();
+    }
+    let name = target.metadata.name.clone().unwrap_or_default();
+    let patch = json!({ "metadata": { "annotations": {
+        APPROVED_DELETE_ANNOTATION: approval_marker(&nonce, &user.subject, now + APPROVAL_TTL_SECS),
+        PENDING_DELETE_ANNOTATION: null,
+    } } });
+    if let Err(e) = agents
+        .patch(&name, &Default::default(), &kube::api::Patch::Merge(&patch))
+        .await
+    {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("record approval: {e}") })),
+        )
+            .into_response();
+    }
+    tracing::info!(%org, agent = %name, approved_by = %user.subject, %nonce, "destructive request approved by owner");
+    Json(json!({ "approved": name, "by": user.subject })).into_response()
 }
 
 enum SupervisorTarget {
@@ -617,9 +733,10 @@ async fn ensure_supervisor(
     state: &AppState,
     org_cr: &agent_api::Organization,
     ns: &str,
-    subject: &str,
+    user: &identity::OrgUser,
 ) -> Result<SupervisorTarget, Box<Response>> {
     use agent_api::v1alpha2::{Supervisor, SupervisorSpec};
+    let subject = user.subject.as_str();
     let mode = org_cr
         .spec
         .supervisors
@@ -635,11 +752,34 @@ async fn ensure_supervisor(
         )
     })?;
     if let Some(sup) = existing.items.into_iter().find(|s| s.spec.user == subject) {
+        let sup_name = sup.metadata.name.clone().unwrap_or_default();
+        // Stamp the owner's identity-resolved groups (P4-2): the control MCP
+        // evaluates org accessPolicies against THIS — the supervisor cannot
+        // assert its owner's groups, and grants refresh on every conversation.
+        let stamped = sup
+            .status
+            .as_ref()
+            .map(|st| st.owner_groups.clone())
+            .unwrap_or_default();
+        if stamped != user.groups {
+            let _ = sups
+                .patch_status(
+                    &sup_name,
+                    &Default::default(),
+                    &kube::api::Patch::Merge(
+                        &json!({ "status": { "ownerGroups": user.groups } }),
+                    ),
+                )
+                .await
+                .map_err(
+                    |e| tracing::warn!(error = %e, "owner-groups stamp failed (stale grants until next call)"),
+                );
+        }
         let agent_ref = sup
             .status
             .as_ref()
             .and_then(|st| st.agent_ref.clone())
-            .unwrap_or_else(|| sup.metadata.name.clone().unwrap_or_default());
+            .unwrap_or(sup_name);
         // The rendered agent must have a Running pod before we forward.
         return match resolve(&state.client, ns, &agent_ref).await {
             Ok(_) => Ok(SupervisorTarget::Ready(agent_ref)),

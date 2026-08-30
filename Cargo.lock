@@ -105,6 +105,7 @@ dependencies = [
  "ring",
  "rustls",
  "serde_json",
+ "serde_yaml",
  "tokio",
  "tracing",
 ]

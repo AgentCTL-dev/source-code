@@ -31,6 +31,8 @@ agent-api = { path = "../agent-api" }
 agentctl-identity = { path = "../agentctl-identity" }
 agentctl-telemetry = { path = "../agentctl-telemetry" }
 base64 = "0.22"
+# Approval nonces (P4-5) — same ring the TLS stack links.
+ring = "0.17"
 
 [dev-dependencies]
-ring = "0.17"
+serde_yaml = "0.9"

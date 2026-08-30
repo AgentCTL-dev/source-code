@@ -77,6 +77,53 @@ pub fn parse_target(raw: &str) -> Result<Target> {
     }
 }
 
+#[derive(Args)]
+pub struct ApproveArgs {
+    /// The organization the request lives in.
+    pub org: String,
+    /// The approval code your supervisor relayed.
+    pub nonce: String,
+    /// Gateway base URL (or AGENTCTL_GATEWAY_URL).
+    #[arg(long)]
+    pub gateway_url: Option<String>,
+}
+
+/// `agentctl approve <org> <nonce>` — the owner's out-of-band YES to a
+/// destructive request their supervisor asked about (P4-5). The gateway
+/// verifies THIS session's bearer is the requesting owner; the supervisor
+/// never holds it, so it cannot approve what it asked.
+pub async fn run_approve(args: ApproveArgs) -> Result<()> {
+    let url = format!(
+        "{}/orgs/{}/approvals/{}",
+        gateway_url(args.gateway_url.as_deref())?,
+        args.org,
+        args.nonce
+    );
+    let session = auth::load_session()?;
+    let http = auth::api_client()?;
+    let resp = http
+        .post(&url)
+        .bearer_auth(session.access_token)
+        .send()
+        .await
+        .context("reach the gateway")?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    match status.as_u16() {
+        200 => {
+            println!(
+                "approved — {} may now proceed (tell your supervisor to retry)",
+                body["approved"].as_str().unwrap_or("the request")
+            );
+            Ok(())
+        }
+        401 => bail!("session refused (401) — run `agentctl login` again"),
+        403 => bail!("this approval is addressed to the requesting owner, not you"),
+        404 => bail!("no live pending approval with that code (it may have expired — ask again)"),
+        _ => bail!("gateway refused ({status}): {body}"),
+    }
+}
+
 /// Resolve the gateway URL: flag > AGENTCTL_GATEWAY_URL. No silent default.
 fn gateway_url(flag: Option<&str>) -> Result<String> {
     let raw = match flag {

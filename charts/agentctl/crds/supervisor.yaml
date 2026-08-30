@@ -111,6 +111,15 @@ spec:
               lastConversation:
                 nullable: true
                 type: string
+              ownerGroups:
+                description: |-
+                  The owner's identity-resolved groups, stamped by the GATEWAY at each
+                  introspection (P4-2). The control MCP evaluates org accessPolicies
+                  against these — the supervisor never asserts its owner's groups
+                  itself, and stale grants age out at the owner's next conversation.
+                items:
+                  type: string
+                type: array
               phase:
                 nullable: true
                 type: string

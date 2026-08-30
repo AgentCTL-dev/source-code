@@ -54,6 +54,9 @@ enum Command {
     Whoami(auth::WhoamiArgs),
     /// Chat with an agent through the gateway, as the signed-in user.
     Chat(chat::ChatArgs),
+    /// Approve a pending destructive request your supervisor asked about
+    /// (only you — the requesting owner — can).
+    Approve(chat::ApproveArgs),
     /// Create resources (currently: `create agent` — any shape from flags).
     #[command(subcommand)]
     Create(CreateCommand),
@@ -110,6 +113,7 @@ async fn main() -> Result<()> {
         Command::Login(args) => auth::run_login(args).await,
         Command::Whoami(args) => auth::run_whoami(args).await,
         Command::Chat(args) => chat::run_chat(args).await,
+        Command::Approve(args) => chat::run_approve(args).await,
         Command::Create(CreateCommand::Agent(args)) => create::run_create_agent(args).await,
         Command::Drain(args) => verbs::run_verb("drain", args).await,
         Command::LameDuck(args) => verbs::run_verb("lame-duck", args).await,

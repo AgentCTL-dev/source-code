@@ -417,8 +417,8 @@ async fn control_mcp(ctx: &Ctx) -> Result<Outcome> {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if tools.len() != 5 {
-        bail!("want the 5 control tools, got {}: {body}", tools.len());
+    if tools.len() != 7 {
+        bail!("want the 7 control tools, got {}: {body}", tools.len());
     }
 
     let call = |id: u64, tool: &'static str, args: Value| {
@@ -479,6 +479,189 @@ async fn control_mcp(ctx: &Ctx) -> Result<Outcome> {
         bail!("status errored: {r}");
     }
 
+    // ---- P4-2: the OBO binding check. Bind the SAME workload to a user by
+    // creating a Supervisor CR named like it; govern the org with a policy
+    // making that user a VIEWER. Reads keep working; create refuses; raising
+    // the user to admin (as the gateway's stamped groups would) flips it on;
+    // and the creation is attributed to the user.
+    let sups: Api<v2::Supervisor> = Api::namespaced(ctx.client.clone(), &ns);
+    let mut sup = v2::Supervisor::new(
+        "sup-probe",
+        v2::SupervisorSpec {
+            user: "mock:carol".into(),
+            paused: true, // binding only — never render an agent for this probe
+            instruction_override: None,
+            budget_override: None,
+        },
+    );
+    sup.metadata.namespace = Some(ns.clone());
+    kh::api::<v2::Supervisor>(&ctx.client, &ns)
+        .create(&Default::default(), &sup)
+        .await
+        .context("bind sup-probe to mock:carol")?;
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({
+                "displayName": "E2E Control",
+                "accessPolicies": [
+                    { "match": { "claims": { "sub": "mock:carol" } }, "role": "viewer" },
+                    { "match": { "groups": ["okta:platform-*"] }, "role": "admin" },
+                ],
+            }))?,
+        )),
+    )
+    .await
+    .context("govern the org")?;
+
+    // Viewer: reads pass, create refuses naming the missing role.
+    let r = call(8, "control.agents.list", json!({})).await?;
+    if r["isError"] == json!(true) {
+        bail!("viewer-bound list refused: {r}");
+    }
+    let r = call(
+        9,
+        "control.agents.create",
+        json!({ "name": "escalation", "instruction": "should never exist", "once": true }),
+    )
+    .await?;
+    if r["isError"] != json!(true) {
+        bail!("a VIEWER-bound supervisor created an agent: {r}");
+    }
+    if agents.get_opt("escalation").await?.is_some() {
+        bail!("the refused create still landed an Agent CR");
+    }
+
+    // The gateway-side stamp (owner groups) raises the ladder: patch the
+    // status the way the gateway does after introspection.
+    sups.patch_status(
+        "sup-probe",
+        &Default::default(),
+        &Patch::Merge(&json!({ "status": { "ownerGroups": ["okta:platform-admins"] } })),
+    )
+    .await
+    .context("stamp owner groups")?;
+    let r = call(
+        10,
+        "control.agents.create",
+        json!({ "name": "sanctioned", "instruction": "acknowledge and stop", "once": true }),
+    )
+    .await?;
+    if r["isError"] == json!(true) {
+        bail!("admin-stamped create refused: {r}");
+    }
+    let created = agents.get("sanctioned").await.context("sanctioned agent")?;
+    if created
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("agentctl.dev/created-for"))
+        != Some(&"mock:carol".to_string())
+    {
+        bail!("create is not attributed to the acting user");
+    }
+
+    // ---- P4-6: a governed child. The caller's own rendered Agent (the
+    // paused supervisor renders one) anchors ownership + the budget ceiling.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(agents.get_opt("sup-probe").await?.is_some())
+    })
+    .await
+    .context("sup-probe rendered agent (subagent parent)")?;
+    let r = call(
+        11,
+        "control.subagents.create",
+        json!({ "name": "probe-child", "instruction": "summarize one thing and stop",
+                "budgetTokens": 1234 }),
+    )
+    .await?;
+    if r["isError"] == json!(true) {
+        bail!("subagent create refused: {r}");
+    }
+    let child = agents.get("probe-child").await.context("child agent")?;
+    let owner = &child
+        .metadata
+        .owner_references
+        .as_ref()
+        .context("child owner refs")?[0];
+    if owner.kind != "Agent" || owner.name != "sup-probe" {
+        bail!("child is not owned by its parent agent: {:?}/{:?}", owner.kind, owner.name);
+    }
+    if child
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("agentctl.dev/parent"))
+        != Some(&"sup-probe".to_string())
+    {
+        bail!("child carries no parent label");
+    }
+
+    // ---- P4-5: the approval gate on delete. The supervisor's ask yields a
+    // pending nonce and NO deletion; only the OWNER's own bearer (via the
+    // gateway) can approve — a wrong user is refused; after approval the
+    // re-issued delete executes.
+    let sign = |sub: &str| {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+        let exp = now() + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({ "iss": "https://mock-idp:8443", "aud": "agentctl-cli", "sub": sub,
+                     "email": format!("{sub}@example.test"), "groups": ["eng"], "exp": exp }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+    let r = call(12, "control.agents.delete", json!({ "name": "sanctioned" })).await?;
+    if r["isError"] == json!(true) {
+        bail!("delete ask errored: {r}");
+    }
+    let nonce = r["structuredContent"]["pending"]
+        .as_str()
+        .context("pending nonce")?
+        .to_string();
+    if agents.get_opt("sanctioned").await?.is_none() {
+        bail!("delete executed WITHOUT approval");
+    }
+
+    let pf_gw = shell::PortForward::service(sys, SVC_GATEWAY, PORT_HTTP, 18103)?;
+    let approve_url = format!("{}/orgs/{org}/approvals/{nonce}", pf_gw.base_url());
+    // The wrong human (bob) cannot approve carol's request.
+    let resp = ctx
+        .http
+        .post(&approve_url)
+        .bearer_auth(sign("bob"))
+        .send()
+        .await?;
+    if resp.status().as_u16() != 403 {
+        bail!("bob approved carol's delete ({})", resp.status());
+    }
+    // The owner approves; the re-issued delete executes.
+    let resp = ctx
+        .http
+        .post(&approve_url)
+        .bearer_auth(sign("carol"))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!("owner approval failed ({})", resp.status());
+    }
+    let r = call(13, "control.agents.delete", json!({ "name": "sanctioned" })).await?;
+    if r["isError"] == json!(true) || r["structuredContent"]["deleted"] != json!("sanctioned") {
+        bail!("approved delete did not execute: {r}");
+    }
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(1), || async {
+        Ok(agents.get_opt("sanctioned").await?.is_none())
+    })
+    .await
+    .context("agent gone after approved delete")?;
+
+    drop(pf_gw);
     drop(pf_ctl);
     drop(pf_id);
     orgs.delete(org, &Default::default()).await.ok();

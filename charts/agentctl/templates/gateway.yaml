@@ -49,9 +49,20 @@ rules:
     verbs: ["get"]
   # Supervisor auto-ensure (RFC 0027): /orgs/<org>/supervisor finds the
   # caller's Supervisor CR by spec.user (list) and creates it on first touch.
+  # status patch = the owner-groups stamp (P4-2): the gateway writes the
+  # identity-resolved groups the control MCP evaluates accessPolicies with.
   - apiGroups: ["agentctl.dev"]
     resources: ["supervisors"]
     verbs: ["get", "list", "create"]
+  - apiGroups: ["agentctl.dev"]
+    resources: ["supervisors/status"]
+    verbs: ["get", "patch"]
+  # Owner approvals (P4-5): the gateway flips a pending-delete annotation to
+  # approved after verifying the OWNER's bearer (the annotation is the only
+  # thing it writes on agents).
+  - apiGroups: ["agentctl.dev"]
+    resources: ["agents"]
+    verbs: ["patch"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
