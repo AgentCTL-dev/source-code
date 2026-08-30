@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod netpol;
 pub mod org;
 pub mod pki;
+pub mod reload;
 pub mod render;
 pub mod serve;
 

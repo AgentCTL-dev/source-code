@@ -556,9 +556,14 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
     } else {
         "idle"
     };
+    // watch_config is ON for every daemon: the key itself is RESTART-ONLY,
+    // so an agent must be born watching to ever gain live reload; whether a
+    // kubelet ConfigMap symlink swap actually fires the watcher is the U1
+    // verification the reload classifier depends on (P2-5).
+    let watch = is_daemon(input.mode);
     doc.insert(
         "lifecycle".into(),
-        json!({ "run_until": run_until, "drain_timeout": DRAIN_TIMEOUT }),
+        json!({ "run_until": run_until, "drain_timeout": DRAIN_TIMEOUT, "watch_config": watch }),
     );
 
     // --- limits + budget --------------------------------------------------

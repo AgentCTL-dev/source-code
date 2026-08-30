@@ -869,6 +869,29 @@ async fn ensure_config_configmap(
 ) -> Result<(), Error> {
     use k8s_openapi::api::core::v1::ConfigMap;
     let name = config_configmap_name(workload);
+
+    // Reload-vs-restart classification (P2-5): compare against the LIVE
+    // ConfigMap so the rollout decision is explicit in the log. Delivery is
+    // always a drain-first rolling restart until upstream U1 (kubelet-swap
+    // config-watch) is green — verified red 2026-08-30.
+    {
+        let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+        if let Ok(Some(existing)) = cms.get_opt(&name).await {
+            if let Some(old_raw) = existing
+                .data
+                .as_ref()
+                .and_then(|d| d.get(agent_config::paths::CONFIG_FILE))
+            {
+                if let Ok(old_doc) = serde_json::from_str::<serde_json::Value>(old_raw) {
+                    let c = crate::reload::classify(&old_doc, &doc.instance.value);
+                    if !c.changed.is_empty() {
+                        info!(workload, decision = %c.summary(), "config change classified");
+                    }
+                }
+            }
+        }
+    }
+
     let mut data = std::collections::BTreeMap::new();
     // Both layers in one ConfigMap: the pod mounts the dir and agentd is
     // invoked `-c services.json -c agentd.json` (catalog first).

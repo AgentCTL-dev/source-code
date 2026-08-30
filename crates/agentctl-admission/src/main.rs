@@ -1968,11 +1968,10 @@ mod tests {
         let decoded = BASE64.decode(encoded).unwrap();
         let back: Value = serde_json::from_slice(&decoded).unwrap();
         // Labels-only defaulting: the decoded patch round-trips as JSON ops.
-        assert!(back
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|o| o["path"].as_str().unwrap_or("").starts_with("/metadata/labels")));
+        assert!(back.as_array().unwrap().iter().all(|o| o["path"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("/metadata/labels")));
     }
 
     #[test]
