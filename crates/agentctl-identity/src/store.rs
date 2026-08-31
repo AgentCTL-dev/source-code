@@ -329,6 +329,14 @@ pub struct PgStore {
     pool: deadpool_postgres::Pool,
 }
 
+impl PgStore {
+    /// The underlying pool — shared with the audit sink (P7-3), which writes
+    /// its own table beside custody.
+    pub fn pool(&self) -> deadpool_postgres::Pool {
+        self.pool.clone()
+    }
+}
+
 /// Schema, applied idempotently at startup (the control-plane migration
 /// convention until a dedicated migration story lands with P2's chart work).
 const MIGRATIONS: &str = r#"

@@ -344,6 +344,12 @@ spec:
             - name: AGENTCTL_MCPG_NON_PRODUCTION
               value: "true"
             {{- end }}
+            {{- with .Values.tenantMcpg.auditShipperImage }}
+            # P7-3: the audit-shipper sidecar tailing each tenant gateway's
+            # hash-chained audit file into identity's ingest door.
+            - name: AGENTCTL_AUDIT_SHIPPER_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.operator.supervisorIdleParkSeconds }}
             # Supervisor scale-to-zero (P7-6): park after this many idle

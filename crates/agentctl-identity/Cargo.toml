@@ -35,6 +35,7 @@ webpki-roots = "0.26"
 jsonwebtoken = "9"
 # Durable custody: same PG stack as gateway/coordination (pure Rust).
 deadpool-postgres = "0.14"
+agentctl-audit = { path = "../agentctl-audit" }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 # Envelope encryption for grants at rest + principal bearer hashing.

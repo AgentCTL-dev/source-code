@@ -34,11 +34,19 @@ async fn main() {
         warn!("IDENTITY_SEAL_KEY not set — using an EPHEMERAL seal key (grants die with this pod); wire a real key before storing connections");
     }
 
+    let mut audit_pool: Option<deadpool_postgres::Pool> = None;
     let store: Arc<dyn Store> = match &cfg.store {
         agentctl_identity::config::StoreConfig::Postgres { dsn } => {
             match PgStore::connect(dsn).await {
                 Ok(pg) => {
                     info!("custody store: postgres");
+                    // The audit sink (P7-3) shares custody's pool; its
+                    // schema is idempotent and additive.
+                    let pool = pg.pool();
+                    if let Err(e) = agentctl_audit::pg::ensure_schema(&pool).await {
+                        warn!(error = %e, "audit schema init failed (trail rows lost until PG recovers)");
+                    }
+                    audit_pool = Some(pool);
                     Arc::new(pg)
                 }
                 Err(e) => {
@@ -122,6 +130,7 @@ async fn main() {
         aauth,
         exchanger,
         sealer,
+        audit: audit_pool,
     });
 
     info!(bind = %cfg.bind, providers = cfg.providers.len(), "agentctl-identity serving");

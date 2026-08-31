@@ -58,6 +58,7 @@ dependencies = [
 name = "agentctl-apiserver"
 version = "1.3.0"
 dependencies = [
+ "agentctl-audit",
  "agentctl-metering",
  "agentctl-telemetry",
  "axum",
@@ -72,6 +73,20 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+ "tracing",
+]
+
+[[package]]
+name = "agentctl-audit"
+version = "1.3.0"
+dependencies = [
+ "deadpool-postgres",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
  "tracing",
 ]
 
@@ -153,6 +168,7 @@ version = "1.3.0"
 dependencies = [
  "agent-api",
  "agent-config",
+ "agentctl-audit",
  "agentctl-metering",
  "agentctl-telemetry",
  "axum",
@@ -183,6 +199,7 @@ dependencies = [
 name = "agentctl-identity"
 version = "1.3.0"
 dependencies = [
+ "agentctl-audit",
  "agentctl-telemetry",
  "async-trait",
  "axum",

@@ -21,6 +21,7 @@ members = [
     "crates/agentctl-coordination",
     "crates/agentctl-control",
     "crates/agentctl-metering",
+    "crates/agentctl-audit",
     "crates/agentctl-scaler",
 ]
 

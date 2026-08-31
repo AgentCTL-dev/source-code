@@ -43,6 +43,34 @@ pub struct AppState {
     /// surface seals custody rows with (same instance the exchanger unseals).
     pub exchanger: Arc<crate::exchange::Exchanger>,
     pub sealer: Arc<crate::seal::Sealer>,
+    /// The audit sink (P7-3): Some with durable custody (Postgres). Evidence,
+    /// never flow control — writes are spawned fire-and-forget.
+    pub audit: Option<deadpool_postgres::Pool>,
+}
+
+/// Fire-and-forget audit write.
+fn audit_spawn(state: &AppState, r: agentctl_audit::Record) {
+    if let Some(pool) = state.audit.clone() {
+        tokio::spawn(async move {
+            if let Err(e) = agentctl_audit::pg::record(&pool, &r).await {
+                tracing::debug!(error = %e, "audit record failed");
+            }
+        });
+    }
+}
+
+/// The inbound trail id (`x-agentctl-trail` / `x-request-id`), when present.
+fn trail_of(headers: &HeaderMap) -> String {
+    for h in ["x-agentctl-trail", "x-request-id"] {
+        if let Some(t) = headers
+            .get(h)
+            .and_then(|v| v.to_str().ok())
+            .filter(|t| !t.is_empty() && t.len() <= 128)
+        {
+            return t.to_string();
+        }
+    }
+    String::new()
 }
 
 /// Provider-role state: the signing key, the issuer URL agents validate
@@ -65,6 +93,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/exchange", post(exchange))
         .route("/v1/connections/start", post(connections_start))
         .route("/v1/connections/poll", post(connections_poll))
+        .route("/v1/audit/ingest", post(audit_ingest))
         .route("/metrics", get(metrics))
         .route(
             "/admin/connections",
@@ -418,6 +447,19 @@ async fn connections_poll(
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
             // A re-connect replaces the grant NOW, not at cache expiry.
             state.exchanger.invalidate(&org, &user, &session.provider);
+            audit_spawn(
+                &state,
+                agentctl_audit::Record::new(
+                    "identity",
+                    org.clone(),
+                    format!("org-{org}"),
+                    String::new(),
+                    agentctl_audit::ACTION_CONSENT,
+                    agentctl_audit::OUTCOME_OK,
+                )
+                .user(user.clone())
+                .dim("provider", session.provider.clone()),
+            );
             Ok(Json(json!({
                 "status": "ok",
                 "org": org,
@@ -429,6 +471,71 @@ async fn connections_poll(
         Err(OidcError::SlowDown) => Ok(Json(json!({ "status": "slow_down" }))),
         Err(e) => Err(err(StatusCode::BAD_GATEWAY, e)),
     }
+}
+
+// -- audit ingest (P7-3) ------------------------------------------------------
+
+/// `POST /v1/audit/ingest` — the shipper door for audit records born outside
+/// our PG (the tenant mcpg's hash-chained file sink). SELF-AUTHENTICATING:
+/// the bearer is one of our own EdDSA workload JWTs with the dedicated
+/// `agentctl:audit-ingest` audience (operator-minted into the shipper's
+/// Secret) — same trust root as every other verifier. Batch of `audit/v1`
+/// records, pre-mapped by the shipper; component is FORCED from the token's
+/// subject namespace so a shipper cannot impersonate another org's stream.
+async fn audit_ingest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let Some(pool) = state.audit.clone() else {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "audit ingest needs durable custody (postgres)",
+        ));
+    };
+    let aauth = aauth_state(&state)?;
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let claims =
+        crate::aauth::verify_identity_jwt(bearer, &aauth.key.public_x_b64url(), &aauth.issuer)
+            .map_err(|e| err(StatusCode::UNAUTHORIZED, e))?;
+    if claims.get("aud").and_then(Value::as_str) != Some("agentctl:audit-ingest") {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "token audience is not agentctl:audit-ingest",
+        ));
+    }
+    // sub = "<namespace>/<shipper>": the org boundary the records must stay in.
+    let sub = claims.get("sub").and_then(Value::as_str).unwrap_or("");
+    let ns = sub.split('/').next().unwrap_or("");
+    if ns.is_empty() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "token subject names no namespace",
+        ));
+    }
+    let mut records: Vec<agentctl_audit::Record> = if body.is_array() {
+        serde_json::from_value(body).map_err(|e| err(StatusCode::BAD_REQUEST, e))?
+    } else {
+        vec![serde_json::from_value(body).map_err(|e| err(StatusCode::BAD_REQUEST, e))?]
+    };
+    if records.len() > 1000 {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "batch over 1000"));
+    }
+    let org = ns.strip_prefix("org-").unwrap_or("").to_string();
+    let mut stored = 0usize;
+    for r in records.iter_mut() {
+        // The token decides attribution, not the payload.
+        r.namespace = ns.to_string();
+        r.org = org.clone();
+        if agentctl_audit::pg::record(&pool, r).await.is_ok() {
+            stored += 1;
+        }
+    }
+    Ok(Json(json!({ "stored": stored, "of": records.len() })))
 }
 
 // -- validation --------------------------------------------------------------
@@ -846,7 +953,29 @@ async fn exchange(
         }
     };
 
-    match state.exchanger.exchange(&org, &user, provider, scope).await {
+    let outcome = state.exchanger.exchange(&org, &user, provider, scope).await;
+    {
+        let (out, detail) = match &outcome {
+            Ok(m) => (agentctl_audit::OUTCOME_OK, m.outcome.as_str().to_string()),
+            Err(e) => (agentctl_audit::OUTCOME_REFUSED, format!("{e:.60}")),
+        };
+        audit_spawn(
+            &state,
+            agentctl_audit::Record::new(
+                "identity",
+                org.clone(),
+                format!("org-{org}"),
+                String::new(),
+                agentctl_audit::ACTION_EXCHANGE,
+                out,
+            )
+            .user(user.clone())
+            .trail(trail_of(&headers))
+            .dim("provider", provider.clone())
+            .dim("detail", detail),
+        );
+    }
+    match outcome {
         Ok(minted) => {
             let expires_in = (minted.expires_unix - state.exchanger.now()).max(1);
             let body = json!({
@@ -1081,6 +1210,21 @@ async fn admin_connections_delete(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.exchanger.invalidate(&org, &user, &provider);
+    if deleted {
+        audit_spawn(
+            &state,
+            agentctl_audit::Record::new(
+                "identity",
+                org.clone(),
+                format!("org-{org}"),
+                String::new(),
+                agentctl_audit::ACTION_CONNECTION_REVOKED,
+                agentctl_audit::OUTCOME_OK,
+            )
+            .user(user.clone())
+            .dim("provider", provider.clone()),
+        );
+    }
     Ok(Json(json!({ "deleted": deleted })))
 }
 
@@ -1214,6 +1358,7 @@ mod tests {
                 60,
             )),
             sealer,
+            audit: None,
         })
     }
 
@@ -1578,6 +1723,7 @@ mod tests {
                 60,
             )),
             sealer,
+            audit: None,
         });
 
         // Start (admin channel names the user; a real CLI presents the

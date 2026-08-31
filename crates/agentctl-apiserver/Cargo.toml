@@ -36,6 +36,7 @@ tracing = "0.1"
 # by default; OTLP export when OTEL_EXPORTER_OTLP_ENDPOINT is set.
 agentctl-telemetry = { path = "../agentctl-telemetry" }
 agentctl-metering = { path = "../agentctl-metering" }
+agentctl-audit = { path = "../agentctl-audit" }
 deadpool-postgres = "0.14"
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 tokio-postgres = "0.7"

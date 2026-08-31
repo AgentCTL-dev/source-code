@@ -53,6 +53,42 @@ impl IdentityConfig {
     }
 }
 
+/// Mint the audit-shipper's ingest token (P7-3): a workload JWT with the
+/// dedicated `agentctl:audit-ingest` audience, sub `<ns>/audit-shipper` —
+/// identity's ingest door forces org attribution from it. Re-minted every
+/// org reconcile (stateless EdDSA; a fresh token also heals an identity
+/// provider-key restart).
+pub async fn mint_ingest_token(
+    http: &reqwest::Client,
+    cfg: &IdentityConfig,
+    ns: &str,
+) -> Result<String, String> {
+    let Some(url) = &cfg.url else {
+        return Err("identity URL not configured".into());
+    };
+    let mut req = http
+        .post(format!("{}/admin/mcpg-token", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "workload": format!("{ns}/audit-shipper"),
+            "audience": "agentctl:audit-ingest",
+            "ttl": 7 * 24 * 3600,
+        }));
+    if let Some(token) = &cfg.admin_token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("mint refused ({status}): {body}"));
+    }
+    body["token"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "mint returned no token".into())
+}
+
 /// reqwest over rustls with the EXPLICIT ring provider + webpki roots — the
 /// control-plane client pattern (plain-http in-cluster URLs bypass TLS).
 pub fn http_client() -> reqwest::Client {

@@ -587,6 +587,10 @@ tenantMcpg:
   # or carries an entitling license token (production — a commercial mcpg
   # arrangement outside this chart).
   nonProductionLicense: false
+  # P7-3 audit pipeline: the shipper sidecar image (tails the tenant
+  # gateway's audit file into identity's ingest door; empty = audit stays
+  # pod-local in the file sink).
+  auditShipperImage: ""
 
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release

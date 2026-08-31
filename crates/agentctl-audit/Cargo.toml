@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "agentctl-audit"
+version = "1.3.0"
+description = "agentctl audit trail: the versioned audit-record vocabulary (attributed {org, namespace, workload, user} with trail/task correlation), the durable Postgres sink every control-plane component writes, and the filtered query the management API serves. Apache-2.0 — the record shape is a public contract."
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tracing = "0.1"
+# The same pure-Rust PG stack the gateway links (no C toolchain).
+deadpool-postgres = "0.14"
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+
+# The shipper bin (tails a foreign audit file — the tenant mcpg's — and
+# POSTs mapped records to identity's ingest door). Plain in-cluster HTTP.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Workspace feature-unification pulls reqwest's manual-roots TLS in — a
+# crypto provider must be installed before any Client builds.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[[bin]]
+name = "agentctl-audit-shipper"
+path = "src/bin/shipper.rs"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -190,6 +190,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("webhook-scale-zero", "fleets", webhook_scale_zero),
         // HITL fabric: gate parks the run, channel notified, right identity answers (P5-6)
         scenario!("hitl-gate", "capability", hitl_gate),
+        // Audit pipeline: one queryable trail for a full OBO tool call (P7-3)
+        scenario!("audit-trail", "capability", audit_trail),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -1150,6 +1152,329 @@ spec:
     }
 
     drop(pf_sink);
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P7-3: the audit pipeline. An OBO tool call leaves rows in TWO streams —
+/// the tenant mcpg's hash-chained per-request records (shipped off-pod by
+/// the sidecar into identity's ingest door, org-attribution forced from its
+/// token) and identity's credential-lifecycle exchange records — and BOTH
+/// come back from ONE management-API query: the mcpg rows by the caller's
+/// propagated `x-request-id` trail, the exchange rows by the (user,
+/// provider, window) join that honestly models the host credential cache's
+/// one-redeem-serves-many cardinality.
+async fn audit_trail(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use agent_api::v1alpha2 as v2;
+    use kube::api::{Api, Patch, PatchParams};
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-audit";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    let apply_org = |display: &'static str| {
+        let orgs = orgs.clone();
+        async move {
+            orgs.patch(
+                org,
+                &PatchParams::apply("e2e").force(),
+                &Patch::Apply(&Organization::new(
+                    org,
+                    serde_json::from_value::<OrganizationSpec>(json!({ "displayName": display }))?,
+                )),
+            )
+            .await
+            .context("apply Organization")
+        }
+    };
+    apply_org("E2E Audit").await?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    let echo = format!(
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata: {{ name: echo-mcp, namespace: {ns} }}
+spec:
+  replicas: 1
+  selector: {{ matchLabels: {{ app: echo-mcp }} }}
+  template:
+    metadata: {{ labels: {{ app: echo-mcp }} }}
+    spec:
+      containers:
+        - name: echo
+          image: mock-echo-mcp:dev
+          imagePullPolicy: IfNotPresent
+          ports: [ {{ containerPort: 8080 }} ]
+          readinessProbe: {{ httpGet: {{ path: /readyz, port: 8080 }} }}
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: echo-mcp, namespace: {ns} }}
+spec:
+  selector: {{ app: echo-mcp }}
+  ports: [ {{ port: 80, targetPort: 8080 }} ]
+"#
+    );
+    shell::kubectl_apply_stdin(&echo).context("deploy echo witness")?;
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/echo-mcp",
+        "-n",
+        &ns,
+        "--timeout=120s",
+    ])
+    .context("echo witness Ready")?;
+
+    let mut entry = v2::MCPService::new(
+        "zendesk",
+        v2::MCPServiceSpec {
+            endpoint: Some(format!("http://echo-mcp.{ns}.svc.cluster.local.:80/mcp")),
+            auth: Some(agent_api::v1alpha2::ServiceAuth {
+                mode: "obo".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    entry.metadata.namespace = Some(ns.clone());
+    kh::api::<v2::MCPService>(&ctx.client, &ns)
+        .patch(
+            "zendesk",
+            &PatchParams::apply("e2e").force(),
+            &Patch::Apply(&entry),
+        )
+        .await
+        .context("register obo MCPService")?;
+    apply_org("E2E Audit v2").await?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        Ok(shell::kubectl(&["get", "deploy", "-n", &ns, "agentctl-mcpg"]).is_ok())
+    })
+    .await
+    .context("tenant gateway never created")?;
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/agentctl-mcpg",
+        "-n",
+        &ns,
+        "--timeout=180s",
+    ])
+    .context("tenant gateway rollout")?;
+    // The shipper sidecar must be part of the pod (P7-3 wiring proof).
+    let containers = shell::kubectl(&[
+        "get",
+        "deploy",
+        "agentctl-mcpg",
+        "-n",
+        &ns,
+        "-o",
+        "jsonpath={.spec.template.spec.containers[*].name}",
+    ])?;
+    if !containers.contains("audit-shipper") {
+        bail!("tenant gateway has no audit-shipper sidecar: {containers}");
+    }
+
+    let admin_token = {
+        let b64 = shell::kubectl(&[
+            "get",
+            "secret",
+            "-n",
+            &ctx.cfg.system_ns,
+            "agentctl-api-token",
+            "-o",
+            "jsonpath={.data.AGENTCTL_API_TOKEN}",
+        ])?;
+        String::from_utf8(base64_decode(b64.trim())?)?
+    };
+    let pf_id = shell::PortForward::service(&ctx.cfg.system_ns, "agentctl-identity", 80, 18123)?;
+    let idb = pf_id.base_url();
+    let user = "mock:erin";
+    // Custody: reset + seed (durable PG outlives reruns).
+    ctx.http
+        .post(format!("{idb}/admin/connections/delete"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "org": org, "user": user, "provider": "zendesk" }))
+        .send()
+        .await
+        .context("reset custody")?;
+    let resp = ctx
+        .http
+        .post(format!("{idb}/admin/connections"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "org": org, "user": user, "provider": "zendesk",
+                        "kind": "static", "secret": "sk-audit-fake" }))
+        .send()
+        .await
+        .context("seed connection")?;
+    if !resp.status().is_success() {
+        bail!("connection seed refused");
+    }
+    let caller = {
+        let resp = ctx
+            .http
+            .post(format!("{idb}/admin/mcpg-token"))
+            .bearer_auth(&admin_token)
+            .json(&json!({ "workload": format!("{ns}/sup-erin"),
+                            "audience": format!("mcpg:{ns}"), "user": user }))
+            .send()
+            .await?;
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        body["token"].as_str().unwrap_or_default().to_string()
+    };
+    if caller.is_empty() {
+        bail!("caller mint refused");
+    }
+
+    // THE OBO tool call, carrying the trail id mcpg preserves into its
+    // hash-chained records.
+    let trail = format!("tr-audit-{}", now());
+    let pf = shell::PortForward::service(&ns, "agentctl-mcpg", 8787, 18124)?;
+    let base = pf.base_url();
+    let call = |body: Value, session: Option<String>| {
+        let base = base.clone();
+        let caller = caller.clone();
+        let trail = trail.clone();
+        async move {
+            let mut req = ctx
+                .http
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-11-25")
+                .header("x-request-id", trail)
+                .bearer_auth(caller)
+                .json(&body);
+            if let Some(s) = &session {
+                req = req.header("mcp-session-id", s.clone());
+            }
+            let resp = req.send().await.context("reach tenant gateway")?;
+            let session = resp
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let text = resp.text().await.unwrap_or_default();
+            let body: Value = if ct.starts_with("text/event-stream") {
+                text.lines()
+                    .filter_map(|l| l.strip_prefix("data:"))
+                    .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+                    .rev()
+                    .find(|v| v.get("result").is_some() || v.get("error").is_some())
+                    .unwrap_or(Value::Null)
+            } else {
+                serde_json::from_str(&text).unwrap_or(Value::Null)
+            };
+            anyhow::Ok((body, session))
+        }
+    };
+    let (init, session) = call(
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if init.get("result").is_none() {
+        bail!("initialize failed: {init}");
+    }
+    let _ = call(
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        session.clone(),
+    )
+    .await;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let call = &call;
+        let session = session.clone();
+        async move {
+            let (tools, _) = call(
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                session,
+            )
+            .await?;
+            Ok(tools["result"]["tools"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|t| t["name"] == "zendesk.auth.echo")))
+        }
+    })
+    .await
+    .context("federated tool never appeared")?;
+    let started = now();
+    let (resp, _) = call(
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "zendesk.auth.echo", "arguments": {} } }),
+        session.clone(),
+    )
+    .await?;
+    let echoed = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if echoed != "Bearer sk-audit-fake" {
+        bail!("obo call did not inject the credential: {resp}");
+    }
+
+    // ONE query, both streams. UPSTREAM CAVEATS (both reported to mcpg, both
+    // observed live on beta.24): the inbound x-request-id lands only in the
+    // request LOG (`upstream_request_id`), never in the AuditEvent, and a
+    // FEDERATED tools/call currently writes no audit record at all — so the
+    // mcpg join asserts the hash-chained session/catalog records that DO
+    // exist, org-forced by the shipper's token, and tightens to tool.call +
+    // request-id when upstream lands the fixes.
+    let _ = &trail;
+    let raw = |path: String| shell::kubectl(&["get", "--raw", &path]);
+    kh::poll_until(Duration::from_secs(90), Duration::from_secs(5), || {
+        let raw = &raw;
+        let ns = ns.clone();
+        async move {
+            let out = raw(format!(
+                "/apis/management.agentctl.dev/v1alpha1/audit/query?org={org}&action=mcpg.tool.list"
+            ))
+            .unwrap_or_default();
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            Ok(v["rows"].as_array().is_some_and(|rows| {
+                rows.iter().any(|r| {
+                    r["component"] == "mcpg"
+                        && r["namespace"] == ns.as_str()
+                        && r["dims"]["prev_event_hash"].is_string()
+                        && r["dims"]["event_id"].is_string()
+                })
+            }))
+        }
+    })
+    .await
+    .context("the mcpg audit stream never reached the trail")?;
+
+    let out = raw(format!(
+        "/apis/management.agentctl.dev/v1alpha1/audit/query?user={user}&action=identity.exchange&from={}",
+        started - 120
+    ))?;
+    let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    let has_exchange = v["rows"].as_array().is_some_and(|rows| {
+        rows.iter().any(|r| {
+            r["dims"]["provider"] == "zendesk" && r["component"] == "identity" && r["org"] == org
+        })
+    });
+    if !has_exchange {
+        bail!("no identity.exchange row for the OBO mint: {out}");
+    }
+
+    drop(pf_id);
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
     pass()

@@ -169,11 +169,28 @@ async fn main() {
             "/apis/management.agentctl.dev/v1alpha1/metering/export",
             get(handle_metering_export),
         )
+        .route(
+            "/apis/management.agentctl.dev/v1alpha1/audit/query",
+            get(handle_audit_query),
+        )
+        .route(
+            "/apis/management.agentctl.dev/v1alpha1/audit/ingest",
+            axum::routing::post(handle_audit_ingest),
+        )
         .with_state(AppState {
             client,
             na: na_client::node_agent_client(),
             metrics: Arc::new(metrics::Metrics::new()),
-            metering: metering_pool(),
+            metering: {
+                let pool = metering_pool();
+                if let Some(p) = &pool {
+                    // The audit table (P7-3) rides the same PG; idempotent.
+                    if let Err(e) = agentctl_audit::pg::ensure_schema(p).await {
+                        tracing::warn!(error = %e, "audit schema init failed");
+                    }
+                }
+                pool
+            },
         })
         .fallback(not_found);
 
@@ -549,6 +566,164 @@ async fn handle_metering_export(
     }
 }
 
+/// `GET /apis/management.agentctl.dev/v1alpha1/audit/query?from&to&org&user&action&trail&task&limit`
+/// — the P7-3 trail read: filtered audit records, newest first. SAR-gated
+/// like the metering export (`get` on the cluster-scoped `audit` resource).
+async fn handle_audit_query(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    state.metrics.inc_request();
+    let user = headers
+        .get("X-Remote-User")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if user.is_empty() {
+        let (c, j) = status(
+            StatusCode::UNAUTHORIZED,
+            "Failure",
+            "no X-Remote-User (not proxied?)",
+        );
+        return (c, j).into_response();
+    }
+    let groups: Vec<String> = headers
+        .get_all("X-Remote-Group")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(str::to_string))
+        .collect();
+    match authorize(&state.client, &user, &groups, "", "", "query", "audit").await {
+        Ok(true) => {}
+        Ok(false) => {
+            let (c, j) = status(StatusCode::FORBIDDEN, "Failure", "audit query denied");
+            return (c, j).into_response();
+        }
+        Err(e) => {
+            let (c, j) = status(StatusCode::INTERNAL_SERVER_ERROR, "Failure", &e);
+            return (c, j).into_response();
+        }
+    }
+    let Some(pool) = &state.metering else {
+        let (c, j) = status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Failure",
+            "audit store not configured (DATABASE_URL unset on the apiserver)",
+        );
+        return (c, j).into_response();
+    };
+    let query = agentctl_audit::Query {
+        from: q.get("from").and_then(|v| v.parse().ok()),
+        to: q.get("to").and_then(|v| v.parse().ok()),
+        org: q.get("org").cloned().filter(|v| !v.is_empty()),
+        user: q.get("user").cloned().filter(|v| !v.is_empty()),
+        action: q.get("action").cloned().filter(|v| !v.is_empty()),
+        trail_id: q.get("trail").cloned().filter(|v| !v.is_empty()),
+        task_id: q.get("task").cloned().filter(|v| !v.is_empty()),
+        limit: q.get("limit").and_then(|v| v.parse().ok()),
+    };
+    match agentctl_audit::pg::query(pool, &query).await {
+        Ok(rows) => Json(json!({
+            "schema": agentctl_audit::SCHEMA,
+            "rows": rows,
+        }))
+        .into_response(),
+        Err(e) => {
+            let (c, j) = status(StatusCode::BAD_GATEWAY, "Failure", &format!("query: {e}"));
+            (c, j).into_response()
+        }
+    }
+}
+
+/// `POST /apis/management.agentctl.dev/v1alpha1/audit/ingest` — the shipper
+/// door (P7-3): components whose audit lives outside our PG (the tenant
+/// mcpg's hash-chained file sink) POST their records here, pre-mapped to
+/// `audit/v1`. SAR-gated `create` on `audit` — the shipper runs as a
+/// ServiceAccount granted exactly that.
+async fn handle_audit_ingest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    state.metrics.inc_request();
+    let user = headers
+        .get("X-Remote-User")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if user.is_empty() {
+        let (c, j) = status(
+            StatusCode::UNAUTHORIZED,
+            "Failure",
+            "no X-Remote-User (not proxied?)",
+        );
+        return (c, j).into_response();
+    }
+    let groups: Vec<String> = headers
+        .get_all("X-Remote-Group")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(str::to_string))
+        .collect();
+    match authorize(&state.client, &user, &groups, "", "", "create", "audit").await {
+        Ok(true) => {}
+        Ok(false) => {
+            let (c, j) = status(StatusCode::FORBIDDEN, "Failure", "audit ingest denied");
+            return (c, j).into_response();
+        }
+        Err(e) => {
+            let (c, j) = status(StatusCode::INTERNAL_SERVER_ERROR, "Failure", &e);
+            return (c, j).into_response();
+        }
+    }
+    let Some(pool) = &state.metering else {
+        let (c, j) = status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Failure",
+            "audit store not configured (DATABASE_URL unset on the apiserver)",
+        );
+        return (c, j).into_response();
+    };
+    // One record or a batch — the shipper group-commits.
+    let records: Vec<agentctl_audit::Record> = if body.is_array() {
+        match serde_json::from_value(body) {
+            Ok(r) => r,
+            Err(e) => {
+                let (c, j) = status(
+                    StatusCode::BAD_REQUEST,
+                    "Failure",
+                    &format!("bad records: {e}"),
+                );
+                return (c, j).into_response();
+            }
+        }
+    } else {
+        match serde_json::from_value(body) {
+            Ok(r) => vec![r],
+            Err(e) => {
+                let (c, j) = status(
+                    StatusCode::BAD_REQUEST,
+                    "Failure",
+                    &format!("bad record: {e}"),
+                );
+                return (c, j).into_response();
+            }
+        }
+    };
+    if records.len() > 1000 {
+        let (c, j) = status(StatusCode::PAYLOAD_TOO_LARGE, "Failure", "batch over 1000");
+        return (c, j).into_response();
+    }
+    let mut stored = 0usize;
+    for r in &records {
+        if agentctl_audit::pg::record(pool, r).await.is_ok() {
+            stored += 1;
+        }
+    }
+    Json(json!({ "stored": stored, "of": records.len() })).into_response()
+}
+
 async fn authorize(
     client: &Client,
     user: &str,
@@ -760,7 +935,10 @@ async fn api_resources() -> Json<Value> {
             { "name": "agentfleets/pause", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
             { "name": "agentfleets/resume", "singularName": "", "namespaced": true, "kind": "AgentFleet", "verbs": ["create"] },
             { "name": "metering", "singularName": "", "namespaced": false, "kind": "Metering", "verbs": ["get"] },
-            { "name": "metering/export", "singularName": "", "namespaced": false, "kind": "Metering", "verbs": ["get", "create"] }
+            { "name": "metering/export", "singularName": "", "namespaced": false, "kind": "Metering", "verbs": ["get", "create"] },
+            { "name": "audit", "singularName": "", "namespaced": false, "kind": "Audit", "verbs": ["get"] },
+            { "name": "audit/query", "singularName": "", "namespaced": false, "kind": "Audit", "verbs": ["get", "create"] },
+            { "name": "audit/ingest", "singularName": "", "namespaced": false, "kind": "Audit", "verbs": ["create"] }
         ],
     }))
 }

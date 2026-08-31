@@ -40,6 +40,8 @@ const FIELD_MANAGER: &str = "agentctl-operator";
 pub const TENANT_GATEWAY_NAME: &str = "agentctl-mcpg";
 /// The registry entry name the platform reserves for the control MCP.
 const CONTROL_ENTRY: &str = "control";
+/// The audit shipper's minted-token Secret (key `token`).
+pub const AUDIT_SHIPPER_SECRET: &str = "agentctl-audit-shipper";
 
 /// Operator wiring: the blessed mcpg image (digest-pinned by the chart).
 /// Absent ⇒ the tenant-gateway plane is off.
@@ -51,6 +53,10 @@ pub struct TenantMcpgConfig {
     /// registry entries are DROPPED with a warning (fail closed; a federation
     /// without its per-user credential must not dial the upstream bare).
     pub exchange_plugin_oci: Option<String>,
+    /// The audit shipper sidecar image (`AGENTCTL_AUDIT_SHIPPER_IMAGE`,
+    /// P7-3): tails the gateway's hash-chained audit file into identity's
+    /// ingest door. Absent ⇒ audit stays pod-local (file sink only).
+    pub audit_shipper_image: Option<String>,
     /// mcpg license posture for the BUSL plugin (`AGENTCTL_MCPG_NON_PRODUCTION`):
     /// the gateway's license gate refuses the plugin on the community tier
     /// without `license.non_production_use` (e2e/dev) or an entitling token
@@ -66,6 +72,10 @@ impl TenantMcpgConfig {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
             exchange_plugin_oci: std::env::var("AGENTCTL_MCPG_EXCHANGE_PLUGIN")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            audit_shipper_image: std::env::var("AGENTCTL_AUDIT_SHIPPER_IMAGE")
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
@@ -358,6 +368,7 @@ pub fn desired_deployment(
     image: &str,
     entries: &[FederationEntry],
     token_refs: &[(String, agent_api::SecretKeyRef)],
+    audit_shipper: Option<&str>,
     owner: &OwnerReference,
 ) -> Deployment {
     let mut env: Vec<EnvVar> = Vec::new();
@@ -436,52 +447,99 @@ pub fn desired_deployment(
                         }),
                         ..Default::default()
                     }),
-                    containers: vec![Container {
-                        name: "mcpg".to_string(),
-                        image: Some(image.to_string()),
-                        image_pull_policy: Some("IfNotPresent".to_string()),
-                        env: Some(env),
-                        ports: Some(vec![ContainerPort {
-                            name: Some("http".to_string()),
-                            container_port: 8787,
-                            ..Default::default()
-                        }]),
-                        readiness_probe: Some(probe(5, 5)),
-                        liveness_probe: Some(probe(20, 10)),
-                        security_context: Some(SecurityContext {
-                            allow_privilege_escalation: Some(false),
-                            read_only_root_filesystem: Some(true),
-                            capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
-                                drop: Some(vec!["ALL".to_string()]),
+                    containers: {
+                        let mut containers = vec![Container {
+                            name: "mcpg".to_string(),
+                            image: Some(image.to_string()),
+                            image_pull_policy: Some("IfNotPresent".to_string()),
+                            env: Some(env),
+                            ports: Some(vec![ContainerPort {
+                                name: Some("http".to_string()),
+                                container_port: 8787,
+                                ..Default::default()
+                            }]),
+                            readiness_probe: Some(probe(5, 5)),
+                            liveness_probe: Some(probe(20, 10)),
+                            security_context: Some(SecurityContext {
+                                allow_privilege_escalation: Some(false),
+                                read_only_root_filesystem: Some(true),
+                                capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
+                                    drop: Some(vec!["ALL".to_string()]),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
                             }),
+                            volume_mounts: Some(vec![
+                                mount("config", "/etc/mcpg", true),
+                                mount("audit", "/var/log/mcpg", false),
+                                mount("tmp", "/tmp", false),
+                                // OCI plugin cache (P5-3): the exchange plugin
+                                // pull needs a writable ~/.cache under the
+                                // read-only rootfs. Ephemeral by design — the
+                                // digest-pinned pull re-fills it on restart.
+                                mount("cache", "/home/mcpg/.cache", false),
+                            ]),
                             ..Default::default()
-                        }),
-                        volume_mounts: Some(vec![
-                            mount("config", "/etc/mcpg", true),
-                            mount("audit", "/var/log/mcpg", false),
-                            mount("tmp", "/tmp", false),
-                            // OCI plugin cache (P5-3): the exchange plugin
-                            // pull needs a writable ~/.cache under the
-                            // read-only rootfs. Ephemeral by design — the
-                            // digest-pinned pull re-fills it on restart.
-                            mount("cache", "/home/mcpg/.cache", false),
-                        ]),
-                        ..Default::default()
-                    }],
-                    volumes: Some(vec![
-                        Volume {
-                            name: "config".to_string(),
-                            config_map: Some(ConfigMapVolumeSource {
-                                name: TENANT_GATEWAY_NAME.to_string(),
+                        }];
+                        if let Some(img) = audit_shipper {
+                            // P7-3: tail the hash-chained audit file (shared
+                            // emptyDir, rw for the offset file) into
+                            // identity's ingest door, authenticated by the
+                            // minted workload JWT Secret mounted below.
+                            containers.push(Container {
+                                name: "audit-shipper".to_string(),
+                                image: Some(img.to_string()),
+                                image_pull_policy: Some("IfNotPresent".to_string()),
+                                env: Some(vec![EnvVar {
+                                    name: "AUDIT_WORKLOAD".to_string(),
+                                    value: Some(TENANT_GATEWAY_NAME.to_string()),
+                                    ..Default::default()
+                                }]),
+                                security_context: Some(SecurityContext {
+                                    allow_privilege_escalation: Some(false),
+                                    read_only_root_filesystem: Some(true),
+                                    capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
+                                        drop: Some(vec!["ALL".to_string()]),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }),
+                                volume_mounts: Some(vec![
+                                    mount("audit", "/var/log/mcpg", false),
+                                    mount("audit-token", "/etc/agentctl/audit", true),
+                                ]),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                        empty_dir("audit"),
-                        empty_dir("tmp"),
-                        empty_dir("cache"),
-                    ]),
+                            });
+                        }
+                        containers
+                    },
+                    volumes: Some({
+                        let mut volumes = vec![
+                            Volume {
+                                name: "config".to_string(),
+                                config_map: Some(ConfigMapVolumeSource {
+                                    name: TENANT_GATEWAY_NAME.to_string(),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                            empty_dir("audit"),
+                            empty_dir("tmp"),
+                            empty_dir("cache"),
+                        ];
+                        if audit_shipper.is_some() {
+                            volumes.push(Volume {
+                                name: "audit-token".to_string(),
+                                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                                    secret_name: Some(AUDIT_SHIPPER_SECRET.to_string()),
+                                    default_mode: Some(0o444),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            });
+                        }
+                        volumes
+                    }),
                     ..Default::default()
                 }),
             },
@@ -633,7 +691,50 @@ pub async fn ensure_tenant_gateway(
     cms.patch(TENANT_GATEWAY_NAME, &pp, &Patch::Apply(&cm))
         .await?;
 
-    let deploy = desired_deployment(ns, org, &image, &entries, &token_refs, owner);
+    // The audit shipper (P7-3): mint the ingest token FIRST (the sidecar
+    // mounts its Secret), every reconcile — stateless EdDSA, and a fresh
+    // mint heals an identity provider-key restart. Mint failure ⇒ ship
+    // without the sidecar this round (audit stays pod-local, warned).
+    let mut shipper = ctx.tenant_mcpg.audit_shipper_image.clone();
+    if shipper.is_some() {
+        match crate::identity::mint_ingest_token(&ctx.identity_http, &ctx.identity, ns).await {
+            Ok(token) => {
+                use k8s_openapi::api::core::v1::Secret;
+                use k8s_openapi::ByteString;
+                let desired = Secret {
+                    metadata: ObjectMeta {
+                        name: Some(AUDIT_SHIPPER_SECRET.to_string()),
+                        namespace: Some(ns.to_string()),
+                        owner_references: Some(vec![owner.clone()]),
+                        ..Default::default()
+                    },
+                    data: Some(BTreeMap::from([(
+                        "token".to_string(),
+                        ByteString(token.into_bytes()),
+                    )])),
+                    ..Default::default()
+                };
+                let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+                secrets
+                    .patch(AUDIT_SHIPPER_SECRET, &pp, &Patch::Apply(&desired))
+                    .await?;
+            }
+            Err(e) => {
+                tracing::warn!(ns, error = %e, "audit-shipper token mint failed; audit stays pod-local this round");
+                shipper = None;
+            }
+        }
+    }
+
+    let deploy = desired_deployment(
+        ns,
+        org,
+        &image,
+        &entries,
+        &token_refs,
+        shipper.as_deref(),
+        owner,
+    );
     let deploys: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
     deploys
         .patch(TENANT_GATEWAY_NAME, &pp, &Patch::Apply(&deploy))

@@ -114,6 +114,9 @@ async fn main() {
     // after us.
     let pool = build_pool();
     for attempt in 1..=30u32 {
+        if let Err(e) = agentctl_audit::pg::ensure_schema(&pool).await {
+            tracing::warn!(error = %e, "audit schema init failed (trail rows lost until PG recovers)");
+        }
         if let Err(e) = agentctl_metering::pg::ensure_schema(&pool).await {
             tracing::warn!(error = %e, "metering schema init failed (billing rows lost until PG recovers)");
         }
@@ -797,6 +800,20 @@ async fn org_approve(
             .into_response();
     }
     state.metrics.inc_approval(true);
+    audit_spawn(
+        &state,
+        agentctl_audit::Record::new(
+            "gateway",
+            org.clone(),
+            ns.clone(),
+            name.clone(),
+            agentctl_audit::ACTION_APPROVAL,
+            agentctl_audit::OUTCOME_OK,
+        )
+        .user(user.subject.clone())
+        .trail(trail_of(&headers))
+        .dim("nonce", nonce.clone()),
+    );
     tracing::info!(%org, agent = %name, approved_by = %user.subject, %nonce, "destructive request approved by owner");
     Json(json!({ "approved": name, "by": user.subject })).into_response()
 }
@@ -1335,6 +1352,10 @@ async fn handle_a2a_routed(
     org_user: Option<identity::OrgUser>,
 ) -> Response {
     let is_fleet = tier != FleetTier::Agent;
+    // The trail id (P7-3): inbound `x-agentctl-trail`/`x-request-id`, or
+    // minted here — every audit row on this request carries it and the
+    // upstream hop receives it.
+    let trail = trail_of(&headers);
     // Metering (P7-4): one durable usage event per handled RPC, at the
     // traffic chokepoint — fire-and-forget, never on the request path.
     {
@@ -1354,7 +1375,7 @@ async fn handle_a2a_routed(
             1,
             "requests",
         )
-        .dim("method", method);
+        .dim("method", method.clone());
         if let Some(u) = &org_user {
             ev = ev.user(u.subject.clone());
         }
@@ -1363,6 +1384,22 @@ async fn handle_a2a_routed(
                 tracing::debug!(error = %e, "metering record failed");
             }
         });
+        // The trail row for this hop (P7-3): who called what, on whose
+        // behalf, correlated by the propagated trail id.
+        let mut rec = agentctl_audit::Record::new(
+            "gateway",
+            ns.strip_prefix("org-").unwrap_or("").to_string(),
+            ns.clone(),
+            name.clone(),
+            agentctl_audit::ACTION_A2A_REQUEST,
+            agentctl_audit::OUTCOME_OK,
+        )
+        .trail(trail.clone())
+        .dim("method", method);
+        if let Some(u) = &org_user {
+            rec = rec.user(u.subject.clone());
+        }
+        audit_spawn(&state, rec);
     }
     state.metrics.inc_rpc();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -1524,6 +1561,7 @@ async fn handle_a2a_routed(
             &identity,
             forward_identity,
             upstream_bearer.as_deref(),
+            Some(&trail),
         );
         return match forwarded.send().await {
             Ok(resp) => (
@@ -1545,6 +1583,7 @@ async fn handle_a2a_routed(
         &identity,
         forward_identity,
         upstream_bearer.as_deref(),
+        Some(&trail),
     );
     let body = match forwarded.send().await {
         Ok(resp) => match resp.json::<Value>().await {
@@ -1589,11 +1628,32 @@ async fn handle_a2a_routed(
             // so GetTask refreshes carry the signal too. The prior stored
             // state is the dedupe.
             let gated_now = st.to_ascii_lowercase().contains("input");
-            let was_gated = store::get(&state.pool, &ns, &name, tid)
+            let prior_state = store::get(&state.pool, &ns, &name, tid)
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|r| r.state.to_ascii_lowercase().contains("input"));
+                .map(|r| r.state);
+            let was_gated = prior_state
+                .as_deref()
+                .is_some_and(|p| p.to_ascii_lowercase().contains("input"));
+            // Trail row per STATE TRANSITION (P7-3) — submissions, gates,
+            // completions; refreshes that change nothing stay silent.
+            if prior_state.as_deref() != Some(st) {
+                audit_spawn(
+                    &state,
+                    agentctl_audit::Record::new(
+                        "gateway",
+                        ns.strip_prefix("org-").unwrap_or("").to_string(),
+                        ns.clone(),
+                        name.clone(),
+                        agentctl_audit::ACTION_TASK_STATE,
+                        agentctl_audit::OUTCOME_OK,
+                    )
+                    .trail(trail.clone())
+                    .task(tid.to_string())
+                    .dim("state", st.to_string()),
+                );
+            }
             // Record which member served the task (owner_pod) so a later live op
             // (cancel/stream/get on a non-terminal task) routes back to it — task
             // affinity across fleet members. Harmless for a single agent.
@@ -1626,6 +1686,23 @@ async fn handle_a2a_routed(
             // answerer's own identity).
             if gated_now && !was_gated {
                 notify_hitl_channels(&state, &ns, &name, tid, status_message, task).await;
+                audit_spawn(
+                    &state,
+                    agentctl_audit::Record::new(
+                        "gateway",
+                        ns.strip_prefix("org-").unwrap_or("").to_string(),
+                        ns.clone(),
+                        name.clone(),
+                        agentctl_audit::ACTION_GATE_NOTIFIED,
+                        agentctl_audit::OUTCOME_OK,
+                    )
+                    .trail(trail.clone())
+                    .task(tid.to_string())
+                    .dim(
+                        "question",
+                        status_message.chars().take(200).collect::<String>(),
+                    ),
+                );
             }
         }
     } else if spec == "tasks/cancel" {
@@ -2288,8 +2365,14 @@ fn forward_request(
     identity: &Option<oidc::Identity>,
     forward_identity: bool,
     upstream_bearer: Option<&str>,
+    trail: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let mut rb = state.na.post(url).json(req);
+    // Trail propagation (P7-3): `x-request-id` is what mcpg preserves into
+    // its hash-chained audit records; our own spelling rides alongside.
+    if let Some(t) = trail {
+        rb = rb.header("x-agentctl-trail", t).header("x-request-id", t);
+    }
     // The per-(user,agent) principal bearer: agentd's principal rules are
     // first-match-wins with the user bearer rules listed before the
     // control-plane operator san-rule, so this header — not the client cert —
@@ -2639,6 +2722,20 @@ async fn hooks_proxy(
 
     state.metrics.inc_hooks_forwarded();
     stamp_delivery(&state, &ns, &name, false).await;
+    audit_spawn(
+        &state,
+        agentctl_audit::Record::new(
+            "gateway",
+            ns.strip_prefix("org-").unwrap_or("").to_string(),
+            ns.clone(),
+            name.clone(),
+            agentctl_audit::ACTION_HOOK_DELIVERY,
+            agentctl_audit::OUTCOME_OK,
+        )
+        .trail(trail_of(&headers))
+        .dim("path", path.clone())
+        .dim("status", status.as_u16().to_string()),
+    );
     {
         let pool = state.pool.clone();
         let ev = agentctl_metering::Event::new(
@@ -2662,6 +2759,39 @@ async fn hooks_proxy(
         out,
     )
         .into_response()
+}
+
+/// The inbound trail id (`x-agentctl-trail`) or a freshly minted one — the
+/// correlation key every audit record on this request carries and every
+/// upstream hop receives (P7-3).
+fn trail_of(headers: &HeaderMap) -> String {
+    for h in ["x-agentctl-trail", "x-request-id"] {
+        if let Some(t) = headers
+            .get(h)
+            .and_then(|v| v.to_str().ok())
+            .filter(|t| !t.is_empty() && t.len() <= 128)
+        {
+            return t.to_string();
+        }
+    }
+    // A correlation id, not a secret: wall-clock nanos + a process counter.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("tr-{nanos:x}-{seq:x}")
+}
+
+/// Fire-and-forget audit write (evidence, never flow control).
+fn audit_spawn(state: &AppState, r: agentctl_audit::Record) {
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        if let Err(e) = agentctl_audit::pg::record(&pool, &r).await {
+            tracing::debug!(error = %e, "audit record failed");
+        }
+    });
 }
 
 /// Unix seconds now (the hooks limiter's clock).
