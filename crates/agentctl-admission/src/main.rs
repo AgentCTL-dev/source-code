@@ -332,6 +332,12 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     let mut verdict =
         check_handle_uniqueness(&state, &kind, &namespace, name, spec.get("handle")).await;
     if verdict.is_ok() {
+        // Workflow set_ref (P7-7): honestly REFUSE an OCI WorkflowSet ref —
+        // its resolver is deferred, and a silent no-op would leave an
+        // operator believing a bundle loaded that never did.
+        verdict = check_workflow_sources(&v2_spec);
+    }
+    if verdict.is_ok() {
         // Hooks exposure (P7-1): every exposed webhook path must be served
         // by a declared webhook trigger — an exposure with no listener is a
         // typo that would 404 externally forever, and RFC 0029 §5 makes
@@ -1181,6 +1187,21 @@ fn evaluate(
         }
     }
 
+    Ok(())
+}
+
+/// P7-7: an OCI `WorkflowSet` reference (`workflows[].setRef`) has no
+/// resolver yet — refuse it with a clear message rather than silently
+/// dropping it (inline + configMapRef sources render fully today).
+fn check_workflow_sources(v2_spec: &agent_api::v1alpha2::AgentSpec) -> Result<(), String> {
+    for wf in &v2_spec.workflows {
+        if wf.set_ref.is_some() {
+            return Err(
+                "workflows[].setRef (OCI WorkflowSet bundles) is not yet resolvable;                  use an inline workflow or configMapRef"
+                    .to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
