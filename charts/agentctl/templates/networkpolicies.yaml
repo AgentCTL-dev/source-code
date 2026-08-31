@@ -200,6 +200,50 @@ spec:
       ports:
         - { protocol: TCP, port: 8787 }
 {{- end }}
+---
+# -----------------------------------------------------------------------------
+# Identity (crown jewel): reached by its sanctioned control-plane consumers
+# (gateway introspection/principals, apiserver, operator admin channel,
+# control) and — P5-3 — by each org's tenant mcpg gateway redeeming per-user
+# tokens at /v1/exchange. Agents themselves also enroll/refresh on the AAuth
+# provider surfaces (same port).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-identity-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-identity
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - agentctl-gateway
+                  - agentctl-apiserver
+                  - agentctl-operator
+                  - agentctl-control
+        - namespaceSelector:
+            matchExpressions:
+              - { key: agentctl.dev/organization, operator: Exists }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentctl-mcpg
+        - namespaceSelector:
+            matchExpressions:
+              - { key: agentctl.dev/organization, operator: Exists }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent
+      ports:
+        - { protocol: TCP, port: 8087 }
 # -----------------------------------------------------------------------------
 # Data plane: per-tenant-namespace agent isolation. An agent pod may egress to
 # DNS, the control-plane services it needs — the A2A gateway (delegation-out) and

@@ -78,6 +78,14 @@ pub struct Config {
     pub aauth_seed: Option<[u8; 32]>,
     /// Agent-token lifetime seconds (`IDENTITY_AAUTH_TOKEN_TTL`, default 3600).
     pub aauth_token_ttl: i64,
+    /// `/v1/exchange` synthetic lifetime for `static` connections, seconds
+    /// (`IDENTITY_EXCHANGE_STATIC_TTL`, default 300). Kept short on purpose:
+    /// mcpg's host cache honors our `expires_in`, and revocation surfaces
+    /// only after both caches lapse.
+    pub exchange_static_ttl: i64,
+    /// Cache margin seconds (`IDENTITY_EXCHANGE_REFRESH_MARGIN`, default 60):
+    /// a cached token is never served with less than this much life left.
+    pub exchange_refresh_margin: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,6 +180,16 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3600);
+        let exchange_static_ttl = std::env::var("IDENTITY_EXCHANGE_STATIC_TTL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300)
+            .clamp(30, 24 * 3600);
+        let exchange_refresh_margin = std::env::var("IDENTITY_EXCHANGE_REFRESH_MARGIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60)
+            .clamp(0, 3600);
 
         Ok(Config {
             bind,
@@ -183,6 +201,8 @@ impl Config {
             aauth_issuer,
             aauth_seed,
             aauth_token_ttl,
+            exchange_static_ttl,
+            exchange_refresh_margin,
         })
     }
 

@@ -72,6 +72,27 @@ pub struct AauthAgent {
     pub created_unix: i64,
 }
 
+/// A per-(org, user, provider) connection: the ONLY place a long-lived user
+/// credential lives (ADR-0005 custody). Secret columns hold SEALED values
+/// (`seal::Sealer`) — the store never sees plaintext.
+#[derive(Debug, Clone)]
+pub struct ConnectionRecord {
+    pub org: String,
+    pub user: String,
+    /// Provider/connection name — the `/v1/exchange` audience.
+    pub provider: String,
+    /// `static` (sealed secret IS the upstream token) or `oauth_refresh`
+    /// (sealed refresh token redeemed at `token_endpoint` per mint).
+    pub kind: String,
+    pub sealed_secret: String,
+    pub token_endpoint: Option<String>,
+    pub client_id: Option<String>,
+    pub sealed_client_secret: Option<String>,
+    pub scope: Option<String>,
+    pub created_unix: i64,
+    pub updated_unix: i64,
+}
+
 /// SHA-256 → base64url, the bearer-hash convention.
 pub fn bearer_hash(secret: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, secret.as_bytes());
@@ -104,6 +125,28 @@ pub trait Store: Send + Sync {
     async fn list_aauth_agents(&self) -> Result<Vec<AauthAgent>, StoreError>;
     /// Ok(true) revoked; Ok(false) unknown local.
     async fn revoke_aauth_agent(&self, local: &str) -> Result<bool, StoreError>;
+
+    // -- connection custody (RFC 0028 §6, P5-3) -----------------------------
+    /// Upsert by (org, user, provider); rotation replaces the sealed secret.
+    async fn put_connection(&self, c: ConnectionRecord) -> Result<(), StoreError>;
+    async fn find_connection(
+        &self,
+        org: &str,
+        user: &str,
+        provider: &str,
+    ) -> Result<ConnectionRecord, StoreError>;
+    async fn list_connections(
+        &self,
+        org: &str,
+        user: Option<&str>,
+    ) -> Result<Vec<ConnectionRecord>, StoreError>;
+    /// Ok(true) deleted; Ok(false) was absent (admin DELETE is idempotent).
+    async fn delete_connection(
+        &self,
+        org: &str,
+        user: &str,
+        provider: &str,
+    ) -> Result<bool, StoreError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +159,7 @@ pub struct MemoryStore {
     principals: Mutex<HashMap<String, PrincipalRecord>>, // key ns/agent/subject
     allowed_keys: Mutex<HashMap<String, AllowedKey>>,    // key jkt
     aauth_agents: Mutex<HashMap<String, AauthAgent>>,    // key local
+    connections: Mutex<HashMap<String, ConnectionRecord>>, // key org/user/provider
 }
 
 #[async_trait::async_trait]
@@ -217,6 +261,55 @@ impl Store for MemoryStore {
             None => Ok(false),
         }
     }
+
+    async fn put_connection(&self, c: ConnectionRecord) -> Result<(), StoreError> {
+        let key = format!("{}/{}/{}", c.org, c.user, c.provider);
+        self.connections.lock().unwrap().insert(key, c);
+        Ok(())
+    }
+
+    async fn find_connection(
+        &self,
+        org: &str,
+        user: &str,
+        provider: &str,
+    ) -> Result<ConnectionRecord, StoreError> {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&format!("{org}/{user}/{provider}"))
+            .cloned()
+            .ok_or(StoreError::NotFound)
+    }
+
+    async fn list_connections(
+        &self,
+        org: &str,
+        user: Option<&str>,
+    ) -> Result<Vec<ConnectionRecord>, StoreError> {
+        Ok(self
+            .connections
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.org == org && user.is_none_or(|u| c.user == u))
+            .cloned()
+            .collect())
+    }
+
+    async fn delete_connection(
+        &self,
+        org: &str,
+        user: &str,
+        provider: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .connections
+            .lock()
+            .unwrap()
+            .remove(&format!("{org}/{user}/{provider}"))
+            .is_some())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +354,20 @@ CREATE TABLE IF NOT EXISTS identity_aauth_agents (
     created_unix BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS identity_aauth_agents_jkt ON identity_aauth_agents (jkt);
+CREATE TABLE IF NOT EXISTS identity_connections (
+    org                  TEXT NOT NULL,
+    usr                  TEXT NOT NULL,
+    provider             TEXT NOT NULL,
+    kind                 TEXT NOT NULL,
+    sealed_secret        TEXT NOT NULL,
+    token_endpoint       TEXT,
+    client_id            TEXT,
+    sealed_client_secret TEXT,
+    scope                TEXT,
+    created_unix         BIGINT NOT NULL,
+    updated_unix         BIGINT NOT NULL,
+    PRIMARY KEY (org, usr, provider)
+);
 "#;
 
 impl PgStore {
@@ -514,6 +621,122 @@ impl Store for PgStore {
             .execute(
                 "UPDATE identity_aauth_agents SET status = 'revoked' WHERE local = $1",
                 &[&local],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(n > 0)
+    }
+
+    async fn put_connection(&self, c: ConnectionRecord) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO identity_connections
+                   (org, usr, provider, kind, sealed_secret, token_endpoint, client_id, sealed_client_secret, scope, created_unix, updated_unix)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                 ON CONFLICT (org, usr, provider)
+                 DO UPDATE SET kind=$4, sealed_secret=$5, token_endpoint=$6, client_id=$7, sealed_client_secret=$8, scope=$9, updated_unix=$11",
+                &[
+                    &c.org, &c.user, &c.provider, &c.kind, &c.sealed_secret,
+                    &c.token_endpoint, &c.client_id, &c.sealed_client_secret, &c.scope,
+                    &c.created_unix, &c.updated_unix,
+                ],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(())
+    }
+
+    async fn find_connection(
+        &self,
+        org: &str,
+        user: &str,
+        provider: &str,
+    ) -> Result<ConnectionRecord, StoreError> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT kind, sealed_secret, token_endpoint, client_id, sealed_client_secret, scope, created_unix, updated_unix
+                 FROM identity_connections WHERE org = $1 AND usr = $2 AND provider = $3",
+                &[&org, &user, &provider],
+            )
+            .await
+            .map_err(|e| StoreError::Pg(format!("{e}")))?
+            .ok_or(StoreError::NotFound)?;
+        Ok(ConnectionRecord {
+            org: org.to_string(),
+            user: user.to_string(),
+            provider: provider.to_string(),
+            kind: row.get(0),
+            sealed_secret: row.get(1),
+            token_endpoint: row.get(2),
+            client_id: row.get(3),
+            sealed_client_secret: row.get(4),
+            scope: row.get(5),
+            created_unix: row.get(6),
+            updated_unix: row.get(7),
+        })
+    }
+
+    async fn list_connections(
+        &self,
+        org: &str,
+        user: Option<&str>,
+    ) -> Result<Vec<ConnectionRecord>, StoreError> {
+        let rows = match user {
+            Some(u) => {
+                self.client()
+                    .await?
+                    .query(
+                        "SELECT usr, provider, kind, sealed_secret, token_endpoint, client_id, sealed_client_secret, scope, created_unix, updated_unix
+                         FROM identity_connections WHERE org = $1 AND usr = $2",
+                        &[&org, &u],
+                    )
+                    .await
+            }
+            None => {
+                self.client()
+                    .await?
+                    .query(
+                        "SELECT usr, provider, kind, sealed_secret, token_endpoint, client_id, sealed_client_secret, scope, created_unix, updated_unix
+                         FROM identity_connections WHERE org = $1",
+                        &[&org],
+                    )
+                    .await
+            }
+        }
+        .map_err(|e| StoreError::Pg(format!("{e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ConnectionRecord {
+                org: org.to_string(),
+                user: row.get(0),
+                provider: row.get(1),
+                kind: row.get(2),
+                sealed_secret: row.get(3),
+                token_endpoint: row.get(4),
+                client_id: row.get(5),
+                sealed_client_secret: row.get(6),
+                scope: row.get(7),
+                created_unix: row.get(8),
+                updated_unix: row.get(9),
+            })
+            .collect())
+    }
+
+    async fn delete_connection(
+        &self,
+        org: &str,
+        user: &str,
+        provider: &str,
+    ) -> Result<bool, StoreError> {
+        let n = self
+            .client()
+            .await?
+            .execute(
+                "DELETE FROM identity_connections WHERE org = $1 AND usr = $2 AND provider = $3",
+                &[&org, &user, &provider],
             )
             .await
             .map_err(|e| StoreError::Pg(format!("{e}")))?;

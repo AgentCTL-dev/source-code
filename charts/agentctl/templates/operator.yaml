@@ -334,6 +334,16 @@ spec:
             # managed org namespace gets its governance proxy from.
             - name: AGENTCTL_TENANT_MCPG_IMAGE
               value: {{ .Values.tenantMcpg.image | quote }}
+            {{- with .Values.tenantMcpg.exchangePlugin }}
+            # P5-3: the credential-exchange plugin the tenant gateways load
+            # for `auth.mode: obo` registry entries.
+            - name: AGENTCTL_MCPG_EXCHANGE_PLUGIN
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.tenantMcpg.nonProductionLicense }}
+            - name: AGENTCTL_MCPG_NON_PRODUCTION
+              value: "true"
+            {{- end }}
             {{- end }}
             {{- if .Values.operator.supervisorIdleParkSeconds }}
             # Supervisor scale-to-zero (P7-6): park after this many idle

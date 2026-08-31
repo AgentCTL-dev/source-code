@@ -180,6 +180,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("dispatcher-fanout", "fleets", dispatcher_fanout),
         // tenant mcpg: org gateway federating the registry, allow-narrowed (P5-1)
         scenario!("tenant-mcpg", "capability", tenant_mcpg),
+        // OBO exchange: per-user credential injected upstream via /v1/exchange (P5-3)
+        scenario!("obo-exchange", "capability", obo_exchange),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -202,8 +204,13 @@ async fn fleet_budget(ctx: &Ctx) -> Result<Outcome> {
     ))?;
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
         let out = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
-            "-o", "jsonpath={.status.readyReplicas}",
+            "get",
+            "statefulset",
+            "-n",
+            ns,
+            name,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
         ])
         .unwrap_or_default();
         Ok(out.trim() == "2")
@@ -229,13 +236,23 @@ async fn fleet_budget(ctx: &Ctx) -> Result<Outcome> {
     // The sweep pauses intake: zero replicas + the named condition.
     kh::poll_until(Duration::from_secs(120), Duration::from_secs(5), || async {
         let replicas = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
-            "-o", "jsonpath={.spec.replicas}",
+            "get",
+            "statefulset",
+            "-n",
+            ns,
+            name,
+            "-o",
+            "jsonpath={.spec.replicas}",
         ])
         .unwrap_or_default();
         let reason = shell::kubectl(&[
-            "get", "agentfleet", "-n", ns, name,
-            "-o", r#"jsonpath={.status.conditions[?(@.type=="Ready")].reason}"#,
+            "get",
+            "agentfleet",
+            "-n",
+            ns,
+            name,
+            "-o",
+            r#"jsonpath={.status.conditions[?(@.type=="Ready")].reason}"#,
         ])
         .unwrap_or_default();
         Ok(replicas.trim() == "0" && reason.contains("BudgetExceeded"))
@@ -244,14 +261,23 @@ async fn fleet_budget(ctx: &Ctx) -> Result<Outcome> {
     .context("budget breach never paused intake")?;
 
     // The window slides past → the fleet resumes without any operator input.
-    kh::poll_until(Duration::from_secs(180), Duration::from_secs(10), || async {
-        let out = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
-            "-o", "jsonpath={.status.readyReplicas}",
-        ])
-        .unwrap_or_default();
-        Ok(out.trim() == "2")
-    })
+    kh::poll_until(
+        Duration::from_secs(180),
+        Duration::from_secs(10),
+        || async {
+            let out = shell::kubectl(&[
+                "get",
+                "statefulset",
+                "-n",
+                ns,
+                name,
+                "-o",
+                "jsonpath={.status.readyReplicas}",
+            ])
+            .unwrap_or_default();
+            Ok(out.trim() == "2")
+        },
+    )
     .await
     .context("fleet never resumed after the window")?;
 
@@ -451,10 +477,12 @@ async fn supervisor_park(ctx: &Ctx) -> Result<Outcome> {
                 .http
                 .post(&url)
                 .bearer_auth(token)
-                .json(&json!({ "jsonrpc": "2.0", "id": id, "method": "SendMessage",
+                .json(
+                    &json!({ "jsonrpc": "2.0", "id": id, "method": "SendMessage",
                     "params": { "message": { "role": "ROLE_USER",
                         "messageId": format!("e2e-park-{id}"),
-                        "parts": [{ "text": text }] } } }))
+                        "parts": [{ "text": text }] } } }),
+                )
                 .send()
                 .await?;
             let status = resp.status();
@@ -479,13 +507,23 @@ async fn supervisor_park(ctx: &Ctx) -> Result<Outcome> {
     let sup = "sup-mock-erin";
     kh::poll_until(Duration::from_secs(120), Duration::from_secs(5), || async {
         let replicas = shell::kubectl(&[
-            "get", "deploy", "-n", &org_namespace("e2e-park"), sup,
-            "-o", "jsonpath={.spec.replicas}",
+            "get",
+            "deploy",
+            "-n",
+            &org_namespace("e2e-park"),
+            sup,
+            "-o",
+            "jsonpath={.spec.replicas}",
         ])
         .unwrap_or_default();
         let phase = shell::kubectl(&[
-            "get", "supervisors", "-n", &org_namespace("e2e-park"), sup,
-            "-o", "jsonpath={.status.phase}",
+            "get",
+            "supervisors",
+            "-n",
+            &org_namespace("e2e-park"),
+            sup,
+            "-o",
+            "jsonpath={.status.phase}",
         ])
         .unwrap_or_default();
         Ok(replicas.trim() == "0" && phase.trim() == "Parked")
@@ -504,6 +542,394 @@ async fn supervisor_park(ctx: &Ctx) -> Result<Outcome> {
     .await
     .context("parked supervisor never woke")?;
 
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P5-3: the OBO lane whole. A registry entry with `auth.mode: obo` federates
+/// through mcpg's credential-exchange plugin: the VERIFIED caller's bearer is
+/// redeemed at identity `/v1/exchange` (RFC 8693) against a custody-seeded
+/// connection, and the minted PER-USER token — not the caller's own — reaches
+/// the upstream as `Authorization` (witnessed by the echo fixture). A caller
+/// whose token names no user is refused; the exchange itself demonstrates
+/// mint → cache → revocation on the wire.
+async fn obo_exchange(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use agent_api::v1alpha2 as v2;
+    use kube::api::{Api, Patch, PatchParams};
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-obo";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    let apply_org = |display: &'static str| {
+        let orgs = orgs.clone();
+        async move {
+            orgs.patch(
+                org,
+                &PatchParams::apply("e2e").force(),
+                &Patch::Apply(&Organization::new(
+                    org,
+                    serde_json::from_value::<OrganizationSpec>(json!({ "displayName": display }))?,
+                )),
+            )
+            .await
+            .context("apply Organization")
+        }
+    };
+    apply_org("E2E Obo").await?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    // The injection WITNESS: an MCP upstream whose one tool echoes the
+    // Authorization header it received.
+    let echo = format!(
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata: {{ name: echo-mcp, namespace: {ns} }}
+spec:
+  replicas: 1
+  selector: {{ matchLabels: {{ app: echo-mcp }} }}
+  template:
+    metadata: {{ labels: {{ app: echo-mcp }} }}
+    spec:
+      containers:
+        - name: echo
+          image: mock-echo-mcp:dev
+          imagePullPolicy: IfNotPresent
+          ports: [ {{ containerPort: 8080 }} ]
+          readinessProbe: {{ httpGet: {{ path: /readyz, port: 8080 }} }}
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: echo-mcp, namespace: {ns} }}
+spec:
+  selector: {{ app: echo-mcp }}
+  ports: [ {{ port: 80, targetPort: 8080 }} ]
+"#
+    );
+    shell::kubectl_apply_stdin(&echo).context("deploy echo witness")?;
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/echo-mcp",
+        "-n",
+        &ns,
+        "--timeout=120s",
+    ])
+    .context("echo witness Ready")?;
+
+    // Register it as an OBO entry: audience defaults to the entry name —
+    // the custody connection's provider key.
+    let mut entry = v2::MCPService::new(
+        "zendesk",
+        v2::MCPServiceSpec {
+            endpoint: Some(format!("http://echo-mcp.{ns}.svc.cluster.local.:80/mcp")),
+            auth: Some(agent_api::v1alpha2::ServiceAuth {
+                mode: "obo".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    entry.metadata.namespace = Some(ns.clone());
+    kh::api::<v2::MCPService>(&ctx.client, &ns)
+        .create(&Default::default(), &entry)
+        .await
+        .context("register obo MCPService")?;
+    apply_org("E2E Obo v2").await?;
+
+    // The registry edit changes the pod-template config hash, so the gateway
+    // ROLLS here: readyReplicas alone races the dying old pod — wait for the
+    // rollout of the CURRENT generation instead.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        Ok(shell::kubectl(&["get", "deploy", "-n", &ns, "agentctl-mcpg"]).is_ok())
+    })
+    .await
+    .context("tenant gateway never created")?;
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/agentctl-mcpg",
+        "-n",
+        &ns,
+        "--timeout=180s",
+    ])
+    .context("tenant gateway rollout")?;
+
+    let admin_token = {
+        let b64 = shell::kubectl(&[
+            "get",
+            "secret",
+            "-n",
+            &ctx.cfg.system_ns,
+            "agentctl-api-token",
+            "-o",
+            "jsonpath={.data.AGENTCTL_API_TOKEN}",
+        ])?;
+        String::from_utf8(base64_decode(b64.trim())?)?
+    };
+    let pf_id = shell::PortForward::service(&ctx.cfg.system_ns, "agentctl-identity", 80, 18115)?;
+    let idb = pf_id.base_url();
+
+    // Seed custody: the user's connection to "zendesk" (static secret).
+    let user = "e2e:andrii";
+    let resp = ctx
+        .http
+        .post(format!("{idb}/admin/connections"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "org": org, "user": user, "provider": "zendesk",
+                        "kind": "static", "secret": "sk-live-fake" }))
+        .send()
+        .await
+        .context("seed connection")?;
+    if !resp.status().is_success() {
+        bail!(
+            "connection seed refused: {}",
+            resp.text().await.unwrap_or_default()
+        );
+    }
+
+    // Mint caller tokens through the operator admin channel: one USER-BOUND
+    // (usr claim — the OBO subject), one workload-only.
+    // NB: DISTINCT workloads. mcpg's host credential cache keys on the
+    // RESOLVED caller identity (subject), and the OBO user rides inside our
+    // token opaquely — two bearers sharing a sub would share a cache slot.
+    // Production holds sub↔usr 1:1 (per-user supervisors); the e2e must too.
+    let mint = |workload: &'static str, user: Option<&'static str>| {
+        let idb = idb.clone();
+        let admin = admin_token.clone();
+        async move {
+            let mut body = json!({ "workload": format!("{}/{workload}", org_namespace("e2e-obo")),
+                                    "audience": format!("mcpg:{}", org_namespace("e2e-obo")) });
+            if let Some(u) = user {
+                body["user"] = json!(u);
+            }
+            let resp = ctx
+                .http
+                .post(format!("{idb}/admin/mcpg-token"))
+                .bearer_auth(admin)
+                .json(&body)
+                .send()
+                .await?;
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok(body["token"].as_str().unwrap_or_default().to_string())
+        }
+    };
+    let user_token = mint("sup-andrii", Some("e2e:andrii")).await?;
+    let bare_token = mint("plain-agent", None).await?;
+    if user_token.is_empty() || bare_token.is_empty() {
+        bail!("identity refused the gateway-token mint");
+    }
+
+    // The exchange itself, on the wire: mint → cache → (after revocation
+    // below) invalid_target. The subject is the user-bound JWT — the same
+    // self-authenticating leg mcpg's plugin drives.
+    let redeem = |subject: String| {
+        let idb = idb.clone();
+        async move {
+            let resp = ctx
+                .http
+                .post(format!("{idb}/v1/exchange"))
+                .form(&[
+                    (
+                        "grant_type",
+                        "urn:ietf:params:oauth:grant-type:token-exchange",
+                    ),
+                    ("subject_token", subject.as_str()),
+                    ("audience", "zendesk"),
+                    ("client_id", "mcpg-tenant-gateway"),
+                ])
+                .send()
+                .await
+                .context("reach /v1/exchange")?;
+            let status = resp.status();
+            let outcome = resp
+                .headers()
+                .get("x-agentctl-exchange")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok((status, outcome, body))
+        }
+    };
+    let (st, outcome, body) = redeem(user_token.clone()).await?;
+    if !st.is_success() || body["access_token"] != "sk-live-fake" {
+        bail!("exchange did not mint the connection secret: {st} {body}");
+    }
+    if outcome.as_deref() != Some("mint") {
+        bail!("first exchange should be a mint, was {outcome:?}");
+    }
+    let (_, outcome, _) = redeem(user_token.clone()).await?;
+    if outcome.as_deref() != Some("cache") {
+        bail!("second exchange should be cache-served, was {outcome:?}");
+    }
+    let (st, _, body) = redeem(bare_token.clone()).await?;
+    if st.as_u16() != 403 || body["error"] != "access_denied" {
+        bail!("a user-less subject token must be refused: {st} {body}");
+    }
+
+    // Now through the GATEWAY: the federated echo tool proves which
+    // credential the gateway injected upstream.
+    let pf = shell::PortForward::service(&ns, "agentctl-mcpg", 8787, 18116)?;
+    let base = pf.base_url();
+    let call = |bearer: Option<String>, body: Value, session: Option<String>| {
+        let base = base.clone();
+        async move {
+            let mut req = ctx
+                .http
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-11-25")
+                .json(&body);
+            if let Some(b) = &bearer {
+                req = req.bearer_auth(b.clone());
+            }
+            if let Some(s) = &session {
+                req = req.header("mcp-session-id", s.clone());
+            }
+            let resp = req.send().await.context("reach tenant gateway")?;
+            let session = resp
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let text = resp.text().await.unwrap_or_default();
+            let body: Value = if ct.starts_with("text/event-stream") {
+                text.lines()
+                    .filter_map(|l| l.strip_prefix("data:"))
+                    .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+                    .rev()
+                    .find(|v| v.get("result").is_some() || v.get("error").is_some())
+                    .unwrap_or(Value::Null)
+            } else {
+                serde_json::from_str(&text).unwrap_or(Value::Null)
+            };
+            anyhow::Ok((body, session))
+        }
+    };
+    let (init, session) = call(
+        Some(user_token.clone()),
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if init.get("result").is_none() {
+        bail!("tenant gateway initialize failed: {init}");
+    }
+    let _ = call(
+        Some(user_token.clone()),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        session.clone(),
+    )
+    .await;
+    // Federation import may still be settling (plugin pull + first dial).
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let call = &call;
+        let session = session.clone();
+        let user_token = user_token.clone();
+        async move {
+            let (tools, _) = call(
+                Some(user_token),
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                session,
+            )
+            .await?;
+            Ok(tools["result"]["tools"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|t| t["name"] == "zendesk.auth.echo")))
+        }
+    })
+    .await
+    .context("federated echo tool never appeared (plugin pull/licensing?)")?;
+
+    // THE injection proof: the upstream saw the PER-USER minted credential,
+    // not the caller's gateway JWT.
+    let (resp, _) = call(
+        Some(user_token.clone()),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "zendesk.auth.echo", "arguments": {} } }),
+        session.clone(),
+    )
+    .await?;
+    let echoed = resp
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if echoed != "Bearer sk-live-fake" {
+        bail!("upstream saw {echoed:?}, wanted the injected per-user credential (full: {resp})");
+    }
+
+    // Fail-closed: the USER-LESS caller initializes (it is verified) but its
+    // tool call dies at the credential hop — never a bare upstream dial.
+    let (init2, session2) = call(
+        Some(bare_token.clone()),
+        json!({ "jsonrpc": "2.0", "id": 10, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "e2e-bare", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if init2.get("result").is_some() {
+        let _ = call(
+            Some(bare_token.clone()),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            session2.clone(),
+        )
+        .await;
+        let (resp, _) = call(
+            Some(bare_token.clone()),
+            json!({ "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                    "params": { "name": "zendesk.auth.echo", "arguments": {} } }),
+            session2,
+        )
+        .await?;
+        let echoed = resp
+            .pointer("/result/content/0/text")
+            .and_then(Value::as_str);
+        if resp.get("error").is_none() && resp.pointer("/result/isError") != Some(&json!(true)) {
+            // A "successful" call is only acceptable if nothing was injected
+            // AND the upstream refused — the echo accepts everything, so any
+            // success here means a bare dial happened.
+            bail!("user-less caller's tool call did not fail closed (echoed {echoed:?}): {resp}");
+        }
+    }
+
+    // Revocation: connection deleted ⇒ cache invalidated ⇒ next redeem dies.
+    let resp = ctx
+        .http
+        .post(format!("{idb}/admin/connections/delete"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "org": org, "user": user, "provider": "zendesk" }))
+        .send()
+        .await
+        .context("revoke connection")?;
+    if !resp.status().is_success() {
+        bail!("revocation refused");
+    }
+    let (st, _, body) = redeem(user_token.clone()).await?;
+    if st.as_u16() != 400 || body["error"] != "invalid_target" {
+        bail!("post-revocation exchange must be invalid_target: {st} {body}");
+    }
+
+    drop(pf_id);
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
     pass()
@@ -531,9 +957,7 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
                 &PatchParams::apply("e2e").force(),
                 &Patch::Apply(&Organization::new(
                     org,
-                    serde_json::from_value::<OrganizationSpec>(
-                        json!({ "displayName": display }),
-                    )?,
+                    serde_json::from_value::<OrganizationSpec>(json!({ "displayName": display }))?,
                 )),
             )
             .await
@@ -556,8 +980,7 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
         "workstats",
         v2::MCPServiceSpec {
             endpoint: Some(
-                "http://agentctl-coordination.agentctl-system.svc.cluster.local.:80/mcp"
-                    .into(),
+                "http://agentctl-coordination.agentctl-system.svc.cluster.local.:80/mcp".into(),
             ),
             allow: vec!["work.stats".into()],
             ..Default::default()
@@ -575,8 +998,13 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
     // The gateway trio comes up in the org namespace.
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
         let out = shell::kubectl(&[
-            "get", "deploy", "-n", &org_namespace("e2e-tg"), "agentctl-mcpg",
-            "-o", "jsonpath={.status.readyReplicas}",
+            "get",
+            "deploy",
+            "-n",
+            &org_namespace("e2e-tg"),
+            "agentctl-mcpg",
+            "-o",
+            "jsonpath={.status.readyReplicas}",
         ])
         .unwrap_or_default();
         Ok(out.trim() == "1")
@@ -590,8 +1018,13 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
     // bound EdDSA JWTs. Mint one through the operator admin channel.
     let admin_token = {
         let b64 = shell::kubectl(&[
-            "get", "secret", "-n", &ctx.cfg.system_ns, "agentctl-api-token",
-            "-o", "jsonpath={.data.AGENTCTL_API_TOKEN}",
+            "get",
+            "secret",
+            "-n",
+            &ctx.cfg.system_ns,
+            "agentctl-api-token",
+            "-o",
+            "jsonpath={.data.AGENTCTL_API_TOKEN}",
         ])?;
         String::from_utf8(base64_decode(b64.trim())?)?
     };
@@ -651,8 +1084,8 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
                 text.lines()
                     .filter_map(|l| l.strip_prefix("data:"))
                     .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
-                    .filter(|v| v.get("result").is_some() || v.get("error").is_some())
-                    .next_back()
+                    .rev()
+                    .find(|v| v.get("result").is_some() || v.get("error").is_some())
                     .unwrap_or(Value::Null)
             } else {
                 serde_json::from_str(&text).unwrap_or(Value::Null)
@@ -745,9 +1178,17 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
         }
     })
     .await
-    .with_context(|| format!("federated tool never appeared; saw {:?}", names.lock().unwrap()))?;
+    .with_context(|| {
+        format!(
+            "federated tool never appeared; saw {:?}",
+            names.lock().unwrap()
+        )
+    })?;
     let got = names.lock().unwrap().clone();
-    if got.iter().any(|n| n.starts_with("workstats.") && n != "workstats.work.stats") {
+    if got
+        .iter()
+        .any(|n| n.starts_with("workstats.") && n != "workstats.work.stats")
+    {
         bail!("allowlist leaked upstream tools: {got:?}");
     }
     if got.iter().any(|n| n.starts_with("control.")) {
@@ -804,13 +1245,23 @@ async fn dispatcher_fanout(ctx: &Ctx) -> Result<Outcome> {
     // Workers 2/2 + the coordinator pod Running.
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
         let w = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
-            "-o", "jsonpath={.status.readyReplicas}",
+            "get",
+            "statefulset",
+            "-n",
+            ns,
+            name,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
         ])
         .unwrap_or_default();
         let c = shell::kubectl(&[
-            "get", "deploy", "-n", ns, &format!("{name}-coordinator"),
-            "-o", "jsonpath={.status.readyReplicas}",
+            "get",
+            "deploy",
+            "-n",
+            ns,
+            &format!("{name}-coordinator"),
+            "-o",
+            "jsonpath={.status.readyReplicas}",
         ])
         .unwrap_or_default();
         Ok(w.trim() == "2" && c.trim() == "1")
@@ -839,10 +1290,8 @@ async fn dispatcher_fanout(ctx: &Ctx) -> Result<Outcome> {
     // inbound a2a ask that the coordinator fanned out.
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
         for i in 0..2 {
-            let logs = shell::kubectl(&[
-                "logs", "-n", ns, &format!("{name}-{i}"), "--tail=200",
-            ])
-            .unwrap_or_default();
+            let logs = shell::kubectl(&["logs", "-n", ns, &format!("{name}-{i}"), "--tail=200"])
+                .unwrap_or_default();
             if logs.contains("\"start.a2a.fired\"") || logs.contains("\"inbox.accepted\"") {
                 return Ok(true);
             }
@@ -891,10 +1340,15 @@ async fn work_redelivery(ctx: &Ctx) -> Result<Outcome> {
     }
     // The holder crashes here: no renew, no release, no ack.
     // The SERVER re-offers after expiry — observed on its own backlog count.
-    kh::poll_until(Duration::from_secs(30), Duration::from_millis(500), || async {
-        let stats = mcp_structured(&ctx.http, &base, "work.stats", json!({}), Value::Null).await?;
-        Ok(stats["pending"].as_u64().unwrap_or(0) >= 1)
-    })
+    kh::poll_until(
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || async {
+            let stats =
+                mcp_structured(&ctx.http, &base, "work.stats", json!({}), Value::Null).await?;
+            Ok(stats["pending"].as_u64().unwrap_or(0) >= 1)
+        },
+    )
     .await
     .context("expired lease never re-offered (pending stayed 0)")?;
     // The redelivered unit is EXACTLY the leased one: the same claim_key
@@ -910,7 +1364,10 @@ async fn work_redelivery(ctx: &Ctx) -> Result<Outcome> {
     if regrant["granted"] != json!(true) {
         bail!("redelivered unit not re-granted to the same claim_key: {regrant}");
     }
-    let lease = regrant["lease_id"].as_str().context("lease id")?.to_string();
+    let lease = regrant["lease_id"]
+        .as_str()
+        .context("lease id")?
+        .to_string();
     let acked = mcp_structured(
         &ctx.http,
         &base,
@@ -955,19 +1412,23 @@ async fn work_redelivery(ctx: &Ctx) -> Result<Outcome> {
     if g["granted"] != json!(true) {
         bail!("poison claim not granted: {g}");
     }
-    kh::poll_until(Duration::from_secs(30), Duration::from_millis(500), || async {
-        let d = mcp_structured(
-            &ctx.http,
-            &base,
-            "work.deadletter",
-            json!({ "action": "list" }),
-            Value::Null,
-        )
-        .await?;
-        Ok(d["items"]
-            .as_array()
-            .is_some_and(|i| i.iter().any(|x| x["work_id"] == json!("px-1"))))
-    })
+    kh::poll_until(
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || async {
+            let d = mcp_structured(
+                &ctx.http,
+                &base,
+                "work.deadletter",
+                json!({ "action": "list" }),
+                Value::Null,
+            )
+            .await?;
+            Ok(d["items"]
+                .as_array()
+                .is_some_and(|i| i.iter().any(|x| x["work_id"] == json!("px-1"))))
+        },
+    )
     .await
     .context("poison unit never dead-lettered")?;
     let rq = mcp_structured(
@@ -1023,8 +1484,13 @@ async fn shard_resize(ctx: &Ctx) -> Result<Outcome> {
     apply(2)?;
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
         let out = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
-            "-o", "jsonpath={.status.readyReplicas}",
+            "get",
+            "statefulset",
+            "-n",
+            ns,
+            name,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
         ])
         .unwrap_or_default();
         Ok(out.trim() == "2")
@@ -1039,8 +1505,13 @@ async fn shard_resize(ctx: &Ctx) -> Result<Outcome> {
     // naive rolling update would never set it).
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(1), || async {
         let out = shell::kubectl(&[
-            "get", "agentfleet", "-n", ns, name,
-            "-o", r#"jsonpath={.status.conditions[?(@.type=="Ready")].reason}"#,
+            "get",
+            "agentfleet",
+            "-n",
+            ns,
+            name,
+            "-o",
+            r#"jsonpath={.status.conditions[?(@.type=="Ready")].reason}"#,
         ])
         .unwrap_or_default();
         Ok(out.contains("Resizing"))
@@ -1051,12 +1522,21 @@ async fn shard_resize(ctx: &Ctx) -> Result<Outcome> {
     // It completes: 3/3 ready with the NEW modulus on the pod template.
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
         let ready = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
-            "-o", "jsonpath={.status.readyReplicas}",
+            "get",
+            "statefulset",
+            "-n",
+            ns,
+            name,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
         ])
         .unwrap_or_default();
         let ann = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
+            "get",
+            "statefulset",
+            "-n",
+            ns,
+            name,
             "-o",
             r#"jsonpath={.spec.template.metadata.annotations.agentctl\.dev/shards}"#,
         ])
@@ -1069,17 +1549,27 @@ async fn shard_resize(ctx: &Ctx) -> Result<Outcome> {
     // Post-resize sanity: every live pod runs under the same modulus (no
     // mixed-N seam survives) and the fleet is Ready again.
     let pods = shell::kubectl(&[
-        "get", "pods", "-n", ns,
-        "-l", &format!("agentctl.dev/agent={name}"),
-        "-o", "jsonpath={.items[*].metadata.name}",
+        "get",
+        "pods",
+        "-n",
+        ns,
+        "-l",
+        &format!("agentctl.dev/agent={name}"),
+        "-o",
+        "jsonpath={.items[*].metadata.name}",
     ])?;
     if pods.split_whitespace().count() != 3 {
         bail!("want exactly 3 member pods after resize, got: {pods}");
     }
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
         let out = shell::kubectl(&[
-            "get", "agentfleet", "-n", ns, name,
-            "-o", r#"jsonpath={.status.conditions[?(@.type=="Ready")].status}"#,
+            "get",
+            "agentfleet",
+            "-n",
+            ns,
+            name,
+            "-o",
+            r#"jsonpath={.status.conditions[?(@.type=="Ready")].status}"#,
         ])
         .unwrap_or_default();
         Ok(out.trim() == "True")
@@ -1107,8 +1597,13 @@ async fn fleet_static(ctx: &Ctx) -> Result<Outcome> {
     // StatefulSet up: 3/3 stable members.
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
         let out = shell::kubectl(&[
-            "get", "statefulset", "-n", ns, name,
-            "-o", "jsonpath={.status.readyReplicas}",
+            "get",
+            "statefulset",
+            "-n",
+            ns,
+            name,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
         ])
         .unwrap_or_default();
         Ok(out.trim() == "3")
@@ -1118,16 +1613,26 @@ async fn fleet_static(ctx: &Ctx) -> Result<Outcome> {
 
     // The shared ConfigMap carries the per-member overlays, vars-only.
     let cm = shell::kubectl(&[
-        "get", "configmap", "-n", ns, &format!("{name}-config"),
-        "-o", "jsonpath={.data.member-1\\.json}",
+        "get",
+        "configmap",
+        "-n",
+        ns,
+        &format!("{name}-config"),
+        "-o",
+        "jsonpath={.data.member-1\\.json}",
     ])?;
     let overlay: Value = serde_json::from_str(cm.trim()).context("member-1 overlay JSON")?;
     if overlay["vars"]["color"] != json!("blue") || overlay["vars"]["is_lead"] != json!(false) {
         bail!("member-1 overlay wrong: {overlay}");
     }
     let cm0 = shell::kubectl(&[
-        "get", "configmap", "-n", ns, &format!("{name}-config"),
-        "-o", "jsonpath={.data.member-0\\.json}",
+        "get",
+        "configmap",
+        "-n",
+        ns,
+        &format!("{name}-config"),
+        "-o",
+        "jsonpath={.data.member-0\\.json}",
     ])?;
     let overlay0: Value = serde_json::from_str(cm0.trim())?;
     if overlay0["vars"]["is_lead"] != json!(true) {
@@ -1136,8 +1641,13 @@ async fn fleet_static(ctx: &Ctx) -> Result<Outcome> {
 
     // The pods mount the third layer keyed by their own ordinal.
     let args = shell::kubectl(&[
-        "get", "pod", "-n", ns, &format!("{name}-0"),
-        "-o", "jsonpath={.spec.containers[0].args}",
+        "get",
+        "pod",
+        "-n",
+        ns,
+        &format!("{name}-0"),
+        "-o",
+        "jsonpath={.spec.containers[0].args}",
     ])?;
     if !args.contains("member-$(AGENT_POD_INDEX).json") {
         bail!("member overlay layer missing from argv: {args}");
@@ -1255,10 +1765,12 @@ async fn mention_orchestration(ctx: &Ctx) -> Result<Outcome> {
                 .http
                 .post(&url)
                 .bearer_auth(token)
-                .json(&json!({ "jsonrpc": "2.0", "id": id, "method": "SendMessage",
+                .json(
+                    &json!({ "jsonrpc": "2.0", "id": id, "method": "SendMessage",
                     "params": { "message": { "role": "ROLE_USER",
                         "messageId": format!("e2e-m-{id}"),
-                        "parts": [{ "text": text }] } } }))
+                        "parts": [{ "text": text }] } } }),
+                )
                 .send()
                 .await?;
             let status = resp.status();
@@ -1277,7 +1789,12 @@ async fn mention_orchestration(ctx: &Ctx) -> Result<Outcome> {
         }
     })
     .await
-    .with_context(|| format!("supervisor never conversed; last: {}", hello.lock().unwrap()))?;
+    .with_context(|| {
+        format!(
+            "supervisor never conversed; last: {}",
+            hello.lock().unwrap()
+        )
+    })?;
 
     // The @mention turn: both handles + one the owner cannot reach. The
     // workflow run outlives the SendMessage round-trip, so poll GetTask (the
@@ -1295,8 +1812,7 @@ async fn mention_orchestration(ctx: &Ctx) -> Result<Outcome> {
             .or_else(|| body.pointer("/result/status/state"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        (!state.contains("WORKING") && !state.contains("SUBMITTED"))
-            .then(|| crate_reply_text(body))
+        (!state.contains("WORKING") && !state.contains("SUBMITTED")).then(|| crate_reply_text(body))
     };
     let text = match terminal_text(&body) {
         Some(t) => t,
@@ -1863,7 +2379,11 @@ async fn control_mcp(ctx: &Ctx) -> Result<Outcome> {
         .as_ref()
         .context("child owner refs")?[0];
     if owner.kind != "Agent" || owner.name != "sup-probe" {
-        bail!("child is not owned by its parent agent: {:?}/{:?}", owner.kind, owner.name);
+        bail!(
+            "child is not owned by its parent agent: {:?}/{:?}",
+            owner.kind,
+            owner.name
+        );
     }
     if child
         .metadata
@@ -2789,8 +3309,8 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
                 text.lines()
                     .filter_map(|l| l.strip_prefix("data:"))
                     .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
-                    .filter(|v| v.get("result").is_some() || v.get("error").is_some())
-                    .next_back()
+                    .rev()
+                    .find(|v| v.get("result").is_some() || v.get("error").is_some())
                     .unwrap_or(Value::Null)
             } else {
                 serde_json::from_str(&text).unwrap_or(Value::Null)

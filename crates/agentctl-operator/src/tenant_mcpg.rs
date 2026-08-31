@@ -46,6 +46,16 @@ const CONTROL_ENTRY: &str = "control";
 #[derive(Clone, Debug, Default)]
 pub struct TenantMcpgConfig {
     pub image: Option<String>,
+    /// Digest-pinned OCI ref of mcpg's `credential-oauth-token-exchange`
+    /// plugin (`AGENTCTL_MCPG_EXCHANGE_PLUGIN`). Absent ⇒ `auth.mode: obo`
+    /// registry entries are DROPPED with a warning (fail closed; a federation
+    /// without its per-user credential must not dial the upstream bare).
+    pub exchange_plugin_oci: Option<String>,
+    /// mcpg license posture for the BUSL plugin (`AGENTCTL_MCPG_NON_PRODUCTION`):
+    /// the gateway's license gate refuses the plugin on the community tier
+    /// without `license.non_production_use` (e2e/dev) or an entitling token
+    /// (production — a commercial mcpg conversation, outside the chart).
+    pub non_production_license: bool,
 }
 
 impl TenantMcpgConfig {
@@ -55,12 +65,36 @@ impl TenantMcpgConfig {
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
+            exchange_plugin_oci: std::env::var("AGENTCTL_MCPG_EXCHANGE_PLUGIN")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            non_production_license: std::env::var("AGENTCTL_MCPG_NON_PRODUCTION")
+                .is_ok_and(|v| v.trim() == "true"),
         }
     }
     pub fn enabled(&self) -> bool {
         self.image.is_some()
     }
 }
+
+/// Everything the OBO (per-user credential injection) lane needs, resolved by
+/// the caller. `None` anywhere upstream ⇒ obo entries drop, proxy plane keeps
+/// serving.
+#[derive(Clone, Debug)]
+pub struct OboWiring {
+    /// Digest-pinned plugin OCI ref.
+    pub plugin_oci: String,
+    /// Identity's RFC 8693 endpoint — the STS trust anchor. Deliberately NOT
+    /// per-federation (mcpg ignores a token URL in credential_config).
+    pub exchange_url: String,
+    /// `license.non_production_use` (the BUSL plugin's e2e/dev entitlement).
+    pub non_production: bool,
+}
+
+/// The plugin id + the provider key the `cred://` URIs reference.
+const EXCHANGE_PLUGIN_ID: &str = "dev.mcpg.credential.oauth-token-exchange";
+const EXCHANGE_PROVIDER: &str = "agentctl";
 
 /// A registry entry eligible for federation, reduced to what the config
 /// needs. Pure input to [`render_config`].
@@ -73,6 +107,10 @@ pub struct FederationEntry {
     /// The mounted env var carrying the upstream service token, when the
     /// entry declares `auth.tokenSecretRef` (mode `service`).
     pub token_env: Option<String>,
+    /// `auth.mode: obo` (P5-3): the audience `/v1/exchange` resolves the
+    /// custody connection by — the per-user credential injected upstream.
+    /// Defaults to the entry name (connection provider = registry entry).
+    pub obo_audience: Option<String>,
 }
 
 /// The env-var name a federation's service token rides in on.
@@ -118,9 +156,35 @@ pub fn gateway_audience(ns: &str) -> String {
 }
 
 /// Render the tenant gateway's whole config document. Pure.
-pub fn render_config(entries: &[FederationEntry], tier: Option<&VerifiedTier>) -> String {
+///
+/// OBO entries (P5-3) render as `oauth_impersonation` federations: the
+/// gateway hands the VERIFIED caller's bearer to the exchange plugin, which
+/// redeems it at identity's `/v1/exchange` (RFC 8693) and injects the minted
+/// per-user token as the upstream `Authorization`. They require BOTH the
+/// wiring (plugin + exchange URL + license posture) and the verified tier —
+/// impersonation from a header-asserted caller is refused by mcpg's engine,
+/// so a downgraded gateway DROPS those entries rather than dialing bare.
+pub fn render_config(
+    entries: &[FederationEntry],
+    tier: Option<&VerifiedTier>,
+    obo: Option<&OboWiring>,
+) -> String {
+    let obo_active = obo.is_some() && tier.is_some();
+    let mut any_obo = false;
     let federations: Vec<Value> = entries
         .iter()
+        .filter(|e| {
+            if e.obo_audience.is_some() && !obo_active {
+                tracing::warn!(
+                    entry = %e.name,
+                    wired = obo.is_some(),
+                    verified = tier.is_some(),
+                    "obo entry dropped: needs the exchange plugin wiring AND the verified caller tier (impersonation never dials the upstream bare)"
+                );
+                return false;
+            }
+            true
+        })
         .map(|e| {
             let mut upstream = json!({
                 "url": e.endpoint,
@@ -137,6 +201,16 @@ pub fn render_config(entries: &[FederationEntry], tier: Option<&VerifiedTier>) -
                 upstream["auth"] = json!({
                     "mode": "service_token",
                     "token": format!("${{env.{env}}}"),
+                });
+            }
+            if let Some(aud) = &e.obo_audience {
+                any_obo = true;
+                upstream["auth"] = json!({
+                    "mode": "oauth_impersonation",
+                    "credential": format!("cred://{EXCHANGE_PLUGIN_ID}/{EXCHANGE_PROVIDER}"),
+                    // Per-federation overrides are audience/resource ONLY;
+                    // the STS endpoint stays on the provider (trust anchor).
+                    "credential_config": { "audience": aud },
                 });
             }
             let trust = if tier.is_some() {
@@ -216,6 +290,31 @@ pub fn render_config(entries: &[FederationEntry], tier: Option<&VerifiedTier>) -
                 "audience": t.audience,
             }
         });
+    }
+    if any_obo {
+        // Emitted ONLY when an obo federation survived the gates above.
+        let w = obo.expect("any_obo implies wiring");
+        doc["plugins"] = json!([{
+            "id": EXCHANGE_PLUGIN_ID,
+            "class": "credential_issuer",
+            "source": { "oci": w.plugin_oci },
+            // The plugin declares NetworkOutbound (it dials the exchange);
+            // an ungranted capability is a boot refusal.
+            "granted_capabilities": ["network_outbound"],
+            "config": {
+                "providers": {
+                    EXCHANGE_PROVIDER: {
+                        "token_url": w.exchange_url,
+                        "client_id": "mcpg-tenant-gateway",
+                    }
+                }
+            },
+        }]);
+        if w.non_production {
+            // The plugin is BUSL: the community license gate needs this (or
+            // an entitling token) or the whole gateway refuses to boot.
+            doc["license"] = json!({ "non_production_use": true });
+        }
     }
     // YAML for operator legibility (`kubectl get cm -o yaml` reads well);
     // mcpg parses YAML as a superset of this JSON-shaped tree.
@@ -305,6 +404,19 @@ pub fn desired_deployment(
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
+                    // ndots:1 — external names (the plugin's ghcr OCI pull)
+                    // resolve absolutely instead of walking cluster search
+                    // domains, where a wildcard site domain captures them
+                    // (the exact state-pod incident). In-cluster federation
+                    // endpoints are rendered as absolute trailing-dot FQDNs
+                    // already.
+                    dns_config: Some(k8s_openapi::api::core::v1::PodDNSConfig {
+                        options: Some(vec![k8s_openapi::api::core::v1::PodDNSConfigOption {
+                            name: Some("ndots".into()),
+                            value: Some("1".into()),
+                        }]),
+                        ..Default::default()
+                    }),
                     security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
                         run_as_non_root: Some(true),
                         // The blessed image's `mcpg` user, numerically (the
@@ -343,6 +455,11 @@ pub fn desired_deployment(
                             mount("config", "/etc/mcpg", true),
                             mount("audit", "/var/log/mcpg", false),
                             mount("tmp", "/tmp", false),
+                            // OCI plugin cache (P5-3): the exchange plugin
+                            // pull needs a writable ~/.cache under the
+                            // read-only rootfs. Ephemeral by design — the
+                            // digest-pinned pull re-fills it on restart.
+                            mount("cache", "/home/mcpg/.cache", false),
                         ]),
                         ..Default::default()
                     }],
@@ -357,6 +474,7 @@ pub fn desired_deployment(
                         },
                         empty_dir("audit"),
                         empty_dir("tmp"),
+                        empty_dir("cache"),
                     ]),
                     ..Default::default()
                 }),
@@ -418,12 +536,16 @@ pub fn eligible_entries(
                 federation_token_env(&name)
             })
         });
+        let obo_audience = svc.spec.auth.as_ref().and_then(|a| {
+            (a.mode == "obo").then(|| a.audience.clone().unwrap_or_else(|| name.clone()))
+        });
         entries.push(FederationEntry {
             name,
             endpoint,
             allow: svc.spec.allow.clone(),
             exclude: svc.spec.exclude.clone(),
             token_env,
+            obo_audience,
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -480,12 +602,24 @@ pub async fn ensure_tenant_gateway(
         _ => None,
     };
 
+    // OBO wiring (P5-3): plugin ref from the chart, exchange URL from the
+    // identity plane the operator already knows. Any gap ⇒ obo entries drop
+    // (warned inside render_config); the proxy plane keeps serving.
+    let obo = match (&ctx.tenant_mcpg.exchange_plugin_oci, &ctx.identity.url) {
+        (Some(plugin), Some(identity_url)) => Some(OboWiring {
+            plugin_oci: plugin.clone(),
+            exchange_url: format!("{}/v1/exchange", identity_url.trim_end_matches('/')),
+            non_production: ctx.tenant_mcpg.non_production_license,
+        }),
+        _ => None,
+    };
+
     let pp = PatchParams::apply(FIELD_MANAGER).force();
     let cm = ConfigMap {
         metadata: meta(ns, org, owner),
         data: Some(BTreeMap::from([(
             "config.yaml".to_string(),
-            render_config(&entries, tier.as_ref()),
+            render_config(&entries, tier.as_ref(), obo.as_ref()),
         )])),
         ..Default::default()
     };
@@ -533,6 +667,27 @@ mod tests {
             allow: allow.iter().map(|s| s.to_string()).collect(),
             exclude: Vec::new(),
             token_env: None,
+            obo_audience: None,
+        }
+    }
+
+    fn test_tier() -> VerifiedTier {
+        VerifiedTier {
+            keys_json:
+                r#"{"keys":[{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"k1","x":"AA"}]}"#
+                    .into(),
+            issuer: "http://agentctl-identity.agentctl-system".into(),
+            audience: gateway_audience("org-acme"),
+        }
+    }
+
+    fn test_obo() -> OboWiring {
+        OboWiring {
+            plugin_oci: "ghcr.io/mcpg-dev/plugins/credential-oauth-token-exchange@sha256:b6b6"
+                .into(),
+            exchange_url:
+                "http://agentctl-identity.agentctl-system.svc.cluster.local.:80/v1/exchange".into(),
+            non_production: true,
         }
     }
 
@@ -550,6 +705,7 @@ mod tests {
                     ..entry("crm", &["search_*"])
                 },
             ],
+            None,
             None,
         );
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
@@ -597,7 +753,7 @@ mod tests {
             issuer: "http://agentctl-identity.agentctl-system".into(),
             audience: gateway_audience("org-acme"),
         };
-        let yaml = render_config(&[entry("state", &["state.*"])], Some(&tier));
+        let yaml = render_config(&[entry("state", &["state.*"])], Some(&tier), None);
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(
             doc["gateway"]["server"]["trust_subject_header"],
@@ -617,6 +773,76 @@ mod tests {
             .contains("Ed25519"));
         let feds = doc["mcp"]["federations"].as_sequence().unwrap();
         assert_eq!(feds[0]["governance"]["minimum_trust"], "verified");
+    }
+
+    /// P5-3: an obo entry under the verified tier renders the impersonation
+    /// federation + the plugin registration + the license posture — and the
+    /// STS endpoint lives ONLY on the provider (credential_config is
+    /// audience-only; mcpg ignores anything else there).
+    #[test]
+    fn obo_entry_renders_impersonation_plugin_and_license() {
+        let mut e = entry("zendesk", &[]);
+        e.obo_audience = Some("zendesk".into());
+        let yaml = render_config(
+            &[e, entry("state", &["state.*"])],
+            Some(&test_tier()),
+            Some(&test_obo()),
+        );
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let feds = doc["mcp"]["federations"].as_sequence().unwrap();
+        assert_eq!(feds.len(), 2);
+        let auth = &feds[0]["upstream"]["auth"]; // input order: zendesk, state
+        assert_eq!(auth["mode"], "oauth_impersonation");
+        assert_eq!(
+            auth["credential"],
+            "cred://dev.mcpg.credential.oauth-token-exchange/agentctl"
+        );
+        assert_eq!(auth["credential_config"]["audience"], "zendesk");
+        assert!(auth["credential_config"].get("redeem_token_url").is_none());
+        let plugin = &doc["plugins"][0];
+        assert_eq!(plugin["class"], "credential_issuer");
+        assert_eq!(plugin["granted_capabilities"][0], "network_outbound");
+        assert!(plugin["source"]["oci"]
+            .as_str()
+            .unwrap()
+            .contains("@sha256:"));
+        assert!(plugin["config"]["providers"]["agentctl"]["token_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/v1/exchange"));
+        assert_eq!(
+            plugin["config"]["providers"]["agentctl"]["client_id"],
+            "mcpg-tenant-gateway"
+        );
+        assert_eq!(
+            doc["license"]["non_production_use"],
+            serde_yaml::Value::Bool(true)
+        );
+        // The plain proxy entry is untouched.
+        assert!(feds[1]["upstream"].get("auth").is_none());
+    }
+
+    /// OBO never dials bare: without the verified tier (or without wiring)
+    /// the entry DROPS and no plugin/license blocks are emitted.
+    #[test]
+    fn obo_entry_drops_without_verified_tier_or_wiring() {
+        let mut e = entry("zendesk", &[]);
+        e.obo_audience = Some("zendesk".into());
+        // Wired but header-tier: impersonation would be refused — drop.
+        let yaml = render_config(
+            &[e.clone(), entry("state", &["state.*"])],
+            None,
+            Some(&test_obo()),
+        );
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(doc["mcp"]["federations"].as_sequence().unwrap().len(), 1);
+        assert!(doc.get("plugins").is_none());
+        assert!(doc.get("license").is_none());
+        // Verified but unwired: same drop.
+        let yaml = render_config(&[e, entry("state", &["state.*"])], Some(&test_tier()), None);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(doc["mcp"]["federations"].as_sequence().unwrap().len(), 1);
+        assert!(doc.get("plugins").is_none());
     }
 
     /// The platform `control` entry NEVER federates (identity laundering);

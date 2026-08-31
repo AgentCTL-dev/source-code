@@ -17,6 +17,13 @@ path = "src/main.rs"
 name = "mock-aauth-mcp"
 path = "src/bin/mock_aauth_mcp.rs"
 
+# The credential-injection witness (P5-3 e2e): a plain-HTTP MCP server whose
+# one tool echoes the Authorization header the call arrived with — proving
+# which credential the tenant gateway injected upstream.
+[[bin]]
+name = "mock-echo-mcp"
+path = "src/bin/mock_echo_mcp.rs"
+
 [dependencies]
 axum = "0.8"
 # Ed25519 verification for the AAuth fixture (same ring the rustls stack links).

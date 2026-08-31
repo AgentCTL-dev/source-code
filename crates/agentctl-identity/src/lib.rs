@@ -22,6 +22,7 @@
 
 pub mod aauth;
 pub mod config;
+pub mod exchange;
 pub mod http;
 pub mod oidc;
 pub mod principals;

@@ -101,11 +101,27 @@ async fn main() {
         None => None,
     };
 
+    // Custody sealer + the RFC 8693 exchange engine (P5-3). The sealer is
+    // shared: admin seals connection rows, the exchanger unseals at mint.
+    let sealer = Arc::new(match cfg.seal_key {
+        Some(key) => agentctl_identity::seal::Sealer::new(key),
+        None => agentctl_identity::seal::Sealer::ephemeral(),
+    });
+    let exchanger = Arc::new(agentctl_identity::exchange::Exchanger::new(
+        store.clone(),
+        sealer.clone(),
+        outbound.clone(),
+        cfg.exchange_static_ttl,
+        cfg.exchange_refresh_margin,
+    ));
+
     let state = Arc::new(AppState {
         federation: Federation::new(outbound, cfg.providers.clone()),
         store,
         admin_token: cfg.admin_token.clone(),
         aauth,
+        exchanger,
+        sealer,
     });
 
     info!(bind = %cfg.bind, providers = cfg.providers.len(), "agentctl-identity serving");

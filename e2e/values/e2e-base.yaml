@@ -71,6 +71,11 @@ control:
 # GATEWAY image boots fine — only the plugin lane is broken upstream).
 tenantMcpg:
   enabled: true
+  # P5-3 OBO lane: the symbol-verified credential-exchange plugin (mcpg's
+  # catalog-wide rebuild, single-entity — the #664 registration bug cannot
+  # bite it). BUSL: the license gate passes on non_production_use in e2e.
+  exchangePlugin: "ghcr.io/mcpg-dev/plugins/credential-oauth-token-exchange@sha256:b6b6563b750967afcd68ca857161f27e8c1869155f3f4c4690c39214869e77a8"
+  nonProductionLicense: true
 
 # Identity plane (P1): the identity service (federated OIDC + principal
 # minting) with durable custody in the bundled Postgres. The api-token Secret

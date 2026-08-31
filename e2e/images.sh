@@ -95,6 +95,12 @@ publish "mock-agent:$TAG"
 build "mock-aauth-mcp:$TAG" "$REPO_ROOT/deploy/examples/mock-aauth-mcp.Dockerfile" "$REPO_ROOT"
 publish "mock-aauth-mcp:$TAG"
 
+# ---- mock-echo-mcp:dev -----------------------------------------------------
+# The credential-injection witness (P5-3): echoes the Authorization header a
+# tools/call arrived with. Same crate, third binary.
+build "mock-echo-mcp:$TAG" "$REPO_ROOT/deploy/examples/mock-echo-mcp.Dockerfile" "$REPO_ROOT"
+publish "mock-echo-mcp:$TAG"
+
 # ---- apd:e2e (the Agent Provider — "the house", RFC 0023) ------------------
 # Built from the sibling agentprovider checkout when present (hermetic, like
 # agentd); skipped-with-warning otherwise — the aauth e2e scenario then SKIPs.

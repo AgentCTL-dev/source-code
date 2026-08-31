@@ -132,24 +132,69 @@ impl ProviderKey {
         workload: &str,
         audience: &str,
         ttl_secs: i64,
+        user: Option<&str>,
     ) -> String {
         let now = now_unix();
         let header =
             B64URL.encode(json!({ "alg": "EdDSA", "typ": "JWT", "kid": self.kid }).to_string());
-        let claims = B64URL.encode(
-            json!({
-                "iss": issuer,
-                "sub": workload,
-                "aud": audience,
-                "iat": now,
-                "exp": now + ttl_secs,
-            })
-            .to_string(),
-        );
+        let mut claims = json!({
+            "iss": issuer,
+            "sub": workload,
+            "aud": audience,
+            "iat": now,
+            "exp": now + ttl_secs,
+        });
+        // The acting user for USER-BOUND workloads (a per-user supervisor):
+        // `/v1/exchange` resolves the OBO subject from this claim. Minted by
+        // the operator channel — the workload cannot assert it for itself.
+        if let Some(u) = user {
+            claims["usr"] = json!(u);
+        }
+        let claims = B64URL.encode(claims.to_string());
         let signing_input = format!("{header}.{claims}");
         let sig = self.pair.sign(signing_input.as_bytes());
         format!("{signing_input}.{}", B64URL.encode(sig.as_ref()))
     }
+}
+
+/// Verify an EdDSA JWT WE minted (agent or gateway token) against the
+/// provider's own public key: signature, `iss` match, unexpired. Returns the
+/// claims. This is the self-authentication path of `/v1/exchange` — the
+/// subject token is our own signed word, so no separate caller credential is
+/// needed.
+pub fn verify_identity_jwt(
+    token: &str,
+    provider_public_x_b64url: &str,
+    issuer: &str,
+) -> Result<Value, String> {
+    let (signed, sig) = token.rsplit_once('.').ok_or("token: no signature")?;
+    let (_, payload) = signed.split_once('.').ok_or("token: no payload")?;
+    let key = B64URL
+        .decode(provider_public_x_b64url)
+        .map_err(|_| "provider key is not base64url".to_string())?;
+    let sig = B64URL
+        .decode(sig)
+        .map_err(|_| "token signature is not base64url".to_string())?;
+    UnparsedPublicKey::new(&ED25519, &key)
+        .verify(signed.as_bytes(), &sig)
+        .map_err(|_| "token does not verify against the provider key".to_string())?;
+    let claims: Value = serde_json::from_slice(
+        &B64URL
+            .decode(payload)
+            .map_err(|_| "token payload is not base64url".to_string())?,
+    )
+    .map_err(|_| "token payload is not JSON".to_string())?;
+    if claims.get("iss").and_then(Value::as_str) != Some(issuer) {
+        return Err("token iss mismatch".into());
+    }
+    let exp = claims
+        .get("exp")
+        .and_then(Value::as_i64)
+        .ok_or("token has no exp")?;
+    if exp <= now_unix() {
+        return Err("token is expired".into());
+    }
+    Ok(claims)
 }
 
 /// The verified caller of a signed agent request.

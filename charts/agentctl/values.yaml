@@ -567,6 +567,16 @@ tenantMcpg:
   enabled: false
   # The blessed mcpg release — digest-pinned (same pin as the state service).
   image: "ghcr.io/mcpg-dev/mcpg:0.1.0-beta.24@sha256:64fdc3c1d3abbfceaaddddb3caf84587332964cfc64a0836048cc93e5dedabc0"
+  # P5-3 OBO lane: mcpg's credential-oauth-token-exchange plugin (digest-pinned
+  # OCI ref). Registry entries with `auth.mode: obo` federate with per-user
+  # credential injection redeemed at identity /v1/exchange; empty = those
+  # entries are dropped (fail closed) and the proxy plane serves the rest.
+  exchangePlugin: ""
+  # The exchange plugin is BUSL-licensed: mcpg's license gate refuses it on
+  # the community tier unless the config declares non-production use (dev/e2e)
+  # or carries an entitling license token (production — a commercial mcpg
+  # arrangement outside this chart).
+  nonProductionLicense: false
 
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release

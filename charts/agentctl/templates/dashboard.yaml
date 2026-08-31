@@ -1075,6 +1075,118 @@ data:
               "refId": "A"
             }
           ]
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "OBO exchanges by outcome (ops/s)",
+          "description": "identity /v1/exchange mints: cache-served vs fresh mint vs proactive refresh vs error (P5-3).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 45
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "lineWidth": 1
+              },
+              "unit": "ops",
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (outcome) (rate(agentctl_identity_exchanges_total[5m]))",
+              "legendFormat": "__auto",
+              "range": true,
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Exchange mint latency (avg s)",
+          "description": "Average time to mint a non-cached upstream token (custody unseal + provider redeem).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 45
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "lineWidth": 1
+              },
+              "unit": "s",
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "rate(agentctl_identity_exchange_mint_seconds_sum[5m]) / rate(agentctl_identity_exchange_mint_seconds_count[5m])",
+              "legendFormat": "avg mint",
+              "range": true,
+              "refId": "A"
+            }
+          ]
         }
       ],
       "refresh": "30s",

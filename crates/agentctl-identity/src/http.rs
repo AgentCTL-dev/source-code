@@ -39,6 +39,10 @@ pub struct AppState {
     /// The AAuth Agent Provider role (RFC 0028 §5). `None` ⇒ those surfaces
     /// answer 404 (the role is opt-in via `IDENTITY_AAUTH_ISSUER`).
     pub aauth: Option<Arc<AauthState>>,
+    /// The RFC 8693 exchange engine (P5-3) + the sealer the connection admin
+    /// surface seals custody rows with (same instance the exchanger unseals).
+    pub exchanger: Arc<crate::exchange::Exchanger>,
+    pub sealer: Arc<crate::seal::Sealer>,
 }
 
 /// Provider-role state: the signing key, the issuer URL agents validate
@@ -58,6 +62,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/introspect", post(introspect))
         .route("/v1/principals/mint", post(principal_mint))
         .route("/v1/principals/verify", post(principal_verify))
+        .route("/v1/exchange", post(exchange))
+        .route("/metrics", get(metrics))
+        .route(
+            "/admin/connections",
+            post(admin_connections_post).get(admin_connections_get),
+        )
+        .route("/admin/connections/delete", post(admin_connections_delete))
         // -- AAuth Agent Provider role (RFC 0028 §5; agentd 1.3.1 wire) -----
         // Agent-facing paths are hard-coded root-relative in the client (no
         // discovery); the well-known + JWKS are the resource servers' trust
@@ -463,10 +474,389 @@ async fn admin_mcpg_token(
         .and_then(Value::as_i64)
         .unwrap_or(24 * 3600)
         .clamp(60, 30 * 24 * 3600);
+    let user = body
+        .get("user")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty());
     let token = aauth
         .key
-        .mint_gateway_token(&aauth.issuer, workload, audience, ttl);
+        .mint_gateway_token(&aauth.issuer, workload, audience, ttl, user);
     Ok(Json(json!({ "token": token, "expires_in": ttl })))
+}
+
+// -- RFC 8693 exchange + connection custody (P5-3) ---------------------------
+
+const GRANT_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+const TT_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
+const TT_JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
+const TT_PRINCIPAL: &str = "urn:agentctl:params:oauth:token-type:principal";
+const TT_USER: &str = "urn:agentctl:params:oauth:token-type:user";
+
+/// RFC 6749-shaped token-endpoint error. mcpg's issuer plugin surfaces ONLY
+/// the `error` code (description is deliberately dropped from its logs), so
+/// the code itself carries the diagnosis.
+fn oauth_err(status: StatusCode, code: &str, desc: impl std::fmt::Display) -> Response {
+    (
+        status,
+        Json(json!({ "error": code, "error_description": desc.to_string() })),
+    )
+        .into_response()
+}
+
+/// Resolve `aud` (`mcpg:<ns>`) → org: managed namespaces are `org-<org>`.
+fn org_from_audience(aud: &str) -> Option<String> {
+    let ns = aud.strip_prefix("mcpg:")?;
+    Some(ns.strip_prefix("org-").unwrap_or(ns).to_string())
+}
+
+/// `POST /v1/exchange` — RFC 8693 token exchange (ADR-0005c): the OBO mint
+/// behind mcpg's `oauth_impersonation` federation auth and any control-plane
+/// caller. Form-encoded, per the RFC and mcpg's issuer wire.
+///
+/// The acting user is resolved from the SUBJECT token, by type:
+/// - `access_token`/`jwt`: a JWT WE minted (gateway/agent token) — verified
+///   against the provider key; the acting user is its `usr` claim (stamped by
+///   the operator channel for user-bound workloads; a token without `usr`
+///   carries no user authority) and the org comes from its `aud`.
+/// - `…:principal`: a per-(user, agent) A2A principal bearer — custody lookup
+///   by hash; user = the principal subject, org = the principal org.
+/// - `…:user`: the bare user id — ADMIN BEARER ONLY (control-plane callers
+///   that authenticated their user upstream), org from the `org` field.
+///
+/// `audience` names the connection (provider) in custody. Every path is
+/// self-authenticating or admin-gated — there is no anonymous mint.
+async fn exchange(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> Response {
+    if form.get("grant_type").map(String::as_str) != Some(GRANT_TOKEN_EXCHANGE) {
+        return oauth_err(
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+            format!("grant_type must be {GRANT_TOKEN_EXCHANGE}"),
+        );
+    }
+    let Some(subject_token) = form.get("subject_token").filter(|t| !t.is_empty()) else {
+        return oauth_err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "subject_token is required",
+        );
+    };
+    let subject_type = form
+        .get("subject_token_type")
+        .map(String::as_str)
+        .unwrap_or(TT_ACCESS_TOKEN);
+    // audience names the custody connection; `resource` is accepted as an
+    // alias (mcpg's credential_config may set either).
+    let Some(provider) = form
+        .get("audience")
+        .or_else(|| form.get("resource"))
+        .filter(|a| !a.is_empty())
+    else {
+        return oauth_err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "audience is required",
+        );
+    };
+    let scope = form
+        .get("scope")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty());
+
+    let (org, user) = match subject_type {
+        TT_ACCESS_TOKEN | TT_JWT => {
+            let Some(aauth) = &state.aauth else {
+                return oauth_err(
+                    StatusCode::FORBIDDEN,
+                    "access_denied",
+                    "token subjects need the AAuth provider role (IDENTITY_AAUTH_ISSUER)",
+                );
+            };
+            let claims = match crate::aauth::verify_identity_jwt(
+                subject_token,
+                &aauth.key.public_x_b64url(),
+                &aauth.issuer,
+            ) {
+                Ok(c) => c,
+                Err(e) => return oauth_err(StatusCode::FORBIDDEN, "access_denied", e),
+            };
+            let Some(user) = claims.get("usr").and_then(Value::as_str) else {
+                return oauth_err(
+                    StatusCode::FORBIDDEN,
+                    "access_denied",
+                    "subject token names no acting user (usr claim) — minted for a non-user-bound workload",
+                );
+            };
+            let org = claims
+                .get("aud")
+                .and_then(Value::as_str)
+                .and_then(org_from_audience)
+                .or_else(|| form.get("org").cloned());
+            let Some(org) = org else {
+                return oauth_err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "cannot resolve org: subject aud is not mcpg:<ns> and no org field given",
+                );
+            };
+            (org, user.to_string())
+        }
+        TT_PRINCIPAL => {
+            let hash = crate::store::bearer_hash(subject_token);
+            match state.store.find_principal_by_hash(&hash).await {
+                Ok(p) => (p.org, p.subject),
+                Err(_) => {
+                    return oauth_err(
+                        StatusCode::FORBIDDEN,
+                        "access_denied",
+                        "unknown principal bearer",
+                    )
+                }
+            }
+        }
+        TT_USER => {
+            if let Err(e) = require_admin(&state, &headers) {
+                return e.into_response();
+            }
+            let Some(org) = form.get("org").filter(|o| !o.is_empty()) else {
+                return oauth_err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "org is required with a user subject",
+                );
+            };
+            (org.clone(), subject_token.clone())
+        }
+        other => {
+            return oauth_err(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("unsupported subject_token_type {other:?}"),
+            )
+        }
+    };
+
+    match state.exchanger.exchange(&org, &user, provider, scope).await {
+        Ok(minted) => {
+            let expires_in = (minted.expires_unix - state.exchanger.now()).max(1);
+            let body = json!({
+                "access_token": minted.access_token,
+                "issued_token_type": TT_ACCESS_TOKEN,
+                "token_type": minted.token_type,
+                "expires_in": expires_in,
+                "scope": minted.scope,
+            });
+            (
+                [("x-agentctl-exchange", minted.outcome.as_str())],
+                Json(body),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            use crate::exchange::ExchangeError as E;
+            match e {
+                E::NoConnection { .. } => oauth_err(StatusCode::BAD_REQUEST, "invalid_target", e),
+                E::ProviderRefused(_) => oauth_err(StatusCode::BAD_REQUEST, "invalid_grant", e),
+                E::ProviderUnreachable(_) => oauth_err(StatusCode::BAD_GATEWAY, "server_error", e),
+                E::Custody(_) => {
+                    tracing::error!(error = %e, "exchange custody failure");
+                    oauth_err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        "custody failure",
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Prometheus exposition: the exchange engine's counters (P7-2's exchange
+/// panel). Text format, hand-rolled like the other control-plane surfaces.
+async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+    use std::sync::atomic::Ordering;
+    let m = &state.exchanger.metrics;
+    let mut out = String::new();
+    out.push_str(
+        "# HELP agentctl_identity_exchanges_total /v1/exchange mints by outcome.\n# TYPE agentctl_identity_exchanges_total counter\n",
+    );
+    for (outcome, v) in [
+        ("cache", m.cache_hits.load(Ordering::Relaxed)),
+        ("mint", m.mints.load(Ordering::Relaxed)),
+        ("refresh", m.refreshes.load(Ordering::Relaxed)),
+        ("error", m.errors.load(Ordering::Relaxed)),
+    ] {
+        out.push_str(&format!(
+            "agentctl_identity_exchanges_total{{outcome=\"{outcome}\"}} {v}\n"
+        ));
+    }
+    out.push_str(
+        "# HELP agentctl_identity_exchange_mint_seconds_sum Time spent minting (non-cache) upstream tokens.\n# TYPE agentctl_identity_exchange_mint_seconds_sum counter\n",
+    );
+    out.push_str(&format!(
+        "agentctl_identity_exchange_mint_seconds_sum {}\n",
+        m.mint_micros_sum.load(Ordering::Relaxed) as f64 / 1e6
+    ));
+    out.push_str(
+        "# HELP agentctl_identity_exchange_mint_seconds_count Mint (non-cache) exchange calls.\n# TYPE agentctl_identity_exchange_mint_seconds_count counter\n",
+    );
+    out.push_str(&format!(
+        "agentctl_identity_exchange_mint_seconds_count {}\n",
+        m.mint_count.load(Ordering::Relaxed)
+    ));
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        out,
+    )
+        .into_response()
+}
+
+/// `POST /admin/connections` — upsert a custody connection (P5-4's consent
+/// flow lands on top of this same row; admin seeding is the P5-3 primitive).
+/// `{org, user, provider, kind, secret, token_endpoint?, client_id?,
+/// client_secret?, scope?}`. Secrets are sealed HERE — plaintext never
+/// reaches the store, and no read surface returns it.
+async fn admin_connections_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    let field = |k: &str| -> Result<String, ApiError> {
+        body.get(k)
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("{k} is required")))
+    };
+    let (org, user, provider) = (field("org")?, field("user")?, field("provider")?);
+    let kind = body
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("static")
+        .to_string();
+    if kind != "static" && kind != "oauth_refresh" {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "kind must be static or oauth_refresh",
+        ));
+    }
+    let secret = field("secret")?;
+    let token_endpoint = body
+        .get("token_endpoint")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if kind == "oauth_refresh" && token_endpoint.is_none() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "oauth_refresh needs token_endpoint",
+        ));
+    }
+    let sealed_secret = state
+        .sealer
+        .seal(
+            &crate::exchange::secret_aad(&org, &user, &provider),
+            secret.as_bytes(),
+        )
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let sealed_client_secret = match body.get("client_secret").and_then(Value::as_str) {
+        Some(cs) if !cs.is_empty() => Some(
+            state
+                .sealer
+                .seal(
+                    &crate::exchange::client_secret_aad(&org, &user, &provider),
+                    cs.as_bytes(),
+                )
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        ),
+        _ => None,
+    };
+    let now = now_unix();
+    state
+        .store
+        .put_connection(crate::store::ConnectionRecord {
+            org: org.clone(),
+            user: user.clone(),
+            provider: provider.clone(),
+            kind,
+            sealed_secret,
+            token_endpoint,
+            client_id: body
+                .get("client_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            sealed_client_secret,
+            scope: body
+                .get("scope")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            created_unix: now,
+            updated_unix: now,
+        })
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // A rotation must take effect NOW, not at cache expiry.
+    state.exchanger.invalidate(&org, &user, &provider);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `GET /admin/connections?org=&user=` — list custody rows, SECRET-FREE.
+async fn admin_connections_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    let Some(org) = q.get("org").filter(|o| !o.is_empty()) else {
+        return Err(err(StatusCode::BAD_REQUEST, "org is required"));
+    };
+    let rows = state
+        .store
+        .list_connections(org, q.get("user").map(String::as_str))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .map(|c| {
+            json!({
+                "org": c.org, "user": c.user, "provider": c.provider, "kind": c.kind,
+                "token_endpoint": c.token_endpoint, "client_id": c.client_id,
+                "scope": c.scope, "created_unix": c.created_unix, "updated_unix": c.updated_unix,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "connections": rows })))
+}
+
+/// `POST /admin/connections/delete {org, user, provider}` — revocation:
+/// custody row gone + cache dropped ⇒ all downstream minting stops.
+async fn admin_connections_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&state, &headers)?;
+    let field = |k: &str| -> Result<String, ApiError> {
+        body.get(k)
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("{k} is required")))
+    };
+    let (org, user, provider) = (field("org")?, field("user")?, field("provider")?);
+    let deleted = state
+        .store
+        .delete_connection(&org, &user, &provider)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.exchanger.invalidate(&org, &user, &provider);
+    Ok(Json(json!({ "deleted": deleted })))
 }
 
 // -- AAuth admin (operator channel) -----------------------------------------
@@ -569,6 +959,8 @@ mod tests {
     use tower::ServiceExt as _;
 
     fn state(admin: Option<&str>) -> Arc<AppState> {
+        let store: Arc<MemoryStore> = Arc::new(MemoryStore::default());
+        let sealer = Arc::new(crate::seal::Sealer::new([9u8; 32]));
         Arc::new(AppState {
             federation: Federation::new(
                 outbound_client(),
@@ -582,14 +974,296 @@ mod tests {
                     groups_claim: "groups".into(),
                 }],
             ),
-            store: Arc::new(MemoryStore::default()),
+            store: store.clone(),
             admin_token: admin.map(str::to_string),
             aauth: Some(Arc::new(AauthState {
                 key: crate::aauth::ProviderKey::from_seed(&[3u8; 32]).unwrap(),
                 issuer: "http://identity.test".into(),
                 token_ttl: 300,
             })),
+            exchanger: Arc::new(crate::exchange::Exchanger::new(
+                store,
+                sealer.clone(),
+                crate::oidc::outbound_client(),
+                300,
+                60,
+            )),
+            sealer,
         })
+    }
+
+    /// Form-encoded POST (the RFC 8693 wire) with optional bearer.
+    async fn call_form(
+        app: Router,
+        path: &str,
+        bearer: Option<&str>,
+        form: &[(&str, &str)],
+    ) -> (StatusCode, Option<String>, Value) {
+        let body: String = form
+            .iter()
+            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/x-www-form-urlencoded");
+        if let Some(b) = bearer {
+            req = req.header("authorization", format!("Bearer {b}"));
+        }
+        let resp = app
+            .oneshot(req.body(axum::body::Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let outcome = resp
+            .headers()
+            .get("x-agentctl-exchange")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            outcome,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Minimal percent-encoding for test form bodies (covers ':' '/' '+').
+    fn urlencode(v: &str) -> String {
+        let mut out = String::new();
+        for b in v.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    const GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+
+    /// Seed a static custody connection through the ADMIN surface (the same
+    /// sealing path production uses), then exchange with each subject type.
+    #[tokio::test]
+    async fn exchange_full_ladder_over_admin_seeded_connection() {
+        let st = state(Some("adm"));
+        // Seed: acme/okta:andrii ↔ zendesk.
+        let (code, _) = call(
+            router(st.clone()),
+            "POST",
+            "/admin/connections",
+            Some("adm"),
+            json!({"org": "acme", "user": "okta:andrii", "provider": "zendesk", "secret": "sk-live-fake"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+
+        // Leg 1: subject = OUR gateway JWT with usr claim, org from aud.
+        let aauth = st.aauth.as_ref().unwrap();
+        let jwt = aauth.key.mint_gateway_token(
+            &aauth.issuer,
+            "org-acme/sup-andrii",
+            "mcpg:org-acme",
+            300,
+            Some("okta:andrii"),
+        );
+        let (code, outcome, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            None,
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", &jwt),
+                ("audience", "zendesk"),
+                ("client_id", "mcpg-tenant"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(outcome.as_deref(), Some("mint"));
+        assert_eq!(body["access_token"], "sk-live-fake");
+        assert_eq!(body["token_type"], "Bearer");
+        assert!(body["expires_in"].as_i64().unwrap() > 0);
+
+        // Same subject again: served from cache.
+        let (_, outcome, _) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            None,
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", &jwt),
+                ("audience", "zendesk"),
+            ],
+        )
+        .await;
+        assert_eq!(outcome.as_deref(), Some("cache"));
+
+        // Leg 1 refusal: a token WITHOUT usr carries no user authority.
+        let no_usr = aauth.key.mint_gateway_token(
+            &aauth.issuer,
+            "org-acme/some-agent",
+            "mcpg:org-acme",
+            300,
+            None,
+        );
+        let (code, _, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            None,
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", &no_usr),
+                ("audience", "zendesk"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "access_denied");
+
+        // Leg 2: principal bearer resolves (user, org) from custody.
+        st.store
+            .put_principal(crate::store::PrincipalRecord {
+                org: "acme".into(),
+                namespace: "org-acme".into(),
+                agent: "sup-andrii".into(),
+                subject: "okta:andrii".into(),
+                bearer_hash: crate::store::bearer_hash("principal-bearer-1"),
+                created_unix: 0,
+            })
+            .await
+            .unwrap();
+        let (code, _, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            None,
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", "principal-bearer-1"),
+                (
+                    "subject_token_type",
+                    "urn:agentctl:params:oauth:token-type:principal",
+                ),
+                ("audience", "zendesk"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["access_token"], "sk-live-fake");
+
+        // Leg 3: bare user subject is ADMIN ONLY.
+        let leg3 = [
+            ("grant_type", GRANT),
+            ("subject_token", "okta:andrii"),
+            (
+                "subject_token_type",
+                "urn:agentctl:params:oauth:token-type:user",
+            ),
+            ("audience", "zendesk"),
+            ("org", "acme"),
+        ];
+        let (code, _, _) = call_form(router(st.clone()), "/v1/exchange", None, &leg3).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        let (code, _, body) =
+            call_form(router(st.clone()), "/v1/exchange", Some("adm"), &leg3).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+
+        // Unknown provider → invalid_target (the code mcpg surfaces).
+        let (code, _, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            None,
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", &jwt),
+                ("audience", "github"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_target");
+
+        // Wrong grant_type refused.
+        let (code, _, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            None,
+            &[
+                ("grant_type", "client_credentials"),
+                ("subject_token", &jwt),
+                ("audience", "zendesk"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "unsupported_grant_type");
+
+        // Deletion is revocation: row + cache go together.
+        let (code, _) = call(
+            router(st.clone()),
+            "POST",
+            "/admin/connections/delete",
+            Some("adm"),
+            json!({"org": "acme", "user": "okta:andrii", "provider": "zendesk"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        let (code, _, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            None,
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", &jwt),
+                ("audience", "zendesk"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "invalid_target");
+    }
+
+    #[tokio::test]
+    async fn connections_admin_list_is_secret_free_and_gated() {
+        let st = state(Some("adm"));
+        let (code, _) = call(
+            router(st.clone()),
+            "POST",
+            "/admin/connections",
+            Some("adm"),
+            json!({"org": "acme", "user": "u1", "provider": "gh", "kind": "oauth_refresh",
+                   "secret": "rt-secret", "token_endpoint": "https://gh.test/token",
+                   "client_id": "cid", "client_secret": "cs-secret"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        let (code, body) = call(
+            router(st.clone()),
+            "GET",
+            "/admin/connections?org=acme",
+            Some("adm"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        let listed = body["connections"].to_string();
+        assert!(listed.contains("\"gh\""));
+        assert!(!listed.contains("rt-secret"));
+        assert!(!listed.contains("cs-secret"));
+        assert!(!listed.contains("sealed"));
+        // Unauthenticated list refused.
+        let (code, _) = call(
+            router(st.clone()),
+            "GET",
+            "/admin/connections?org=acme",
+            None,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
     }
 
     async fn call(

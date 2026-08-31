@@ -601,6 +601,14 @@
         },
         "image": {
           "type": "string"
+        },
+        "exchangePlugin": {
+          "type": "string",
+          "description": "Digest-pinned OCI ref of mcpg's credential-oauth-token-exchange plugin (P5-3 OBO lane); empty disables per-user injection (obo entries drop, fail closed)."
+        },
+        "nonProductionLicense": {
+          "type": "boolean",
+          "description": "Declare license.non_production_use in tenant gateway configs so the BUSL exchange plugin passes mcpg's community license gate (dev/e2e only; production needs an entitling license token)."
         }
       }
     }
