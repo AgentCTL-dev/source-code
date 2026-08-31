@@ -1,5 +1,12 @@
 # Security reference
 
+> ⚠️ **v1-era document** (through v1.3.0). The platform is now **v2** — see the
+> canonical **[architecture](v2/ARCHITECTURE.md)** and the exhaustive
+> **[reference](reference.md)** for the current components, CRDs
+> (`agentctl.dev/v1alpha2`), and behavior. The concepts here still apply; some
+> specific manifests and field names are v1.
+
+
 How agentctl authenticates every caller, isolates tenants, hardens workloads, and
 manages its certificate fabric — for reviewers and operators hardening a
 production install. For the component overview see [architecture.md](architecture.md);

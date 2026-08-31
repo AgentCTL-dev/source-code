@@ -1,5 +1,12 @@
 # CRD & API design notes
 
+> ⚠️ **v1-era document** (through v1.3.0). The platform is now **v2** — see the
+> canonical **[architecture](v2/ARCHITECTURE.md)** and the exhaustive
+> **[reference](reference.md)** for the current components, CRDs
+> (`agentctl.dev/v1alpha2`), and behavior. The concepts here still apply; some
+> specific manifests and field names are v1.
+
+
 A running design review of the agentctl Custom Resources (`agentctl.dev/v1alpha1`:
 `Agent`, `AgentFleet`, `ModelPool`). It records what has been
 applied and the recommendations still open, so the API can be tightened while it

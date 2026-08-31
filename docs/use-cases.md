@@ -1,5 +1,12 @@
 # Use cases
 
+> ⚠️ **v1-era document** (through v1.3.0). The platform is now **v2** — see the
+> canonical **[architecture](v2/ARCHITECTURE.md)** and the exhaustive
+> **[reference](reference.md)** for the current components, CRDs
+> (`agentctl.dev/v1alpha2`), and behavior. The concepts here still apply; some
+> specific manifests and field names are v1.
+
+
 agentctl turns fleets of conformant agents into declarative Kubernetes resources. These worked examples show how a solo engineer, a startup, a small business, and platform, data, and ops teams put it to work — each with the actual manifests to `kubectl apply`.
 
 Every example runs the reference agent **agentd** (`ghcr.io/agentd-dev/agentd:1.0.0`), but agentctl depends on the [Agent Control Contract](../contract/README.md), not on any one binary — swap in any conformant agent image and the resources are unchanged. The manifests are complete but illustrative: the control plane must already be installed (see [the chart README](../charts/agentctl/README.md)), and provider endpoints, Secrets, and MCP server URLs are placeholders to replace with your own.
