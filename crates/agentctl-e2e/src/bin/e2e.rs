@@ -655,7 +655,11 @@ spec:
     );
     entry.metadata.namespace = Some(ns.clone());
     kh::api::<v2::MCPService>(&ctx.client, &ns)
-        .create(&Default::default(), &entry)
+        .patch(
+            entry.metadata.name.as_deref().unwrap_or_default(),
+            &PatchParams::apply("e2e").force(),
+            &Patch::Apply(&entry),
+        )
         .await
         .context("register obo MCPService")?;
     apply_org("E2E Connections v2").await?;
@@ -689,6 +693,16 @@ spec:
     let pf_id = shell::PortForward::service(&ctx.cfg.system_ns, "agentctl-identity", 80, 18117)?;
     let idb = pf_id.base_url();
     let user = "mock:connie";
+
+    // Custody is durable ACROSS runs (identity PG outlives the org): reset
+    // the connection so "pre-consent" is true on reruns too.
+    ctx.http
+        .post(format!("{idb}/admin/connections/delete"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "org": org, "user": user, "provider": "zendesk" }))
+        .send()
+        .await
+        .context("reset custody")?;
 
     // BEFORE consent: the exchange refuses with the CONNECT CARD — the
     // machine-readable "connection_required" a HITL surface renders.
@@ -1013,7 +1027,11 @@ spec:
     );
     entry.metadata.namespace = Some(ns.clone());
     kh::api::<v2::MCPService>(&ctx.client, &ns)
-        .create(&Default::default(), &entry)
+        .patch(
+            entry.metadata.name.as_deref().unwrap_or_default(),
+            &PatchParams::apply("e2e").force(),
+            &Patch::Apply(&entry),
+        )
         .await
         .context("register obo MCPService")?;
     apply_org("E2E Obo v2").await?;
@@ -1396,7 +1414,11 @@ async fn tenant_mcpg(ctx: &Ctx) -> Result<Outcome> {
     );
     entry.metadata.namespace = Some(ns.clone());
     kh::api::<v2::MCPService>(&ctx.client, &ns)
-        .create(&Default::default(), &entry)
+        .patch(
+            entry.metadata.name.as_deref().unwrap_or_default(),
+            &PatchParams::apply("e2e").force(),
+            &Patch::Apply(&entry),
+        )
         .await
         .context("register workstats MCPService")?;
     // Nudge the org reconcile so the catalog re-renders now (the gateway
