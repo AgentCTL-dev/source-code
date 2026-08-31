@@ -196,6 +196,9 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("sandbox-run", "capability", sandbox_run),
         // Store classes: ephemeral/local/managed all render + run (P3-4)
         scenario!("store-classes", "capability", store_classes),
+        // Lifecycle verbs: backup/restore/reset/stop/start/migrate on a managed
+        // agent — migrate reschedules the pod with zero checkpoint loss (P3-5)
+        scenario!("lifecycle-verbs", "durability", lifecycle_verbs),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -1611,6 +1614,170 @@ async fn store_classes(ctx: &Ctx) -> Result<Outcome> {
         "--wait=false",
     ])
     .ok();
+    pass()
+}
+
+/// P3-5: the state-plane lifecycle verbs on a managed agent, through the
+/// aggregated management API (`kubectl create --raw`, front-proxy + SAR gated).
+/// A managed agent checkpoints on its loop, then:
+///   backup   → the durable snapshot is non-empty and captured;
+///   migrate  → the pod is replaced and every checkpoint key is preserved
+///              (the DoD: reschedule with zero run loss);
+///   stop     → the Deployment scales to 0 (durable state persists);
+///   reset    → the state is purged (a follow-up backup is empty);
+///   restore  → the captured snapshot is UPSERT back (backup non-empty again);
+///   start    → the agent wakes.
+/// reset/restore run while the agent is parked, so no concurrent checkpoint
+/// races the assertions.
+async fn lifecycle_verbs(ctx: &Ctx) -> Result<Outcome> {
+    let sys = &ctx.cfg.system_ns;
+    let ready = shell::kubectl(&[
+        "get",
+        "deploy",
+        "-n",
+        sys,
+        "agentctl-state",
+        "-o",
+        "jsonpath={.status.readyReplicas}",
+    ])
+    .unwrap_or_default();
+    if ready.trim().is_empty() || ready.trim() == "0" {
+        return skip(
+            "state service not Ready — P3-5 lifecycle verbs (backup/restore/migrate) need the \
+             managed state plane; unskips with state-durability.",
+        );
+    }
+
+    let ns = &ctx.cfg.ns;
+    let name = "lc-probe";
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge ticks in one line\" }}\n  expose: {{ a2a: true }}\n  store: {{ class: managed }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
+    ))?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(!first_pod(ns, &agent_label(name)).unwrap_or_default().is_empty())
+    })
+    .await
+    .context("lc-probe pod")?;
+    let pod = first_pod(ns, &agent_label(name))?;
+    kh::wait_pod_running(&ctx.client, ns, &pod, READY_TIMEOUT).await?;
+
+    let base = format!("/apis/management.agentctl.dev/v1alpha1/namespaces/{ns}/agents/{name}");
+    let backup_path = format!("{base}/backup");
+    // A verb POST via the aggregation layer, returning the Status JSON.
+    let raw = |path: &str, body_file: &str| -> Result<Value> {
+        let out = shell::kubectl(&["create", "--raw", path, "-f", body_file])
+            .with_context(|| format!("aggregated POST {path}"))?;
+        Ok(serde_json::from_str(&out).unwrap_or(Value::Null))
+    };
+    let items_of = |v: &Value| -> usize {
+        v.pointer("/data/items")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0)
+    };
+
+    // The agent must checkpoint before there is anything to back up.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let backup_path = backup_path.clone();
+        async move {
+            let out =
+                shell::kubectl(&["create", "--raw", &backup_path, "-f", "/dev/null"]).unwrap_or_default();
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            Ok(v.pointer("/data/items")
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty()))
+        }
+    })
+    .await
+    .context("managed agent checkpoints before backup")?;
+
+    // 1) BACKUP — capture the snapshot.
+    let backup = raw(&backup_path, "/dev/null")?;
+    if backup.get("status").and_then(Value::as_str) != Some("Success") {
+        bail!("backup did not succeed: {backup}");
+    }
+    let n_backup = items_of(&backup);
+    if n_backup == 0 {
+        bail!("backup returned no checkpoint rows: {backup}");
+    }
+    let snapshot = json!({ "items": backup.pointer("/data/items").cloned().unwrap_or(json!([])) });
+
+    // 2) MIGRATE — reschedule the pod; the DoD is zero checkpoint loss.
+    let mig = raw(&format!("{base}/migrate"), "/dev/null")?;
+    if mig.get("status").and_then(Value::as_str) != Some("Success") {
+        bail!("migrate did not succeed: {mig}");
+    }
+    if mig.pointer("/data/keys_preserved").and_then(Value::as_u64).unwrap_or(0) < n_backup as u64 {
+        bail!("migrate did not preserve every checkpoint key: {mig}");
+    }
+    // migrate replaces the pod (the old one drains gracefully, so it lingers
+    // Terminating briefly — poll for the replacement rather than reading a
+    // possibly-stale items[0]).
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || {
+        let old = pod.clone();
+        async move {
+            let now = first_pod(ns, &agent_label(name)).unwrap_or_default();
+            Ok(!now.is_empty() && now != old)
+        }
+    })
+    .await
+    .context("migrate replacement pod")?;
+    let pod2 = first_pod(ns, &agent_label(name))?;
+    kh::wait_pod_running(&ctx.client, ns, &pod2, READY_TIMEOUT).await?;
+
+    // 3) STOP — the operator honours lifecycle.paused (replicas → 0).
+    let _ = raw(&format!("{base}/stop"), "/dev/null")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        let r = shell::kubectl(&[
+            "get",
+            "deploy",
+            "-n",
+            ns,
+            name,
+            "-o",
+            "jsonpath={.spec.replicas}",
+        ])
+        .unwrap_or_default();
+        Ok(r.trim() == "0")
+    })
+    .await
+    .context("stop parks the agent (replicas 0)")?;
+
+    // 4) RESET — purge the durable state (parked, so nothing re-checkpoints).
+    let _ = raw(&format!("{base}/reset"), "/dev/null")?;
+    let after_reset = raw(&backup_path, "/dev/null")?;
+    if items_of(&after_reset) != 0 {
+        bail!("reset did not clear the durable state: {after_reset}");
+    }
+
+    // 5) RESTORE — UPSERT the captured snapshot back.
+    let restore_file = std::env::temp_dir().join(format!("lc-restore-{}.json", std::process::id()));
+    std::fs::write(&restore_file, serde_json::to_vec(&snapshot)?)?;
+    let restored = raw(
+        &format!("{base}/restore"),
+        restore_file.to_str().unwrap_or("/dev/null"),
+    )?;
+    let _ = std::fs::remove_file(&restore_file);
+    if restored.get("status").and_then(Value::as_str) != Some("Success") {
+        bail!("restore did not succeed: {restored}");
+    }
+    let after_restore = raw(&backup_path, "/dev/null")?;
+    if items_of(&after_restore) < n_backup {
+        bail!(
+            "restore round-trip lost rows ({n_backup} -> {}): {after_restore}",
+            items_of(&after_restore)
+        );
+    }
+
+    // 6) START — wake the agent.
+    let _ = raw(&format!("{base}/start"), "/dev/null")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(!first_pod(ns, &agent_label(name)).unwrap_or_default().is_empty())
+    })
+    .await
+    .context("start wakes the parked agent")?;
+
+    shell::kubectl(&["delete", "agent", "-n", ns, name, "--wait=false"]).ok();
     pass()
 }
 

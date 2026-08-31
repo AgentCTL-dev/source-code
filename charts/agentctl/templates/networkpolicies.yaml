@@ -197,6 +197,13 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: agent
+        {{- if .Values.apiserver.enabled }}
+        # The aggregated apiserver reaches the admin tools for the P3-5
+        # lifecycle verbs (backup/restore/reset/migrate) — same namespace.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentctl-apiserver
+        {{- end }}
       ports:
         - { protocol: TCP, port: 8787 }
 {{- end }}

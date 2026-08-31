@@ -31,7 +31,8 @@ use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SubjectAccessReview, SubjectAccessReviewSpec,
 };
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
-use kube::api::{ListParams, PostParams};
+use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::{Api, Client};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -55,6 +56,10 @@ struct AppState {
     /// The metering store (P7-4) — read-only aggregation for the export.
     /// `None` when DATABASE_URL is unset (export answers 503).
     metering: Option<deadpool_postgres::Pool>,
+    /// The managed state service base URL (P3-5), e.g.
+    /// `https://agentctl-state.<ns>.svc:8787`. `None` when the state plane is
+    /// off — the state-plane lifecycle verbs (backup/restore/reset) then 503.
+    state_url: Option<String>,
 }
 
 /// A read-only pool over the shared Postgres for the metering export.
@@ -191,6 +196,9 @@ async fn main() {
                 }
                 pool
             },
+            state_url: std::env::var("AGENTCTL_STATE_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
         .fallback(not_found);
 
@@ -307,11 +315,20 @@ async fn handle_verb(
     State(state): State<AppState>,
     Path((ns, name, verb)): Path<(String, String, String)>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> (StatusCode, Json<Value>) {
-    if !matches!(
+    // Two verb families on an Agent: the RUNTIME verbs forward to the agent
+    // pod's admin surface; the STATE-plane lifecycle verbs (P3-5) act on the
+    // durable checkpoint / the CR, never the pod.
+    let runtime = matches!(
         verb.as_str(),
         "drain" | "lame-duck" | "cancel" | "pause" | "resume"
-    ) {
+    );
+    let lifecycle = matches!(
+        verb.as_str(),
+        "backup" | "restore" | "reset" | "stop" | "start" | "migrate"
+    );
+    if !runtime && !lifecycle {
         return status(
             StatusCode::NOT_FOUND,
             "Failure",
@@ -342,6 +359,9 @@ async fn handle_verb(
         Ok(true) => {
             state.metrics.inc_authorized();
             tracing::info!(%user, %ns, agent = %name, %verb, "authorized management verb");
+            if lifecycle {
+                return handle_lifecycle_verb(&state, &ns, &name, &verb, &user, &body).await;
+            }
             match call_agent_admin(&state.client, &state.na, &ns, &name, &verb).await {
                 Ok(result) => {
                     state.metrics.inc_forwarded();
@@ -873,6 +893,389 @@ async fn call_fleet_admin(
         }
     }
     Ok((ok, total, detail))
+}
+
+// --- P3-5 state-plane lifecycle verbs --------------------------------------
+// backup/restore/reset act on the durable checkpoint through the state
+// service's admin tools; stop/start flip the CR's `lifecycle.paused` (the
+// operator parks the managed pod, the central-Postgres state persists);
+// migrate replaces the pod and PROVES the checkpoint survived (zero run loss).
+
+/// The subject prefix every managed agent's checkpoint keys sit under — the
+/// operator stamps `x-mcpg-subject-id: orgs/<ns>/<name>` on the store binding,
+/// so its keys are `orgs/<ns>/<name>/…` and this is the admin backup unit.
+fn agent_prefix(ns: &str, name: &str) -> String {
+    format!("orgs/{ns}/{name}/")
+}
+
+#[tracing::instrument(skip_all, fields(ns = %ns, agent = %name, verb = %verb))]
+async fn handle_lifecycle_verb(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+    verb: &str,
+    user: &str,
+    body: &axum::body::Bytes,
+) -> (StatusCode, Json<Value>) {
+    match lifecycle_verb(state, ns, name, verb, body).await {
+        Ok((msg, data)) => {
+            state.metrics.inc_forwarded();
+            tracing::info!(%ns, agent = %name, %verb, %user, "lifecycle verb applied");
+            status_data(
+                StatusCode::OK,
+                "Success",
+                &format!("{verb} {ns}/{name} by {user}: {msg}"),
+                data,
+            )
+        }
+        Err(e) => {
+            state.metrics.inc_error();
+            tracing::error!(error = %e, %verb, "lifecycle verb failed");
+            let code = if e.starts_with("state plane is off") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else if let Some(rest) = e.strip_prefix("precondition: ") {
+                return status(StatusCode::CONFLICT, "Failure", rest);
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            status(code, "Failure", &e)
+        }
+    }
+}
+
+/// The state-plane verb body: returns `(human message, optional data blob)`.
+async fn lifecycle_verb(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+    verb: &str,
+    body: &axum::body::Bytes,
+) -> Result<(String, Value), String> {
+    match verb {
+        "stop" => {
+            set_paused(&state.client, ns, name, true).await?;
+            Ok((
+                "paused — pod parked, managed state preserved".into(),
+                Value::Null,
+            ))
+        }
+        "start" => {
+            set_paused(&state.client, ns, name, false).await?;
+            Ok(("resumed".into(), Value::Null))
+        }
+        "backup" => {
+            let url = state_url(state)?;
+            let sc = state_admin_call(
+                &state.na,
+                url,
+                "state.admin.snapshot",
+                json!({ "prefix": agent_prefix(ns, name) }),
+            )
+            .await?;
+            let items = sc.get("items").cloned().unwrap_or_else(|| json!([]));
+            let n = items.as_array().map(Vec::len).unwrap_or(0);
+            Ok((format!("{n} checkpoint rows"), json!({ "items": items })))
+        }
+        "restore" => {
+            let url = state_url(state)?;
+            let items = serde_json::from_slice::<Value>(body)
+                .ok()
+                .and_then(|v| v.get("items").cloned())
+                .ok_or("restore needs a JSON body {\"items\": [...]} from `agentctl backup`")?;
+            let sc = state_admin_call(
+                &state.na,
+                url,
+                "state.admin.restore",
+                json!({ "items": items }),
+            )
+            .await?;
+            let n = sc.get("restored").and_then(Value::as_i64).unwrap_or(0);
+            Ok((format!("{n} rows restored"), Value::Null))
+        }
+        "reset" => {
+            let url = state_url(state)?;
+            let sc = state_admin_call(
+                &state.na,
+                url,
+                "state.admin.purge",
+                json!({ "prefix": agent_prefix(ns, name) }),
+            )
+            .await?;
+            let n = sc.get("rows_affected").and_then(Value::as_i64).unwrap_or(0);
+            Ok((format!("{n} rows purged (fresh start)"), Value::Null))
+        }
+        "migrate" => migrate_agent(state, ns, name).await,
+        other => Err(format!("unmapped lifecycle verb: {other}")),
+    }
+}
+
+fn state_url(state: &AppState) -> Result<&str, String> {
+    state
+        .state_url
+        .as_deref()
+        .ok_or_else(|| "state plane is off (AGENTCTL_STATE_URL unset)".to_string())
+}
+
+/// Patch `spec.lifecycle.paused` on the Agent CR (dynamic — no typed dep). The
+/// operator honours it: a paused daemon renders `replicas: 0` (P7-6).
+async fn set_paused(client: &Client, ns: &str, name: &str, paused: bool) -> Result<(), String> {
+    let gvk = GroupVersionKind::gvk("agentctl.dev", "v1alpha2", "Agent");
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    api.patch(
+        name,
+        &PatchParams::default(),
+        &Patch::Merge(json!({ "spec": { "lifecycle": { "paused": paused } } })),
+    )
+    .await
+    .map_err(|e| format!("patch agent {ns}/{name} paused={paused}: {e}"))?;
+    Ok(())
+}
+
+/// Replace a managed agent's pod and prove the durable checkpoint survived.
+async fn migrate_agent(state: &AppState, ns: &str, name: &str) -> Result<(String, Value), String> {
+    let url = state_url(state)?;
+    let class = agent_store_class(&state.client, ns, name).await?;
+    if class != "managed" {
+        return Err(format!(
+            "precondition: migrate requires store.class=managed; {ns}/{name} is \
+             `{class}` — ephemeral/local state is node-local and cannot move"
+        ));
+    }
+    // The checkpoint high-water per key BEFORE the move (the zero-loss witness).
+    let before = snapshot_seqs(&state.na, url, &agent_prefix(ns, name)).await?;
+    let (pod, from_node) = one_agent_pod(&state.client, ns, name).await?;
+    delete_pod(&state.client, ns, &pod).await?;
+    let (new_pod, to_node) = wait_running_pod(&state.client, ns, name, &pod).await?;
+    // The durable state lives in central Postgres, untouched by the pod
+    // swap — assert every key's seq is preserved (never lost, never regressed).
+    let after = snapshot_seqs(&state.na, url, &agent_prefix(ns, name)).await?;
+    for (k, s0) in &before {
+        match after.get(k) {
+            Some(s1) if s1 >= s0 => {}
+            Some(s1) => return Err(format!("checkpoint regressed for {k}: seq {s0} -> {s1}")),
+            None => return Err(format!("checkpoint LOST for {k} (seq {s0}) after migrate")),
+        }
+    }
+    let node_note = if from_node == to_node {
+        format!("{from_node} (single-node cluster: same-node reschedule)")
+    } else {
+        format!("{from_node} -> {to_node}")
+    };
+    Ok((
+        format!(
+            "pod {pod} -> {new_pod}, node {node_note}; {} checkpoint keys preserved",
+            before.len()
+        ),
+        json!({ "from_node": from_node, "to_node": to_node, "keys_preserved": before.len() }),
+    ))
+}
+
+async fn agent_store_class(client: &Client, ns: &str, name: &str) -> Result<String, String> {
+    let gvk = GroupVersionKind::gvk("agentctl.dev", "v1alpha2", "Agent");
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    let obj = api
+        .get(name)
+        .await
+        .map_err(|e| format!("get agent {ns}/{name}: {e}"))?;
+    Ok(obj
+        .data
+        .pointer("/spec/store/class")
+        .and_then(Value::as_str)
+        .unwrap_or("ephemeral")
+        .to_string())
+}
+
+/// One Running pod for the agent, with the node it sits on.
+async fn one_agent_pod(client: &Client, ns: &str, name: &str) -> Result<(String, String), String> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
+    let p = pods
+        .list(&lp)
+        .await
+        .map_err(|e| format!("list pods: {e}"))?
+        .items
+        .into_iter()
+        .find(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))
+        .ok_or_else(|| format!("no Running pod for agent {ns}/{name}"))?;
+    let pod_name = p.metadata.name.clone().unwrap_or_default();
+    let node = p
+        .spec
+        .and_then(|s| s.node_name)
+        .unwrap_or_else(|| "<unscheduled>".into());
+    Ok((pod_name, node))
+}
+
+async fn delete_pod(client: &Client, ns: &str, pod: &str) -> Result<(), String> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    pods.delete(pod, &DeleteParams::default())
+        .await
+        .map_err(|e| format!("delete pod {pod}: {e}"))?;
+    Ok(())
+}
+
+/// Poll (bounded, ~40s) for a fresh Running pod whose name differs from the
+/// deleted one — the reschedule's completion signal.
+async fn wait_running_pod(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    old: &str,
+) -> Result<(String, String), String> {
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+        let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
+        let Ok(list) = pods.list(&lp).await else {
+            continue;
+        };
+        for p in list.items {
+            let pn = p.metadata.name.clone().unwrap_or_default();
+            if pn == old || pn.is_empty() {
+                continue;
+            }
+            if p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running") {
+                let node = p
+                    .spec
+                    .and_then(|s| s.node_name)
+                    .unwrap_or_else(|| "<unscheduled>".into());
+                return Ok((pn, node));
+            }
+        }
+    }
+    Err(format!(
+        "timed out waiting for a replacement pod for {ns}/{name}"
+    ))
+}
+
+/// `state.admin.snapshot` → a `{key: seq}` map for zero-loss comparison.
+async fn snapshot_seqs(
+    http: &reqwest::Client,
+    url: &str,
+    prefix: &str,
+) -> Result<std::collections::BTreeMap<String, i64>, String> {
+    let sc = state_admin_call(
+        http,
+        url,
+        "state.admin.snapshot",
+        json!({ "prefix": prefix }),
+    )
+    .await?;
+    let mut m = std::collections::BTreeMap::new();
+    if let Some(items) = sc.get("items").and_then(Value::as_array) {
+        for it in items {
+            if let (Some(k), Some(s)) = (
+                it.get("key").and_then(Value::as_str),
+                it.get("seq").and_then(Value::as_i64),
+            ) {
+                m.insert(k.to_string(), s);
+            }
+        }
+    }
+    Ok(m)
+}
+
+/// One MCP `tools/call` against the state service (initialize → call), over
+/// the shared chart-CA-trusting mTLS client. Returns the tool's
+/// `structuredContent`.
+async fn state_admin_call(
+    http: &reqwest::Client,
+    base_url: &str,
+    tool: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let mcp = format!("{}/mcp", base_url.trim_end_matches('/'));
+    let (_, session) = state_post(
+        http,
+        &mcp,
+        None,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "agentctl-apiserver", "version": "0" } } }),
+    )
+    .await?;
+    let _ = state_post(
+        http,
+        &mcp,
+        session.clone(),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )
+    .await;
+    let (body, _) = state_post(
+        http,
+        &mcp,
+        session,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": tool, "arguments": args } }),
+    )
+    .await?;
+    if let Some(err) = body.pointer("/error") {
+        return Err(format!("state {tool}: {err}"));
+    }
+    body.pointer("/result/structuredContent")
+        .cloned()
+        .ok_or_else(|| format!("state {tool}: no structuredContent in response"))
+}
+
+/// One streamable-HTTP POST to the state gateway, returning the last
+/// result/error frame and any session id. mcpg interleaves log notifications,
+/// so `.rfind` the frame that actually carries a result/error.
+async fn state_post(
+    http: &reqwest::Client,
+    mcp: &str,
+    session: Option<String>,
+    body: Value,
+) -> Result<(Value, Option<String>), String> {
+    let mut req = http
+        .post(mcp)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-11-25")
+        .header("x-mcpg-subject-id", "control-plane/apiserver")
+        .timeout(Duration::from_secs(30))
+        .json(&body);
+    if let Some(s) = &session {
+        req = req.header("mcp-session-id", s.clone());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("state POST {mcp}: {e}"))?;
+    let sid = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("state read body: {e}"))?;
+    let v = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .rfind(|v| v.get("result").is_some() || v.get("error").is_some())
+        .or_else(|| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    Ok((v, sid))
+}
+
+fn status_data(
+    code: StatusCode,
+    kind: &str,
+    message: &str,
+    data: Value,
+) -> (StatusCode, Json<Value>) {
+    let mut obj = json!({
+        "kind": "Status", "apiVersion": "v1", "status": kind,
+        "message": message, "code": code.as_u16()
+    });
+    if !data.is_null() {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert("data".into(), data);
+        }
+    }
+    (code, Json(obj))
 }
 
 fn status(code: StatusCode, kind: &str, message: &str) -> (StatusCode, Json<Value>) {

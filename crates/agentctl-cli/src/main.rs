@@ -73,6 +73,18 @@ enum Command {
     Resume(verbs::VerbArgs),
     /// Cancel an agent's in-flight run (needs a run id where required).
     Cancel(verbs::VerbArgs),
+    /// Snapshot a managed agent's durable checkpoint to a file (P3-5).
+    Backup(verbs::BackupArgs),
+    /// Restore a managed agent's checkpoint from a backup file (P3-5).
+    Restore(verbs::RestoreArgs),
+    /// Clear a managed agent's durable state — a fresh start (P3-5).
+    Reset(verbs::VerbArgs),
+    /// Park a managed agent (replicas 0); its durable state persists (P3-5).
+    Stop(verbs::VerbArgs),
+    /// Wake a stopped agent; a managed agent resumes from its checkpoint (P3-5).
+    Start(verbs::VerbArgs),
+    /// Reschedule a managed agent's pod, proving the checkpoint survives (P3-5).
+    Migrate(verbs::VerbArgs),
     /// Exposure helpers (currently: `expose webhook` — the external hooks
     /// URL + the route's signing secret).
     #[command(subcommand)]
@@ -156,6 +168,12 @@ async fn main() -> Result<()> {
         Command::Pause(args) => verbs::run_verb("pause", args).await,
         Command::Resume(args) => verbs::run_verb("resume", args).await,
         Command::Cancel(args) => verbs::run_verb("cancel", args).await,
+        Command::Backup(args) => verbs::run_backup(args).await,
+        Command::Restore(args) => verbs::run_restore(args).await,
+        Command::Reset(args) => verbs::run_verb("reset", args).await,
+        Command::Stop(args) => verbs::run_verb("stop", args).await,
+        Command::Start(args) => verbs::run_verb("start", args).await,
+        Command::Migrate(args) => verbs::run_verb("migrate", args).await,
     }
 }
 

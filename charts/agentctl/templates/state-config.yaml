@@ -337,4 +337,31 @@ data:
                 params: [items]
                 row_mode: single
                 timeout_ms: 30000
+
+          - name: state.admin.purge
+            title: "Prefix purge (reset)"
+            description: >-
+              Delete every row under a prefix — the destructive half of
+              `agentctl reset` (a fresh start: the next `state.put seq=1` into a
+              purged key is an insert again). Returns the row count. Unfenced
+              admin, like snapshot/restore — takes an explicit prefix, so a
+              caller may only reach it through the SAR-gated management API.
+            annotations: { read_only: false, idempotent: true, destructive: true, open_world: false }
+            input_schema:
+              type: object
+              required: [prefix]
+              properties:
+                prefix: { type: string, minLength: 1, maxLength: 1024 }
+                _meta: { type: object }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                sql: |
+                  DELETE FROM agent_state WHERE starts_with(key, :prefix)
+                params: [prefix]
+                row_mode: affected_rows
+                timeout_ms: 15000
 {{- end }}

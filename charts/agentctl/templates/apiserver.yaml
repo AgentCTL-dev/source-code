@@ -50,9 +50,14 @@ metadata:
     {{- . | nindent 4 }}
     {{- end }}
 rules:
+  # Locate agent pods for the runtime verbs; delete one for `migrate` (P3-5).
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "delete"]
+  # Read an agent's store class + patch `lifecycle.paused` for stop/start (P3-5).
+  - apiGroups: ["agentctl.dev"]
+    resources: ["agents"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -144,6 +149,14 @@ spec:
             # Metering export (P7-4): read-only aggregation over the shared
             # Postgres (the gateway writes the durable usage events there).
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
+            {{- if .Values.state.enabled }}
+            # Managed state service (P3-5): the backup/restore/reset/migrate
+            # lifecycle verbs reach the checkpointer's admin tools over the
+            # chart-CA-trusted mTLS hop. BASE url (the apiserver appends /mcp);
+            # trailing-dot FQDN dodges search-domain capture.
+            - name: AGENTCTL_STATE_URL
+              value: {{ printf "https://agentctl-state.%s.svc.cluster.local.:8787" $ns | quote }}
+            {{- end }}
           {{- with (index .Values "apiserver").envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

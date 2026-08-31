@@ -27,9 +27,12 @@ Everything below is one Helm release; you compose which planes are on.
 ## The four boundaries you build against
 
 1. **The management API** (`management.agentctl.dev/v1alpha1`) — an aggregated
-   Kubernetes API server. Lifecycle verbs (`drain`/`pause`/…), metering export,
-   audit query. Authenticated as your control-plane's ServiceAccount; authorized
-   by Kubernetes RBAC (SubjectAccessReview). This is your programmatic surface.
+   Kubernetes API server. Runtime verbs (`drain`/`pause`/…), the state-plane
+   lifecycle verbs (`backup`/`restore`/`reset`/`stop`/`start`/`migrate` — a
+   managed agent's `migrate` reschedules its pod with the durable checkpoint
+   preserved, verified server-side), metering export, audit query. Authenticated
+   as your control-plane's ServiceAccount; authorized by Kubernetes RBAC
+   (SubjectAccessReview). This is your programmatic surface.
 2. **The CRDs** (`agentctl.dev/v1alpha2`) — `Organization`, `Agent`,
    `AgentFleet`, `AgentClass`, `MCPService`, `Supervisor`. Declarative; apply
    them from your product backend. `AgentClass` is your product's *plan*: it

@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Management/lifecycle verbs (`agentctl drain|lame-duck|pause|resume|cancel`)
-//! — POSTs to the aggregated management API
+//! Management/lifecycle verbs — POSTs to the aggregated management API
 //! (`management.agentctl.dev/v1alpha1`), so they ride the caller's kubeconfig
 //! and Kubernetes RBAC exactly like `kubectl`. The apiserver reaches the agent
 //! pod over mTLS as the Management origin; the CLI never dials a pod.
+//!
+//! Two families: the RUNTIME verbs (`drain|lame-duck|pause|resume|cancel`)
+//! forward to the agent pod; the P3-5 STATE-plane lifecycle verbs
+//! (`backup|restore|reset|stop|start|migrate`) act on the durable checkpoint
+//! or the CR. backup/restore move a JSON snapshot through a file, so they get
+//! dedicated argument shapes; the rest are plain `VerbArgs`.
 
 #[cfg(test)]
 use anyhow::bail;
@@ -56,9 +61,106 @@ pub async fn run_verb(verb: &str, args: VerbArgs) -> Result<()> {
 #[cfg(test)]
 fn known_verb(verb: &str) -> Result<&str> {
     match verb {
-        "drain" | "lame-duck" | "pause" | "resume" | "cancel" => Ok(verb),
-        other => bail!("unknown management verb {other:?} (drain|lame-duck|pause|resume|cancel)"),
+        "drain" | "lame-duck" | "pause" | "resume" | "cancel" | "backup" | "restore" | "reset"
+        | "stop" | "start" | "migrate" => Ok(verb),
+        other => bail!("unknown management verb {other:?}"),
     }
+}
+
+/// `agentctl backup <name> [-o file]` — snapshot a managed agent's durable
+/// checkpoint (`state.admin.snapshot` via the management API) and write the
+/// JSON array to `--output` (default: stdout).
+#[derive(Args)]
+pub struct BackupArgs {
+    /// Agent name.
+    pub name: String,
+    /// Namespace (defaults to the kubeconfig context namespace).
+    #[arg(short = 'n', long)]
+    pub namespace: Option<String>,
+    /// Write the snapshot here (default: stdout).
+    #[arg(short = 'o', long)]
+    pub output: Option<String>,
+}
+
+/// `agentctl restore <name> -i file` — UPSERT a snapshot back into a managed
+/// agent's checkpoint (`state.admin.restore`).
+#[derive(Args)]
+pub struct RestoreArgs {
+    /// Agent name.
+    pub name: String,
+    /// Namespace (defaults to the kubeconfig context namespace).
+    #[arg(short = 'n', long)]
+    pub namespace: Option<String>,
+    /// The backup file produced by `agentctl backup`.
+    #[arg(short = 'i', long)]
+    pub input: String,
+}
+
+async fn post_json(client: &kube::Client, path: &str, body: Vec<u8>) -> Result<serde_json::Value> {
+    let req = http::Request::post(path)
+        .header("content-type", "application/json")
+        .body(body)
+        .context("build management request")?;
+    Ok(client.request(req).await?)
+}
+
+fn print_message(resp: &serde_json::Value) {
+    match resp.get("message").and_then(serde_json::Value::as_str) {
+        Some(msg) => println!("{msg}"),
+        None => println!(
+            "{}",
+            serde_json::to_string_pretty(resp).unwrap_or_else(|_| resp.to_string())
+        ),
+    }
+}
+
+pub async fn run_backup(args: BackupArgs) -> Result<()> {
+    let client = Client::try_default().await?;
+    let ns = args
+        .namespace
+        .unwrap_or_else(|| client.default_namespace().to_string());
+    let path = verb_path(&ns, "agents", &args.name, "backup");
+    let resp = post_json(&client, &path, b"{}".to_vec())
+        .await
+        .with_context(|| format!("backup agents/{} in {ns}", args.name))?;
+    let items = resp
+        .pointer("/data/items")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let blob = serde_json::to_string_pretty(&serde_json::json!({ "items": items }))?;
+    match &args.output {
+        Some(f) => {
+            std::fs::write(f, blob.as_bytes()).with_context(|| format!("write {f}"))?;
+            match resp.get("message").and_then(serde_json::Value::as_str) {
+                Some(msg) => println!("{msg} -> {f}"),
+                None => println!("wrote snapshot -> {f}"),
+            }
+        }
+        None => println!("{blob}"),
+    }
+    Ok(())
+}
+
+pub async fn run_restore(args: RestoreArgs) -> Result<()> {
+    let client = Client::try_default().await?;
+    let ns = args
+        .namespace
+        .unwrap_or_else(|| client.default_namespace().to_string());
+    let raw = std::fs::read(&args.input).with_context(|| format!("read {}", args.input))?;
+    // Accept either {"items":[...]} (our backup) or a bare [...] array.
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", args.input))?;
+    let body = if parsed.get("items").is_some() {
+        raw
+    } else {
+        serde_json::to_vec(&serde_json::json!({ "items": parsed }))?
+    };
+    let path = verb_path(&ns, "agents", &args.name, "restore");
+    let resp = post_json(&client, &path, body)
+        .await
+        .with_context(|| format!("restore agents/{} in {ns}", args.name))?;
+    print_message(&resp);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -79,7 +181,19 @@ mod tests {
 
     #[test]
     fn verbs_are_the_frozen_management_set() {
-        for v in ["drain", "lame-duck", "pause", "resume", "cancel"] {
+        for v in [
+            "drain",
+            "lame-duck",
+            "pause",
+            "resume",
+            "cancel",
+            "backup",
+            "restore",
+            "reset",
+            "stop",
+            "start",
+            "migrate",
+        ] {
             assert!(known_verb(v).is_ok());
         }
         assert!(known_verb("restart").is_err());
