@@ -186,3 +186,150 @@ pub async fn run_expose_webhook(args: ExposeWebhookArgs) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// -- dlq (P7-5): the work-fabric dead-letter queue -------------------------
+
+/// `agentctl dlq list|requeue|drop` — the coordination server's dead-letter
+/// admin surface (`work.deadletter`), for the operator draining a fleet's
+/// poison items. Speaks MCP `tools/call` to the coordination `/mcp`; the URL
+/// comes from `--coordination-url`/`AGENTCTL_COORDINATION_URL` (in-cluster:
+/// `http://agentctl-coordination.<ns>`; from a workstation, port-forward
+/// `svc/agentctl-coordination 8080:80` then `http://127.0.0.1:8080`), and the
+/// bearer from `--token`/`AGENTCTL_API_TOKEN` when the server gates on it.
+#[derive(clap::Subcommand)]
+pub enum DlqCommand {
+    /// List the dead-lettered items (work_id, attempts, the item body).
+    List(DlqListArgs),
+    /// Requeue one dead-lettered item back onto the claim fabric.
+    Requeue(DlqItemArgs),
+    /// Drop one dead-lettered item permanently.
+    Drop(DlqItemArgs),
+}
+
+#[derive(Args)]
+pub struct DlqListArgs {
+    #[command(flatten)]
+    pub conn: DlqConn,
+}
+
+#[derive(Args)]
+pub struct DlqItemArgs {
+    /// The item's work_id (from `dlq list`).
+    pub work_id: String,
+    #[command(flatten)]
+    pub conn: DlqConn,
+}
+
+#[derive(Args)]
+pub struct DlqConn {
+    /// Coordination server base URL (or AGENTCTL_COORDINATION_URL).
+    #[arg(long)]
+    pub coordination_url: Option<String>,
+    /// Bearer token if the server gates on one (or AGENTCTL_API_TOKEN).
+    #[arg(long)]
+    pub token: Option<String>,
+}
+
+impl DlqConn {
+    fn url(&self) -> Result<String> {
+        let raw = match &self.coordination_url {
+            Some(u) => u.clone(),
+            None => std::env::var("AGENTCTL_COORDINATION_URL")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+                .context(
+                    "no coordination URL: pass --coordination-url or set \
+                     AGENTCTL_COORDINATION_URL (workstation: `kubectl -n agentctl-system \
+                     port-forward svc/agentctl-coordination 8080:80` then http://127.0.0.1:8080)",
+                )?,
+        };
+        Ok(raw.trim_end_matches('/').to_string())
+    }
+    fn token(&self) -> Option<String> {
+        self.token
+            .clone()
+            .or_else(|| std::env::var("AGENTCTL_API_TOKEN").ok())
+            .filter(|t| !t.trim().is_empty())
+    }
+}
+
+async fn dlq_call(conn: &DlqConn, arguments: serde_json::Value) -> Result<serde_json::Value> {
+    use anyhow::bail;
+    let url = conn.url()?;
+    let http = reqwest::Client::builder()
+        .build()
+        .context("build http client")?;
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "work.deadletter", "arguments": arguments }
+    });
+    let mut req = http.post(format!("{url}/mcp")).json(&body);
+    if let Some(t) = conn.token() {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await.context("reach the coordination server")?;
+    let status = resp.status();
+    let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        bail!("coordination server refused ({status})");
+    }
+    if let Some(err) = v.get("error") {
+        bail!("work.deadletter error: {err}");
+    }
+    // The dual result shape: structuredContent is the parsed body.
+    Ok(v.pointer("/result/structuredContent")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
+pub async fn run_dlq(cmd: DlqCommand) -> Result<()> {
+    use anyhow::bail;
+    match cmd {
+        DlqCommand::List(args) => {
+            let out = dlq_call(&args.conn, serde_json::json!({ "action": "list" })).await?;
+            let items = out
+                .get("items")
+                .and_then(|i| i.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if items.is_empty() {
+                println!("no dead-lettered items.");
+                return Ok(());
+            }
+            println!("{:<40}  {:>8}  ITEM", "WORK_ID", "ATTEMPTS");
+            for it in &items {
+                println!(
+                    "{:<40}  {:>8}  {}",
+                    it["work_id"].as_str().unwrap_or("?"),
+                    it["attempts"].as_i64().unwrap_or(0),
+                    it["item"]
+                );
+            }
+        }
+        DlqCommand::Requeue(args) => {
+            let out = dlq_call(
+                &args.conn,
+                serde_json::json!({ "action": "requeue", "work_id": args.work_id }),
+            )
+            .await?;
+            if out["found"] == serde_json::Value::Bool(true) {
+                println!("requeued {}.", args.work_id);
+            } else {
+                bail!("no dead-lettered item {}", args.work_id);
+            }
+        }
+        DlqCommand::Drop(args) => {
+            let out = dlq_call(
+                &args.conn,
+                serde_json::json!({ "action": "drop", "work_id": args.work_id }),
+            )
+            .await?;
+            if out["found"] == serde_json::Value::Bool(true) {
+                println!("dropped {}.", args.work_id);
+            } else {
+                bail!("no dead-lettered item {}", args.work_id);
+            }
+        }
+    }
+    Ok(())
+}

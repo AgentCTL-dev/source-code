@@ -452,6 +452,48 @@ impl ConfigDoc {
         }
         format!("{h:016x}")
     }
+
+    /// Hash over ONLY the RESTART-REQUIRED config subtrees (P7-5). agentd's
+    /// config_watch hot-reloads most of the document live (agent.*, workflows,
+    /// intelligence, mcp, limits, …); a change there must NOT roll the pod.
+    /// The pod-template annotation stamps THIS hash so only a restart-only
+    /// change forces a new process; everything else flows through the
+    /// ConfigMap and hot-reloads.
+    ///
+    /// The set is agentd 1.3.1's authoritative `RESTART_ONLY_PATHS` UNION the
+    /// two paths it neither refuses nor reloads — `a2a.principals` and
+    /// `webhooks` — which must be treated as restart-required or a new
+    /// principal / rotated webhook secret would silently strand (upstream
+    /// wire fact, confirmed in agentd source).
+    pub fn restart_hash(&self) -> String {
+        const RESTART_ONLY: &[&str] = &[
+            "config_version",
+            "agent/name",
+            "store",
+            "lifecycle",
+            "a2a/listen",
+            "a2a/tls",
+            "a2a/bearer",
+            "a2a/principals",
+            "observability/otel",
+            "observability/metrics_addr",
+            "observability/health_file",
+            "observability/events_ring",
+            "observability/traceparent",
+            "security",
+            "webhooks",
+        ];
+        let mut subset = serde_json::Map::new();
+        for ptr in RESTART_ONLY {
+            if let Some(v) = self.value.pointer(&format!("/{ptr}")) {
+                subset.insert(ptr.replace('/', "."), v.clone());
+            }
+        }
+        ConfigDoc {
+            value: Value::Object(subset),
+        }
+        .hash()
+    }
 }
 
 /// The rendered two-layer projection (RFC 0032 §4): the `services:` catalog
@@ -466,6 +508,13 @@ pub struct Projection {
 }
 
 impl Projection {
+    /// The RESTART-ONLY hash over both layers (P7-5 pod-template annotation).
+    /// Only a restart-required change rolls the pod; the catalog layer is
+    /// hot-reloadable in full (`mcp.servers[]`), so it never enters this hash.
+    pub fn restart_hash(&self) -> String {
+        self.instance.restart_hash()
+    }
+
     /// Change-detector hash over BOTH layers (the pod-template annotation).
     pub fn hash(&self) -> String {
         ConfigDoc {
@@ -1336,6 +1385,37 @@ mod tests {
         let mut input = base(Mode::Once);
         input.instruction = Some("Different.".into());
         assert_ne!(a.hash(), build(&input).unwrap().hash());
+    }
+
+    /// P7-5: the RESTART hash IGNORES hot-reloadable changes (instruction,
+    /// workflows, mcp, intelligence) so they never roll the pod, but MOVES on
+    /// a restart-only change (store, a2a.listen, security, webhooks,
+    /// a2a.principals). The pod-template annotation stamps restart_hash.
+    #[test]
+    fn restart_hash_ignores_reloadable_but_moves_on_restart_only() {
+        let a = build(&base(Mode::Reactive)).unwrap();
+        // Hot-reloadable: instruction change ⇒ SAME restart hash (no roll).
+        let mut reload = base(Mode::Reactive);
+        reload.instruction = Some("A wholly new persona.".into());
+        let b = build(&reload).unwrap();
+        assert_ne!(a.hash(), b.hash(), "full hash sees the change");
+        assert_eq!(
+            a.restart_hash(),
+            b.restart_hash(),
+            "instruction hot-reloads — the pod must NOT roll"
+        );
+        // Restart-only: switching to the managed store ⇒ restart hash MOVES.
+        let mut restart = base(Mode::Reactive);
+        restart.store = StoreSelector::Mcp {
+            server: "state".into(),
+            prefix: "orgs/x/y".into(),
+        };
+        let c = build(&restart).unwrap();
+        assert_ne!(
+            a.restart_hash(),
+            c.restart_hash(),
+            "a store change requires a fresh process"
+        );
     }
 
     #[test]

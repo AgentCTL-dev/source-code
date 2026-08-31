@@ -715,9 +715,27 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
         }
     };
 
+    // HotReload condition (P7-5): only meaningful for a live daemon that
+    // hot-reloads its config; a degraded node surfaces here.
+    // Only a live daemon can lose its watcher; hot_reload_degraded finds a
+    // Running pod (a completed Job has none) so gating on Ready suffices.
+    let hot_reload = if condition.status == "True" {
+        hot_reload_degraded(&ctx.client, ns, &name)
+            .await
+            .then(hot_reload_degraded_condition)
+    } else {
+        None
+    };
     // DeepEqual guard: only write status if it actually changed,
     // so we don't churn the Agent (and re-trigger our own watch) every reconcile.
-    let desired = desired_status(&condition, observed, phase, &contract, identity.as_ref())?;
+    let desired = desired_status_with(
+        &condition,
+        hot_reload.as_ref(),
+        observed,
+        phase,
+        &contract,
+        identity.as_ref(),
+    )?;
     if status_changed(agent.status.as_ref(), &desired)? {
         let patch = serde_json::json!({ "status": desired });
         agents
@@ -1120,7 +1138,9 @@ fn pod_wiring(
         })
         .collect();
     PodWiring {
-        config_hash: doc.hash(),
+        // P7-5: the pod rolls ONLY on a restart-required change; the full
+        // document rides the ConfigMap and agentd hot-reloads the rest.
+        config_hash: doc.restart_hash(),
         hooks_port: false,
         hooks_secrets: false,
         intelligence_token: intelligence.and_then(|(_, t)| t.clone()),
@@ -1573,8 +1593,24 @@ fn desired_status(
     contract: &ContractStatus,
     identity: Option<&IdentityStatus>,
 ) -> Result<serde_json::Value, Error> {
+    desired_status_with(condition, None, observed, phase, contract, identity)
+}
+
+/// [`desired_status`] with an optional SECOND condition (P7-5 HotReload).
+fn desired_status_with(
+    condition: &Condition,
+    extra: Option<&Condition>,
+    observed: Option<i64>,
+    phase: &str,
+    contract: &ContractStatus,
+    identity: Option<&IdentityStatus>,
+) -> Result<serde_json::Value, Error> {
+    let mut conditions = vec![serde_json::to_value(condition)?];
+    if let Some(e) = extra {
+        conditions.push(serde_json::to_value(e)?);
+    }
     let mut body = serde_json::json!({
-        "conditions": [serde_json::to_value(condition)?],
+        "conditions": conditions,
         "observedGeneration": serde_json::to_value(observed)?,
         "phase": phase,
         "contract": serde_json::to_value(contract)?,
@@ -1635,6 +1671,42 @@ pub fn ready_condition(observed_generation: Option<i64>, rendered_kind: &str) ->
 /// kinds, or `None` for a Job (which keeps the applied condition). An unreadable
 /// status is treated as `0` ready (fail-safe: a CrashLooping / PKI-misconfigured /
 /// image-pull-failing workload never becomes Ready).
+/// Detect agentd's node-level hot-reload loss (P7-5): a dense node exhausts
+/// `fs.inotify.max_user_instances`, `config.watch.error {errno:24}` is logged,
+/// the watcher thread exits and the daemon serves on WITHOUT hot reload —
+/// silent staleness. We surface it as an operator-visible condition so an
+/// operator sees "hot reload lost on this node" and raises the sysctl. Best
+/// effort: tails the newest pod's recent logs; any read error ⇒ None (absent
+/// condition), never a false alarm.
+async fn hot_reload_degraded(client: &Client, ns: &str, name: &str) -> bool {
+    use k8s_openapi::api::core::v1::Pod;
+    let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let lp = kube::api::ListParams::default().labels(&format!("agentctl.dev/agent={name}"));
+    let Ok(list) = pods.list(&lp).await else {
+        return false;
+    };
+    let Some(pod) = list.items.into_iter().find_map(|p| {
+        let running = p
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|ph| ph == "Running");
+        running.then(|| p.metadata.name.clone()).flatten()
+    }) else {
+        return false;
+    };
+    let lp = kube::api::LogParams {
+        tail_lines: Some(200),
+        ..Default::default()
+    };
+    match pods.logs(&pod, &lp).await {
+        Ok(logs) => logs
+            .lines()
+            .any(|l| l.contains("config.watch.error") && l.contains("\"errno\":24")),
+        Err(_) => false,
+    }
+}
+
 async fn workload_readiness(
     client: &Client,
     ns: &str,
@@ -1723,6 +1795,22 @@ pub fn readiness_condition(
         reason: Some(reason.to_string()),
         message: Some(message),
         observed_generation,
+        last_transition_time: None,
+    }
+}
+
+/// The `HotReload` condition (P7-5): True only when a node inotify exhaustion
+/// has cost the daemon its config watcher (silent staleness otherwise).
+pub fn hot_reload_degraded_condition() -> Condition {
+    Condition {
+        type_: "HotReload".to_string(),
+        status: "False".to_string(),
+        reason: Some("InotifyExhausted".to_string()),
+        message: Some(
+            "config.watch.error errno 24 on this node (fs.inotify.max_user_instances exhausted):              the daemon serves on but config changes will NOT hot-reload until the pod is              rescheduled or the node sysctl is raised"
+                .to_string(),
+        ),
+        observed_generation: None,
         last_transition_time: None,
     }
 }

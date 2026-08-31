@@ -77,12 +77,25 @@ enum Command {
     /// URL + the route's signing secret).
     #[command(subcommand)]
     Expose(ExposeCommand),
+    /// Inspect + drain a fleet's work-fabric dead-letter queue (P7-5).
+    #[command(subcommand)]
+    Dlq(DlqCommand),
 }
 
 #[derive(Subcommand)]
 enum ExposeCommand {
     /// Show a declared webhook's external hooks URL (+ secret with --show-secret).
     Webhook(verbs::ExposeWebhookArgs),
+}
+
+#[derive(Subcommand)]
+enum DlqCommand {
+    /// List the dead-lettered items.
+    List(verbs::DlqListArgs),
+    /// Requeue one dead-lettered item onto the claim fabric.
+    Requeue(verbs::DlqItemArgs),
+    /// Drop one dead-lettered item permanently.
+    Drop(verbs::DlqItemArgs),
 }
 
 #[derive(Subcommand)]
@@ -126,6 +139,14 @@ async fn main() -> Result<()> {
         Command::Login(args) => auth::run_login(args).await,
         Command::Connect(args) => auth::run_connect(args).await,
         Command::Expose(ExposeCommand::Webhook(args)) => verbs::run_expose_webhook(args).await,
+        Command::Dlq(cmd) => {
+            let c = match cmd {
+                DlqCommand::List(a) => verbs::DlqCommand::List(a),
+                DlqCommand::Requeue(a) => verbs::DlqCommand::Requeue(a),
+                DlqCommand::Drop(a) => verbs::DlqCommand::Drop(a),
+            };
+            verbs::run_dlq(c).await
+        }
         Command::Whoami(args) => auth::run_whoami(args).await,
         Command::Chat(args) => chat::run_chat(args).await,
         Command::Approve(args) => chat::run_approve(args).await,
