@@ -105,3 +105,11 @@ identity:
       - name: mock
         issuer: https://mock-idp:8443
         client_id: agentctl-cli
+      # P5-4: the CONNECTABLE provider catalog is this same list — this entry
+      # backs `agentctl connect zendesk`, and its name is the custody key the
+      # org's `auth.mode: obo` registry entries exchange against. Same mock
+      # issuer; the mock's /device+/token auto-approve with a rotating
+      # refresh token and 8s access-token lifetimes (refresh runs live).
+      - name: zendesk
+        issuer: https://mock-idp:8443
+        client_id: agentctl-connect

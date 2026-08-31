@@ -50,6 +50,9 @@ enum Command {
     Uninstall(install::UninstallArgs),
     /// Sign in via your identity provider (RFC 8628 device flow).
     Login(auth::LoginArgs),
+    /// Connect a provider account for your agents to act on your behalf
+    /// (one-time consent; the refresh grant stays in identity custody).
+    Connect(auth::ConnectArgs),
     /// Show the signed-in identity from the saved session.
     Whoami(auth::WhoamiArgs),
     /// Chat with an agent through the gateway, as the signed-in user.
@@ -111,6 +114,7 @@ async fn main() -> Result<()> {
         Command::Install(args) => install::run_install(args).await,
         Command::Uninstall(args) => install::run_uninstall(args).await,
         Command::Login(args) => auth::run_login(args).await,
+        Command::Connect(args) => auth::run_connect(args).await,
         Command::Whoami(args) => auth::run_whoami(args).await,
         Command::Chat(args) => chat::run_chat(args).await,
         Command::Approve(args) => chat::run_approve(args).await,

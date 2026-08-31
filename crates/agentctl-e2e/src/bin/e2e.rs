@@ -182,6 +182,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("tenant-mcpg", "capability", tenant_mcpg),
         // OBO exchange: per-user credential injected upstream via /v1/exchange (P5-3)
         scenario!("obo-exchange", "capability", obo_exchange),
+        // Connections: consent once via device flow, agents proceed OBO (P5-4)
+        scenario!("connections-flow", "capability", connections_flow),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -542,6 +544,375 @@ async fn supervisor_park(ctx: &Ctx) -> Result<Outcome> {
     .await
     .context("parked supervisor never woke")?;
 
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P5-4: the consent flow whole. An `auth.mode: obo` entry with NO custody
+/// connection refuses with the CONNECT CARD (who must connect what, and the
+/// exact CLI line); the REAL `agentctl connect` binary then walks the RFC
+/// 8628 device flow against the in-cluster IdP (offline_access appended,
+/// auto-approving mock) and the refresh grant lands SEALED in custody —
+/// after which the same user's agent call proceeds, and a later call shows
+/// the refresh + rotation path minting a NEW upstream token live.
+async fn connections_flow(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use agent_api::v1alpha2 as v2;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str| {
+        let exp = now() + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({ "iss": "https://mock-idp:8443", "aud": "agentctl-cli", "sub": sub,
+                     "email": format!("{sub}@example.test"), "groups": ["eng"], "exp": exp }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-conn";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    let apply_org = |display: &'static str| {
+        let orgs = orgs.clone();
+        async move {
+            orgs.patch(
+                org,
+                &PatchParams::apply("e2e").force(),
+                &Patch::Apply(&Organization::new(
+                    org,
+                    serde_json::from_value::<OrganizationSpec>(json!({ "displayName": display }))?,
+                )),
+            )
+            .await
+            .context("apply Organization")
+        }
+    };
+    apply_org("E2E Connections").await?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    let echo = format!(
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata: {{ name: echo-mcp, namespace: {ns} }}
+spec:
+  replicas: 1
+  selector: {{ matchLabels: {{ app: echo-mcp }} }}
+  template:
+    metadata: {{ labels: {{ app: echo-mcp }} }}
+    spec:
+      containers:
+        - name: echo
+          image: mock-echo-mcp:dev
+          imagePullPolicy: IfNotPresent
+          ports: [ {{ containerPort: 8080 }} ]
+          readinessProbe: {{ httpGet: {{ path: /readyz, port: 8080 }} }}
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: echo-mcp, namespace: {ns} }}
+spec:
+  selector: {{ app: echo-mcp }}
+  ports: [ {{ port: 80, targetPort: 8080 }} ]
+"#
+    );
+    shell::kubectl_apply_stdin(&echo).context("deploy echo witness")?;
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/echo-mcp",
+        "-n",
+        &ns,
+        "--timeout=120s",
+    ])
+    .context("echo witness Ready")?;
+
+    let mut entry = v2::MCPService::new(
+        "zendesk",
+        v2::MCPServiceSpec {
+            endpoint: Some(format!("http://echo-mcp.{ns}.svc.cluster.local.:80/mcp")),
+            auth: Some(agent_api::v1alpha2::ServiceAuth {
+                mode: "obo".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    entry.metadata.namespace = Some(ns.clone());
+    kh::api::<v2::MCPService>(&ctx.client, &ns)
+        .create(&Default::default(), &entry)
+        .await
+        .context("register obo MCPService")?;
+    apply_org("E2E Connections v2").await?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        Ok(shell::kubectl(&["get", "deploy", "-n", &ns, "agentctl-mcpg"]).is_ok())
+    })
+    .await
+    .context("tenant gateway never created")?;
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/agentctl-mcpg",
+        "-n",
+        &ns,
+        "--timeout=180s",
+    ])
+    .context("tenant gateway rollout")?;
+
+    let admin_token = {
+        let b64 = shell::kubectl(&[
+            "get",
+            "secret",
+            "-n",
+            &ctx.cfg.system_ns,
+            "agentctl-api-token",
+            "-o",
+            "jsonpath={.data.AGENTCTL_API_TOKEN}",
+        ])?;
+        String::from_utf8(base64_decode(b64.trim())?)?
+    };
+    let pf_id = shell::PortForward::service(&ctx.cfg.system_ns, "agentctl-identity", 80, 18117)?;
+    let idb = pf_id.base_url();
+    let user = "mock:connie";
+
+    // BEFORE consent: the exchange refuses with the CONNECT CARD — the
+    // machine-readable "connection_required" a HITL surface renders.
+    let resp = ctx
+        .http
+        .post(format!("{idb}/v1/exchange"))
+        .bearer_auth(&admin_token)
+        .form(&[
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("subject_token", user),
+            (
+                "subject_token_type",
+                "urn:agentctl:params:oauth:token-type:user",
+            ),
+            ("audience", "zendesk"),
+            ("org", org),
+        ])
+        .send()
+        .await
+        .context("reach /v1/exchange")?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if status.as_u16() != 400 || body["error"] != "invalid_target" {
+        bail!("pre-consent exchange should refuse invalid_target: {status} {body}");
+    }
+    let card = &body["connection_required"];
+    if card["provider"] != "zendesk"
+        || card["org"] != org
+        || card["connect"] != format!("agentctl connect zendesk --org {org}")
+    {
+        bail!("the connect card is wrong: {body}");
+    }
+
+    // THE CONSENT, through the REAL CLI: a signed-in user (vendored-key
+    // session) runs `agentctl connect zendesk` and approves at the mock IdP
+    // (auto-approve on the second poll). No token ever reaches the machine.
+    let cli_dir = std::env::temp_dir().join(format!("agentctl-connect-e2e-{}", now()));
+    std::fs::create_dir_all(&cli_dir).context("cli config dir")?;
+    std::fs::write(
+        cli_dir.join("credentials.json"),
+        json!({
+            "identity_url": idb,
+            "provider": "mock",
+            "access_token": sign("connie"),
+            "expires_unix": now() + 600,
+            "identity": { "subject": user },
+        })
+        .to_string(),
+    )
+    .context("write CLI session")?;
+    let out = std::process::Command::new("target/release/agentctl")
+        .args([
+            "connect",
+            "zendesk",
+            "--org",
+            org,
+            "--identity-url",
+            &idb,
+            "--timeout",
+            "60",
+        ])
+        .env("AGENTCTL_CONFIG_DIR", &cli_dir)
+        .output()
+        .context("spawn agentctl connect")?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        bail!(
+            "agentctl connect failed ({}): {} {}",
+            out.status,
+            stdout,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    if !stdout.contains("Connected zendesk") || !stdout.contains(user) {
+        bail!("connect output did not confirm the connection: {stdout}");
+    }
+
+    // Custody holds the grant — secret-free on the read surface.
+    let listed: Value = ctx
+        .http
+        .get(format!("{idb}/admin/connections?org={org}"))
+        .bearer_auth(&admin_token)
+        .send()
+        .await?
+        .json()
+        .await
+        .unwrap_or(Value::Null);
+    let row = &listed["connections"][0];
+    if row["provider"] != "zendesk" || row["kind"] != "oauth_refresh" || row["user"] != user {
+        bail!("custody row wrong after consent: {listed}");
+    }
+    if listed.to_string().contains("rt-") {
+        bail!("refresh-token material leaked into the admin list: {listed}");
+    }
+
+    // AFTER consent the user's agent call PROCEEDS: the gateway redeems the
+    // caller's bearer at the exchange, which refreshes against the IdP and
+    // injects the minted per-user token upstream.
+    let mint_caller = || async {
+        let resp = ctx
+            .http
+            .post(format!("{idb}/admin/mcpg-token"))
+            .bearer_auth(&admin_token)
+            .json(&json!({ "workload": format!("{ns}/sup-connie"),
+                            "audience": format!("mcpg:{ns}"), "user": user }))
+            .send()
+            .await?;
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        anyhow::Ok(body["token"].as_str().unwrap_or_default().to_string())
+    };
+    let caller = mint_caller().await?;
+    if caller.is_empty() {
+        bail!("identity refused the caller mint");
+    }
+    let pf = shell::PortForward::service(&ns, "agentctl-mcpg", 8787, 18118)?;
+    let base = pf.base_url();
+    let call = |body: Value, session: Option<String>| {
+        let base = base.clone();
+        let caller = caller.clone();
+        async move {
+            let mut req = ctx
+                .http
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-11-25")
+                .bearer_auth(caller)
+                .json(&body);
+            if let Some(s) = &session {
+                req = req.header("mcp-session-id", s.clone());
+            }
+            let resp = req.send().await.context("reach tenant gateway")?;
+            let session = resp
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let text = resp.text().await.unwrap_or_default();
+            let body: Value = if ct.starts_with("text/event-stream") {
+                text.lines()
+                    .filter_map(|l| l.strip_prefix("data:"))
+                    .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+                    .rev()
+                    .find(|v| v.get("result").is_some() || v.get("error").is_some())
+                    .unwrap_or(Value::Null)
+            } else {
+                serde_json::from_str(&text).unwrap_or(Value::Null)
+            };
+            anyhow::Ok((body, session))
+        }
+    };
+    let (init, session) = call(
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if init.get("result").is_none() {
+        bail!("tenant gateway initialize failed: {init}");
+    }
+    let _ = call(
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        session.clone(),
+    )
+    .await;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let call = &call;
+        let session = session.clone();
+        async move {
+            let (tools, _) = call(
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                session,
+            )
+            .await?;
+            Ok(tools["result"]["tools"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|t| t["name"] == "zendesk.auth.echo")))
+        }
+    })
+    .await
+    .context("federated echo tool never appeared")?;
+    let echo_call = |id: i64| {
+        let call = &call;
+        let session = session.clone();
+        async move {
+            let (resp, _) = call(
+                json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                        "params": { "name": "zendesk.auth.echo", "arguments": {} } }),
+                session,
+            )
+            .await?;
+            anyhow::Ok(
+                resp.pointer("/result/content/0/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        }
+    };
+    let first = echo_call(2).await?;
+    if !first.starts_with("Bearer at-") {
+        bail!("upstream saw {first:?}, wanted the refreshed per-user token");
+    }
+
+    // The refresh + rotation path, LIVE: mock access tokens live 8s, so a
+    // later call re-redeems with the ROTATED refresh token and the upstream
+    // sees a NEW token — days of agent life compressed to one expiry.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let second = echo_call(3).await?;
+    if !second.starts_with("Bearer at-") || second == first {
+        bail!("no fresh token after expiry (rotation broken?): first {first:?}, then {second:?}");
+    }
+
+    std::fs::remove_dir_all(&cli_dir).ok();
+    drop(pf_id);
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
     pass()

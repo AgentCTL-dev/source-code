@@ -295,14 +295,31 @@ impl Federation {
 
     /// RFC 8628 §3.1–3.2: start a device authorization.
     pub async fn device_start(&self, name: &str) -> Result<DeviceStart, OidcError> {
+        self.device_start_scoped(name, &[]).await
+    }
+
+    /// [`device_start`] with EXTRA scopes appended (deduped) — the connect
+    /// flow (P5-4) adds `offline_access` so the provider mints the refresh
+    /// token custody stores; ordinary logins never ask for offline power.
+    pub async fn device_start_scoped(
+        &self,
+        name: &str,
+        extra_scopes: &[&str],
+    ) -> Result<DeviceStart, OidcError> {
         let p = self.provider(name)?.clone();
         let d = self.discovery(name).await?;
         let endpoint = d
             .device_authorization_endpoint
             .ok_or_else(|| OidcError::Device("provider offers no device flow".into()))?;
+        let mut scopes = p.scopes.clone();
+        for extra in extra_scopes {
+            if !scopes.iter().any(|s| s == extra) {
+                scopes.push((*extra).to_string());
+            }
+        }
         let mut form = vec![
             ("client_id", p.client_id.clone()),
-            ("scope", p.scopes.join(" ")),
+            ("scope", scopes.join(" ")),
         ];
         if let Some(secret) = &p.client_secret {
             form.push(("client_secret", secret.clone()));

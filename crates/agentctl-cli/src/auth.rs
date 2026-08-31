@@ -36,6 +36,23 @@ pub struct LoginArgs {
     pub timeout: u64,
 }
 
+#[derive(clap::Args)]
+pub struct ConnectArgs {
+    /// The provider to connect (as configured on the identity service) —
+    /// also the connection name your org's registry entries reference.
+    pub provider: String,
+    /// The org the connection lands in.
+    #[arg(long)]
+    pub org: String,
+    /// Base URL of the agentctl-identity service (or AGENTCTL_IDENTITY_URL;
+    /// falls back to the URL saved at login).
+    #[arg(long)]
+    pub identity_url: Option<String>,
+    /// Give up after this many seconds of polling.
+    #[arg(long, default_value_t = 600)]
+    pub timeout: u64,
+}
+
 #[derive(Args)]
 pub struct WhoamiArgs {}
 
@@ -142,6 +159,97 @@ pub async fn run_whoami(_args: WhoamiArgs) -> Result<()> {
 
 /// Load the saved session for API calls (`agentctl chat`), refusing loudly
 /// when absent or expired — a dead token would just bounce off the gateway.
+/// `agentctl connect <provider> --org <org>` — the P5-4 consent flow: one
+/// device-flow approval at the provider and the refresh grant lives in
+/// identity custody; from then on the org's agents act on your behalf
+/// through the exchange. No token ever reaches this machine.
+pub async fn run_connect(args: ConnectArgs) -> Result<()> {
+    let session =
+        load_session().context("sign in first: `agentctl login` (the connect flow acts as YOU)")?;
+    let url = match identity_url(args.identity_url.as_deref()) {
+        Ok(u) => u,
+        Err(_) => session.identity_url.trim_end_matches('/').to_string(),
+    };
+    let http = http_client()?;
+
+    let start = {
+        let resp = http
+            .post(format!("{url}/v1/connections/start"))
+            .bearer_auth(&session.access_token)
+            .json(&json!({ "provider": args.provider, "org": args.org }))
+            .send()
+            .await
+            .context("reach the identity service")?;
+        let status = resp.status();
+        let v: Value = resp.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            let msg = v["error"].as_str().unwrap_or("unexpected response");
+            if status.as_u16() == 401 {
+                bail!("identity service refused ({status}): {msg} — your session may have expired; run `agentctl login`");
+            }
+            bail!("identity service refused ({status}): {msg}");
+        }
+        v
+    };
+    let handle = start["handle"]
+        .as_str()
+        .context("identity service returned no connect handle")?
+        .to_string();
+    let user_code = start["user_code"].as_str().unwrap_or("?");
+    let verification_uri = start["verification_uri"].as_str().unwrap_or("?");
+    let interval = start["interval"].as_u64().unwrap_or(5).max(1);
+
+    println!(
+        "To let your agents act on your {} account, open:\n\n    {verification_uri}\n\nand enter the code: {user_code}\n",
+        args.provider
+    );
+    print!("Waiting for consent");
+    std::io::stdout().flush().ok();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(args.timeout);
+    let mut wait = interval;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            println!();
+            bail!(
+                "consent timed out after {}s; run `agentctl connect {}` again",
+                args.timeout,
+                args.provider
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+        let poll: Value = post_json(
+            &http,
+            &url,
+            "/v1/connections/poll",
+            json!({ "handle": handle }),
+        )
+        .await
+        .context("poll connect consent")?;
+        match poll["status"].as_str() {
+            Some("ok") => {
+                println!();
+                println!(
+                    "Connected {} for {} in org {} — agents proceed on your behalf; revoke any time with the connections admin.",
+                    poll["provider"].as_str().unwrap_or(&args.provider),
+                    poll["user"].as_str().unwrap_or("you"),
+                    poll["org"].as_str().unwrap_or(&args.org),
+                );
+                return Ok(());
+            }
+            Some("pending") => {
+                print!(".");
+                std::io::stdout().flush().ok();
+            }
+            Some("slow_down") => wait += 5,
+            other => {
+                println!();
+                bail!("unexpected consent status {other:?} from the identity service");
+            }
+        }
+    }
+}
+
 pub fn load_session() -> Result<Credentials> {
     let path = credentials_path()?;
     let raw = std::fs::read_to_string(&path).with_context(|| {

@@ -31,6 +31,15 @@ pub struct DeviceSession {
     pub device_code: String,
     pub interval_secs: u64,
     pub expires_unix: i64,
+    /// What completing this session does: `login` mints a CLI session;
+    /// `connect` stores the provider's refresh token as a custody
+    /// connection for (org, subject) — the P5-4 consent flow.
+    pub purpose: String,
+    /// `connect` only: the org the connection lands in.
+    pub org: Option<String>,
+    /// `connect` only: the acting user (introspected at START — the poller
+    /// presents no identity, the opaque handle carries it).
+    pub subject: Option<String>,
 }
 
 /// A minted A2A principal (user × agent), stored hash-only.
@@ -330,6 +339,9 @@ CREATE TABLE IF NOT EXISTS identity_device_sessions (
     interval_secs BIGINT NOT NULL,
     expires_unix  BIGINT NOT NULL
 );
+ALTER TABLE identity_device_sessions ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'login';
+ALTER TABLE identity_device_sessions ADD COLUMN IF NOT EXISTS org TEXT;
+ALTER TABLE identity_device_sessions ADD COLUMN IF NOT EXISTS subject TEXT;
 CREATE TABLE IF NOT EXISTS identity_principals (
     namespace    TEXT NOT NULL,
     agent        TEXT NOT NULL,
@@ -410,10 +422,10 @@ impl Store for PgStore {
         self.client()
             .await?
             .execute(
-                "INSERT INTO identity_device_sessions (handle, provider, device_code, interval_secs, expires_unix)
-                 VALUES ($1,$2,$3,$4,$5)
-                 ON CONFLICT (handle) DO UPDATE SET device_code=$3, interval_secs=$4, expires_unix=$5",
-                &[&s.handle, &s.provider, &s.device_code, &(s.interval_secs as i64), &s.expires_unix],
+                "INSERT INTO identity_device_sessions (handle, provider, device_code, interval_secs, expires_unix, purpose, org, subject)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                 ON CONFLICT (handle) DO UPDATE SET device_code=$3, interval_secs=$4, expires_unix=$5, purpose=$6, org=$7, subject=$8",
+                &[&s.handle, &s.provider, &s.device_code, &(s.interval_secs as i64), &s.expires_unix, &s.purpose, &s.org, &s.subject],
             )
             .await
             .map_err(|e| StoreError::Pg(format!("{e}")))?;
@@ -425,7 +437,7 @@ impl Store for PgStore {
             .client()
             .await?
             .query_opt(
-                "SELECT provider, device_code, interval_secs, expires_unix
+                "SELECT provider, device_code, interval_secs, expires_unix, purpose, org, subject
                  FROM identity_device_sessions WHERE handle = $1",
                 &[&handle],
             )
@@ -438,6 +450,9 @@ impl Store for PgStore {
             device_code: row.get(1),
             interval_secs: row.get::<_, i64>(2) as u64,
             expires_unix: row.get(3),
+            purpose: row.get(4),
+            org: row.get(5),
+            subject: row.get(6),
         })
     }
 

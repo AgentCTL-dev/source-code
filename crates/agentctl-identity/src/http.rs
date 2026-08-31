@@ -63,6 +63,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/principals/mint", post(principal_mint))
         .route("/v1/principals/verify", post(principal_verify))
         .route("/v1/exchange", post(exchange))
+        .route("/v1/connections/start", post(connections_start))
+        .route("/v1/connections/poll", post(connections_poll))
         .route("/metrics", get(metrics))
         .route(
             "/admin/connections",
@@ -167,6 +169,9 @@ async fn device_start(
             device_code: start.device_code.clone(),
             interval_secs: start.interval,
             expires_unix: now_unix() + start.expires_in as i64,
+            purpose: "login".into(),
+            org: None,
+            subject: None,
         })
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -193,6 +198,12 @@ async fn device_poll(
         .take_device_session(handle)
         .await
         .map_err(|_| err(StatusCode::NOT_FOUND, "unknown or expired login handle"))?;
+    if session.purpose != "login" {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "handle belongs to a connect flow; poll /v1/connections/poll",
+        ));
+    }
     if session.expires_unix < now_unix() {
         return Err(err(StatusCode::GONE, "login expired; start again"));
     }
@@ -216,6 +227,202 @@ async fn device_poll(
                 "id_token": tokens.id_token,
                 "expires_in": tokens.expires_in,
                 "identity": identity,
+            })))
+        }
+        Err(OidcError::AuthorizationPending) => Ok(Json(json!({ "status": "pending" }))),
+        Err(OidcError::SlowDown) => Ok(Json(json!({ "status": "slow_down" }))),
+        Err(e) => Err(err(StatusCode::BAD_GATEWAY, e)),
+    }
+}
+
+// -- connections (P5-4 consent flow) -----------------------------------------
+
+/// Resolve the CALLER for the connect flow: the Authorization bearer is
+/// either a USER's identity access token (validated against the federated
+/// providers — the user connects THEMSELF) or the admin bearer (control
+/// plane / tests name the user explicitly).
+async fn connect_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &Value,
+) -> Result<String, ApiError> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if !bearer.is_empty() {
+        if let Ok(identity) = state.federation.validate_any(bearer).await {
+            return Ok(identity.subject);
+        }
+    }
+    // Not a user token: the admin channel may connect on a named user's
+    // behalf (require_admin refuses anything else, fail closed).
+    require_admin(state, headers)?;
+    body.get("user")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "admin-channel connect needs an explicit user",
+            )
+        })
+}
+
+/// `POST /v1/connections/start {provider, org}` — begin the CONSENT device
+/// flow for a provider connection (RFC 8628 + `offline_access`): the human
+/// approves at the IdP once; poll stores the refresh token in custody and
+/// the org's agents proceed on the user's behalf from then on (P5-4).
+async fn connections_start(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let subject = connect_caller(&state, &headers, &body).await?;
+    let provider = body
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "provider is required"))?;
+    let org = body
+        .get("org")
+        .and_then(Value::as_str)
+        .filter(|o| !o.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "org is required"))?;
+    let start = state
+        .federation
+        .device_start_scoped(provider, &["offline_access"])
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let mut raw = [0u8; 24];
+    SystemRandom::new().fill(&mut raw).expect("rng");
+    let handle = B64.encode(raw);
+    state
+        .store
+        .put_device_session(DeviceSession {
+            handle: handle.clone(),
+            provider: provider.to_string(),
+            device_code: start.device_code.clone(),
+            interval_secs: start.interval,
+            expires_unix: now_unix() + start.expires_in as i64,
+            purpose: "connect".into(),
+            org: Some(org.to_string()),
+            subject: Some(subject),
+        })
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({
+        "handle": handle,
+        "user_code": start.user_code,
+        "verification_uri": start.verification_uri,
+        "expires_in": start.expires_in,
+        "interval": start.interval,
+    })))
+}
+
+/// `POST /v1/connections/poll {handle}` — complete the consent: redeem the
+/// device code, seal the provider's REFRESH token into custody as the
+/// (org, user, provider) connection, and return only facts — no token ever
+/// leaves this service on this path.
+async fn connections_poll(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let handle = body
+        .get("handle")
+        .and_then(Value::as_str)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "handle is required"))?;
+    let session = state
+        .store
+        .take_device_session(handle)
+        .await
+        .map_err(|_| err(StatusCode::NOT_FOUND, "unknown or expired connect handle"))?;
+    if session.purpose != "connect" {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "handle belongs to a login flow; poll /v1/device/poll",
+        ));
+    }
+    if session.expires_unix < now_unix() {
+        return Err(err(StatusCode::GONE, "consent expired; start again"));
+    }
+    let (org, user) = match (&session.org, &session.subject) {
+        (Some(o), Some(u)) => (o.clone(), u.clone()),
+        _ => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "connect session lost its binding",
+            ))
+        }
+    };
+    match state
+        .federation
+        .device_poll(&session.provider, &session.device_code)
+        .await
+    {
+        Ok(tokens) => {
+            let Some(refresh) = tokens.refresh_token else {
+                return Err(err(
+                    StatusCode::BAD_GATEWAY,
+                    "provider granted no refresh token (offline_access unsupported or refused) — the connection would die with the first access token",
+                ));
+            };
+            let provider_cfg = state
+                .federation
+                .provider(&session.provider)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+                .clone();
+            let discovery = state
+                .federation
+                .discovery(&session.provider)
+                .await
+                .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+            let sealed_secret = state
+                .sealer
+                .seal(
+                    &crate::exchange::secret_aad(&org, &user, &session.provider),
+                    refresh.as_bytes(),
+                )
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let sealed_client_secret = match &provider_cfg.client_secret {
+                Some(cs) => Some(
+                    state
+                        .sealer
+                        .seal(
+                            &crate::exchange::client_secret_aad(&org, &user, &session.provider),
+                            cs.as_bytes(),
+                        )
+                        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+                ),
+                None => None,
+            };
+            let now = now_unix();
+            state
+                .store
+                .put_connection(crate::store::ConnectionRecord {
+                    org: org.clone(),
+                    user: user.clone(),
+                    provider: session.provider.clone(),
+                    kind: "oauth_refresh".into(),
+                    sealed_secret,
+                    token_endpoint: Some(discovery.token_endpoint.clone()),
+                    client_id: Some(provider_cfg.client_id.clone()),
+                    sealed_client_secret,
+                    scope: None,
+                    created_unix: now,
+                    updated_unix: now,
+                })
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            // A re-connect replaces the grant NOW, not at cache expiry.
+            state.exchanger.invalidate(&org, &user, &session.provider);
+            Ok(Json(json!({
+                "status": "ok",
+                "org": org,
+                "user": user,
+                "provider": session.provider,
             })))
         }
         Err(OidcError::AuthorizationPending) => Ok(Json(json!({ "status": "pending" }))),
@@ -658,7 +865,25 @@ async fn exchange(
         Err(e) => {
             use crate::exchange::ExchangeError as E;
             match e {
-                E::NoConnection { .. } => oauth_err(StatusCode::BAD_REQUEST, "invalid_target", e),
+                E::NoConnection {
+                    ref org,
+                    ref user,
+                    ref provider,
+                } => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        // The RFC 6749 code mcpg surfaces; agentctl-native
+                        // callers additionally get the connect card facts
+                        // (P5-4): who must connect what, where.
+                        "error": "invalid_target",
+                        "error_description": e.to_string(),
+                        "connection_required": {
+                            "org": org, "user": user, "provider": provider,
+                            "connect": format!("agentctl connect {provider} --org {org}"),
+                        },
+                    })),
+                )
+                    .into_response(),
                 E::ProviderRefused(_) => oauth_err(StatusCode::BAD_REQUEST, "invalid_grant", e),
                 E::ProviderUnreachable(_) => oauth_err(StatusCode::BAD_GATEWAY, "server_error", e),
                 E::Custody(_) => {
@@ -1224,6 +1449,242 @@ mod tests {
         .await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["error"], "invalid_target");
+    }
+
+    /// P5-4: the whole consent flow against an in-process IdP — start (with
+    /// offline_access appended), pending poll, approval, then the refresh
+    /// token lands SEALED in custody (never in the poll response) and the
+    /// exchange mints from it immediately.
+    #[tokio::test]
+    async fn connect_flow_stores_refresh_token_and_feeds_the_exchange() {
+        use axum::extract::Form;
+        use axum::routing::{get, post};
+        use std::collections::HashMap as Map;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // In-process IdP: discovery + device + token endpoints. First token
+        // poll is authorization_pending; the second issues tokens WITH a
+        // refresh token, and refresh_token grants mint at-<n>.
+        struct Idp {
+            polls: AtomicU64,
+            scope_seen: std::sync::Mutex<String>,
+        }
+        let idp = Arc::new(Idp {
+            polls: AtomicU64::new(0),
+            scope_seen: std::sync::Mutex::new(String::new()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let (b1, b2) = (base.clone(), base.clone());
+        let (i1, i2) = (idp.clone(), idp.clone());
+        let app = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || {
+                    let b = b1.clone();
+                    async move {
+                        Json(json!({
+                            "issuer": b,
+                            "token_endpoint": format!("{b}/token"),
+                            "device_authorization_endpoint": format!("{b}/device"),
+                            "jwks_uri": format!("{b}/jwks.json"),
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/device",
+                post(move |Form(f): Form<Map<String, String>>| {
+                    let idp = i1.clone();
+                    let b = b2.clone();
+                    async move {
+                        *idp.scope_seen.lock().unwrap() =
+                            f.get("scope").cloned().unwrap_or_default();
+                        Json(json!({
+                            "device_code": "dc-1",
+                            "user_code": "ABCD-EFGH",
+                            "verification_uri": format!("{b}/activate"),
+                            "expires_in": 300,
+                            "interval": 1,
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/token",
+                post(move |Form(f): Form<Map<String, String>>| {
+                    let idp = i2.clone();
+                    async move {
+                        match f.get("grant_type").map(String::as_str) {
+                            Some("urn:ietf:params:oauth:grant-type:device_code") => {
+                                if idp.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                                    return (
+                                        StatusCode::BAD_REQUEST,
+                                        Json(json!({"error": "authorization_pending"})),
+                                    )
+                                        .into_response();
+                                }
+                                Json(json!({
+                                    "access_token": "at-consent",
+                                    "refresh_token": "rt-consent-0",
+                                    "expires_in": 3600,
+                                }))
+                                .into_response()
+                            }
+                            Some("refresh_token") => Json(json!({
+                                "access_token": format!(
+                                    "at-{}",
+                                    f.get("refresh_token").cloned().unwrap_or_default()
+                                ),
+                                "expires_in": 3600,
+                            }))
+                            .into_response(),
+                            _ => (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"error": "unsupported_grant_type"})),
+                            )
+                                .into_response(),
+                        }
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // State whose "dev" provider points at the in-process IdP.
+        let store: Arc<MemoryStore> = Arc::new(MemoryStore::default());
+        let sealer = Arc::new(crate::seal::Sealer::new([9u8; 32]));
+        let st = Arc::new(AppState {
+            federation: Federation::new(
+                outbound_client(),
+                vec![Provider {
+                    name: "zendesk".into(),
+                    issuer: base.clone(),
+                    client_id: "agentctl-cli".into(),
+                    client_secret: None,
+                    audiences: vec![],
+                    scopes: vec!["openid".into()],
+                    groups_claim: "groups".into(),
+                }],
+            ),
+            store: store.clone(),
+            admin_token: Some("adm".into()),
+            aauth: None,
+            exchanger: Arc::new(crate::exchange::Exchanger::new(
+                store,
+                sealer.clone(),
+                crate::oidc::outbound_client(),
+                300,
+                60,
+            )),
+            sealer,
+        });
+
+        // Start (admin channel names the user; a real CLI presents the
+        // user's own identity token instead).
+        let (code, body) = call(
+            router(st.clone()),
+            "POST",
+            "/v1/connections/start",
+            Some("adm"),
+            json!({"provider": "zendesk", "org": "acme", "user": "okta:andrii"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        let handle = body["handle"].as_str().unwrap().to_string();
+        assert!(body["verification_uri"]
+            .as_str()
+            .unwrap()
+            .contains("/activate"));
+        // The consent flow asked for offline power; login never does.
+        assert!(idp.scope_seen.lock().unwrap().contains("offline_access"));
+
+        // First poll: pending. Second: consent granted, connection stored.
+        let (_, body) = call(
+            router(st.clone()),
+            "POST",
+            "/v1/connections/poll",
+            None,
+            json!({"handle": handle}),
+        )
+        .await;
+        assert_eq!(body["status"], "pending");
+        let (code, body) = call(
+            router(st.clone()),
+            "POST",
+            "/v1/connections/poll",
+            None,
+            json!({"handle": handle}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "ok");
+        assert!(
+            body.get("access_token").is_none() && body.get("refresh_token").is_none(),
+            "no token may leave the connect path: {body}"
+        );
+
+        // Custody now feeds the exchange: the refresh token redeems at the
+        // IdP and the minted access token flows out.
+        let (code, _, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            Some("adm"),
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", "okta:andrii"),
+                (
+                    "subject_token_type",
+                    "urn:agentctl:params:oauth:token-type:user",
+                ),
+                ("audience", "zendesk"),
+                ("org", "acme"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["access_token"], "at-rt-consent-0");
+
+        // Wrong-poller guards both ways.
+        let (code, body) = call(
+            router(st.clone()),
+            "POST",
+            "/v1/device/poll",
+            None,
+            json!({"handle": handle}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// A missing connection's exchange refusal carries the CONNECT CARD facts
+    /// (P5-4): org, user, provider, and the CLI one-liner.
+    #[tokio::test]
+    async fn exchange_refusal_names_the_required_connection() {
+        let st = state(Some("adm"));
+        let (code, _, body) = call_form(
+            router(st.clone()),
+            "/v1/exchange",
+            Some("adm"),
+            &[
+                ("grant_type", GRANT),
+                ("subject_token", "okta:andrii"),
+                (
+                    "subject_token_type",
+                    "urn:agentctl:params:oauth:token-type:user",
+                ),
+                ("audience", "github"),
+                ("org", "acme"),
+            ],
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_target");
+        let card = &body["connection_required"];
+        assert_eq!(card["provider"], "github");
+        assert_eq!(card["org"], "acme");
+        assert_eq!(card["user"], "okta:andrii");
+        assert_eq!(card["connect"], "agentctl connect github --org acme");
     }
 
     #[tokio::test]
