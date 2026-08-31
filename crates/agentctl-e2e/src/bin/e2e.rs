@@ -726,6 +726,11 @@ spec:
     };
     let user_token = mint("sup-andrii", Some("e2e:andrii")).await?;
     let bare_token = mint("plain-agent", None).await?;
+    // The cache-partition probe: SAME sub as the user token, no usr. With
+    // credentials.key_attributes: [subject_token] the host cache partitions
+    // per raw bearer, so this caller must NOT be served the user's cached
+    // credential (the exact bleed the P5-3 finding uncovered).
+    let aliased_token = mint("sup-andrii", None).await?;
     if user_token.is_empty() || bare_token.is_empty() {
         bail!("identity refused the gateway-token mint");
     }
@@ -909,6 +914,38 @@ spec:
             // AND the upstream refused — the echo accepts everything, so any
             // success here means a bare dial happened.
             bail!("user-less caller's tool call did not fail closed (echoed {echoed:?}): {resp}");
+        }
+    }
+
+    // The aliased caller (same sub, no usr) AFTER the user's call warmed the
+    // host cache: per-bearer partitioning means it hits the exchange itself
+    // and is refused there — served the user's credential = the bleed.
+    let (init3, session3) = call(
+        Some(aliased_token.clone()),
+        json!({ "jsonrpc": "2.0", "id": 20, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "e2e-aliased", "version": "0" } } }),
+        None,
+    )
+    .await?;
+    if init3.get("result").is_some() {
+        let _ = call(
+            Some(aliased_token.clone()),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            session3.clone(),
+        )
+        .await;
+        let (resp, _) = call(
+            Some(aliased_token.clone()),
+            json!({ "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                    "params": { "name": "zendesk.auth.echo", "arguments": {} } }),
+            session3,
+        )
+        .await?;
+        if resp.get("error").is_none() && resp.pointer("/result/isError") != Some(&json!(true)) {
+            bail!(
+                "same-sub user-less caller was served the user's cached credential (cache not partitioned per bearer): {resp}"
+            );
         }
     }
 

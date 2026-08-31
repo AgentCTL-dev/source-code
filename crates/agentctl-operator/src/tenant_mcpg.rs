@@ -315,6 +315,12 @@ pub fn render_config(
             // an entitling token) or the whole gateway refuses to boot.
             doc["license"] = json!({ "non_production_use": true });
         }
+        // Partition the HOST credential cache per raw bearer (mcpg keys on
+        // the resolved subject by default): without this, two bearers
+        // sharing a `sub` would share the cached upstream credential even
+        // when the exchange would refuse one of them. mcpg's next release
+        // folds subject_token in implicitly; listing it stays valid.
+        doc["credentials"] = json!({ "key_attributes": ["subject_token"] });
     }
     // YAML for operator legibility (`kubectl get cm -o yaml` reads well);
     // mcpg parses YAML as a superset of this JSON-shaped tree.
@@ -818,6 +824,8 @@ mod tests {
             doc["license"]["non_production_use"],
             serde_yaml::Value::Bool(true)
         );
+        // The host credential cache partitions per raw bearer (P5-3 finding).
+        assert_eq!(doc["credentials"]["key_attributes"][0], "subject_token");
         // The plain proxy entry is untouched.
         assert!(feds[1]["upstream"].get("auth").is_none());
     }
