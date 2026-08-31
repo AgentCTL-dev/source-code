@@ -609,6 +609,37 @@ sandbox:
   # Kernel isolation (Kata et al.): the cell pods' runtimeClassName.
   runtimeClassName: ""
 
+# Artifacts façade (P3-3): the artifacts.* MCP backend over an S3-compatible
+# content store. Blobs go to object storage, not the state Postgres. Bundles a
+# single-node MinIO by default; point s3Endpoint at a managed S3 for production.
+artifacts:
+  enabled: false
+  logLevel: info
+  bucket: artifacts
+  region: us-east-1
+  # Per-org byte cap enforced before each put (0 disables).
+  orgQuotaBytes: "104857600"   # 100 MiB
+  # Set to use a managed S3 instead of the bundled MinIO (then MinIO can be
+  # left running unused, or you can gate it off in your own overlay).
+  s3Endpoint: ""
+  replicas: 1
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 128Mi }
+  # Dev credentials — OVERRIDE for any shared/production install (they are the
+  # MinIO root user and the artifacts service's S3 key alike).
+  credentials:
+    accessKeyId: agentctl
+    secretAccessKey: agentctl-artifacts-dev-secret
+  minio:
+    image: "quay.io/minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+    resources:
+      requests: { cpu: 25m, memory: 128Mi }
+      limits: { cpu: "1", memory: 512Mi }
+    persistence:
+      enabled: false
+      size: 5Gi
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the

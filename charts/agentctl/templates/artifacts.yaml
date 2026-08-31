@@ -1,0 +1,232 @@
+{{- $ns := include "agentctl.namespace" . }}
+{{- if .Values.artifacts.enabled }}
+{{- $a := .Values.artifacts }}
+# The artifacts façade (P3-3): the artifacts.* MCP backend over an
+# S3-compatible content store. Blobs (opaque, possibly large) belong in object
+# storage, not the state Postgres — this fronts MinIO (or any S3) with put/get/
+# list, fences every object under the caller's org prefix, and enforces a
+# per-org byte quota. Registered as an org MCPService, it federates through the
+# tenant gateway like the sandbox cell.
+---
+# S3 credentials, shared by MinIO (its root user) and the artifacts service.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentctl-artifacts-s3
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: {{ $a.credentials.accessKeyId | quote }}
+  AWS_SECRET_ACCESS_KEY: {{ $a.credentials.secretAccessKey | quote }}
+---
+# MinIO content store. Single node on an emptyDir for dev/e2e; point the
+# artifacts service at a managed S3 (and disable this) for production, or give
+# MinIO a PVC via artifacts.minio.persistence.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-artifacts-minio
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-artifacts-minio
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-artifacts-minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-artifacts-minio
+        {{- include "agentctl.labels" . | nindent 8 }}
+    spec:
+      # MinIO's image ships no non-root USER, so pin a numeric one; /data
+      # (emptyDir/PVC) is made writable via fsGroup, and HOME points there so
+      # MinIO writes its runtime state where it can.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: {{ $a.minio.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data", "--address", ":9000"]
+          env:
+            - name: HOME
+              value: /data
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef: { name: agentctl-artifacts-s3, key: AWS_ACCESS_KEY_ID }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: agentctl-artifacts-s3, key: AWS_SECRET_ACCESS_KEY }
+          ports:
+            - { containerPort: 9000, name: s3 }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: s3 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml $a.minio.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          {{- if $a.minio.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: agentctl-artifacts-minio
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- if $a.minio.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentctl-artifacts-minio
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ $a.minio.persistence.size | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-artifacts-minio
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-artifacts-minio
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-artifacts-minio
+  ports:
+    - { name: s3, port: 9000, targetPort: s3 }
+---
+# The artifacts.* MCP backend.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-artifacts
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-artifacts
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $a.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-artifacts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-artifacts
+        {{- include "agentctl.labels" . | nindent 8 }}
+    spec:
+      # ndots:1 keeps the MinIO FQDN (and any external S3 host) off the search
+      # list, where a cluster wildcard domain could capture it.
+      dnsConfig:
+        options:
+          - { name: ndots, value: "1" }
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: artifacts
+          image: "{{ .Values.image.registry }}{{ if .Values.image.registry }}/{{ end }}agentctl/artifacts:{{ .Values.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: {{ $a.logLevel | quote }}
+            - name: ARTIFACTS_S3_ENDPOINT
+              value: {{ $a.s3Endpoint | default (printf "http://agentctl-artifacts-minio.%s.svc.cluster.local.:9000" $ns) | quote }}
+            - name: ARTIFACTS_S3_BUCKET
+              value: {{ $a.bucket | quote }}
+            - name: ARTIFACTS_S3_REGION
+              value: {{ $a.region | quote }}
+            - name: ARTIFACTS_ORG_QUOTA_BYTES
+              value: {{ $a.orgQuotaBytes | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: { name: agentctl-artifacts-s3, key: AWS_ACCESS_KEY_ID }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: agentctl-artifacts-s3, key: AWS_SECRET_ACCESS_KEY }
+            {{- if .Values.apiToken.enabled }}
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentctl-api-token, key: AGENTCTL_API_TOKEN }
+            {{- end }}
+          ports:
+            - { containerPort: 8080, name: http }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+          resources:
+            {{- toYaml $a.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-artifacts
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-artifacts
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-artifacts
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+{{- if .Values.networkPolicies.enabled }}
+---
+# The artifacts backend accepts its sanctioned callers: the tenant gateways
+# that federate it (per-org), plus every operator-managed org namespace's
+# agents. Its own org fence + quota are the tenancy control; this is the
+# perimeter (a policy CNI enforces it — inert on kindnet).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-artifacts-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-artifacts
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - { key: agentctl.dev/organization, operator: Exists }
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentctl-tenant-mcpg
+      ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}
+{{- end }}

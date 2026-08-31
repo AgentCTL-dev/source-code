@@ -23,6 +23,7 @@ members = [
     "crates/agentctl-metering",
     "crates/agentctl-audit",
     "crates/agentctl-sandbox",
+    "crates/agentctl-artifacts",
     "crates/agentctl-scaler",
 ]
 

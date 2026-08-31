@@ -73,6 +73,12 @@ sandbox:
   # The cell pods use the same busybox/python images images-quick.sh loads.
   warmPool: 1
 
+# The artifacts façade (P3-3): artifacts.* over the bundled MinIO. A tight org
+# quota so the quota-refusal path is exercised by the e2e without huge blobs.
+artifacts:
+  enabled: true
+  orgQuotaBytes: "1048576"   # 1 MiB — small enough for the quota test
+
 
 # Tenant mcpg per org (P5-1): the proxy-only governance gateway (the blessed
 # GATEWAY image boots fine — only the plugin lane is broken upstream).

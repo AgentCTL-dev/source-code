@@ -19,6 +19,7 @@ Everything below is one Helm release; you compose which planes are on.
 | "Bring your own login" | OIDC federation (`identity.providers[]`); device flow (CLI) + auth-code (web) | You map IdP claims → orgs/groups; no passwords to hold |
 | "Let my agent use my Zendesk" | Connections (`agentctl connect`), custody + RFC 8693 exchange, per-user tokens injected upstream (P5-3/4) | A "Connect" button hitting `/v1/connections/start` |
 | "Run agent code safely" | The sandbox cell — single-use, network-denied pods (P5-5) | Register `sandbox.run` in the org's MCPService registry |
+| "Let my agent keep files" | The artifacts façade — `artifacts.put/get/list` over S3, org-fenced with per-org quotas (P3-3) | Register the artifacts service in the org's MCPService registry |
 | "Humans approve risky actions" | HITL gates answered under the right identity, fanned to a channel (P5-6) | Set `spec.approval` + `hitl: [webhook:…]`; wire your Slack |
 | "Charge for it" | Billing-ready metering — attributed events + export (P7-4) | Your billing reads `…/metering/export` |
 | "Prove what happened" | One queryable audit trail across the planes (P7-3) | Your compliance UI reads `…/audit/query` |

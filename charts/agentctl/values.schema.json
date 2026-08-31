@@ -1,674 +1,741 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "agentctl Helm values",
-  "description": "Validates the top-level shape of agentctl chart values. Intentionally permissive (additionalProperties allowed on most objects) so valid installs are never rejected, while still catching type mistakes (e.g. a string where an integer/boolean is required).",
-  "type": "object",
-  "additionalProperties": true,
-  "definitions": {
-    "component": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "replicas": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "logLevel": {
-          "type": "string"
-        },
-        "resources": {
-          "type": "object"
-        },
-        "nodeSelector": {
-          "type": "object"
-        },
-        "affinity": {
-          "type": "object"
-        },
-        "tolerations": {
-          "type": "array"
-        },
-        "topologySpreadConstraints": {
-          "type": "array"
-        },
-        "priorityClassName": {
-          "type": "string"
-        },
-        "podAnnotations": {
-          "type": "object"
-        },
-        "podLabels": {
-          "type": "object"
-        },
-        "extraEnv": {
-          "type": "array"
-        },
-        "envFrom": {
-          "type": "array"
-        },
-        "allowedRegistries": {
-          "type": "string"
-        },
-        "secretsNamespaces": {
-          "type": "array"
-        },
-        "attestIdentity": {
-          "type": "boolean"
-        },
-        "inferProxy": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "socketDir": {
-              "type": "string"
-            }
-          }
-        },
-        "store": {
-          "type": "string",
-          "enum": [
-            "memory",
-            "postgres"
-          ]
-        },
-        "mtls": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "allowedNames": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "scalerCommonName": {
-              "type": "string"
-            }
-          }
-        },
-        "federationPeers": {
-          "type": "string"
-        },
-        "address": {
-          "type": "string"
-        },
-        "coordinationUrl": {
-          "type": "string"
-        },
-        "scaler": {
-          "type": "object"
-        },
-        "probes": {
-          "type": "object"
-        },
-        "serviceAccount": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "annotations": {
-              "type": "object"
-            }
-          }
-        },
-        "pdb": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "minAvailable": {
-              "type": [
-                "integer",
-                "string"
-              ]
-            }
-          }
-        },
-        "autoscaling": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "minReplicas": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "maxReplicas": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "targetCPUUtilizationPercentage": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            }
-          }
-        },
-        "hooks": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "ratePerMinute": {
-              "type": "integer",
-              "minimum": 1,
-              "description": "Per-agent hooks-ingress delivery ceiling per 60s window (429 above)."
-            },
-            "maxBodyBytes": {
-              "type": "integer",
-              "minimum": 1024,
-              "description": "Max accepted hooks delivery body in bytes (413 above)."
-            }
-          }
-        },
-        "allowPrivateWebhooks": {
-          "type": "boolean",
-          "description": "DEV ONLY: admit http/private addresses for outbound webhooks (disables the SSRF guard)."
-        }
-      }
-    }
-  },
-  "properties": {
-    "image": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "registry": {
-          "type": "string"
-        },
-        "tag": {
-          "type": [
-            "string",
-            "number"
-          ]
-        },
-        "pullPolicy": {
-          "type": "string",
-          "enum": [
-            "Always",
-            "IfNotPresent",
-            "Never"
-          ]
-        },
-        "pullSecrets": {
-          "type": "array"
-        },
-        "digests": {
-          "type": "object"
-        }
-      }
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "title": "agentctl Helm values",
+ "description": "Validates the top-level shape of agentctl chart values. Intentionally permissive (additionalProperties allowed on most objects) so valid installs are never rejected, while still catching type mistakes (e.g. a string where an integer/boolean is required).",
+ "type": "object",
+ "additionalProperties": true,
+ "definitions": {
+  "component": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
     },
-    "referenceAgent": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "image": {
-          "type": "string"
-        }
-      }
+    "replicas": {
+     "type": "integer",
+     "minimum": 0
     },
-    "commonLabels": {
-      "type": "object"
-    },
-    "commonAnnotations": {
-      "type": "object"
-    },
-    "metrics": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "serviceMonitor": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "interval": {
-              "type": "string"
-            },
-            "scrapeTimeout": {
-              "type": "string"
-            },
-            "labels": {
-              "type": "object"
-            }
-          }
-        }
-      }
-    },
-    "observability": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "dashboards": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            }
-          }
-        },
-        "alerts": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "labels": {
-              "type": "object"
-            }
-          }
-        }
-      }
-    },
-    "namespace": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "create": {
-          "type": "boolean"
-        },
-        "podSecurity": {
-          "type": "string"
-        }
-      }
-    },
-    "certManager": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "caIssuerRef": {
-          "type": "string"
-        }
-      }
-    },
-    "postgres": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": [
-            "bundled",
-            "external"
-          ]
-        },
-        "bundled": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "image": {
-              "type": "string"
-            },
-            "runAsUser": {
-              "type": "integer"
-            },
-            "storage": {
-              "type": "string"
-            },
-            "pvcSize": {
-              "type": "string"
-            },
-            "storageClassName": {
-              "type": "string"
-            },
-            "tls": {
-              "type": "object",
-              "additionalProperties": true,
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "verifyFull": {
-                  "type": "boolean"
-                }
-              }
-            }
-          }
-        },
-        "external": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "dsnSecretName": {
-              "type": "string"
-            },
-            "dsnSecretKey": {
-              "type": "string"
-            }
-          }
-        }
-      }
-    },
-    "operator": {
-      "$ref": "#/definitions/component"
-    },
-    "apiserver": {
-      "$ref": "#/definitions/component"
-    },
-    "gateway": {
-      "$ref": "#/definitions/component"
-    },
-    "admission": {
-      "$ref": "#/definitions/component"
-    },
-    "coordination": {
-      "$ref": "#/definitions/component"
-    },
-    "scaler": {
-      "$ref": "#/definitions/component"
-    },
-    "apiToken": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "value": {
-          "type": "string"
-        }
-      }
-    },
-    "trustedProxy": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "allowedNames": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "proxyCommonName": {
-          "type": "string"
-        },
-        "headerPrefix": {
-          "type": "string"
-        },
-        "identityHeaders": {
-          "type": "object",
-          "properties": {
-            "user": {
-              "type": "string"
-            },
-            "email": {
-              "type": "string"
-            },
-            "groups": {
-              "type": "string"
-            }
-          }
-        }
-      }
-    },
-    "networkPolicies": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "agentNamespaces": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      }
+    "logLevel": {
+     "type": "string"
     },
     "resources": {
-      "type": "object"
+     "type": "object"
     },
-    "identity": {
-      "type": "object",
-      "additionalProperties": true,
-      "description": "Identity plane: identity.aauth (portable AGENT identity wiring for the operator) and identity.service (the agentctl-identity SERVICE: federated OIDC, device-flow login, principal minting, the AAuth provider role).",
-      "properties": {
-        "aauth": {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "provider": {
-              "type": "string",
-              "description": "Agent Provider issuer URL; empty = off."
-            },
-            "adminTokenSecret": {
-              "type": "object",
-              "additionalProperties": true,
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "key": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        },
-        "service": {
-          "type": "object",
-          "additionalProperties": true,
-          "description": "The agentctl-identity service (RFC 0028).",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "replicas": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "store": {
-              "type": "string",
-              "enum": [
-                "memory",
-                "postgres"
-              ]
-            },
-            "providers": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "required": [
-                  "name",
-                  "issuer",
-                  "client_id"
-                ],
-                "properties": {
-                  "name": {
-                    "type": "string"
-                  },
-                  "issuer": {
-                    "type": "string",
-                    "pattern": "^https?://"
-                  },
-                  "client_id": {
-                    "type": "string"
-                  }
-                },
-                "additionalProperties": true
-              }
-            },
-            "issuerCa": {
-              "type": "object",
-              "additionalProperties": true,
-              "properties": {
-                "secretName": {
-                  "type": "string"
-                },
-                "configMapName": {
-                  "type": "string"
-                },
-                "key": {
-                  "type": "string"
-                }
-              }
-            },
-            "sealKeySecret": {
-              "type": "object",
-              "additionalProperties": true,
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "key": {
-                  "type": "string"
-                }
-              }
-            },
-            "aauth": {
-              "type": "object",
-              "additionalProperties": true,
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "tokenTtl": {
-                  "type": "integer",
-                  "minimum": 60
-                },
-                "seedSecret": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "properties": {
-                    "name": {
-                      "type": "string"
-                    },
-                    "key": {
-                      "type": "string"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
+    "nodeSelector": {
+     "type": "object"
     },
-    "state": {
-      "type": "object",
-      "description": "Managed state service (P3): the mcpg-backed checkpointer for store.class: managed agents.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "image": {
-          "type": "string",
-          "description": "Blessed mcpg image, digest-pinned."
-        },
-        "pluginImage": {
-          "type": "string",
-          "description": "backend-sql plugin OCI reference."
-        },
-        "replicas": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "resources": {
-          "type": "object"
-        }
-      }
+    "affinity": {
+     "type": "object"
     },
-    "control": {
-      "type": "object",
-      "description": "Control MCP (P4-1): AAuth-verified, namespace-scoped control.* tools for supervisors.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "replicas": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "resources": {
-          "type": "object"
-        }
-      }
+    "tolerations": {
+     "type": "array"
     },
-    "tenantMcpg": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Per-org mcpg governance proxies (P5-1).",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "image": {
-          "type": "string"
-        },
-        "exchangePlugin": {
-          "type": "string",
-          "description": "Digest-pinned OCI ref of mcpg's credential-oauth-token-exchange plugin (P5-3 OBO lane); empty disables per-user injection (obo entries drop, fail closed)."
-        },
-        "nonProductionLicense": {
-          "type": "boolean",
-          "description": "Declare license.non_production_use in tenant gateway configs so the BUSL exchange plugin passes mcpg's community license gate (dev/e2e only; production needs an entitling license token)."
-        },
-        "auditShipperImage": {
-          "type": "string",
-          "description": "P7-3: audit-shipper sidecar image tailing each tenant gateway's audit file into identity's ingest door; empty disables shipping."
-        }
-      }
+    "topologySpreadConstraints": {
+     "type": "array"
     },
-    "sandbox": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "logLevel": {
-          "type": "string"
-        },
-        "cellNamespace": {
-          "type": "string"
-        },
-        "warmPool": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "images": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "python": {
-              "type": "string"
-            },
-            "sh": {
-              "type": "string"
-            }
-          }
-        },
-        "runtimeClassName": {
-          "type": "string"
-        }
+    "priorityClassName": {
+     "type": "string"
+    },
+    "podAnnotations": {
+     "type": "object"
+    },
+    "podLabels": {
+     "type": "object"
+    },
+    "extraEnv": {
+     "type": "array"
+    },
+    "envFrom": {
+     "type": "array"
+    },
+    "allowedRegistries": {
+     "type": "string"
+    },
+    "secretsNamespaces": {
+     "type": "array"
+    },
+    "attestIdentity": {
+     "type": "boolean"
+    },
+    "inferProxy": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      },
+      "socketDir": {
+       "type": "string"
       }
+     }
+    },
+    "store": {
+     "type": "string",
+     "enum": [
+      "memory",
+      "postgres"
+     ]
+    },
+    "mtls": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      },
+      "allowedNames": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "scalerCommonName": {
+       "type": "string"
+      }
+     }
+    },
+    "federationPeers": {
+     "type": "string"
+    },
+    "address": {
+     "type": "string"
+    },
+    "coordinationUrl": {
+     "type": "string"
+    },
+    "scaler": {
+     "type": "object"
+    },
+    "probes": {
+     "type": "object"
+    },
+    "serviceAccount": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "annotations": {
+       "type": "object"
+      }
+     }
+    },
+    "pdb": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      },
+      "minAvailable": {
+       "type": [
+        "integer",
+        "string"
+       ]
+      }
+     }
+    },
+    "autoscaling": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      },
+      "minReplicas": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "maxReplicas": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "targetCPUUtilizationPercentage": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 100
+      }
+     }
+    },
+    "hooks": {
+     "type": "object",
+     "additionalProperties": false,
+     "properties": {
+      "ratePerMinute": {
+       "type": "integer",
+       "minimum": 1,
+       "description": "Per-agent hooks-ingress delivery ceiling per 60s window (429 above)."
+      },
+      "maxBodyBytes": {
+       "type": "integer",
+       "minimum": 1024,
+       "description": "Max accepted hooks delivery body in bytes (413 above)."
+      }
+     }
+    },
+    "allowPrivateWebhooks": {
+     "type": "boolean",
+     "description": "DEV ONLY: admit http/private addresses for outbound webhooks (disables the SSRF guard)."
     }
+   }
   }
+ },
+ "properties": {
+  "image": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "registry": {
+     "type": "string"
+    },
+    "tag": {
+     "type": [
+      "string",
+      "number"
+     ]
+    },
+    "pullPolicy": {
+     "type": "string",
+     "enum": [
+      "Always",
+      "IfNotPresent",
+      "Never"
+     ]
+    },
+    "pullSecrets": {
+     "type": "array"
+    },
+    "digests": {
+     "type": "object"
+    }
+   }
+  },
+  "referenceAgent": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "image": {
+     "type": "string"
+    }
+   }
+  },
+  "commonLabels": {
+   "type": "object"
+  },
+  "commonAnnotations": {
+   "type": "object"
+  },
+  "metrics": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "serviceMonitor": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      },
+      "interval": {
+       "type": "string"
+      },
+      "scrapeTimeout": {
+       "type": "string"
+      },
+      "labels": {
+       "type": "object"
+      }
+     }
+    }
+   }
+  },
+  "observability": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "dashboards": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      }
+     }
+    },
+    "alerts": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      },
+      "labels": {
+       "type": "object"
+      }
+     }
+    }
+   }
+  },
+  "namespace": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "create": {
+     "type": "boolean"
+    },
+    "podSecurity": {
+     "type": "string"
+    }
+   }
+  },
+  "certManager": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "caIssuerRef": {
+     "type": "string"
+    }
+   }
+  },
+  "postgres": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "mode": {
+     "type": "string",
+     "enum": [
+      "bundled",
+      "external"
+     ]
+    },
+    "bundled": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "image": {
+       "type": "string"
+      },
+      "runAsUser": {
+       "type": "integer"
+      },
+      "storage": {
+       "type": "string"
+      },
+      "pvcSize": {
+       "type": "string"
+      },
+      "storageClassName": {
+       "type": "string"
+      },
+      "tls": {
+       "type": "object",
+       "additionalProperties": true,
+       "properties": {
+        "enabled": {
+         "type": "boolean"
+        },
+        "verifyFull": {
+         "type": "boolean"
+        }
+       }
+      }
+     }
+    },
+    "external": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "dsnSecretName": {
+       "type": "string"
+      },
+      "dsnSecretKey": {
+       "type": "string"
+      }
+     }
+    }
+   }
+  },
+  "operator": {
+   "$ref": "#/definitions/component"
+  },
+  "apiserver": {
+   "$ref": "#/definitions/component"
+  },
+  "gateway": {
+   "$ref": "#/definitions/component"
+  },
+  "admission": {
+   "$ref": "#/definitions/component"
+  },
+  "coordination": {
+   "$ref": "#/definitions/component"
+  },
+  "scaler": {
+   "$ref": "#/definitions/component"
+  },
+  "apiToken": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "value": {
+     "type": "string"
+    }
+   }
+  },
+  "trustedProxy": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "allowedNames": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "proxyCommonName": {
+     "type": "string"
+    },
+    "headerPrefix": {
+     "type": "string"
+    },
+    "identityHeaders": {
+     "type": "object",
+     "properties": {
+      "user": {
+       "type": "string"
+      },
+      "email": {
+       "type": "string"
+      },
+      "groups": {
+       "type": "string"
+      }
+     }
+    }
+   }
+  },
+  "networkPolicies": {
+   "type": "object",
+   "additionalProperties": true,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "agentNamespaces": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "resources": {
+   "type": "object"
+  },
+  "identity": {
+   "type": "object",
+   "additionalProperties": true,
+   "description": "Identity plane: identity.aauth (portable AGENT identity wiring for the operator) and identity.service (the agentctl-identity SERVICE: federated OIDC, device-flow login, principal minting, the AAuth provider role).",
+   "properties": {
+    "aauth": {
+     "type": "object",
+     "additionalProperties": true,
+     "properties": {
+      "provider": {
+       "type": "string",
+       "description": "Agent Provider issuer URL; empty = off."
+      },
+      "adminTokenSecret": {
+       "type": "object",
+       "additionalProperties": true,
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "key": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    "service": {
+     "type": "object",
+     "additionalProperties": true,
+     "description": "The agentctl-identity service (RFC 0028).",
+     "properties": {
+      "enabled": {
+       "type": "boolean"
+      },
+      "replicas": {
+       "type": "integer",
+       "minimum": 0
+      },
+      "store": {
+       "type": "string",
+       "enum": [
+        "memory",
+        "postgres"
+       ]
+      },
+      "providers": {
+       "type": "array",
+       "items": {
+        "type": "object",
+        "required": [
+         "name",
+         "issuer",
+         "client_id"
+        ],
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "issuer": {
+          "type": "string",
+          "pattern": "^https?://"
+         },
+         "client_id": {
+          "type": "string"
+         }
+        },
+        "additionalProperties": true
+       }
+      },
+      "issuerCa": {
+       "type": "object",
+       "additionalProperties": true,
+       "properties": {
+        "secretName": {
+         "type": "string"
+        },
+        "configMapName": {
+         "type": "string"
+        },
+        "key": {
+         "type": "string"
+        }
+       }
+      },
+      "sealKeySecret": {
+       "type": "object",
+       "additionalProperties": true,
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "key": {
+         "type": "string"
+        }
+       }
+      },
+      "aauth": {
+       "type": "object",
+       "additionalProperties": true,
+       "properties": {
+        "enabled": {
+         "type": "boolean"
+        },
+        "tokenTtl": {
+         "type": "integer",
+         "minimum": 60
+        },
+        "seedSecret": {
+         "type": "object",
+         "additionalProperties": true,
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "key": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "state": {
+   "type": "object",
+   "description": "Managed state service (P3): the mcpg-backed checkpointer for store.class: managed agents.",
+   "additionalProperties": false,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "image": {
+     "type": "string",
+     "description": "Blessed mcpg image, digest-pinned."
+    },
+    "pluginImage": {
+     "type": "string",
+     "description": "backend-sql plugin OCI reference."
+    },
+    "replicas": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "resources": {
+     "type": "object"
+    }
+   }
+  },
+  "control": {
+   "type": "object",
+   "description": "Control MCP (P4-1): AAuth-verified, namespace-scoped control.* tools for supervisors.",
+   "additionalProperties": false,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "replicas": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "resources": {
+     "type": "object"
+    }
+   }
+  },
+  "tenantMcpg": {
+   "type": "object",
+   "additionalProperties": false,
+   "description": "Per-org mcpg governance proxies (P5-1).",
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "image": {
+     "type": "string"
+    },
+    "exchangePlugin": {
+     "type": "string",
+     "description": "Digest-pinned OCI ref of mcpg's credential-oauth-token-exchange plugin (P5-3 OBO lane); empty disables per-user injection (obo entries drop, fail closed)."
+    },
+    "nonProductionLicense": {
+     "type": "boolean",
+     "description": "Declare license.non_production_use in tenant gateway configs so the BUSL exchange plugin passes mcpg's community license gate (dev/e2e only; production needs an entitling license token)."
+    },
+    "auditShipperImage": {
+     "type": "string",
+     "description": "P7-3: audit-shipper sidecar image tailing each tenant gateway's audit file into identity's ingest door; empty disables shipping."
+    }
+   }
+  },
+  "sandbox": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "logLevel": {
+     "type": "string"
+    },
+    "cellNamespace": {
+     "type": "string"
+    },
+    "warmPool": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "images": {
+     "type": "object",
+     "additionalProperties": false,
+     "properties": {
+      "python": {
+       "type": "string"
+      },
+      "sh": {
+       "type": "string"
+      }
+     }
+    },
+    "runtimeClassName": {
+     "type": "string"
+    }
+   }
+  },
+  "artifacts": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "enabled": {
+     "type": "boolean"
+    },
+    "logLevel": {
+     "type": "string"
+    },
+    "bucket": {
+     "type": "string"
+    },
+    "region": {
+     "type": "string"
+    },
+    "orgQuotaBytes": {
+     "type": "string"
+    },
+    "s3Endpoint": {
+     "type": "string"
+    },
+    "replicas": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "resources": {
+     "type": "object"
+    },
+    "credentials": {
+     "type": "object",
+     "additionalProperties": false,
+     "properties": {
+      "accessKeyId": {
+       "type": "string"
+      },
+      "secretAccessKey": {
+       "type": "string"
+      }
+     }
+    },
+    "minio": {
+     "type": "object",
+     "additionalProperties": false,
+     "properties": {
+      "image": {
+       "type": "string"
+      },
+      "resources": {
+       "type": "object"
+      },
+      "persistence": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "enabled": {
+         "type": "boolean"
+        },
+        "size": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ }
 }

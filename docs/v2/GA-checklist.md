@@ -12,45 +12,45 @@ traces to a row there and to a live e2e scenario.
 | **P0** Substrate + agent-agnosticism | P0-1..5 | ✅ Done | real agentd 1.3.1 in kind |
 | **P1** Identity (OIDC, AAuth, principals) | P1-1..6 | ✅ Done | sec-aauth, org-route-user, supervisor-route |
 | **P2** Tenancy, CRDs, projection, triggers | P2-1..8 | ✅ Done | org-tenancy, policy-ladder, trigger-matrix |
-| **P3** State / durability | P3-1 built·parked, **P3-2..6 blocked** | ⛔ upstream | see below |
+| **P3** State / durability | P3-1..6 | ✅ **Complete** | state-durability, store-classes, lifecycle-verbs, artifacts-flow + checkpoint bench |
 | **P4** Control plane (supervisors, OBO, approvals, @mention) | P4-1..7 | ✅ Done | control-mcp, mention-orchestration |
 | **P5** Capability plane (tenant mcpg, OBO, connect, sandbox, HITL, work) | P5-1..7 | ✅ **Complete** | tenant-mcpg, obo-exchange, connections-flow, sandbox-run, hitl-gate, work-redelivery |
 | **P6** Fleets + scaling | P6-1..6 | ✅ **Complete** | fleet-static, shard-resize, dispatcher-fanout, fleet-budget, webhook-scale-zero |
 | **P7** GA surfaces (hooks, dashboards, audit, metering, scale-to-zero, hardening) | P7-1..6 done, P7-7 this doc | ✅ Done | hooks-ingress, metering-export, audit-trail, supervisor-park |
 
-**49 e2e scenarios; last full catalogue: 45 passed / 4 documented skips / 0
-failed.** The four skips are environmental, not gaps:
+**53 e2e scenarios; last full catalogue: 50 passed / 3 documented skips / 0
+failed.** The three skips are environmental, not gaps:
 `sec-oidc`/`sec-trusted-proxy` (a pre-existing unarmed-gate gap superseded by
-the P1 identity-gateway authn scenarios), `sec-netpol` (needs a Calico lane —
-kindnet does not enforce NetworkPolicy), and `state-durability` (the one
-blocked item below).
+the P1 identity-gateway authn scenarios) and `sec-netpol` (needs a Calico lane —
+kindnet does not enforce NetworkPolicy).
 
-## The one blocked dependency — the state plane (P3-2..6)
+## The state plane (P3) — complete
 
-**P3-1 is built and correct** (the `state.*` checkpointer profile: single-CTE
-seq-CAS, byte-identical-replay idempotence, prefix-fenced tenancy, the full
-4-tool store contract, the chart's digest-pinned state service). It is
-**parked, not missing.**
+Once mcpg **beta.26** (the `#664` entity-vtable fix) booted the `backend-sql`
+pairing, the whole state plane landed on the proven P3-1 checkpointer:
 
-The block is upstream and specific: the blessed mcpg image cannot `dlopen`
-the `backend-sql` state plugin — three artifact pairings failed in sequence
-(GLIBC floor, missing entry exports, then a watch-strategy registration
-collision), and the mcpg team is re-blessing a pairing built from the same
-source line as the gateway. **The moment a pairing boots, `state.enabled`
-flips on and `state-durability` unskips itself** — P3-2..6 (server-side
-fencing, artifacts façade, store classes, lifecycle verbs, capacity
-benchmark) then land on top of the proven P3-1 foundation. This is tracked,
-not open-ended: the interim prefix-trust + NetworkPolicy posture ships today,
-and the cross-session contract with mcpg is settled.
-
-Nothing else in the program depends on it — every other plane is complete and
-live-verified without state durability.
+- **P3-1** `state.*` seq-CAS checkpointer (single-CTE CAS, byte-identical-replay
+  idempotence, the 4-tool store contract) — a real `store.class: managed`
+  agentd agent checkpoints through it and survives `kill -9` with no
+  split-brain (`state-durability`).
+- **P3-2** server-side tenant fence (`param_exprs` `identity.subject_id`): a
+  conforming caller physically cannot touch another agent's keys; plus
+  `state.admin.snapshot/restore/purge`.
+- **P3-3** `artifacts.*` façade over an S3 content store (bundled MinIO),
+  org-fenced with per-org quotas (`artifacts-flow`).
+- **P3-4** store classes ephemeral/local/managed, the `local` StatefulSet+PVC
+  path surviving a pod delete (`store-classes`).
+- **P3-5** lifecycle verbs backup/restore/reset/stop/start/migrate — `migrate`
+  reschedules a managed agent's pod with the checkpoint provably preserved
+  (`lifecycle-verbs`).
+- **P3-6** checkpoint capacity benchmark (~735 checkpoints/sec single-replica,
+  zero CAS errors; numbers in [benchmarks.md](../benchmarks.md)).
 
 ## GA gates — all green
 
 - [x] **Every plane live-verified in a real cluster** against real agentd
-      1.3.1 and blessed mcpg beta.24 (not mocks) — 45/49 scenarios, the 4 skips
-      documented and environmental.
+      1.3.1, blessed mcpg beta.26, and a bundled MinIO (not mocks) — 50/53
+      scenarios, the 3 skips documented and environmental.
 - [x] **Fail-closed by construction** — audited in the hardening pass
       (P7-5): identity admin refuses without a token, the exchange refuses a
       user-less subject, a gate with no channel refuses at compile, admission
@@ -88,10 +88,10 @@ live-verified without state durability.
 
 ## Verdict
 
-Every buildable plane of the v2 program is **done, integrated, and
-live-verified**. P5 and P6 are complete planes; P7's GA surfaces are all live.
-The single incomplete area — state durability (P3-2..6) — is blocked solely on
-an upstream mcpg plugin pairing, is built up to that boundary (P3-1), and
-unskips itself the moment the pairing boots. That is the GA state: shippable
-now for every posture that does not require managed state durability, and one
-upstream digest away from complete.
+**Every plane of the v2 program — P0 through P7 — is done, integrated, and
+live-verified against real agentd, blessed mcpg beta.26, and a bundled MinIO.**
+The state plane (P3), the last area to land, is complete: managed durability
+that survives `kill -9`, a server-side tenant fence, an S3-backed artifacts
+façade with org quotas, three store classes, the full lifecycle-verb set
+(including a checkpoint-preserving `migrate`), and a measured capacity envelope.
+Nothing in the program is parked or blocked. That is the GA state: shippable.

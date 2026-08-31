@@ -113,7 +113,10 @@ async fn run_sweeps(cli: &Cli) -> Result<()> {
             "c" => sweep_cp_trends(&ctx, &rd, cli.max_n).await?,
             "d" => sweep_throughput(&ctx, &rd, &concurrency_steps(cli), cli.duration_secs).await?,
             "e" => sweep_latency(&ctx, &rd, cli.max_n).await?,
-            "f" => sweep_state_checkpoint(&ctx, &rd, &concurrency_steps(cli), cli.duration_secs).await?,
+            "f" => {
+                sweep_state_checkpoint(&ctx, &rd, &concurrency_steps(cli), cli.duration_secs)
+                    .await?
+            }
             other => bail!("unknown sweep {other:?} (want a|b|c|d|e|f)"),
         };
         sweeps.insert(s.to_string(), v);
@@ -398,7 +401,14 @@ async fn sweep_state_checkpoint(
     drop(pf);
     rd.write_csv(
         "state_checkpoint",
-        &["agents", "checkpoints_per_sec", "p50_ms", "p99_ms", "ops", "errors"],
+        &[
+            "agents",
+            "checkpoints_per_sec",
+            "p50_ms",
+            "p99_ms",
+            "ops",
+            "errors",
+        ],
         &rows,
     )?;
     Ok(json!({ "steps": rows.len() }))
@@ -504,15 +514,16 @@ async fn state_loadgen(
                 .await;
                 lat.push(op_start.elapsed().as_secs_f64() * 1000.0);
                 ops += 1;
-                let sc = r.as_ref().and_then(|(b, _)| b.pointer("/result/structuredContent"));
+                let sc = r
+                    .as_ref()
+                    .and_then(|(b, _)| b.pointer("/result/structuredContent"));
                 match sc.and_then(|s| s.get("ok")).and_then(|v| v.as_bool()) {
                     Some(true) => stored = seq,
                     _ => {
                         errors += 1;
                         // Resync from the reported stored seq when present.
-                        if let Some(latest) = sc
-                            .and_then(|s| s.get("latest"))
-                            .and_then(|v| v.as_u64())
+                        if let Some(latest) =
+                            sc.and_then(|s| s.get("latest")).and_then(|v| v.as_u64())
                         {
                             stored = latest;
                         }

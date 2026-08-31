@@ -194,6 +194,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("audit-trail", "capability", audit_trail),
         // Sandbox cell: code runs in a single-use, network-denied pod (P5-5)
         scenario!("sandbox-run", "capability", sandbox_run),
+        // Artifacts façade: put/get/list over S3 (MinIO), org-fenced + quota (P3-3)
+        scenario!("artifacts-flow", "capability", artifacts_flow),
         // Store classes: ephemeral/local/managed all render + run (P3-4)
         scenario!("store-classes", "capability", store_classes),
         // Lifecycle verbs: backup/restore/reset/stop/start/migrate on a managed
@@ -1654,7 +1656,9 @@ async fn lifecycle_verbs(ctx: &Ctx) -> Result<Outcome> {
         "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge ticks in one line\" }}\n  expose: {{ a2a: true }}\n  store: {{ class: managed }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
     ))?;
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
-        Ok(!first_pod(ns, &agent_label(name)).unwrap_or_default().is_empty())
+        Ok(!first_pod(ns, &agent_label(name))
+            .unwrap_or_default()
+            .is_empty())
     })
     .await
     .context("lc-probe pod")?;
@@ -1680,8 +1684,8 @@ async fn lifecycle_verbs(ctx: &Ctx) -> Result<Outcome> {
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
         let backup_path = backup_path.clone();
         async move {
-            let out =
-                shell::kubectl(&["create", "--raw", &backup_path, "-f", "/dev/null"]).unwrap_or_default();
+            let out = shell::kubectl(&["create", "--raw", &backup_path, "-f", "/dev/null"])
+                .unwrap_or_default();
             let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
             Ok(v.pointer("/data/items")
                 .and_then(Value::as_array)
@@ -1707,7 +1711,12 @@ async fn lifecycle_verbs(ctx: &Ctx) -> Result<Outcome> {
     if mig.get("status").and_then(Value::as_str) != Some("Success") {
         bail!("migrate did not succeed: {mig}");
     }
-    if mig.pointer("/data/keys_preserved").and_then(Value::as_u64).unwrap_or(0) < n_backup as u64 {
+    if mig
+        .pointer("/data/keys_preserved")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        < n_backup as u64
+    {
         bail!("migrate did not preserve every checkpoint key: {mig}");
     }
     // migrate replaces the pod (the old one drains gracefully, so it lingers
@@ -1772,7 +1781,9 @@ async fn lifecycle_verbs(ctx: &Ctx) -> Result<Outcome> {
     // 6) START — wake the agent.
     let _ = raw(&format!("{base}/start"), "/dev/null")?;
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
-        Ok(!first_pod(ns, &agent_label(name)).unwrap_or_default().is_empty())
+        Ok(!first_pod(ns, &agent_label(name))
+            .unwrap_or_default()
+            .is_empty())
     })
     .await
     .context("start wakes the parked agent")?;
@@ -1926,6 +1937,160 @@ async fn sandbox_run(ctx: &Ctx) -> Result<Outcome> {
         {
             bail!("network egress from the cell was NOT denied: {net}");
         }
+    }
+
+    drop(pf);
+    pass()
+}
+
+/// P3-3: the artifacts façade over the content store. Drives `artifacts.*`
+/// directly (a tenant gateway federates it in production): a blob round-trips
+/// (put → get, byte-identical) and appears in the org's list; a DIFFERENT org
+/// can neither read the key nor see it in a list (the org fence); a write past
+/// the org quota is refused; and a call with no asserted identity is refused
+/// (fail closed).
+async fn artifacts_flow(ctx: &Ctx) -> Result<Outcome> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let system = &ctx.cfg.system_ns;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get",
+            "deploy",
+            "agentctl-artifacts",
+            "-n",
+            system,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "1")
+    })
+    .await
+    .context("artifacts service never Ready")?;
+
+    let admin_token = {
+        let raw = shell::kubectl(&[
+            "get",
+            "secret",
+            "-n",
+            system,
+            "agentctl-api-token",
+            "-o",
+            "jsonpath={.data.AGENTCTL_API_TOKEN}",
+        ])
+        .unwrap_or_default();
+        String::from_utf8(base64_decode(raw.trim()).unwrap_or_default()).unwrap_or_default()
+    };
+    let pf = shell::PortForward::service(system, "agentctl-artifacts", 8080, 18130)?;
+    let base = pf.base_url();
+    // A tool call under a chosen subject (`None` = omit the identity header).
+    let call = |subject: Option<&str>, tool: &str, args: Value| {
+        let base = base.clone();
+        let token = admin_token.clone();
+        let subject = subject.map(str::to_string);
+        let tool = tool.to_string();
+        async move {
+            let mut req = ctx
+                .http
+                .post(format!("{base}/mcp"))
+                .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": { "name": tool, "arguments": args } }));
+            if !token.is_empty() {
+                req = req.bearer_auth(token);
+            }
+            if let Some(s) = &subject {
+                req = req.header("x-mcpg-subject-id", s);
+            }
+            let resp = req.send().await.context("reach artifacts")?;
+            let v: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok(v["result"]["structuredContent"].clone())
+        }
+    };
+    // Handshake (also proves the tools are advertised).
+    let init: Value = {
+        let mut req = ctx.http.post(format!("{base}/mcp")).json(&json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": { "name": "e2e", "version": "0" } } }));
+        if !admin_token.is_empty() {
+            req = req.bearer_auth(&admin_token);
+        }
+        req.send().await?.json().await.unwrap_or(Value::Null)
+    };
+    if init.get("result").is_none() {
+        bail!("artifacts initialize failed: {init}");
+    }
+
+    let org_a = "orgs/e2e-art-a/agent-1";
+    let org_b = "orgs/e2e-art-b/agent-9";
+    let key = "reports/summary.txt";
+    let payload = b"the quick brown fox jumps over the lazy dog";
+
+    // (1) put → get round-trip, byte-identical.
+    let put = call(
+        Some(org_a),
+        "artifacts.put",
+        json!({ "key": key, "content_base64": b64.encode(payload) }),
+    )
+    .await?;
+    if put["size"].as_u64() != Some(payload.len() as u64) {
+        bail!("put did not report the right size: {put}");
+    }
+    let got = call(Some(org_a), "artifacts.get", json!({ "key": key })).await?;
+    let got_bytes = got["content_base64"]
+        .as_str()
+        .and_then(|s| b64.decode(s).ok())
+        .unwrap_or_default();
+    if got_bytes != payload {
+        bail!("get did not round-trip the bytes: {got}");
+    }
+
+    // (2) list shows the key (relative to the org).
+    let list = call(Some(org_a), "artifacts.list", json!({})).await?;
+    if !list["items"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|o| o["key"] == json!(key)))
+    {
+        bail!("list did not include the put key: {list}");
+    }
+
+    // (3) THE ORG FENCE: org B cannot read A's key, nor see it listed.
+    let cross_get = call(Some(org_b), "artifacts.get", json!({ "key": key })).await?;
+    if !cross_get.is_null() {
+        bail!("FENCE BREACH: org B read org A's artifact: {cross_get}");
+    }
+    let cross_list = call(Some(org_b), "artifacts.list", json!({})).await?;
+    if cross_list["items"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty())
+    {
+        bail!("FENCE BREACH: org B listed org A's artifacts: {cross_list}");
+    }
+
+    // (4) QUOTA: a fresh org whose single write exceeds the (1 MiB e2e) cap is
+    // refused with the quota code, not stored.
+    let org_q = "orgs/e2e-art-quota/agent-1";
+    let big = vec![b'x'; 1_200_000];
+    let refused = call(
+        Some(org_q),
+        "artifacts.put",
+        json!({ "key": "big.bin", "content_base64": b64.encode(&big) }),
+    )
+    .await?;
+    if refused["error"]["code"] != json!("quota_exceeded") {
+        bail!("over-quota write was not refused with quota_exceeded: {refused}");
+    }
+    // And nothing landed.
+    let q_list = call(Some(org_q), "artifacts.list", json!({})).await?;
+    if q_list["items"].as_array().is_some_and(|a| !a.is_empty()) {
+        bail!("a quota-refused write still stored something: {q_list}");
+    }
+
+    // (5) FAIL CLOSED: no asserted identity ⇒ refused.
+    let anon = call(None, "artifacts.list", json!({})).await?;
+    if anon["error"]["code"] != json!("no_identity") {
+        bail!("a call with no identity was not refused: {anon}");
     }
 
     drop(pf);
