@@ -4959,8 +4959,11 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         .danger_accept_invalid_certs(true)
         .build()?;
 
+    // The driver's own asserted subject — the P3-2 fence scopes its agent-tool
+    // calls to keys under THIS prefix (admin tools are unfenced).
+    let driver_subj = format!("orgs/{}/e2e-driver", ctx.cfg.ns);
     // Minimal MCP streamable-HTTP client: initialize → session id → calls.
-    let post = |body: Value, session: Option<String>| {
+    let post = |body: Value, session: Option<String>, subject: String| {
         let mcp = mcp.clone();
         let state_http = state_http.clone();
         async move {
@@ -4969,9 +4972,10 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
                 .header("accept", "application/json, text/event-stream")
                 .header("mcp-protocol-version", "2025-11-25")
                 // Interim prefix-trust (P3-1): the caller self-asserts its
-                // identity behind the NetworkPolicy perimeter, reaching the
-                // header_asserted tier the state bindings require.
-                .header("x-mcpg-subject-id", "orgs/e2e/state-probe/agent")
+                // identity (x-mcpg-subject-id) behind the NetworkPolicy
+                // perimeter → header_asserted tier; the state bindings key
+                // their SQL on this via identity.subject_id (the P3-2 fence).
+                .header("x-mcpg-subject-id", subject)
                 .json(&body);
             if let Some(s) = &session {
                 req = req.header("mcp-session-id", s.clone());
@@ -5009,6 +5013,7 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
             "capabilities": {},
             "clientInfo": { "name": "agentctl-e2e", "version": "0" } } }),
         None,
+        driver_subj.clone(),
     )
     .await?;
     if init.get("result").is_none() {
@@ -5017,12 +5022,15 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     let _ = post(
         json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
         session.clone(),
+        driver_subj.clone(),
     )
     .await;
     // beta.26 enforces UNIQUE JSON-RPC request ids per session; an atomic
     // counter guarantees it regardless of the caller's label.
     let next_id = std::sync::atomic::AtomicU64::new(100);
-    let call = |_label: u64, tool: &str, args: Value| {
+    // Agent-tool calls assert the DRIVER's own subject (the fence scopes them
+    // to keys under it). `call_as` overrides the subject for the fence test.
+    let call_as = |subject: String, tool: &str, args: Value| {
         let tool = tool.to_string();
         let session = session.clone();
         let post = &post;
@@ -5032,6 +5040,7 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
                 json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
                         "params": { "name": tool, "arguments": args } }),
                 session,
+                subject,
             )
             .await?;
             if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
@@ -5040,9 +5049,11 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
             anyhow::Ok(resp["result"].clone())
         }
     };
+    let call = |_label: u64, tool: &str, args: Value| call_as(driver_subj.clone(), tool, args);
 
-    // Contract conformance, straight off store.profile.json.
-    let key = format!("orgs/{}/e2e-probe/agent/state", ctx.cfg.ns);
+    // Contract conformance, straight off store.profile.json — keys under the
+    // driver's OWN subject prefix so the P3-2 fence admits them.
+    let key = format!("{driver_subj}/state");
     let sc = |r: &Value| r["structuredContent"].clone();
     let envl = json!({ "v": 1, "note": "first checkpoint" });
 
@@ -5104,12 +5115,7 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     if sc(&r)["state"]["v"] != json!(2) || sc(&r)["seq"] != json!(2) {
         bail!("read-back after CAS: {r}");
     }
-    let r = call(
-        9,
-        "state.list",
-        json!({ "prefix": format!("orgs/{}/e2e-probe/", ctx.cfg.ns) }),
-    )
-    .await?;
+    let r = call(9, "state.list", json!({ "prefix": driver_subj.clone() })).await?;
     let keys = sc(&r)["keys"].as_array().cloned().unwrap_or_default();
     if !keys.iter().any(|k| k["key"] == json!(key)) {
         bail!("list missed the written key: {r}");
@@ -5137,14 +5143,18 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     let pod = first_pod(ns, &agent_label(name))?;
     kh::wait_pod_running(&ctx.client, ns, &pod, READY_TIMEOUT).await?;
 
-    // The agent's checkpoints appear under ITS operator-rendered prefix.
+    // The agent's checkpoints appear under ITS operator-rendered prefix. The
+    // driver (a DIFFERENT subject) reads them via the ADMIN snapshot tool —
+    // the agent-tool `state.list` is fenced to the caller's own subject, so
+    // a cross-agent read there returns nothing (that IS the fence, tested
+    // below); the admin tool is unfenced by design (operator/control plane).
     let prefix = format!("orgs/{ns}/{name}");
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
         let prefix = prefix.clone();
         let call = &call;
         async move {
-            let r = call(12, "state.list", json!({ "prefix": prefix })).await?;
-            Ok(r["structuredContent"]["keys"]
+            let r = call(12, "state.admin.snapshot", json!({ "prefix": prefix })).await?;
+            Ok(r["structuredContent"]["items"]
                 .as_array()
                 .is_some_and(|k| !k.is_empty()))
         }
@@ -5188,12 +5198,80 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     if restarts.trim() != "0" {
         bail!("restored agent restarted {restarts} times (split-brain or store outage?)");
     }
-    let r = call(13, "state.list", json!({ "prefix": prefix.clone() })).await?;
-    if !r["structuredContent"]["keys"]
+    let r = call(
+        13,
+        "state.admin.snapshot",
+        json!({ "prefix": prefix.clone() }),
+    )
+    .await?;
+    if !r["structuredContent"]["items"]
         .as_array()
         .is_some_and(|k| !k.is_empty())
     {
         bail!("checkpoints vanished across the SIGKILL: {r}");
+    }
+
+    // THE FENCE (P3-2 DoD): the driver, asserting its OWN subject, cannot read
+    // the managed agent's keys through an agent tool — state.get of a key
+    // under the agent's prefix returns absent, and state.list of the agent's
+    // prefix returns empty, no matter the argument. Cross-agent access is
+    // provably impossible for a conforming caller (the SQL keys on the
+    // host-supplied identity.subject_id, which the args map can never set).
+    let victim_key = format!("{prefix}/agent/state");
+    let fenced_get = call(30, "state.get", json!({ "key": victim_key })).await?;
+    if !fenced_get["structuredContent"].is_null()
+        && !fenced_get["structuredContent"]["state"].is_null()
+    {
+        bail!("FENCE BREACH: driver read another agent's key: {fenced_get}");
+    }
+    let fenced_list = call(31, "state.list", json!({ "prefix": prefix.clone() })).await?;
+    if fenced_list["structuredContent"]["keys"]
+        .as_array()
+        .is_some_and(|k| !k.is_empty())
+    {
+        bail!("FENCE BREACH: driver listed another agent's keys: {fenced_list}");
+    }
+
+    // Leg 3 (P3-2): snapshot / delete / restore round-trip under the driver's
+    // OWN subject (fence-consistent) — the backup/restore unit `agentctl
+    // backup` and `migrate` build on. The managed agent's prefix already
+    // snapshotted non-empty above (leg 2), proving the admin export works
+    // across subjects too.
+    let admin_key = format!("{driver_subj}/admin-roundtrip");
+    call(
+        15,
+        "state.put",
+        json!({ "key": admin_key, "seq": 1,
+        "state": { "marker": "roundtrip" } }),
+    )
+    .await?;
+    let snap = call(
+        16,
+        "state.admin.snapshot",
+        json!({ "prefix": driver_subj.clone() }),
+    )
+    .await?;
+    let items = snap["structuredContent"]["items"].clone();
+    if items.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        bail!("snapshot of the driver prefix was empty: {snap}");
+    }
+    // Delete it, prove it's gone, restore the snapshot, prove it's back.
+    call(17, "state.delete", json!({ "key": admin_key })).await?;
+    let gone = call(18, "state.get", json!({ "key": admin_key })).await?;
+    if !gone["structuredContent"].is_null() && !gone["structuredContent"]["state"].is_null() {
+        bail!("key not deleted before restore: {gone}");
+    }
+    let restored = call(19, "state.admin.restore", json!({ "items": items })).await?;
+    if restored["structuredContent"]["restored"]
+        .as_i64()
+        .unwrap_or(0)
+        < 1
+    {
+        bail!("restore reported no rows: {restored}");
+    }
+    let back = call(20, "state.get", json!({ "key": admin_key })).await?;
+    if back["structuredContent"]["state"]["marker"] != json!("roundtrip") {
+        bail!("snapshot/restore round-trip lost the key: {back}");
     }
 
     drop(pf);

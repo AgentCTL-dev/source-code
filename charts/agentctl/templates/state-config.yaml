@@ -117,11 +117,13 @@ data:
                 # refusal, never an insert).
                 sql: |
                   WITH cur AS (
-                    SELECT seq, state FROM agent_state WHERE key = :key
+                    SELECT seq, state FROM agent_state
+                    WHERE key = :key AND starts_with(:key, :caller || '/')
                   ), attempt AS (
                     INSERT INTO agent_state (key, seq, state, updated_at)
                     SELECT :key, :seq, CAST(:state AS jsonb), now()
-                    WHERE :seq = 1 OR EXISTS (SELECT 1 FROM cur WHERE cur.seq = :seq - 1)
+                    WHERE starts_with(:key, :caller || '/')
+                      AND (:seq = 1 OR EXISTS (SELECT 1 FROM cur WHERE cur.seq = :seq - 1))
                     ON CONFLICT (key) DO UPDATE
                       SET seq = EXCLUDED.seq, state = EXCLUDED.state, updated_at = now()
                       WHERE agent_state.seq = EXCLUDED.seq - 1
@@ -137,7 +139,16 @@ data:
                         THEN NULL
                       ELSE COALESCE((SELECT cur.seq FROM cur), 0)
                     END AS latest
-                params: [key, seq, state]
+                # The TENANT FENCE (P3-2): identity.subject_id (the caller's own
+                # asserted subject, host-supplied — the args map can never set
+                # it) is bound into the query, so every row the caller can
+                # touch must be under its OWN subject prefix. A conforming
+                # agent's keys are `<subject>/…`; a call passing another
+                # agent's key matches nothing. Header-asserted tier today
+                # (perimeter-compensated); a pure tier swap to verified JWT.
+                param_exprs:
+                  caller: "identity.subject_id"
+                params: [key, seq, state, caller]
                 row_mode: single
                 timeout_ms: 5000
 
@@ -164,12 +175,15 @@ data:
                 sql: |
                   SELECT state, seq FROM agent_state
                   WHERE key = :key
+                    AND starts_with(:key, :caller || '/')
                     AND (CAST(:seq AS bigint) IS NULL OR seq = CAST(:seq AS bigint))
-                params: [key, seq]
+                params: [key, seq, caller]
                 param_exprs:
                   # `seq` is optional on the wire; SQL params are not — bind
                   # SQL NULL when absent (and the cast keeps NULL bigint-typed).
                   seq: "has(arguments.seq) ? arguments.seq : null"
+                  # The tenant fence (P3-2): the caller's own subject.
+                  caller: "identity.subject_id"
                 row_mode: single
                 read_only: true
                 timeout_ms: 5000
@@ -198,7 +212,12 @@ data:
                          ) AS keys
                   FROM agent_state
                   WHERE starts_with(key, :prefix)
-                params: [prefix]
+                    AND starts_with(key, :caller || '/')
+                params: [prefix, caller]
+                param_exprs:
+                  # The tenant fence (P3-2): listed keys are always the
+                  # caller's, whatever prefix it asks for.
+                  caller: "identity.subject_id"
                 row_mode: single
                 read_only: true
                 timeout_ms: 5000
@@ -220,8 +239,93 @@ data:
               driver: postgres
               url: "${env.DATABASE_URL}"
               query:
-                sql: "DELETE FROM agent_state WHERE key = :key"
-                params: [key]
+                sql: "DELETE FROM agent_state WHERE key = :key AND starts_with(:key, :caller || '/')"
+                params: [key, caller]
+                param_exprs:
+                  # The tenant fence (P3-2): a caller can delete only its own keys.
+                  caller: "identity.subject_id"
                 row_mode: affected_rows
                 timeout_ms: 5000
+
+          # --- admin (P3-2): snapshot/restore a per-agent prefix -----------
+          - name: state.admin.snapshot
+            title: "Prefix snapshot (export)"
+            description: >-
+              Export every {key, seq, state} under a prefix as a single JSON
+              array — the durable backup unit for `agentctl backup` and the
+              input to state.admin.restore. Read-only.
+            annotations: { read_only: true, idempotent: true, open_world: false }
+            input_schema:
+              type: object
+              required: [prefix]
+              properties:
+                prefix: { type: string, minLength: 1, maxLength: 1024 }
+                _meta: { type: object }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                sql: |
+                  SELECT COALESCE(
+                           jsonb_agg(
+                             jsonb_build_object('key', key, 'seq', seq, 'state', state)
+                             ORDER BY key
+                           ),
+                           '[]'::jsonb
+                         ) AS items
+                  FROM agent_state
+                  WHERE starts_with(key, :prefix)
+                params: [prefix]
+                row_mode: single
+                read_only: true
+                timeout_ms: 15000
+
+          - name: state.admin.restore
+            title: "Prefix restore (import)"
+            description: >-
+              Restore a snapshot: UPSERT each {key, seq, state} row from the
+              `items` array (last-writer-wins on key). Idempotent — restoring
+              the same snapshot twice is a no-op. Returns the row count.
+            annotations: { read_only: false, idempotent: true, destructive: false, open_world: false }
+            input_schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [key, seq, state]
+                    properties:
+                      key: { type: string, minLength: 1, maxLength: 1024 }
+                      seq: { type: integer, minimum: 1 }
+                      state: { type: object }
+                    additionalProperties: false
+                _meta: { type: object }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                # Explode the JSON array to rows and UPSERT each. `:items` binds
+                # the whole array as jsonb; jsonb_to_recordset projects it.
+                sql: |
+                  WITH incoming AS (
+                    SELECT key, seq, state
+                    FROM jsonb_to_recordset(CAST(:items AS jsonb))
+                      AS x(key text, seq bigint, state jsonb)
+                  ), applied AS (
+                    INSERT INTO agent_state (key, seq, state, updated_at)
+                    SELECT key, seq, state, now() FROM incoming
+                    ON CONFLICT (key) DO UPDATE
+                      SET seq = EXCLUDED.seq, state = EXCLUDED.state, updated_at = now()
+                    RETURNING 1
+                  )
+                  SELECT count(*) AS restored FROM applied
+                params: [items]
+                row_mode: single
+                timeout_ms: 30000
 {{- end }}
