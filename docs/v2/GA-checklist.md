@@ -1,9 +1,9 @@
 # agentctl v2 — GA readiness checklist (P7-7)
 
 The honest state of the v2 program at the GA gate: what is done and
-live-verified, what is deferred, and the one thing blocked on an upstream
-dependency. This is the capstone of [PLAN.md](PLAN.md) — every claim here
-traces to a row there and to a live e2e scenario.
+live-verified, and what is deferred as post-GA polish. Every plane is complete;
+nothing is blocked. This is the capstone of [PLAN.md](PLAN.md) — every claim
+here traces to a row there and to a live e2e scenario.
 
 ## Planes — status at a glance
 
@@ -18,8 +18,8 @@ traces to a row there and to a live e2e scenario.
 | **P6** Fleets + scaling | P6-1..6 | ✅ **Complete** | fleet-static, shard-resize, dispatcher-fanout, fleet-budget, webhook-scale-zero |
 | **P7** GA surfaces (hooks, dashboards, audit, metering, scale-to-zero, hardening) | P7-1..6 done, P7-7 this doc | ✅ Done | hooks-ingress, metering-export, audit-trail, supervisor-park |
 
-**53 e2e scenarios; last full catalogue: 50 passed / 3 documented skips / 0
-failed.** The three skips are environmental, not gaps:
+**52 e2e scenarios; last full catalogue: 49 passed / 3 documented skips / 0
+failed** (full run, 2026-08-31). The three skips are environmental, not gaps:
 `sec-oidc`/`sec-trusted-proxy` (a pre-existing unarmed-gate gap superseded by
 the P1 identity-gateway authn scenarios) and `sec-netpol` (needs a Calico lane —
 kindnet does not enforce NetworkPolicy).
@@ -49,8 +49,8 @@ pairing, the whole state plane landed on the proven P3-1 checkpointer:
 ## GA gates — all green
 
 - [x] **Every plane live-verified in a real cluster** against real agentd
-      1.3.1, blessed mcpg beta.26, and a bundled MinIO (not mocks) — 50/53
-      scenarios, the 3 skips documented and environmental.
+      1.3.1, blessed mcpg beta.26, and a bundled MinIO (not mocks) — 49/52
+      scenarios pass, the 3 skips documented and environmental.
 - [x] **Fail-closed by construction** — audited in the hardening pass
       (P7-5): identity admin refuses without a token, the exchange refuses a
       user-less subject, a gate with no channel refuses at compile, admission
