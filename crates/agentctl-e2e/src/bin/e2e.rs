@@ -192,6 +192,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("hitl-gate", "capability", hitl_gate),
         // Audit pipeline: one queryable trail for a full OBO tool call (P7-3)
         scenario!("audit-trail", "capability", audit_trail),
+        // Sandbox cell: code runs in a single-use, network-denied pod (P5-5)
+        scenario!("sandbox-run", "capability", sandbox_run),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -1002,7 +1004,7 @@ spec:
 
     // Erin raises the decision; the run PARKS at the gate with the question.
     // (Retry: the org route 503s while the agent's principal Secret settles.)
-    let mut sent = Value::Null;
+    let sent;
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
     loop {
         let v = rpc(
@@ -1031,7 +1033,7 @@ spec:
     // The run is async — the gate arms moments after the send returns.
     // Poll GetTask (live passthrough for non-terminal tasks) until the run
     // PARKS at INPUT_REQUIRED with the templated question.
-    let mut parked = Value::Null;
+    let parked;
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         let v = rpc(
@@ -1477,6 +1479,157 @@ spec:
     drop(pf_id);
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P5-5: the sandbox cell. `sandbox.run` executes agent-authored code in a
+/// SINGLE-USE, network-denied, capability-stripped pod. This drives it
+/// straight over the cell's MCP surface (a tenant gateway federates it in
+/// production; the direct drive proves the backend) and asserts: code runs
+/// and returns stdout + a declared artifact + exit code; a run with NO
+/// cluster credential inside it (the token that would let it escape) sees
+/// none; and a NETWORK dial from inside the cell fails (deny-all — on a
+/// policy CNI; the assertion is skip-guarded off it).
+async fn sandbox_run(ctx: &Ctx) -> Result<Outcome> {
+    let system = &ctx.cfg.system_ns;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get",
+            "deploy",
+            "agentctl-sandbox",
+            "-n",
+            system,
+            "-o",
+            "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "1")
+    })
+    .await
+    .context("sandbox cell never Ready")?;
+
+    let admin_token = {
+        let b64 = shell::kubectl(&[
+            "get",
+            "secret",
+            "-n",
+            system,
+            "agentctl-api-token",
+            "-o",
+            "jsonpath={.data.AGENTCTL_API_TOKEN}",
+        ])
+        .unwrap_or_default();
+        String::from_utf8(base64_decode(b64.trim()).unwrap_or_default()).unwrap_or_default()
+    };
+    let pf = shell::PortForward::service(system, "agentctl-sandbox", 80, 18125)?;
+    let base = pf.base_url();
+    let call = |body: Value| {
+        let base = base.clone();
+        let token = admin_token.clone();
+        async move {
+            let mut req = ctx.http.post(format!("{base}/mcp")).json(&body);
+            if !token.is_empty() {
+                req = req.bearer_auth(token);
+            }
+            let resp = req.send().await.context("reach sandbox cell")?;
+            let v: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok(v)
+        }
+    };
+
+    // Handshake + tool visible.
+    let init = call(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": { "name": "e2e", "version": "0" } } }))
+    .await?;
+    if init.get("result").is_none() {
+        bail!("sandbox initialize failed: {init}");
+    }
+    let tools = call(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await?;
+    if !tools["result"]["tools"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|t| t["name"] == "sandbox.run"))
+    {
+        bail!("sandbox.run not advertised: {tools}");
+    }
+
+    // (1) Code runs: reads stdin + an input file, prints, writes an artifact.
+    let run = |args: Value| {
+        let call = &call;
+        async move {
+            let v = call(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "sandbox.run", "arguments": args } }))
+            .await?;
+            anyhow::Ok(v["result"]["structuredContent"].clone())
+        }
+    };
+    let r = run(json!({
+        "language": "python",
+        "code": "import sys\nname=open('who.txt').read().strip()\nprint('hello', name, sys.stdin.read().strip())\nopen('out.txt','w').write('artifact:'+name)\n",
+        "stdin": "extra",
+        "files": { "who.txt": "sandboxed-erin" },
+        "out_files": ["out.txt"],
+        "timeout_secs": 30
+    }))
+    .await
+    .context("code run leg")?;
+    if r["exit_code"] != 0 {
+        bail!("code run non-zero exit: {r}");
+    }
+    if !r["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("hello sandboxed-erin extra")
+    {
+        bail!("stdout wrong: {r}");
+    }
+    if r["files"]["out.txt"] != "artifact:sandboxed-erin" {
+        bail!("artifact wrong: {r}");
+    }
+
+    // (2) No cluster credential inside the cell — the SA-token path is absent.
+    let cred = run(json!({
+        "language": "sh",
+        "code": "if [ -e /var/run/secrets/kubernetes.io/serviceaccount/token ]; then echo LEAKED; else echo none; fi\n",
+        "timeout_secs": 20
+    }))
+    .await
+    .context("credential probe leg")?;
+    if !cred["stdout"].as_str().unwrap_or_default().contains("none") {
+        bail!("a service-account token was mounted into the cell: {cred}");
+    }
+
+    // (3) Timeout is enforced (killed = pod deleted).
+    let killed = run(json!({
+        "language": "sh",
+        "code": "sleep 60\n",
+        "timeout_secs": 3
+    }))
+    .await
+    .context("timeout leg")?;
+    if killed["killed"] != true {
+        bail!("an over-time run was not killed: {killed}");
+    }
+
+    // (4) Network egress denied — Calico lane only (kindnet does not enforce).
+    if std::env::var("AGENTCTL_E2E_CALICO").is_ok() {
+        let net = run(json!({
+            "language": "sh",
+            "code": "wget -T 3 -q -O- http://agentctl-identity.agentctl-system 2>&1 || echo BLOCKED\n",
+            "timeout_secs": 15
+        }))
+        .await
+        .context("egress leg")?;
+        if !net["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("BLOCKED")
+        {
+            bail!("network egress from the cell was NOT denied: {net}");
+        }
+    }
+
+    drop(pf);
     pass()
 }
 

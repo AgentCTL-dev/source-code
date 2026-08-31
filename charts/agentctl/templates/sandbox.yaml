@@ -1,0 +1,150 @@
+{{- $ns := include "agentctl.namespace" . }}
+{{- if .Values.sandbox.enabled }}
+# The sandbox cell (P5-5): the sandbox.* MCP backend. Code runs in SINGLE-USE,
+# capability-stripped pods inside the dedicated cell namespace below, whose
+# NetworkPolicy denies ALL traffic (integral to the sandbox — rendered
+# unconditionally here, enforced by a policy-capable CNI; on kindnet it is
+# inert and the remaining layers still hold: no SA token, non-root, caps
+# dropped, RO rootfs, resource+time caps, single-use pods). RuntimeClass
+# (Kata et al.) is the kernel-isolation upgrade: sandbox.runtimeClassName.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.sandbox.cellNamespace }}
+  labels:
+    app.kubernetes.io/name: agentctl-sandbox-cell
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agentctl-sandbox-cell-deny-all
+  namespace: {{ .Values.sandbox.cellNamespace }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentctl-sandbox
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-sandbox
+    {{- include "agentctl.labels" . | nindent 4 }}
+---
+# The runner's ONLY power: pod lifecycle + exec INSIDE the cell namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentctl-sandbox-runner
+  namespace: {{ .Values.sandbox.cellNamespace }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    # kube-rs's WebSocket exec issues a GET upgrade (not the classic POST),
+    # so the runner needs both verbs on the exec subresource.
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentctl-sandbox-runner
+  namespace: {{ .Values.sandbox.cellNamespace }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentctl-sandbox-runner
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-sandbox
+    namespace: {{ $ns }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentctl-sandbox
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-sandbox
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentctl-sandbox
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentctl-sandbox
+        {{- include "agentctl.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: agentctl-sandbox
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sandbox
+          image: "{{ .Values.image.registry }}{{ if .Values.image.registry }}/{{ end }}agentctl/sandbox:{{ .Values.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.sandbox.logLevel | quote }}
+            - name: SANDBOX_NAMESPACE
+              value: {{ .Values.sandbox.cellNamespace | quote }}
+            - name: SANDBOX_WARM_POOL
+              value: {{ .Values.sandbox.warmPool | quote }}
+            - name: SANDBOX_IMAGE_PYTHON
+              value: {{ .Values.sandbox.images.python | quote }}
+            - name: SANDBOX_IMAGE_SH
+              value: {{ .Values.sandbox.images.sh | quote }}
+            {{- with .Values.sandbox.runtimeClassName }}
+            - name: SANDBOX_RUNTIME_CLASS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.apiToken.enabled }}
+            - name: AGENTCTL_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: agentctl-api-token, key: AGENTCTL_API_TOKEN }
+            {{- end }}
+          ports:
+            - { containerPort: 8080, name: http }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentctl-sandbox
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: agentctl-sandbox
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentctl-sandbox
+  ports:
+    - { port: 80, targetPort: 8080, name: http }
+{{- end }}

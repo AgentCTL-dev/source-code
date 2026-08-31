@@ -67,6 +67,13 @@ state:
 control:
   enabled: true
 
+# The sandbox cell (P5-5): sandbox.run over single-use network-denied pods.
+sandbox:
+  enabled: true
+  # The cell pods use the same busybox/python images images-quick.sh loads.
+  warmPool: 1
+
+
 # Tenant mcpg per org (P5-1): the proxy-only governance gateway (the blessed
 # GATEWAY image boots fine — only the plugin lane is broken upstream).
 tenantMcpg:

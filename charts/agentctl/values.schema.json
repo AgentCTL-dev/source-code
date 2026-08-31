@@ -635,6 +635,40 @@
           "description": "P7-3: audit-shipper sidecar image tailing each tenant gateway's audit file into identity's ingest door; empty disables shipping."
         }
       }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "logLevel": {
+          "type": "string"
+        },
+        "cellNamespace": {
+          "type": "string"
+        },
+        "warmPool": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "images": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "python": {
+              "type": "string"
+            },
+            "sh": {
+              "type": "string"
+            }
+          }
+        },
+        "runtimeClassName": {
+          "type": "string"
+        }
+      }
     }
   }
 }

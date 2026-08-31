@@ -33,7 +33,7 @@ AGENTD_GHCR="${AGENTD_GHCR:-ghcr.io/agentd-dev/agentd:1.3.1}"
 # The 6 control-plane components (component == deploy/<comp>/Dockerfile dir),
 # matching the release.yml build matrix. Contract 1.0: agents serve HTTPS MCP
 # natively and dial their model provider + MCP servers directly (no broker).
-COMPONENTS=(operator apiserver gateway admission coordination scaler)
+COMPONENTS=(operator apiserver gateway admission coordination scaler sandbox)
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 

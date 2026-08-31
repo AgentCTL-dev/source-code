@@ -592,6 +592,21 @@ tenantMcpg:
   # pod-local in the file sink).
   auditShipperImage: ""
 
+# The sandbox cell (P5-5): sandbox.run executes code in single-use,
+# capability-stripped pods in a network-denied cell namespace. Register it in
+# an org's registry (MCPService, e.g. allow [sandbox.run]) to federate it
+# through the tenant gateway. Threat model: docs/v2/sandbox-threat-model.md.
+sandbox:
+  enabled: false
+  logLevel: info
+  cellNamespace: agentctl-sandbox-cell
+  warmPool: 1
+  images:
+    python: "python:3.12-alpine"
+    sh: "busybox:1.36"
+  # Kernel isolation (Kata et al.): the cell pods' runtimeClassName.
+  runtimeClassName: ""
+
 # Defense-in-depth NetworkPolicies (need a policy-enforcing CNI — kindnet ignores).
 # When enabled the chart renders: (a) control-plane policies in the release
 # namespace — a namespace-wide default-deny-ingress plus narrow allows for the
