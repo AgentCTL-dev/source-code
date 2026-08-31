@@ -431,6 +431,7 @@ mod tests {
             token_env: None,
             header: None,
             allow: Vec::new(),
+            static_headers: Default::default(),
         }
     }
 

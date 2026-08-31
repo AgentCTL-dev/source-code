@@ -40,6 +40,21 @@ data:
         mcp_path: "/mcp"
         health_path: "/health"
         max_request_body_mb: 4
+        # TLS termination on the same listener (P3): agentd refuses to dial a
+        # plaintext MCP endpoint off-loopback, so the state gateway serves
+        # HTTPS with the chart-CA cert the managed agent already trusts. The
+        # `tls:` block's presence flips this HTTP transport to HTTPS (mcpg
+        # beta.26, deny_unknown_fields — these are the complete legal keys).
+        tls:
+          cert_path: /etc/mcpg/tls/tls.crt
+          key_path: /etc/mcpg/tls/tls.key
+          min_tls_version: "1.2"
+        # Interim prefix-trust posture (see header): the caller self-asserts
+        # its identity via x-mcpg-subject-id behind the NetworkPolicy
+        # perimeter, raising it to header_asserted — the tier the state
+        # bindings require. Rises to `verified` when the identity-fenced
+        # plugin pin (param_exprs identity.*) lands with P3-2.
+        trust_subject_header: true
       plugin_registry:
         # OCI plugin cache on the pod's writable emptyDir (root fs is RO).
         cache_dir: /var/cache/mcpg
@@ -84,6 +99,8 @@ data:
                 key: { type: string, minLength: 1, maxLength: 1024 }
                 seq: { type: integer, minimum: 1 }
                 state: { type: object, description: "The agentd state envelope." }
+                # MCP reserves `_meta` on tool arguments (agentd sends it); allow it.
+                _meta: { type: object }
               additionalProperties: false
             backend:
               kind: sql
@@ -136,6 +153,8 @@ data:
               properties:
                 key: { type: string, minLength: 1, maxLength: 1024 }
                 seq: { type: integer, minimum: 1 }
+                # MCP reserves `_meta` on tool arguments (agentd sends it); allow it.
+                _meta: { type: object }
               additionalProperties: false
             backend:
               kind: sql
@@ -164,6 +183,8 @@ data:
               required: [prefix]
               properties:
                 prefix: { type: string, minLength: 1, maxLength: 1024 }
+                # MCP reserves `_meta` on tool arguments (agentd sends it); allow it.
+                _meta: { type: object }
               additionalProperties: false
             backend:
               kind: sql
@@ -191,6 +212,8 @@ data:
               required: [key]
               properties:
                 key: { type: string, minLength: 1, maxLength: 1024 }
+                # MCP reserves `_meta` on tool arguments (agentd sends it); allow it.
+                _meta: { type: object }
               additionalProperties: false
             backend:
               kind: sql

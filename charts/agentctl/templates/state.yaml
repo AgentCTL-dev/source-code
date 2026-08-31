@@ -1,5 +1,27 @@
 {{- if .Values.state.enabled }}
 {{- $ns := include "agentctl.namespace" . }}
+---
+# Serving cert (P3): agentd refuses to DIAL a plaintext MCP endpoint
+# off-loopback, so the state gateway serves TLS. Issued by the chart CA the
+# managed agent already trusts via security.tls_ca.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: agentctl-state
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agentctl.labels" . | nindent 4 }}
+spec:
+  secretName: agentctl-state-tls
+  duration: 8760h
+  renewBefore: 720h
+  dnsNames:
+    - agentctl-state.{{ $ns }}.svc
+    - agentctl-state.{{ $ns }}.svc.cluster.local
+  usages: ["server auth"]
+  issuerRef:
+    {{- include "agentctl.caIssuer" . | nindent 4 }}
+---
 {{- $st := .Values.state }}
 # Schema bootstrap: mcpg has no config-declared DDL, so a hook Job lands the
 # table before/with each rollout (idempotent CREATE IF NOT EXISTS; retries
@@ -102,11 +124,11 @@ spec:
             # MCPG_CONFIG default (/etc/mcpg/config.yaml) matches the mount.
             {{- include "agentctl.databaseUrlEnv" . | nindent 12 }}
           readinessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /health, port: http, scheme: HTTPS }
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /health, port: http, scheme: HTTPS }
             initialDelaySeconds: 20
             periodSeconds: 10
           resources:
@@ -117,12 +139,15 @@ spec:
             capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: config, mountPath: /etc/mcpg, readOnly: true }
+            - { name: tls, mountPath: /etc/mcpg/tls, readOnly: true }
             - { name: plugin-cache, mountPath: /var/cache/mcpg }
             - { name: audit, mountPath: /var/log/mcpg }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: config
           configMap: { name: agentctl-state-config }
+        - name: tls
+          secret: { secretName: agentctl-state-tls }
         - name: plugin-cache
           emptyDir: {}
         - name: audit

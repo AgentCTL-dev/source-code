@@ -963,6 +963,7 @@ async fn compose_document_v2(
                 } else {
                     grant.allow.clone()
                 },
+                static_headers: Default::default(),
             });
         }
     }
@@ -993,6 +994,15 @@ async fn compose_document_v2(
                 token_env: None,
                 header: None,
                 allow: vec!["state.*".into()],
+                // P3-1: the agent self-asserts its prefix identity to the
+                // state gateway, lifting its store calls to mcpg's
+                // header-asserted trust tier (the tier the state.* bindings
+                // require) behind the NetworkPolicy perimeter. P3-2 upgrades
+                // this same header to a JWT-verified subject (the fence).
+                static_headers: std::collections::BTreeMap::from([(
+                    "x-mcpg-subject-id".to_string(),
+                    format!("orgs/{ns}/{name}"),
+                )]),
             });
             agent_config::StoreSelector::Mcp {
                 server: "state".into(),

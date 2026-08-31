@@ -4818,17 +4818,27 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     }
 
     let pf = shell::PortForward::service(sys, "agentctl-state", 8787, 18100)?;
-    let mcp = format!("{}/mcp", pf.base_url());
+    // The state gateway serves TLS now (agentd refuses plaintext off-loopback);
+    // a throwaway trusting client suffices for the forwarded port (the managed
+    // agent trusts the real cert via the chart CA).
+    let mcp = format!("{}/mcp", pf.base_url().replace("http://", "https://"));
+    let state_http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
 
     // Minimal MCP streamable-HTTP client: initialize → session id → calls.
     let post = |body: Value, session: Option<String>| {
         let mcp = mcp.clone();
+        let state_http = state_http.clone();
         async move {
-            let mut req = ctx
-                .http
+            let mut req = state_http
                 .post(&mcp)
                 .header("accept", "application/json, text/event-stream")
                 .header("mcp-protocol-version", "2025-11-25")
+                // Interim prefix-trust (P3-1): the caller self-asserts its
+                // identity behind the NetworkPolicy perimeter, reaching the
+                // header_asserted tier the state bindings require.
+                .header("x-mcpg-subject-id", "orgs/e2e/state-probe/agent")
                 .json(&body);
             if let Some(s) = &session {
                 req = req.header("mcp-session-id", s.clone());
@@ -4876,10 +4886,14 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         session.clone(),
     )
     .await;
-    let call = |id: u64, tool: &str, args: Value| {
+    // beta.26 enforces UNIQUE JSON-RPC request ids per session; an atomic
+    // counter guarantees it regardless of the caller's label.
+    let next_id = std::sync::atomic::AtomicU64::new(100);
+    let call = |_label: u64, tool: &str, args: Value| {
         let tool = tool.to_string();
         let session = session.clone();
         let post = &post;
+        let id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         async move {
             let (resp, _) = post(
                 json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",

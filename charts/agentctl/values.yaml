@@ -552,8 +552,10 @@ identity:
 state:
   enabled: false
   # The blessed mcpg release — digest-pinned; bump only to a newer blessed pin.
-  image: "ghcr.io/mcpg-dev/mcpg:0.1.0-beta.24@sha256:64fdc3c1d3abbfceaaddddb3caf84587332964cfc64a0836048cc93e5dedabc0"
+  image: "ghcr.io/mcpg-dev/mcpg:0.1.0-beta.26@sha256:3268cc052b0e045d979e8cfa64e6a4a3641a32697c53b216e8500cfb0e74da74"
   # backend-sql plugin (arch-suffix resolved by mcpg at boot; publicly pullable).
+  # Boots on beta.26: the #664 entity-vtable fix resolves the multi-same-class
+  # cdylib registration collision that parked the pairing on beta.24.
   pluginImage: "ghcr.io/mcpg-dev/plugins/backend-sql:protocol-1"
   replicas: 1
   resources:

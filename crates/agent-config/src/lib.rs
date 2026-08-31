@@ -96,6 +96,12 @@ pub struct ResolvedMcp {
     /// The consumer's NARROWED tool allow list (grant ∩ registry ceiling —
     /// resolved by the operator; empty = the catalog's full surface).
     pub allow: Vec<String>,
+    /// Static (non-secret) request headers the agent sends on every call to
+    /// this server — e.g. `x-mcpg-subject-id` for the managed state binding,
+    /// which lifts the agent's store calls to mcpg's header-asserted trust
+    /// tier and carries its prefix identity (P3-1; P3-2 upgrades the same
+    /// header to a JWT-verified subject).
+    pub static_headers: std::collections::BTreeMap<String, String>,
 }
 
 impl ResolvedMcp {
@@ -123,6 +129,7 @@ impl ResolvedMcp {
             token_env: has_mounted_token.then(|| Self::token_env_for(&s.name)),
             header: s.auth.as_ref().and_then(|a| a.header.clone()),
             allow: Vec::new(),
+            static_headers: Default::default(),
         }
     }
 }
@@ -608,13 +615,20 @@ fn services_layer(input: &ConfigInput) -> ConfigDoc {
         if !m.tags.is_empty() {
             entry.insert("tags".into(), json!({ "*": m.tags }));
         }
+        let mut headers = serde_json::Map::new();
         if let Some(env) = &m.token_env {
             let value = match &m.header {
                 Some(_) => format!("{{{{secret:{env}}}}}"),
                 None => format!("Bearer {{{{secret:{env}}}}}"),
             };
             let header = m.header.clone().unwrap_or_else(|| "Authorization".into());
-            entry.insert("headers".into(), json!({ header: value }));
+            headers.insert(header, json!(value));
+        }
+        for (k, v) in &m.static_headers {
+            headers.insert(k.clone(), json!(v));
+        }
+        if !headers.is_empty() {
+            entry.insert("headers".into(), Value::Object(headers));
         }
         services.insert(m.name.clone(), Value::Object(entry));
     }
@@ -1145,6 +1159,7 @@ mod tests {
                 token_env: None,
                 header: None,
                 allow: Vec::new(),
+                static_headers: Default::default(),
             },
             ResolvedMcp {
                 name: "fs".into(),
@@ -1153,6 +1168,7 @@ mod tests {
                 token_env: None,
                 header: None,
                 allow: Vec::new(),
+                static_headers: Default::default(),
             },
         ];
         input.subscribe = vec!["queue://inbox".into()];
@@ -1264,6 +1280,7 @@ mod tests {
             token_env: None,
             header: None,
             allow: vec!["state.*".into()],
+            static_headers: Default::default(),
         }];
         let proj = build_projection(&input).unwrap();
         let store = &proj.instance.value["store"];
@@ -1503,6 +1520,7 @@ mod tests {
                     token_env: None,
                     header: None,
                     allow: Vec::new(),
+                    static_headers: Default::default(),
                 }];
                 i.subscribe = vec!["queue://inbox".into()];
                 i
@@ -1547,6 +1565,7 @@ triggers:
                 token_env: None,
                 header: None,
                 allow: Vec::new(),
+                static_headers: Default::default(),
             }],
         )
         .expect("ten-kind compile");
@@ -1731,6 +1750,7 @@ triggers:
             token_env: Some("AGENT_MCP_BILLING_TOKEN".into()),
             header: None,
             allow: Vec::new(),
+            static_headers: Default::default(),
         }];
         // Refs span BOTH layers: the intelligence token in the instance, the
         // MCP header token in the catalog — the projection unions them.

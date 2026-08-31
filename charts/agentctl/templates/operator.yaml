@@ -327,7 +327,7 @@ spec:
             # the synthetic `state` MCP binding for `store.class: managed`
             # agents (trailing-dot FQDN — dodges search-domain capture).
             - name: AGENTCTL_STATE_URL
-              value: {{ printf "http://agentctl-state.%s.svc.cluster.local.:8787/mcp" $ns | quote }}
+              value: {{ printf "https://agentctl-state.%s.svc.cluster.local.:8787/mcp" $ns | quote }}
             {{- end }}
             {{- if .Values.tenantMcpg.enabled }}
             # Tenant capability plane (P5-1): the blessed mcpg image every

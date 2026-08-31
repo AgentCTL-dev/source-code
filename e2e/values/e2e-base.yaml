@@ -60,7 +60,7 @@ operator:
 # a promoted older artifact. Flip on ONLY when a pairing actually BOOTS
 # (a crash-looping state pod wedges every `helm --wait`).
 state:
-  enabled: false
+  enabled: true
 
 # Control MCP (P4-1): AAuth-verified control.* tools for supervisors. The
 # AAuth plane it needs is armed in the identity block below.
