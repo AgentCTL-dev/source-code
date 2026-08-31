@@ -551,6 +551,10 @@ spec:
                             description: Retention window for `delete` (`720h`).
                             nullable: true
                             type: string
+                          size:
+                            description: '`local` class only: the PVC size (default `1Gi`).'
+                            nullable: true
+                            type: string
                         type: object
                       substrate:
                         description: Substrate tier. Names are the canonical tier ids.
@@ -1333,6 +1337,10 @@ spec:
                         type: string
                       retention:
                         description: Retention window for `delete` (`720h`).
+                        nullable: true
+                        type: string
+                      size:
+                        description: '`local` class only: the PVC size (default `1Gi`).'
                         nullable: true
                         type: string
                     type: object

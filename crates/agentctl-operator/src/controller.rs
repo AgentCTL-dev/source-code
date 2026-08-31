@@ -471,7 +471,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     // Hooks ingress (P7-1): each authenticated webhook trigger needs its
     // operator-provisioned secret (`hmac-<i>`/`bearer-<i>` in the
     // `<name>-hooks` Secret) BEFORE the document's secret-file refs mount.
-    let (hooks_keys, has_webhook) = {
+    let (hooks_keys, has_webhook, local_store_size) = {
         let v2_api: Api<agent_api::v1alpha2::Agent> = Api::namespaced(ctx.client.clone(), ns);
         match v2_api.get_opt(&name).await {
             Ok(Some(a)) => {
@@ -488,9 +488,19 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
                         }
                     }
                 }
-                (keys, any)
+                // P3-4: local store class → the PVC size for the StatefulSet.
+                let local = (a.spec.store.as_ref().map(|st| st.class)
+                    == Some(agent_api::v1alpha2::StoreClass::Local))
+                .then(|| {
+                    a.spec
+                        .store
+                        .as_ref()
+                        .and_then(|st| st.size.clone())
+                        .unwrap_or_else(|| "1Gi".to_string())
+                });
+                (keys, any, local)
             }
-            _ => (Vec::new(), false),
+            _ => (Vec::new(), false, None),
         }
     };
     let composed = match compose_document_v2(
@@ -536,6 +546,8 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             }
             wiring.peer_bearers = !peer_bearers.is_empty();
             wiring.hooks_port = has_webhook;
+            // P3-4: `store.class: local` → the durable-PVC StatefulSet render.
+            wiring.local_store_size = local_store_size.clone();
             wiring.hooks_secrets = !hooks_keys.is_empty();
             render_agent(&render_obj, &ctx.render, &wiring)
                 .map(|mut rendered| {
@@ -1010,12 +1022,14 @@ async fn compose_document_v2(
             }
         }
         Some(agent_api::v1alpha2::StoreClass::Local) => {
-            return Err(
-                "store.class: local (PVC-backed) is not rendered yet — use ephemeral or managed"
-                    .to_string(),
-            );
+            // P3-4: the agentd file store on a durable PVC (StatefulSet
+            // volumeClaimTemplate) — set below via wiring.local_store_size.
+            agent_config::StoreSelector::File
         }
-        _ => agent_config::StoreSelector::File,
+        // Ephemeral (the default) + no store block → the emptyDir file store.
+        Some(agent_api::v1alpha2::StoreClass::Ephemeral) | None => {
+            agent_config::StoreSelector::File
+        }
     };
 
     let (mut input, shape) = agent_config::v2::from_v2_spec_with_store(
@@ -1153,6 +1167,7 @@ fn pod_wiring(
         config_hash: doc.restart_hash(),
         hooks_port: false,
         hooks_secrets: false,
+        local_store_size: None,
         intelligence_token: intelligence.and_then(|(_, t)| t.clone()),
         mcp_tokens,
         workflow,

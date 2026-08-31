@@ -435,6 +435,9 @@ pub struct StoreSpec {
     /// Retention window for `delete` (`720h`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<String>,
+    /// `local` class only: the PVC size (default `1Gi`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -1404,6 +1407,7 @@ lifecycle: { runUntil: drained, drainTimeout: 25s }
             store: Some(StoreSpec {
                 class: StoreClass::Managed,
                 retention: None,
+                size: None,
             }),
             triggers: vec![Trigger {
                 webhook: Some(WebhookTrigger {

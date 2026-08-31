@@ -226,6 +226,12 @@ pub struct PodWiring {
     /// Mount the `<workload>-hooks` Secret at [`paths::HOOKS_SECRETS_DIR`]
     /// (per-route HMAC/bearer values the webhook auth blocks reference).
     pub hooks_secrets: bool,
+    /// `store.class: local` (P3-4): the agentd file store on a durable PVC
+    /// instead of an emptyDir — the render becomes a single-replica
+    /// StatefulSet whose volumeClaimTemplate provides the state dir (survives
+    /// pod reschedule; node-local durability between ephemeral and managed).
+    /// `Some(size)` ⇒ local; the pod template drops the state emptyDir.
+    pub local_store_size: Option<String>,
 }
 
 /// In-pod mount of the AAuth key Secret.
@@ -374,17 +380,62 @@ pub fn render_agent(
                 ..Default::default()
             }))
         }
-        Mode::Loop | Mode::Reactive => Rendered::Deployment(Box::new(Deployment {
-            metadata: meta,
-            spec: Some(DeploymentSpec {
-                replicas: Some(1),
-                selector: label_selector(&labels),
-                template,
+        Mode::Loop | Mode::Reactive => match &wiring.local_store_size {
+            // `local` store (P3-4): a single-replica StatefulSet whose
+            // volumeClaimTemplate provides the durable state dir; the state
+            // survives pod reschedule (unlike ephemeral's emptyDir).
+            Some(size) => Rendered::StatefulSet(Box::new(StatefulSet {
+                metadata: meta,
+                spec: Some(StatefulSetSpec {
+                    replicas: Some(1),
+                    service_name: Some(name.clone()),
+                    selector: label_selector(&labels),
+                    template,
+                    volume_claim_templates: Some(vec![state_pvc_template(size)]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            None => Rendered::Deployment(Box::new(Deployment {
+                metadata: meta,
+                spec: Some(DeploymentSpec {
+                    replicas: Some(1),
+                    selector: label_selector(&labels),
+                    template,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        },
+    })
+}
+
+/// The durable state PVC template for a `local`-store agent (P3-4): named
+/// [`STATE_VOLUME`] so the pod's existing state MOUNT binds to it; RWO, the
+/// default StorageClass, the requested size.
+fn state_pvc_template(size: &str) -> k8s_openapi::api::core::v1::PersistentVolumeClaim {
+    use k8s_openapi::api::core::v1::{
+        PersistentVolumeClaim, PersistentVolumeClaimSpec, VolumeResourceRequirements,
+    };
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    PersistentVolumeClaim {
+        metadata: ObjectMeta {
+            name: Some(STATE_VOLUME.to_string()),
+            ..Default::default()
+        },
+        spec: Some(PersistentVolumeClaimSpec {
+            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            resources: Some(VolumeResourceRequirements {
+                requests: Some(std::collections::BTreeMap::from([(
+                    "storage".to_string(),
+                    Quantity(size.to_string()),
+                )])),
                 ..Default::default()
             }),
             ..Default::default()
-        })),
-    })
+        }),
+        ..Default::default()
+    }
 }
 
 /// The Job spec around a template: no in-cluster retries beyond the policy
@@ -892,12 +943,16 @@ fn pod_template(
 
     // Writable state for EVERY shape: the document always declares the file
     // store (agentd initializes the state dir even on one-shots, and the
-    // XDG-defaulted path is the read-only rootfs).
-    volumes.push(Volume {
-        name: STATE_VOLUME.to_string(),
-        empty_dir: Some(EmptyDirVolumeSource::default()),
-        ..Default::default()
-    });
+    // XDG-defaulted path is the read-only rootfs). `local` (P3-4) provides
+    // the SAME mount from a StatefulSet volumeClaimTemplate instead of an
+    // emptyDir — so omit the emptyDir volume there (the mount stays).
+    if wiring.local_store_size.is_none() {
+        volumes.push(Volume {
+            name: STATE_VOLUME.to_string(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        });
+    }
     mounts.push(mount(STATE_VOLUME, STATE_MOUNT, false));
     if let Some(wf) = &wiring.workflow {
         volumes.push(Volume {

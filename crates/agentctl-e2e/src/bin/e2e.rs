@@ -194,6 +194,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("audit-trail", "capability", audit_trail),
         // Sandbox cell: code runs in a single-use, network-denied pod (P5-5)
         scenario!("sandbox-run", "capability", sandbox_run),
+        // Store classes: ephemeral/local/managed all render + run (P3-4)
+        scenario!("store-classes", "capability", store_classes),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -1479,6 +1481,137 @@ spec:
     drop(pf_id);
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P3-4: all three store classes render and run. `ephemeral` → Deployment on
+/// an emptyDir (state dies with the pod); `local` → a single-replica
+/// StatefulSet whose volumeClaimTemplate gives a durable PVC (state SURVIVES
+/// a pod delete); `managed` → the state-service checkpointer (covered by
+/// state-durability). This proves the render shapes and the local
+/// durability boundary.
+async fn store_classes(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let dir = examples_dir();
+    apply_mock_provider(ctx, &dir)?;
+    apply_example(&dir, "modelpool-mock.yaml")?;
+
+    // ephemeral → Deployment.
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: store-eph, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"tick\" }}\n  intelligence: {{ pool: mockpool }}\n  store: {{ class: ephemeral }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
+    ))
+    .context("apply ephemeral agent")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(shell::kubectl(&["get", "deployment", "store-eph", "-n", ns]).is_ok())
+    })
+    .await
+    .context("ephemeral must render a Deployment")?;
+
+    // local → StatefulSet with a PVC.
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: store-local, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"tick\" }}\n  intelligence: {{ pool: mockpool }}\n  store: {{ class: local, size: 128Mi }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
+    ))
+    .context("apply local agent")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        Ok(shell::kubectl(&["get", "statefulset", "store-local", "-n", ns]).is_ok())
+    })
+    .await
+    .context("local must render a StatefulSet")?;
+    // The PVC exists and is bound (the volumeClaimTemplate provisioned it).
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get",
+            "pvc",
+            "-n",
+            ns,
+            "-l",
+            "app.kubernetes.io/name=agent",
+            "-o",
+            "jsonpath={.items[*].metadata.name}",
+        ])
+        .unwrap_or_default();
+        Ok(out.contains("agentd-state-store-local-0"))
+    })
+    .await
+    .context("local agent's state PVC never appeared")?;
+    // Durability boundary (distroless agent = no shell to write a marker, so
+    // prove it at the volume): the StatefulSet's PVC PERSISTS across a pod
+    // delete — an emptyDir would be gone; a bound claim survives and the
+    // replacement pod re-attaches the SAME volume (its data with it).
+    let pod = "store-local-0".to_string();
+    kh::wait_pod_running(&ctx.client, ns, &pod, READY_TIMEOUT).await?;
+    let pvc_uid = |()| {
+        shell::kubectl(&[
+            "get",
+            "pvc",
+            "agentd-state-store-local-0",
+            "-n",
+            ns,
+            "-o",
+            "jsonpath={.metadata.uid}",
+        ])
+        .unwrap_or_default()
+    };
+    let uid_before = pvc_uid(());
+    if uid_before.trim().is_empty() {
+        bail!("local agent's PVC has no uid (not bound?)");
+    }
+    shell::kubectl(&[
+        "delete",
+        "pod",
+        "-n",
+        ns,
+        &pod,
+        "--grace-period=0",
+        "--force",
+    ])?;
+    // The claim is NOT deleted with the pod.
+    let uid_after = pvc_uid(());
+    if uid_after.trim() != uid_before.trim() {
+        bail!(
+            "the state PVC did NOT survive the pod delete (before {uid_before:?}, after {uid_after:?}) — not durable"
+        );
+    }
+    // The replacement pod comes back Running with the SAME claim re-attached.
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        Ok(shell::kubectl(&[
+            "get",
+            "pod",
+            &pod,
+            "-n",
+            ns,
+            "-o",
+            "jsonpath={.status.phase}",
+        ])
+        .map(|p| p.trim() == "Running")
+        .unwrap_or(false))
+    })
+    .await
+    .context("local agent pod never came back")?;
+    let claim = shell::kubectl(&[
+        "get",
+        "pod",
+        &pod,
+        "-n",
+        ns,
+        "-o",
+        "jsonpath={.spec.volumes[?(@.name=='agentd-state')].persistentVolumeClaim.claimName}",
+    ])
+    .unwrap_or_default();
+    if claim.trim() != "agentd-state-store-local-0" {
+        bail!("the replacement pod did not re-attach the durable claim: {claim:?}");
+    }
+
+    shell::kubectl(&[
+        "delete",
+        "agent",
+        "store-eph",
+        "store-local",
+        "-n",
+        ns,
+        "--wait=false",
+    ])
+    .ok();
     pass()
 }
 
