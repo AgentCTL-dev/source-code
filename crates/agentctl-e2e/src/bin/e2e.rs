@@ -188,6 +188,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("hooks-ingress", "capability", hooks_ingress),
         // Scale-from-zero: parked webhook daemon wakes on first delivery (P6-5)
         scenario!("webhook-scale-zero", "fleets", webhook_scale_zero),
+        // HITL fabric: gate parks the run, channel notified, right identity answers (P5-6)
+        scenario!("hitl-gate", "capability", hitl_gate),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -720,8 +722,13 @@ async fn webhook_scale_zero(ctx: &Ctx) -> Result<Outcome> {
     .await?;
     let secret = {
         let b64 = shell::kubectl(&[
-            "get", "secret", "sleeper-hooks", "-n", ns,
-            "-o", "jsonpath={.data.hmac-0}",
+            "get",
+            "secret",
+            "sleeper-hooks",
+            "-n",
+            ns,
+            "-o",
+            "jsonpath={.data.hmac-0}",
         ])
         .context("hooks Secret")?;
         String::from_utf8(base64_decode(b64.trim())?)?
@@ -730,7 +737,13 @@ async fn webhook_scale_zero(ctx: &Ctx) -> Result<Outcome> {
     // Quiet for idleParkSeconds ⇒ the operator PARKS it: replicas 0.
     kh::poll_until(Duration::from_secs(90), Duration::from_secs(3), || async {
         let out = shell::kubectl(&[
-            "get", "deploy", "sleeper", "-n", ns, "-o", "jsonpath={.spec.replicas}",
+            "get",
+            "deploy",
+            "sleeper",
+            "-n",
+            ns,
+            "-o",
+            "jsonpath={.spec.replicas}",
         ])
         .unwrap_or_default();
         Ok(out.trim() == "0")
@@ -797,6 +810,348 @@ async fn webhook_scale_zero(ctx: &Ctx) -> Result<Outcome> {
 
     drop(pf);
     shell::kubectl(&["delete", "agent", "sleeper", "-n", ns, "--wait=false"]).ok();
+    pass()
+}
+
+/// P5-6: the HITL fabric. A workflow's `human` step (addressed with
+/// `to: {role: user, labels: {user: …}}`) parks the run at INPUT_REQUIRED;
+/// the gateway keeps the QUESTION on the stored task and notifies the
+/// agent's registered channel (a webhook sink standing in for Slack); the
+/// WRONG user's answer is refused by agentd (-32602, gate stays open) and
+/// the ADDRESSED user's plain-text continuation — sent through the org route
+/// under their own identity — completes the run with the answer in the output.
+async fn hitl_gate(ctx: &Ctx) -> Result<Outcome> {
+    use agent_api::org::{org_namespace, Organization, OrganizationSpec};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use kube::api::{Api, Patch, PatchParams};
+
+    const KEY_PEM: &str = include_str!("../../../agentctl-identity/tests/keys/test-idp.pem");
+    let sign = |sub: &str| {
+        let exp = now() + 600;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-1".into());
+        encode(
+            &header,
+            &json!({ "iss": "https://mock-idp:8443", "aud": "agentctl-cli", "sub": sub,
+                     "email": format!("{sub}@example.test"), "groups": ["eng"], "exp": exp }),
+            &EncodingKey::from_rsa_pem(KEY_PEM.as_bytes()).expect("vendored test key"),
+        )
+        .expect("sign test token")
+    };
+
+    shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
+    let org = "e2e-hitl";
+    let ns = org_namespace(org);
+    let orgs: Api<Organization> = Api::all(ctx.client.clone());
+    orgs.patch(
+        org,
+        &PatchParams::apply("e2e").force(),
+        &Patch::Apply(&Organization::new(
+            org,
+            serde_json::from_value::<OrganizationSpec>(json!({ "displayName": "E2E HITL" }))?,
+        )),
+    )
+    .await
+    .context("apply Organization")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(orgs
+            .get(org)
+            .await?
+            .status
+            .is_some_and(|s| s.phase.as_deref() == Some("Ready")))
+    })
+    .await
+    .context("org Ready")?;
+
+    // The channel sink — "Slack" for this lane: captures every POST.
+    let sink = format!(
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata: {{ name: hitl-sink, namespace: {ns} }}
+data:
+  server.py: |
+    import http.server, json, threading
+    SEEN, LOCK = [], threading.Lock()
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n)
+            with LOCK:
+                try: SEEN.append(json.loads(body))
+                except Exception: SEEN.append({{"raw": body.decode(errors="replace")}})
+            self._json(200, {{"ok": True}})
+        def do_GET(self):
+            with LOCK: body = json.dumps(SEEN).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def _json(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *a): pass
+    http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {{ name: hitl-sink, namespace: {ns} }}
+spec:
+  replicas: 1
+  selector: {{ matchLabels: {{ app: hitl-sink }} }}
+  template:
+    metadata: {{ labels: {{ app: hitl-sink }} }}
+    spec:
+      containers:
+        - name: sink
+          image: python:3.12-alpine
+          command: ["python", "/data/server.py"]
+          ports: [ {{ containerPort: 8080 }} ]
+          volumeMounts: [ {{ name: data, mountPath: /data }} ]
+      volumes:
+        - name: data
+          configMap: {{ name: hitl-sink }}
+---
+apiVersion: v1
+kind: Service
+metadata: {{ name: hitl-sink, namespace: {ns} }}
+spec:
+  selector: {{ app: hitl-sink }}
+  ports: [ {{ port: 80, targetPort: 8080 }} ]
+"#
+    );
+    shell::kubectl_apply_stdin(&sink).context("deploy hitl sink")?;
+    shell::kubectl(&[
+        "rollout",
+        "status",
+        "deployment/hitl-sink",
+        "-n",
+        &ns,
+        "--timeout=120s",
+    ])
+    .context("sink Ready")?;
+
+    // The gated agent: a `decide` command workflow whose human step is
+    // ADDRESSED to erin — a hard guarantee of a human decision (agentd
+    // never auto-answers an addressed gate, whatever the approval policy).
+    let workflow = json!({
+        "name": "decide",
+        "version": 3,
+        "steps": {
+            "start": { "kind": "a2a", "command": "decide" },
+            "gate": { "kind": "human", "depends_on": ["start"],
+                      "question": "Approve the wire transfer of {{steps.start.output.args.amount}}?",
+                      "to": { "role": "user", "labels": { "user": "mock:erin" } },
+                      "timeout": "10m" },
+            "done": { "kind": "finish", "depends_on": ["gate"], "status": "completed",
+                      "output": "decision: {{steps.gate.output}}" }
+        }
+    });
+    let agent = json!({
+        "apiVersion": "agentctl.dev/v1alpha2",
+        "kind": "Agent",
+        "metadata": { "name": "gated", "namespace": ns },
+        "spec": {
+            "shape": "daemon",
+            "runtime": { "image": "agentd:1.3.1" },
+            "instruction": { "text": "hold the line" },
+            "expose": { "a2a": true },
+            "access": { "principals": ["mock:erin", "mock:frank"], "grants": ["decide"] },
+            "approval": { "policy": "ask",
+                          "hitl": [format!("webhook:http://hitl-sink.{ns}.svc.cluster.local.:80/hook")] },
+            "workflows": [ { "inline": workflow } ]
+        }
+    });
+    // JSON is a YAML subset — kubectl takes it verbatim.
+    shell::kubectl_apply_stdin(&agent.to_string()).context("apply gated agent")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(!first_pod(&ns, &agent_label("gated"))
+            .unwrap_or_default()
+            .is_empty())
+    })
+    .await?;
+    let pod = first_pod(&ns, &agent_label("gated"))?;
+    kh::wait_pod_running(&ctx.client, &ns, &pod, READY_TIMEOUT).await?;
+
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18121)?;
+    let base = pf.base_url();
+    let rpc = |token: String, body: Value| {
+        let base = base.clone();
+        async move {
+            let resp = ctx
+                .http
+                .post(format!("{base}/orgs/e2e-hitl/agents/gated"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .context("reach the org route")?;
+            let v: Value = resp.json().await.unwrap_or(Value::Null);
+            anyhow::Ok(v)
+        }
+    };
+    let erin = sign("erin");
+    let frank = sign("frank");
+
+    // Erin raises the decision; the run PARKS at the gate with the question.
+    // (Retry: the org route 503s while the agent's principal Secret settles.)
+    let mut sent = Value::Null;
+    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        let v = rpc(
+            erin.clone(),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": { "message": {
+                "role": "ROLE_USER", "messageId": format!("m-{}", now()),
+                "parts": [{ "data": { "agentd": { "op": "decide", "amount": "$4,200" } } }]
+            } } }),
+        )
+        .await?;
+        if v.get("result").is_some() {
+            sent = v;
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("decide send never succeeded: {v}");
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    let task_id = sent
+        .pointer("/result/task/id")
+        .and_then(Value::as_str)
+        .context("send returned no task id")?
+        .to_string();
+
+    // The run is async — the gate arms moments after the send returns.
+    // Poll GetTask (live passthrough for non-terminal tasks) until the run
+    // PARKS at INPUT_REQUIRED with the templated question.
+    let mut parked = Value::Null;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let v = rpc(
+            erin.clone(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "GetTask", "params": { "id": task_id } }),
+        )
+        .await?;
+        let task = v.pointer("/result/task").or_else(|| v.get("result"));
+        let st = task
+            .and_then(|t| t.pointer("/status/state"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if st.to_ascii_lowercase().contains("input") {
+            parked = v;
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("the gated run never parked at INPUT_REQUIRED (last: {v})");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let question = parked
+        .pointer("/result/task/status/message/parts/0/text")
+        .or_else(|| parked.pointer("/result/status/message/parts/0/text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !question.contains("$4,200") {
+        bail!("the pending question should carry the templated amount: {parked}");
+    }
+
+    // The channel heard about it (the gateway's fan-out): taskId + question.
+    let pf_sink = shell::PortForward::service(&ns, "hitl-sink", 80, 18122)?;
+    let sink_base = pf_sink.base_url();
+    kh::poll_until(Duration::from_secs(60), Duration::from_secs(3), || {
+        let sink_base = sink_base.clone();
+        let task_id = task_id.clone();
+        async move {
+            let seen: Value = ctx
+                .http
+                .get(format!("{sink_base}/seen"))
+                .send()
+                .await?
+                .json()
+                .await
+                .unwrap_or(Value::Null);
+            Ok(seen.as_array().is_some_and(|a| {
+                a.iter().any(|n| {
+                    n["taskId"] == task_id.as_str()
+                        && n["question"].as_str().is_some_and(|q| q.contains("$4,200"))
+                })
+            }))
+        }
+    })
+    .await
+    .context("the HITL channel never heard the gate")?;
+
+    // FRANK (listed principal, NOT the addressee) answers: agentd refuses
+    // (-32602) and the gate STAYS open.
+    let wrong = rpc(
+        frank,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "SendMessage", "params": { "message": {
+            "role": "ROLE_USER", "messageId": format!("m-{}", now()), "taskId": task_id,
+            "parts": [{ "text": "no" }]
+        } } }),
+    )
+    .await?;
+    let code = wrong.pointer("/error/code").and_then(Value::as_i64);
+    if code != Some(-32602) {
+        bail!("the wrong principal's answer must be refused with -32602, got {wrong}");
+    }
+
+    // ERIN answers — plain text, as the gate consumes it — and the run
+    // completes with the decision in the output.
+    let answered = rpc(
+        erin.clone(),
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "SendMessage", "params": { "message": {
+            "role": "ROLE_USER", "messageId": format!("m-{}", now()), "taskId": task_id,
+            "parts": [{ "text": "yes — approved" }]
+        } } }),
+    )
+    .await?;
+    let _ = answered;
+    // Completion may land a beat after the answer: poll to terminal.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let v = rpc(
+            erin.clone(),
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "GetTask", "params": { "id": task_id } }),
+        )
+        .await?;
+        let task = v
+            .pointer("/result/task")
+            .or_else(|| v.get("result"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let st = task
+            .pointer("/status/state")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if st.contains("completed") {
+            let output = task
+                .pointer("/artifacts/0/parts/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !output.contains("approved") {
+                bail!("the workflow output should carry erin's decision, got {output:?}");
+            }
+            break;
+        }
+        if st.contains("failed") || st.contains("cancel") {
+            bail!("the answered run should complete, ended {st:?}: {v}");
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("the answered run never completed (last: {v})");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    drop(pf_sink);
+    drop(pf);
+    orgs.delete(org, &Default::default()).await.ok();
     pass()
 }
 

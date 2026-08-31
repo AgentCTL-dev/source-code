@@ -222,6 +222,9 @@ gateway:
   hooks:
     ratePerMinute: 120
     maxBodyBytes: 1048576
+  # DEV ONLY: let outbound webhooks (push notifications + HITL channel
+  # deliveries) reach http/private addresses — disables the SSRF guard.
+  allowPrivateWebhooks: false
   # Stateless A2A gateway: small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }

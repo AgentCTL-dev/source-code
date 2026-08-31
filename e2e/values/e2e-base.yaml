@@ -113,3 +113,7 @@ identity:
       - name: zendesk
         issuer: https://mock-idp:8443
         client_id: agentctl-connect
+
+gateway:
+  # e2e: in-cluster HITL sink + push targets are private http.
+  allowPrivateWebhooks: true

@@ -171,6 +171,10 @@
               "description": "Max accepted hooks delivery body in bytes (413 above)."
             }
           }
+        },
+        "allowPrivateWebhooks": {
+          "type": "boolean",
+          "description": "DEV ONLY: admit http/private addresses for outbound webhooks (disables the SSRF guard)."
         }
       }
     }

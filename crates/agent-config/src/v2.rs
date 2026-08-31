@@ -158,6 +158,7 @@ pub fn from_v2_spec_with_store(
             .as_ref()
             .map(|a| a.grants.clone())
             .unwrap_or_default(),
+        approval_policy: spec.approval.as_ref().and_then(|a| a.policy.clone()),
         vars: Map::new(),
         singleton_selectors: Vec::new(),
     };

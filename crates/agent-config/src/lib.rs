@@ -217,6 +217,9 @@ pub struct ConfigInput {
     /// Typed-command grant patterns for the named principals (spec
     /// `access.grants`) — a command DataPart's `op` needs one; prose none.
     pub principal_grants: Vec<String>,
+    /// P5-6 HITL: `spec.approval.policy` → agentd `agent.approval` (+ the
+    /// matching `ask_human_fallback`). None ⇒ agentd defaults untouched.
+    pub approval_policy: Option<String>,
     /// Base-layer `vars:` (agentd folds `{{config.<key>}}` references
     /// anywhere in the document, type-preserving for whole-token
     /// substitution; unresolved references refuse startup). Fleet members
@@ -302,6 +305,7 @@ impl ConfigInput {
                 .as_ref()
                 .map(|a| a.grants.clone())
                 .unwrap_or_default(),
+            approval_policy: None,
             vars: Map::new(),
             singleton_selectors: Vec::new(),
         }
@@ -332,6 +336,9 @@ pub enum ConfigError {
     ExternalScheduleNeedsCron,
     /// A schedule trigger with neither `cron` nor `every`.
     ScheduleTriggerNeedsWhen,
+    /// `spec.approval` without `expose.a2a`: the human channel serves on the
+    /// A2A listener — a gate with no channel parks forever (or auto-fails).
+    ApprovalNeedsA2a,
     /// A webhook trigger's `auth` names a mode the compiler cannot render
     /// (`hmac` | `bearer` | `none`).
     UnknownWebhookAuth { auth: String },
@@ -365,6 +372,10 @@ impl std::fmt::Display for ConfigError {
             ConfigError::ScheduleTriggerNeedsWhen => {
                 write!(f, "a schedule trigger needs `cron` or `every`")
             }
+            ConfigError::ApprovalNeedsA2a => write!(
+                f,
+                "spec.approval needs expose.a2a: the human-in-the-loop channel serves on the                  A2A listener, and a gate with no channel parks forever"
+            ),
             ConfigError::UnknownWebhookAuth { auth } => write!(
                 f,
                 "webhook trigger auth {auth:?} is not supported: use hmac (the default) or                  bearer — agentd refuses unauthenticated routes on its non-loopback                  webhook listener, so `none` cannot render"
@@ -585,6 +596,36 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
                 agent.insert("instruction".into(), json!(instruction));
             }
         }
+    }
+    // P5-6 HITL policy: `ask` parks gates at INPUT_REQUIRED for a human
+    // answer through the fabric (fallback `wait` — the channel/gateway
+    // answers later, agentd's default `fail` would kill the run instead);
+    // `auto` lets the LLM judge answer marked-as-auto; `deny` asks with a
+    // hard `fail` fallback — a gate nobody may answer IS a denial.
+    // Any approval posture arms the HITL surface: agentd's human channel is
+    // `interface.enabled && a2a` (source-verified) — without it every gate
+    // parks channel-less and the linked task never reaches INPUT_REQUIRED.
+    if input.approval_policy.is_some() {
+        if !input.serve_a2a {
+            // A gate nobody can ever answer is a silent hang bounded only by
+            // its timeout (upstream-confirmed): refuse the combination.
+            return Err(ConfigError::ApprovalNeedsA2a);
+        }
+        doc.insert("interface".into(), json!({ "enabled": true }));
+    }
+    match input.approval_policy.as_deref() {
+        Some("ask") => {
+            agent.insert("approval".into(), json!("ask"));
+            agent.insert("ask_human_fallback".into(), json!("wait"));
+        }
+        Some("auto") => {
+            agent.insert("approval".into(), json!("auto"));
+        }
+        Some("deny") => {
+            agent.insert("approval".into(), json!("ask"));
+            agent.insert("ask_human_fallback".into(), json!("fail"));
+        }
+        _ => {}
     }
     if !agent.is_empty() {
         doc.insert("agent".into(), Value::Object(agent));

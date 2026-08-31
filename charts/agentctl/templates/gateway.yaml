@@ -175,6 +175,12 @@ spec:
             - name: AGENTCTL_HOOKS_MAX_BODY
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.gateway.allowPrivateWebhooks }}
+            # DEV ONLY: admit http + private addresses for outbound webhooks
+            # (push + HITL channels) — disables the SSRF guard.
+            - name: AGENTCTL_WEBHOOK_ALLOW_PRIVATE
+              value: "true"
+            {{- end }}
             # Mesh registry federation: peer gateway base URLs (CSV).
             # Peers are queried with ?local=1 to prevent recursion.
             {{- with .Values.gateway.federationPeers }}

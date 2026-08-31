@@ -1465,15 +1465,22 @@ async fn handle_a2a_routed(
         }
     };
 
-    // `tasks/get`: serve from the durable store first (survives the agent),
-    // falling back to a live call.
-    if spec == "tasks/get" {
+    // `tasks/get`: serve TERMINAL tasks from the durable store (they survive
+    // the agent); a NON-terminal row falls through to the live call — a run
+    // parked at a gate must never be masked by its stale stored state.
+    if spec == "tasks/get" || spec == "GetTask" {
         if let Some(tid) = req.pointer("/params/id").and_then(Value::as_str) {
             if let Ok(Some(row)) = store::get(&state.pool, &ns, &name, tid).await {
-                return Json(
-                    json!({ "jsonrpc": "2.0", "id": id, "result": store::task_json(&row) }),
-                )
-                .into_response();
+                let terminal = {
+                    let st = row.state.to_ascii_lowercase();
+                    st.contains("completed") || st.contains("failed") || st.contains("cancel")
+                };
+                if terminal {
+                    return Json(
+                        json!({ "jsonrpc": "2.0", "id": id, "result": store::task_json(&row) }),
+                    )
+                    .into_response();
+                }
             }
         }
     }
@@ -1557,7 +1564,9 @@ async fn handle_a2a_routed(
     // `SendMessageResponse` envelope `{"task": <Task>}`; `GetTask`/`CancelTask`
     // return a bare Task. `task_of` normalizes both so persistence + push read
     // the Task regardless of shape.
-    if spec == "message/send" {
+    let is_send = spec == "message/send" || spec == "SendMessage";
+    let is_get = spec == "tasks/get" || spec == "GetTask";
+    if is_send || is_get {
         if let Some(task) = body.get("result").and_then(task_of) {
             let tid = task.get("id").and_then(Value::as_str).unwrap_or("task-1");
             let st = task
@@ -1568,6 +1577,23 @@ async fn handle_a2a_routed(
                 .pointer("/artifacts/0/parts/0/text")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            // The status message: for a run parked at INPUT_REQUIRED this is
+            // the pending GATE QUESTION (P5-6) — kept so a stored tasks/get
+            // can surface what the task waits for.
+            let status_message = task
+                .pointer("/status/message/parts/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // Channel fan-out on the TRANSITION into input-required (P5-6):
+            // the gate often arms AFTER the send returns (the run is async),
+            // so GetTask refreshes carry the signal too. The prior stored
+            // state is the dedupe.
+            let gated_now = st.to_ascii_lowercase().contains("input");
+            let was_gated = store::get(&state.pool, &ns, &name, tid)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.state.to_ascii_lowercase().contains("input"));
             // Record which member served the task (owner_pod) so a later live op
             // (cancel/stream/get on a non-terminal task) routes back to it — task
             // affinity across fleet members. Harmless for a single agent.
@@ -1579,7 +1605,10 @@ async fn handle_a2a_routed(
                 st,
                 &input,
                 artifact,
-                Some(&pod_ip),
+                status_message,
+                // Affinity is written by the SEND that placed the task; a
+                // get refresh must not re-home it.
+                is_send.then_some(pod_ip.as_str()),
             )
             .await
             {
@@ -1590,6 +1619,13 @@ async fn handle_a2a_routed(
             // Deliver a push notification if a webhook is registered.
             if let Ok(Some((url, token))) = store::push_get(&state.pool, &ns, &name, tid).await {
                 deliver_push(url, token, task.clone());
+            }
+            // P5-6 HITL: this run just PARKED at a gate — notify the
+            // agent's registered channels once per parking (fire-and-forget;
+            // the answer returns as an ordinary continuation under the
+            // answerer's own identity).
+            if gated_now && !was_gated {
+                notify_hitl_channels(&state, &ns, &name, tid, status_message, task).await;
             }
         }
     } else if spec == "tasks/cancel" {
@@ -1773,9 +1809,34 @@ async fn push_config(
 mod webhook {
     use std::net::{IpAddr, SocketAddr};
 
+    /// Dev-only relaxation (`AGENTCTL_WEBHOOK_ALLOW_PRIVATE=true`): admit
+    /// plaintext http and private/cluster addresses for OUTBOUND webhooks —
+    /// e2e sinks and air-gapped dev clusters. NEVER set in production: it
+    /// disables the SSRF guard for push + HITL channel deliveries.
+    pub fn allow_private() -> bool {
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| {
+            std::env::var("AGENTCTL_WEBHOOK_ALLOW_PRIVATE").is_ok_and(|v| v.trim() == "true")
+        })
+    }
+
     /// Parse an `https://host[:port]` webhook, returning `(host, port)`. Rejects any
-    /// non-https scheme.
+    /// non-https scheme (plaintext admitted only under [`allow_private`]).
     pub fn parse_https(url: &str) -> Result<(String, u16), String> {
+        if allow_private() {
+            if let Some(rest) = url.strip_prefix("http://") {
+                let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+                let hostport = authority.rsplit('@').next().unwrap_or(authority);
+                let (host, port) = match hostport.rsplit_once(':') {
+                    Some((h, p)) => (
+                        h.to_string(),
+                        p.parse::<u16>().map_err(|_| "bad port".to_string())?,
+                    ),
+                    None => (hostport.to_string(), 80),
+                };
+                return Ok((host, port));
+            }
+        }
         let rest = url
             .strip_prefix("https://")
             .ok_or_else(|| "webhook url must be https://".to_string())?;
@@ -1845,7 +1906,7 @@ mod webhook {
             return Err(format!("webhook host {host} did not resolve"));
         }
         for a in &addrs {
-            if !is_public(&a.ip()) {
+            if !is_public(&a.ip()) && !allow_private() {
                 return Err(format!(
                     "webhook host {host} resolves to non-public address {} (SSRF blocked)",
                     a.ip()
@@ -2329,6 +2390,67 @@ async fn principal_bearer_for(
 /// those methods require, so it reaches the pod directly.
 /// (A fleet's pods are labelled the same way, so this resolves a fleet member
 /// too; picking the first Running replica is the current fan-out policy.)
+/// P5-6 HITL: fan a parked gate out to the agent's registered channels —
+/// `spec.approval.hitl` entries (falling back to its AgentClass's registry
+/// `hitl` when the agent lists none) of the form `webhook:<https-url>` (a
+/// Slack incoming webhook IS one). Each URL passes the SSRF guard the push
+/// lane uses; delivery is fire-and-forget — the ANSWER never comes through
+/// the channel, only through an authenticated continuation.
+async fn notify_hitl_channels(
+    state: &AppState,
+    ns: &str,
+    name: &str,
+    task_id: &str,
+    question: &str,
+    task: &Value,
+) {
+    let agents: Api<agent_api::v1alpha2::Agent> = Api::namespaced(state.client.clone(), ns);
+    let agent = match agents.get_opt(name).await {
+        Ok(Some(a)) => a,
+        _ => return,
+    };
+    let mut channels: Vec<String> = agent
+        .spec
+        .approval
+        .as_ref()
+        .map(|a| a.hitl.clone())
+        .unwrap_or_default();
+    if channels.is_empty() {
+        if let Some(class) = &agent.spec.class {
+            let classes: Api<agent_api::v1alpha2::AgentClass> =
+                Api::namespaced(state.client.clone(), ns);
+            if let Ok(Some(c)) = classes.get_opt(class).await {
+                channels = c.spec.hitl.clone();
+            }
+        }
+    }
+    if channels.is_empty() {
+        return;
+    }
+    let payload = json!({
+        "kind": "agentctl.hitl.gate",
+        "namespace": ns,
+        "agent": name,
+        "org": ns.strip_prefix("org-").unwrap_or(""),
+        "taskId": task_id,
+        "question": question,
+        "state": task.pointer("/status/state"),
+        "answerHint": format!("send a message with taskId {task_id} through the gateway as the addressed user"),
+    });
+    for ch in channels {
+        let Some(url) = ch.strip_prefix("webhook:") else {
+            tracing::debug!(channel = %ch, "hitl channel kind not deliverable from the gateway (webhook:<url> only)");
+            continue;
+        };
+        match webhook::validate(url).await {
+            Ok(()) => deliver_push(url.to_string(), String::new(), payload.clone()),
+            Err(e) => {
+                tracing::warn!(%ns, %name, channel = %url, error = %e, "hitl channel refused by the webhook guard")
+            }
+        }
+    }
+}
+
 /// Write the delivery-activity stamp (P6-5): `agentctl.dev/last-delivery` =
 /// unix seconds on the Agent. Rate-limited to one write per 30s per agent
 /// unless `force` (the no-ready-replica branch — the WAKE signal for a

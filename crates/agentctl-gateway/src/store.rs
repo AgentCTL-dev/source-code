@@ -16,6 +16,10 @@ pub struct TaskRow {
     pub id: String,
     pub state: String,
     pub artifact: String,
+    /// The task's `status.message` text — for a run parked at
+    /// INPUT_REQUIRED this is the pending GATE QUESTION (P5-6); dropping it
+    /// made a stored `tasks/get` blind to what the task is waiting for.
+    pub status_message: String,
 }
 
 /// Create the tables if missing (idempotent; called with retry at startup).
@@ -47,7 +51,9 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
             ALTER TABLE a2a_push_configs ADD COLUMN IF NOT EXISTS token text NOT NULL DEFAULT '';
             -- Which fleet member (pod IP) served the task, so a later
             -- live op routes back to it (task affinity). Additive.
-            ALTER TABLE a2a_tasks ADD COLUMN IF NOT EXISTS owner_pod text",
+            ALTER TABLE a2a_tasks ADD COLUMN IF NOT EXISTS owner_pod text;
+            -- The status.message text (a pending gate's question). Additive.
+            ALTER TABLE a2a_tasks ADD COLUMN IF NOT EXISTS status_message text NOT NULL DEFAULT ''",
         )
         .await
         .map_err(|e| e.to_string())
@@ -56,7 +62,7 @@ pub async fn ensure_schema(pool: &Pool) -> Result<(), String> {
 /// Insert or update a task record for `(ns, agent, id)`. `owner_pod` (the member
 /// pod IP that served the task) is recorded/refreshed for fleet task affinity;
 /// `None` leaves any existing value untouched.
-#[allow(clippy::too_many_arguments)] // a flat task row: (ns, agent, id, state, input, artifact, owner_pod)
+#[allow(clippy::too_many_arguments)] // a flat task row
 pub async fn upsert(
     pool: &Pool,
     ns: &str,
@@ -65,17 +71,18 @@ pub async fn upsert(
     state: &str,
     input: &str,
     artifact: &str,
+    status_message: &str,
     owner_pod: Option<&str>,
 ) -> Result<(), String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
     client
         .execute(
-            "INSERT INTO a2a_tasks (namespace, agent, id, state, input, artifact, owner_pod)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO a2a_tasks (namespace, agent, id, state, input, artifact, status_message, owner_pod)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (namespace, agent, id)
-             DO UPDATE SET state = $4, artifact = $6,
-                           owner_pod = COALESCE($7, a2a_tasks.owner_pod), updated_at = now()",
-            &[&ns, &agent, &id, &state, &input, &artifact, &owner_pod],
+             DO UPDATE SET state = $4, artifact = $6, status_message = $7,
+                           owner_pod = COALESCE($8, a2a_tasks.owner_pod), updated_at = now()",
+            &[&ns, &agent, &id, &state, &input, &artifact, &status_message, &owner_pod],
         )
         .await
         .map(|_| ())
@@ -107,7 +114,7 @@ pub async fn get(pool: &Pool, ns: &str, agent: &str, id: &str) -> Result<Option<
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let row = client
         .query_opt(
-            "SELECT id, state, artifact FROM a2a_tasks
+            "SELECT id, state, artifact, status_message FROM a2a_tasks
              WHERE namespace = $1 AND agent = $2 AND id = $3",
             &[&ns, &agent, &id],
         )
@@ -117,6 +124,7 @@ pub async fn get(pool: &Pool, ns: &str, agent: &str, id: &str) -> Result<Option<
         id: r.get(0),
         state: r.get(1),
         artifact: r.get(2),
+        status_message: r.get(3),
     }))
 }
 
@@ -125,7 +133,7 @@ pub async fn list(pool: &Pool, ns: &str, agent: &str) -> Result<Vec<TaskRow>, St
     let client = pool.get().await.map_err(|e| e.to_string())?;
     let rows = client
         .query(
-            "SELECT id, state, artifact FROM a2a_tasks
+            "SELECT id, state, artifact, status_message FROM a2a_tasks
              WHERE namespace = $1 AND agent = $2 ORDER BY created_at DESC",
             &[&ns, &agent],
         )
@@ -137,6 +145,7 @@ pub async fn list(pool: &Pool, ns: &str, agent: &str) -> Result<Vec<TaskRow>, St
             id: r.get(0),
             state: r.get(1),
             artifact: r.get(2),
+            status_message: r.get(3),
         })
         .collect())
 }
@@ -251,10 +260,20 @@ pub fn task_json(row: &TaskRow) -> Value {
             "parts": [{ "kind": "text", "text": row.artifact }]
         }])
     };
+    let status = if row.status_message.is_empty() {
+        json!({ "state": row.state })
+    } else {
+        // A parked gate's pending question (INPUT_REQUIRED) — the message a
+        // HITL surface renders.
+        json!({ "state": row.state, "message": {
+            "role": "ROLE_AGENT",
+            "parts": [{ "text": row.status_message }],
+        } })
+    };
     json!({
         "id": row.id,
         "contextId": "ctx-1",
-        "status": { "state": row.state },
+        "status": status,
         "artifacts": artifacts,
         "kind": "task",
     })
@@ -270,12 +289,31 @@ mod tests {
             id: "t-1".into(),
             state: "completed".into(),
             artifact: "echo: hi".into(),
+            status_message: String::new(),
         };
         let t = task_json(&row);
         assert_eq!(t["id"], "t-1");
         assert_eq!(t["kind"], "task");
         assert_eq!(t["status"]["state"], "completed");
+        assert!(t["status"].get("message").is_none());
         assert_eq!(t["artifacts"][0]["parts"][0]["text"], "echo: hi");
+    }
+
+    /// P5-6: a parked gate's question rides `status.message` (agent role).
+    #[test]
+    fn task_json_carries_the_pending_question() {
+        let row = TaskRow {
+            id: "t-2".into(),
+            state: "TASK_STATE_INPUT_REQUIRED".into(),
+            artifact: String::new(),
+            status_message: "Approve the wire transfer?".into(),
+        };
+        let t = task_json(&row);
+        assert_eq!(
+            t["status"]["message"]["parts"][0]["text"],
+            "Approve the wire transfer?"
+        );
+        assert_eq!(t["status"]["message"]["role"], "ROLE_AGENT");
     }
 
     #[test]
@@ -284,6 +322,7 @@ mod tests {
             id: "t-2".into(),
             state: "canceled".into(),
             artifact: String::new(),
+            status_message: String::new(),
         };
         let t = task_json(&row);
         assert_eq!(t["status"]["state"], "canceled");
