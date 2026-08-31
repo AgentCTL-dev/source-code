@@ -333,6 +333,16 @@ spec:
                           drainTimeout:
                             nullable: true
                             type: string
+                          idleParkSeconds:
+                            description: |-
+                              P6-5 scale-from-zero for webhook daemons: park to zero replicas after
+                              this many seconds without a delivery; the gateway's hooks proxy stamps
+                              activity and its stamp on a parked agent is the WAKE signal (senders
+                              retry on the 503 + Retry-After meanwhile). Unset = never park.
+                            format: uint32
+                            minimum: 0.0
+                            nullable: true
+                            type: integer
                           paused:
                             default: false
                             description: Declarative pause (parity with the `pause` verb).
@@ -694,7 +704,10 @@ spec:
                               nullable: true
                               properties:
                                 auth:
-                                  description: '`hmac` | `bearer` | `none` (none only for cluster-internal exposure).'
+                                  description: |-
+                                    `hmac` (default — the operator provisions the route secret) or
+                                    `bearer`. agentd refuses unauthenticated routes on its non-loopback
+                                    webhook listener, so there is no `none`.
                                   nullable: true
                                   type: string
                                 idempotency:
@@ -1104,6 +1117,16 @@ spec:
                       drainTimeout:
                         nullable: true
                         type: string
+                      idleParkSeconds:
+                        description: |-
+                          P6-5 scale-from-zero for webhook daemons: park to zero replicas after
+                          this many seconds without a delivery; the gateway's hooks proxy stamps
+                          activity and its stamp on a parked agent is the WAKE signal (senders
+                          retry on the 503 + Retry-After meanwhile). Unset = never park.
+                        format: uint32
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
                       paused:
                         default: false
                         description: Declarative pause (parity with the `pause` verb).
@@ -1465,7 +1488,10 @@ spec:
                           nullable: true
                           properties:
                             auth:
-                              description: '`hmac` | `bearer` | `none` (none only for cluster-internal exposure).'
+                              description: |-
+                                `hmac` (default — the operator provisions the route secret) or
+                                `bearer`. agentd refuses unauthenticated routes on its non-loopback
+                                webhook listener, so there is no `none`.
                               nullable: true
                               type: string
                             idempotency:

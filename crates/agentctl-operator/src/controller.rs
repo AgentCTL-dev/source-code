@@ -416,12 +416,57 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     // (a defaulted daemon whose only triggers are once/manual renders a Job).
     // The v2 view's lifecycle.paused (declared-only until P7-6): drives the
     // zero-replica park below.
-    let paused = {
+    let (paused, mut park_requeue) = {
         let v2_api: Api<agent_api::v1alpha2::Agent> = Api::namespaced(ctx.client.clone(), ns);
-        matches!(
-            v2_api.get_opt(&name).await,
-            Ok(Some(a)) if a.spec.lifecycle.as_ref().is_some_and(|l| l.paused)
-        )
+        let v2 = v2_api.get_opt(&name).await.ok().flatten();
+        let user_paused = v2
+            .as_ref()
+            .is_some_and(|a| a.spec.lifecycle.as_ref().is_some_and(|l| l.paused));
+        // P6-5 delivery-driven park: a webhook daemon with idleParkSeconds
+        // sleeps at zero replicas once deliveries go quiet; the gateway's
+        // activity stamp (`agentctl.dev/last-delivery`, written on every
+        // delivery attempt — reachable or not) wakes it through this same
+        // reconcile. User pause always wins and never auto-clears.
+        let mut parked = false;
+        let mut requeue: Option<std::time::Duration> = None;
+        if let Some(a) = &v2 {
+            let idle = a
+                .spec
+                .lifecycle
+                .as_ref()
+                .and_then(|l| l.idle_park_seconds)
+                .filter(|w| *w > 0);
+            let has_webhook = a.spec.triggers.iter().any(|t| t.webhook.is_some());
+            if let (Some(window), true, false) = (idle, has_webhook, user_paused) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let created = a
+                    .metadata
+                    .creation_timestamp
+                    .as_ref()
+                    .map(|t| t.0.as_second())
+                    .unwrap_or(now);
+                let last_delivery = a
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|ann| ann.get(crate::render::LAST_DELIVERY_ANNOTATION))
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(created);
+                let last_activity = last_delivery.max(created);
+                let quiet = now - last_activity;
+                parked = quiet >= window as i64;
+                // Half-window leash either way: park promptly when quiet,
+                // and re-check a parked agent for staleness cheaply.
+                requeue = Some(std::time::Duration::from_secs(((window as u64) / 2).max(5)));
+                if parked {
+                    tracing::info!(%ns, %name, quiet, window, "webhook daemon parked (scale-from-zero armed)");
+                }
+            }
+        }
+        (user_paused || parked, requeue)
     };
     // Hooks ingress (P7-1): each authenticated webhook trigger needs its
     // operator-provisioned secret (`hmac-<i>`/`bearer-<i>` in the
@@ -682,7 +727,11 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     } else {
         debug!(agent = %name, "status unchanged; skipped patch");
     }
-    Ok(Action::requeue(requeue_after()))
+    let after = match park_requeue.take() {
+        Some(d) => d.min(requeue_after()),
+        None => requeue_after(),
+    };
+    Ok(Action::requeue(after))
 }
 
 /// The `Cleanup` branch: the workload is owner-referenced, so Kubernetes GC

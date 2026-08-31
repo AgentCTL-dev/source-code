@@ -186,6 +186,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("connections-flow", "capability", connections_flow),
         // Hooks ingress: external delivery through the gateway, HMAC at agentd (P7-1)
         scenario!("hooks-ingress", "capability", hooks_ingress),
+        // Scale-from-zero: parked webhook daemon wakes on first delivery (P6-5)
+        scenario!("webhook-scale-zero", "fleets", webhook_scale_zero),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -692,6 +694,109 @@ async fn hooks_ingress(ctx: &Ctx) -> Result<Outcome> {
 
     drop(pf);
     shell::kubectl(&["delete", "agent", "hooked", "-n", ns, "--wait=false"]).ok();
+    pass()
+}
+
+/// P6-5: scale-from-zero for webhook daemons. `lifecycle.idleParkSeconds`
+/// parks a quiet webhook agent at ZERO replicas; the next delivery hits the
+/// gateway's 503 + Retry-After, whose forced activity stamp moves the park
+/// clock — the operator's sweep flips replicas back up and the sender's
+/// retry loop lands the delivery on the woken pod.
+async fn webhook_scale_zero(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let dir = examples_dir();
+    apply_mock_provider(ctx, &dir)?;
+    apply_example(&dir, "modelpool-mock.yaml")?;
+
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: sleeper, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge the delivery in one line\" }}\n  intelligence: {{ pool: mockpool }}\n  lifecycle: {{ idleParkSeconds: 20 }}\n  expose:\n    a2a: true\n    webhooks: [ {{ path: /ping }} ]\n  triggers:\n    - webhook: {{ path: /ping, methods: [POST] }}\n"
+    ))
+    .context("apply sleeper agent")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(!first_pod(ns, &agent_label("sleeper"))
+            .unwrap_or_default()
+            .is_empty())
+    })
+    .await?;
+    let secret = {
+        let b64 = shell::kubectl(&[
+            "get", "secret", "sleeper-hooks", "-n", ns,
+            "-o", "jsonpath={.data.hmac-0}",
+        ])
+        .context("hooks Secret")?;
+        String::from_utf8(base64_decode(b64.trim())?)?
+    };
+
+    // Quiet for idleParkSeconds ⇒ the operator PARKS it: replicas 0.
+    kh::poll_until(Duration::from_secs(90), Duration::from_secs(3), || async {
+        let out = shell::kubectl(&[
+            "get", "deploy", "sleeper", "-n", ns, "-o", "jsonpath={.spec.replicas}",
+        ])
+        .unwrap_or_default();
+        Ok(out.trim() == "0")
+    })
+    .await
+    .context("webhook daemon never parked to zero")?;
+
+    // The delivery, exactly as an external sender retries it.
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18120)?;
+    let base = pf.base_url();
+    let body = json!({ "ping": 1 }).to_string();
+    let sig = {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+        let tag = ring::hmac::sign(&key, body.as_bytes());
+        let hex: String = tag.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256={hex}")
+    };
+    let url = format!("{base}/hooks/{ns}/sleeper/ping");
+    let first = ctx
+        .http
+        .post(&url)
+        .header("x-signature", sig.clone())
+        .body(body.clone())
+        .send()
+        .await
+        .context("first delivery to the parked agent")?;
+    if first.status().as_u16() != 503 {
+        bail!(
+            "a parked agent should answer 503 + Retry-After, got {}",
+            first.status()
+        );
+    }
+    if first.headers().get("retry-after").is_none() {
+        bail!("the 503 must carry Retry-After (senders' retry contract)");
+    }
+
+    // Retry like a webhook sender until the woken pod takes it.
+    let mut delivered = false;
+    for _ in 0..24 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let resp = ctx
+            .http
+            .post(&url)
+            .header("x-signature", sig.clone())
+            .body(body.clone())
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            delivered = true;
+            break;
+        }
+    }
+    if !delivered {
+        bail!("the parked agent never woke to take the delivery");
+    }
+    // And the workflow actually fired on the woken pod.
+    let pod = first_pod(ns, &agent_label("sleeper"))?;
+    kh::poll_until(Duration::from_secs(60), Duration::from_secs(5), || async {
+        let logs = shell::kubectl(&["logs", "-n", ns, &pod, "--tail=-1"]).unwrap_or_default();
+        Ok(logs.contains("main-webhook"))
+    })
+    .await
+    .context("webhook firing on the woken pod")?;
+
+    drop(pf);
+    shell::kubectl(&["delete", "agent", "sleeper", "-n", ns, "--wait=false"]).ok();
     pass()
 }
 

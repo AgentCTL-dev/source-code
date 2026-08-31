@@ -1,9 +1,9 @@
 {{- $ns := include "agentctl.namespace" . }}
 {{- if .Values.scaler.enabled }}
-# ServiceAccount for the KEDA external scaler. No RBAC: it is a stateless gRPC
-# service KEDA polls; it reads the claim backlog over HTTP from the coordination
-# server (address passed per-trigger by the operator's ScaledObject), not the
-# cluster API.
+# ServiceAccount for the KEDA external scaler. RBAC: pods get/list only — the
+# inbox_pending signal (P6-5 v2) lists a fleet's member pods by label and
+# scrapes their probes-port /metrics; the backlog signal stays a plain HTTP
+# read from the coordination server (no API access needed).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -19,6 +19,35 @@ metadata:
     {{- with (include "agentctl.commonLabels" $) }}
     {{- . | nindent 4 }}
     {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentctl-scaler
+  labels:
+    app.kubernetes.io/name: agentctl-scaler
+    {{- include "agentctl.labels" . | nindent 4 }}
+rules:
+  # inbox_pending (P6-5 v2): list member pods to scrape their /metrics.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentctl-scaler
+  labels:
+    app.kubernetes.io/name: agentctl-scaler
+    {{- include "agentctl.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentctl-scaler
+subjects:
+  - kind: ServiceAccount
+    name: agentctl-scaler
+    namespace: {{ $ns }}
 ---
 # The KEDA external scaler: a stateless gRPC service implementing the
 # KEDA `externalscaler.ExternalScaler` API on :9100. KEDA dials it (per the

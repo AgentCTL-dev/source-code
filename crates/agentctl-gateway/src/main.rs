@@ -79,6 +79,10 @@ struct AppState {
     /// Hooks-ingress tenant limits (P7-1): a fixed-window per-agent arrival
     /// limiter (window start unix, count) + the caps from env.
     hooks_limiter: HooksLimiter,
+    /// Last delivery-activity stamp per agent (30s rate limit on the
+    /// annotation write; the unreachable branch stamps unconditionally —
+    /// that IS the wake signal).
+    hooks_stamped: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), i64>>>,
     /// Max deliveries per agent per 60s window (`AGENTCTL_HOOKS_RATE`).
     hooks_rate: u32,
     /// Max accepted body bytes (`AGENTCTL_HOOKS_MAX_BODY`).
@@ -205,6 +209,7 @@ async fn main() {
             auth: gate,
             round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             hooks_limiter: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            hooks_stamped: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             hooks_rate: std::env::var("AGENTCTL_HOOKS_RATE")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -2324,6 +2329,36 @@ async fn principal_bearer_for(
 /// those methods require, so it reaches the pod directly.
 /// (A fleet's pods are labelled the same way, so this resolves a fleet member
 /// too; picking the first Running replica is the current fan-out policy.)
+/// Write the delivery-activity stamp (P6-5): `agentctl.dev/last-delivery` =
+/// unix seconds on the Agent. Rate-limited to one write per 30s per agent
+/// unless `force` (the no-ready-replica branch — the WAKE signal for a
+/// parked webhook daemon; the operator's park sweep reads this clock).
+async fn stamp_delivery(state: &AppState, ns: &str, name: &str, force: bool) {
+    let now = chrono_unix();
+    {
+        let mut m = state.hooks_stamped.lock().unwrap();
+        let last = m.entry((ns.to_string(), name.to_string())).or_insert(0);
+        if !force && now - *last < 30 {
+            return;
+        }
+        *last = now;
+    }
+    let agents: Api<agent_api::v1alpha2::Agent> = Api::namespaced(state.client.clone(), ns);
+    let patch = json!({ "metadata": { "annotations": {
+        agent_api::LAST_DELIVERY_ANNOTATION: now.to_string(),
+    } } });
+    if let Err(e) = agents
+        .patch(
+            name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await
+    {
+        tracing::debug!(%ns, %name, error = %e, "delivery stamp failed");
+    }
+}
+
 /// `ANY /hooks/{ns}/{name}/<path>` — the external webhook door (P7-1).
 ///
 /// The gateway is the data plane (RFC 0029 §5): it gates on the Agent's
@@ -2422,10 +2457,12 @@ async fn hooks_proxy(
     let pod_ip = match resolve(&state.client, &ns, &name).await {
         Ok(ip) => ip,
         Err(e) => {
-            // The scale-from-zero seam: senders retry; P6-5's wake lane
-            // turns this into a park/unpark signal.
+            // The scale-from-zero WAKE (P6-5): the forced stamp moves the
+            // park clock, the operator's sweep flips replicas back up, and
+            // the sender's Retry-After loop lands the delivery.
+            stamp_delivery(&state, &ns, &name, true).await;
             state.metrics.inc_hooks_unreachable();
-            tracing::info!(%ns, %name, error = %e, "hooks delivery with no ready replica");
+            tracing::info!(%ns, %name, error = %e, "hooks delivery with no ready replica (wake stamped)");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(axum::http::header::RETRY_AFTER, "10")],
@@ -2479,6 +2516,7 @@ async fn hooks_proxy(
     let out = resp.bytes().await.unwrap_or_default();
 
     state.metrics.inc_hooks_forwarded();
+    stamp_delivery(&state, &ns, &name, false).await;
     {
         let pool = state.pool.clone();
         let ev = agentctl_metering::Event::new(

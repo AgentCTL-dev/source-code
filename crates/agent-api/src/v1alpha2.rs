@@ -497,6 +497,12 @@ pub struct LifecycleSpec {
     /// Declarative pause (parity with the `pause` verb).
     #[serde(default)]
     pub paused: bool,
+    /// P6-5 scale-from-zero for webhook daemons: park to zero replicas after
+    /// this many seconds without a delivery; the gateway's hooks proxy stamps
+    /// activity and its stamp on a parked agent is the WAKE signal (senders
+    /// retry on the 503 + Retry-After meanwhile). Unset = never park.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_park_seconds: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]

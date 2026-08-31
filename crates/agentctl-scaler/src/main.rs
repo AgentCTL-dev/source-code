@@ -98,11 +98,22 @@ async fn main() {
     if auth_token.is_some() {
         tracing::info!("AGENTCTL_API_TOKEN set: presenting bearer token on work.stats requests");
     }
+    // The in-cluster client for the inbox_pending pod scrape (P6-5 v2);
+    // unavailable (dev, out-of-cluster) ⇒ that signal errors per read and
+    // the hold-last damping keeps fleets steady.
+    let kube = match kube::Client::try_default().await {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "no kube client — inbox_pending signal disabled");
+            None
+        }
+    };
     let svc = Scaler::new(
         http,
         metrics.clone(),
         Duration::from_millis(poll_ms.max(1)),
         auth_token,
+        kube,
     );
 
     // One shutdown signal fans out to both servers via a watch channel.

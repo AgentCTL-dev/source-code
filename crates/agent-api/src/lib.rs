@@ -17,6 +17,12 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Delivery-activity stamp (P6-5 scale-from-zero): the gateway's hooks proxy
+/// writes unix seconds here on every delivery attempt — reachable or not —
+/// and the operator's park sweep reads it (a stamp on a parked agent is the
+/// wake signal).
+pub const LAST_DELIVERY_ANNOTATION: &str = "agentctl.dev/last-delivery";
+
 pub mod approval;
 pub mod org;
 pub mod registry;

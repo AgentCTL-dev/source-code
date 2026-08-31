@@ -220,6 +220,9 @@ pub fn desired_agent(
                 run_until: Some("drained".into()),
                 drain_timeout: None,
                 paused: spec.paused,
+                // Supervisors park on the CONVERSATION clock (P7-6), not the
+                // delivery clock.
+                idle_park_seconds: None,
             }),
             // @mention (P4-7): the owner-reachable estate as dialable peers +
             // the orchestration workflow. The compose path dials each peer AS

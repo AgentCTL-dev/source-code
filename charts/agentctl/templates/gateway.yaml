@@ -57,9 +57,10 @@ rules:
   - apiGroups: ["agentctl.dev"]
     resources: ["supervisors/status"]
     verbs: ["get", "patch"]
-  # Owner approvals (P4-5): the gateway flips a pending-delete annotation to
-  # approved after verifying the OWNER's bearer (the annotation is the only
-  # thing it writes on agents).
+  # Owner approvals (P4-5): flip the pending-delete annotation to approved
+  # after verifying the OWNER's bearer. Delivery stamps (P6-5): write the
+  # last-delivery annotation the park sweep reads. Annotations are the ONLY
+  # thing the gateway writes on agents.
   - apiGroups: ["agentctl.dev"]
     resources: ["agents"]
     verbs: ["patch"]

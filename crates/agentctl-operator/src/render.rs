@@ -248,6 +248,9 @@ pub fn peer_bearers_secret_name(workload: &str) -> String {
 
 const HOOKS_VOLUME: &str = "agentctl-hooks";
 
+/// Delivery-activity stamp (P6-5): shared with the gateway via agent-api.
+pub use agent_api::LAST_DELIVERY_ANNOTATION;
+
 /// The per-agent webhook-route Secret (P7-1; `hmac-<i>`/`bearer-<i>` keys).
 pub fn hooks_secret_name(workload: &str) -> String {
     format!("{workload}-hooks")
@@ -618,6 +621,16 @@ pub fn render_scaled_object(
     let name = fleet.metadata.name.clone()?;
     let scaling = &fleet.spec.scaling;
     let min = scaling.min_replicas.unwrap_or(0);
+    // The contract-neutral signal token (P6-5 scaler v2): `backlog` (the
+    // coordination work fabric — the default) or `inbox_pending` (the sum of
+    // agent_inbox_pending over the fleet's own member pods, per the metrics
+    // registry's scaler_guidance.primary).
+    let metric = scaling
+        .target
+        .as_ref()
+        .map(|t| t.metric.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "backlog".to_string());
     let threshold = scaling
         .target
         .as_ref()
@@ -639,6 +652,11 @@ pub fn render_scaled_object(
             "metadata": {
                 "scalerAddress": scaler_address,
                 "coordinationUrl": coordination_url,
+                "metric": metric,
+                // inbox_pending source: the scaler scrapes the fleet's own
+                // member pods (label-selected) on the probes port.
+                "namespace": fleet.metadata.namespace.clone().unwrap_or_default(),
+                "selector": format!("agentctl.dev/agent={name}"),
                 "threshold": threshold,
                 "activationThreshold": "1",
             }
