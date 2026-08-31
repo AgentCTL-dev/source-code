@@ -39,17 +39,27 @@ kubectl get pods -n cert-manager
 
 ### Control-plane components
 
-All components are Deployments. The chart ships six control-plane container images.
+All components are Deployments. Each is one container image; the state and tenant
+gateways are built on the Apache-licensed **mcpg** image. Turn on the planes your
+product needs — the core (operator/apiserver/admission/gateway/identity) is on by
+default; the rest are opt-in. See the full reference in
+[docs/reference.md](../../docs/reference.md#1-components).
 
 | Component | Purpose | Value block | Default |
 | --- | --- | --- | --- |
-| **operator** | Reconciles `Agent`/`AgentFleet` into workloads; leader-elected for HA; issues per-workload serving certs and distributes the cluster CA; reconciles per-namespace NetworkPolicies; wires the KEDA `ScaledObject` for claim fleets; projects status. | `operator` | Always installed |
-| **apiserver** | Aggregated API serving the management verbs (`drain`, `lame-duck`, `cancel`, `pause`, `resume`) under `management.agentctl.dev`; authorizes each via `SubjectAccessReview` and dials the target agent pod(s) directly over mTLS. | `apiserver` | `enabled: true` |
-| **admission** | Validating webhook (image-registry allow-list, lethal-trifecta gate, ModelPool existence, OIDC-policy shape) and mutating webhook (secure defaults). | `admission` | `enabled: true` |
-| **gateway** | The public agent-to-agent (A2A) surface: projects and signs Agent Cards, serves `message/send` and `message/stream` (SSE), persists tasks in Postgres, delivers SSRF-guarded push webhooks, and enforces inbound auth. | `gateway` | `enabled: true` |
-| **coordination** | Work-distribution backbone: an MCP server exposing `work.*` with exactly-one-owner claim leasing, a result channel, dead-lettering, and an in-memory or durable-Postgres store. Its backlog is the scale-from-zero signal. | `coordination` | `enabled: false` |
-| **scaler** | KEDA external scaler that reads the coordination backlog so claim fleets scale from zero. | `scaler` | `enabled: false` |
-| **postgres** (bundled) | Durable store for the gateway and (optionally) coordination. | `postgres` | Rendered when `postgres.mode: bundled` |
+| **operator** | Reconciles the CRD family into workloads; leader-elected for HA; owns per-workload PKI + CA distribution, per-namespace NetworkPolicies, KEDA wiring, tenant-namespace creation, and the guarded shard-resize choreography. | `operator` | Always installed |
+| **apiserver** | Aggregated API (`management.agentctl.dev`): runtime verbs + the state-plane lifecycle verbs (backup/restore/reset/stop/start/migrate) + metering-export/audit-query; `SubjectAccessReview`-authorized. | `apiserver` | `enabled: true` |
+| **admission** | Validating + mutating + conversion webhooks (image allow-list, lethal-trifecta gate, class floors, handle uniqueness, dangling-Secret rung; storage version `v1alpha2`). | `admission` | `enabled: true` |
+| **identity** | OIDC federation, RFC 8628 device flow, sealed credential custody, the RFC 8693 exchange, the connections flow, and the AAuth agent-identity provider. | `identity` | `enabled` |
+| **gateway** | The tenant data-plane front door: org routes, Agent Cards + `message/send`/`stream`, the external hooks ingress, HITL fan-out, supervisor auto-ensure/park, and inbound OIDC → per-(user,agent) principal injection. | `gateway` | `enabled: true` |
+| **control** | The `control.*` MCP (agents manage agents): list/get/status/resolve/create + subagents, AAuth-verified and namespace-scoped server-side. | `control` | `enabled` |
+| **coordination** | The `work.*` claim hub: exactly-one-owner leasing, result channel, dead-lettering, in-memory or durable-Postgres. Its backlog is the scale-from-zero signal. | `coordination` | `enabled: false` |
+| **scaler** | KEDA external scaler reading the coordination backlog + per-fleet inbox metric. | `scaler` | `enabled: false` |
+| **sandbox** | The `sandbox.run` backend — single-use, network-denied, capability-stripped code-execution pods (optional Kata/gVisor). | `sandbox` | `enabled: false` |
+| **artifacts** | The `artifacts.put/get/list` backend over S3 (bundled MinIO), org-fenced with per-org byte quotas. | `artifacts` | `enabled: false` |
+| **state** | The `state.*` seq-CAS checkpointer for `store.class: managed` — a governed mcpg SQL binding over Postgres, TLS-serving, server-side tenant-fenced. | `state` | `enabled: false` |
+| **tenant mcpg** | *(per org, operator-provisioned)* The governance capability plane: a proxy-only mcpg federating the org's `MCPService` registry, with per-user credential injection. | `tenantMcpg` | `enabled: false` |
+| **postgres** (bundled) | Durable store for the gateway, coordination, identity custody, metering, audit, and managed state. | `postgres` | Rendered when `postgres.mode: bundled` |
 
 The chart also renders, as needed: cert-manager `Issuer`/`Certificate` objects and the
 CA bundle; the `APIService` registration and webhook configurations (with caBundle
@@ -194,6 +204,19 @@ common knobs `replicas`, `logLevel` (maps to `RUST_LOG`), `resources`, `nodeSele
 | `admission.enabled` | `true` | Deploy the admission webhooks. |
 | `<component>.autoscaling.enabled` | `false` | HPA for `apiserver`, `gateway`, `admission` (CPU-target). |
 | `<component>.pdb.enabled` | `false` | PodDisruptionBudget for a component. |
+
+### Planes (opt-in)
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `identity.service.enabled` | (per profile) | The identity plane: OIDC federation, custody, the RFC 8693 exchange, and the AAuth provider. |
+| `control.enabled` | `false` | The `control.*` MCP (agents manage agents) + per-managed-namespace defaults seeding. |
+| `coordination.enabled` | `false` | The `work.*` claim hub (needed by claim fleets). |
+| `scaler.enabled` | `false` | The KEDA external scaler (needs KEDA installed). |
+| `sandbox.enabled` | `false` | The sandbox cell + its deny-all cell namespace. |
+| `artifacts.enabled` | `false` | The artifacts façade + bundled MinIO; `artifacts.orgQuotaBytes`, `artifacts.s3Endpoint` (point at a managed S3), `artifacts.credentials`. |
+| `state.enabled` | `false` | The managed `state.*` checkpointer (mcpg + Postgres); `store.class: managed` agents need it. |
+| `tenantMcpg.enabled` | `false` | Per-org governance gateways; `tenantMcpg.exchangePlugin` (OBO), `tenantMcpg.nonProductionLicense`, `tenantMcpg.auditShipperImage`. |
 
 ### Security gates
 
