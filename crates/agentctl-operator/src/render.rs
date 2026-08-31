@@ -219,6 +219,13 @@ pub struct PodWiring {
     /// `vars:` overlay in the SAME shared ConfigMap) and the downward-API
     /// `AGENT_POD_INDEX` env (the StatefulSet pod-index label).
     pub member_overlays: bool,
+    /// Declare the `hooks` container port (:9494) — any webhook trigger
+    /// binds agentd's listener on the pod network for the gateway's hooks
+    /// proxy (P7-1; NetworkPolicy admits only the control plane).
+    pub hooks_port: bool,
+    /// Mount the `<workload>-hooks` Secret at [`paths::HOOKS_SECRETS_DIR`]
+    /// (per-route HMAC/bearer values the webhook auth blocks reference).
+    pub hooks_secrets: bool,
 }
 
 /// In-pod mount of the AAuth key Secret.
@@ -237,6 +244,13 @@ const PEER_BEARERS_VOLUME: &str = "agentctl-peer-bearers";
 /// The per-agent OUTBOUND peer-bearer Secret (P4-7; one key per peer handle).
 pub fn peer_bearers_secret_name(workload: &str) -> String {
     format!("{workload}-peer-bearers")
+}
+
+const HOOKS_VOLUME: &str = "agentctl-hooks";
+
+/// The per-agent webhook-route Secret (P7-1; `hmac-<i>`/`bearer-<i>` keys).
+pub fn hooks_secret_name(workload: &str) -> String {
+    format!("{workload}-hooks")
 }
 
 /// Writable scratch over the read-only root filesystem.
@@ -926,6 +940,22 @@ fn pod_template(
             true,
         ));
     }
+    if wiring.hooks_secrets {
+        volumes.push(Volume {
+            name: HOOKS_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(hooks_secret_name(workload)),
+                default_mode: Some(0o444),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        mounts.push(mount(
+            HOOKS_VOLUME,
+            agent_config::paths::HOOKS_SECRETS_DIR,
+            true,
+        ));
+    }
 
     let mut env = downward_env();
     if wiring.member_overlays {
@@ -986,18 +1016,30 @@ fn pod_template(
         // when the projection emits them — adopt beside the LAST file).
         args: Some(args),
         env: Some(env),
-        ports: Some(vec![
-            ContainerPort {
-                name: Some("a2a".to_string()),
-                container_port: SERVE_PORT,
-                ..Default::default()
-            },
-            ContainerPort {
-                name: Some("probes".to_string()),
-                container_port: METRICS_PORT,
-                ..Default::default()
-            },
-        ]),
+        ports: Some({
+            let mut ports = vec![
+                ContainerPort {
+                    name: Some("a2a".to_string()),
+                    container_port: SERVE_PORT,
+                    ..Default::default()
+                },
+                ContainerPort {
+                    name: Some("probes".to_string()),
+                    container_port: METRICS_PORT,
+                    ..Default::default()
+                },
+            ];
+            if wiring.hooks_port {
+                // agentd's webhook listener (pod-network bind; the gateway
+                // hooks proxy is the only sanctioned external path).
+                ports.push(ContainerPort {
+                    name: Some("hooks".to_string()),
+                    container_port: 9494,
+                    ..Default::default()
+                });
+            }
+            ports
+        }),
         volume_mounts: Some(mounts),
         // Liveness = the supervisor reactor heartbeat (an idle reactive agent
         // is healthy; a stuck subagent must NOT fail pod liveness); readiness

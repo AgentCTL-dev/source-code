@@ -423,6 +423,31 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             Ok(Some(a)) if a.spec.lifecycle.as_ref().is_some_and(|l| l.paused)
         )
     };
+    // Hooks ingress (P7-1): each authenticated webhook trigger needs its
+    // operator-provisioned secret (`hmac-<i>`/`bearer-<i>` in the
+    // `<name>-hooks` Secret) BEFORE the document's secret-file refs mount.
+    let (hooks_keys, has_webhook) = {
+        let v2_api: Api<agent_api::v1alpha2::Agent> = Api::namespaced(ctx.client.clone(), ns);
+        match v2_api.get_opt(&name).await {
+            Ok(Some(a)) => {
+                let mut keys = Vec::new();
+                let mut any = false;
+                for (i, t) in a.spec.triggers.iter().enumerate() {
+                    if let Some(w) = &t.webhook {
+                        any = true;
+                        match w.auth.as_deref() {
+                            // Mirrors the compiler: unset auth = HMAC.
+                            Some("hmac") | None => keys.push(format!("hmac-{i}")),
+                            Some("bearer") => keys.push(format!("bearer-{i}")),
+                            _ => {}
+                        }
+                    }
+                }
+                (keys, any)
+            }
+            _ => (Vec::new(), false),
+        }
+    };
     let composed = match compose_document_v2(
         &ctx.client,
         ns,
@@ -465,6 +490,8 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
                 });
             }
             wiring.peer_bearers = !peer_bearers.is_empty();
+            wiring.hooks_port = has_webhook;
+            wiring.hooks_secrets = !hooks_keys.is_empty();
             render_agent(&render_obj, &ctx.render, &wiring)
                 .map(|mut rendered| {
                     // v2 `lifecycle.paused` (P7-6 park): a paused DAEMON
@@ -496,6 +523,12 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
             // templates must resolve before any pod mounts the document.
             if !peer_bearers.is_empty() {
                 ensure_peer_bearers_secret(ctx.as_ref(), ns, &name, &peer_bearers, &owner).await?;
+            }
+            // Hooks secrets (P7-1): same rule again; values are generated
+            // once and PRESERVED across reconciles (rotation is an explicit
+            // admin action, never a silent re-roll).
+            if !hooks_keys.is_empty() {
+                ensure_hooks_secret(ctx.as_ref(), ns, &name, &hooks_keys, &owner).await?;
             }
             // The document the pod mounts — applied BEFORE the workload so a
             // scheduling pod never races an absent ConfigMap.
@@ -1039,6 +1072,8 @@ fn pod_wiring(
         .collect();
     PodWiring {
         config_hash: doc.hash(),
+        hooks_port: false,
+        hooks_secrets: false,
         intelligence_token: intelligence.and_then(|(_, t)| t.clone()),
         mcp_tokens,
         workflow,
@@ -1178,6 +1213,61 @@ async fn ensure_peer_bearers_secret(
         ..Default::default()
     };
     let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    secrets
+        .patch(
+            &secret_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&desired),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Ensure the `<name>-hooks` Secret holds one value per authenticated
+/// webhook trigger (P7-1). Existing values are PRESERVED — external senders
+/// hold the other half of an HMAC secret, so a reconcile must never rotate
+/// one silently; missing keys are filled with fresh 32-byte hex.
+async fn ensure_hooks_secret(
+    ctx: &Ctx,
+    ns: &str,
+    workload: &str,
+    keys: &[String],
+    owner: &k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
+) -> Result<(), Error> {
+    use k8s_openapi::api::core::v1::Secret;
+    use k8s_openapi::ByteString;
+    let secret_name = crate::render::hooks_secret_name(workload);
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    let existing = secrets
+        .get_opt(&secret_name)
+        .await?
+        .and_then(|s| s.data)
+        .unwrap_or_default();
+    let mut data: std::collections::BTreeMap<String, ByteString> =
+        std::collections::BTreeMap::new();
+    for k in keys {
+        let value = match existing.get(k) {
+            Some(v) => v.clone(),
+            None => {
+                use ring::rand::{SecureRandom as _, SystemRandom};
+                let mut raw = [0u8; 32];
+                SystemRandom::new().fill(&mut raw).expect("system rng");
+                let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+                ByteString(hex.into_bytes())
+            }
+        };
+        data.insert(k.clone(), value);
+    }
+    let desired = Secret {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(secret_name.clone()),
+            namespace: Some(ns.to_string()),
+            owner_references: Some(vec![owner.clone()]),
+            ..Default::default()
+        },
+        data: Some(data),
+        ..Default::default()
+    };
     secrets
         .patch(
             &secret_name,

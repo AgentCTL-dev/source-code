@@ -164,6 +164,16 @@ spec:
                 secretKeyRef:
                   name: agentctl-gateway-signing
                   key: GATEWAY_SIGNING_SEED
+            {{- with .Values.gateway.hooks.ratePerMinute }}
+            # Hooks ingress (P7-1): per-agent delivery ceiling per 60s window.
+            - name: AGENTCTL_HOOKS_RATE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.hooks.maxBodyBytes }}
+            # Hooks ingress: max accepted delivery body (413 above).
+            - name: AGENTCTL_HOOKS_MAX_BODY
+              value: {{ . | quote }}
+            {{- end }}
             # Mesh registry federation: peer gateway base URLs (CSV).
             # Peers are queried with ?local=1 to prevent recursion.
             {{- with .Values.gateway.federationPeers }}

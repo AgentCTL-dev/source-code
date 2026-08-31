@@ -281,7 +281,9 @@ pub enum ScheduleRuntime {
 pub struct WebhookTrigger {
     /// Listener path (`/zendesk`).
     pub path: String,
-    /// `hmac` | `bearer` | `none` (none only for cluster-internal exposure).
+    /// `hmac` (default — the operator provisions the route secret) or
+    /// `bearer`. agentd refuses unauthenticated routes on its non-loopback
+    /// webhook listener, so there is no `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

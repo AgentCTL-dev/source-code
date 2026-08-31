@@ -30,6 +30,12 @@ pub struct Metrics {
     /// (wrong user / unknown nonce) — the "gates" observability (P7-2).
     approvals_allowed: AtomicU64,
     approvals_refused: AtomicU64,
+    /// Hooks-ingress deliveries (P7-1): forwarded to the agent's webhook
+    /// listener; refused at a gateway gate (exposure/method/rate/size);
+    /// or dropped because no ready pod could be reached (503 + Retry-After).
+    hooks_forwarded: AtomicU64,
+    hooks_refused: AtomicU64,
+    hooks_unreachable: AtomicU64,
     /// Per-agent OIDC requests allowed (valid JWT + claims) on the A2A surface.
     oidc_allow: AtomicU64,
     /// Per-agent OIDC requests denied (authN 401 or authZ 403) on the A2A surface.
@@ -55,6 +61,9 @@ impl Metrics {
             auth_rejected: AtomicU64::new(0),
             approvals_allowed: AtomicU64::new(0),
             approvals_refused: AtomicU64::new(0),
+            hooks_forwarded: AtomicU64::new(0),
+            hooks_refused: AtomicU64::new(0),
+            hooks_unreachable: AtomicU64::new(0),
             oidc_allow: AtomicU64::new(0),
             oidc_deny: AtomicU64::new(0),
             trusted_proxy_accepted: AtomicU64::new(0),
@@ -98,6 +107,21 @@ impl Metrics {
 
     pub fn inc_auth_rejected(&self) {
         self.auth_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A hooks delivery was forwarded to the agent's webhook listener.
+    pub fn inc_hooks_forwarded(&self) {
+        self.hooks_forwarded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A hooks delivery was refused at a gateway gate.
+    pub fn inc_hooks_refused(&self) {
+        self.hooks_refused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A hooks delivery found no reachable replica (503 + Retry-After).
+    pub fn inc_hooks_unreachable(&self) {
+        self.hooks_unreachable.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A per-agent OIDC request was allowed (valid JWT + satisfied claims).
@@ -177,6 +201,24 @@ impl Metrics {
             "agentctl_gateway_auth_rejected_total",
             "Requests rejected (401) by the bearer-token access gate.",
             self.auth_rejected.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_hooks_forwarded_total",
+            "Hooks-ingress deliveries forwarded to agent webhook listeners.",
+            self.hooks_forwarded.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_hooks_refused_total",
+            "Hooks-ingress deliveries refused at a gateway gate (exposure/method/rate/size).",
+            self.hooks_refused.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "agentctl_gateway_hooks_unreachable_total",
+            "Hooks-ingress deliveries that found no reachable replica.",
+            self.hooks_unreachable.load(Ordering::Relaxed),
         );
         counter(
             &mut out,

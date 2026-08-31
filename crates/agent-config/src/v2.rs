@@ -36,9 +36,13 @@ use serde_json::{json, Map, Value};
 use crate::{ConfigError, ConfigInput, Mode, ResolvedIntelligence, ResolvedMcp};
 use agent_api::v1alpha2 as api;
 
-/// The in-pod loopback webhook listener (exposed via the gateway hooks proxy
-/// / port-forward; a public bind would demand TLS + per-route auth).
-pub const WEBHOOK_LISTEN: &str = "http://127.0.0.1:9494";
+/// The in-pod webhook listener (P7-1): bound on the POD network so the
+/// gateway's hooks proxy — the one external door — can deliver. agentd
+/// refuses plaintext off loopback, so the listener serves the agent's own
+/// operator-issued certs (the same unconditional TLS mount the a2a surface
+/// uses); per-route HMAC/bearer (below) is the authenticator, per RFC 0029
+/// §5's role split (gateway: rate/size/audit; agentd: TLS + auth).
+pub const WEBHOOK_LISTEN: &str = "https://0.0.0.0:9494";
 
 /// What a v2 spec renders as (the workload kind decision).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,10 +263,56 @@ fn compile_trigger(
         }
     } else if let Some(w) = &t.webhook {
         // The listener block is the config prerequisite (refused absent).
-        *webhooks_block = Some(json!({ "listen": WEBHOOK_LISTEN }));
+        *webhooks_block = Some(json!({
+            "listen": WEBHOOK_LISTEN,
+            "tls": { "cert": crate::paths::TLS_CERT, "key": crate::paths::TLS_KEY },
+        }));
         let mut start = Map::new();
         start.insert("kind".into(), json!("webhook"));
         start.insert("path".into(), json!(w.path));
+        // Per-route auth (P7-1): the operator provisions the secret value
+        // into the `<name>-hooks` Secret mounted at HOOKS_SECRETS_DIR; the
+        // ref resolves at agentd startup (a dangling mount is exit 2).
+        match w.auth.as_deref() {
+            // SECURE BY DEFAULT: an off-loopback listener refuses
+            // unauthenticated routes at agentd, so unset auth means HMAC
+            // (the operator provisions the secret; `agentctl expose webhook
+            // --show-secret` hands the sender its half).
+            Some("hmac") | None => {
+                start.insert(
+                    "auth".into(),
+                    // GitHub-convention signature shape, pinned explicitly
+                    // (header + prefix defaults differ across senders):
+                    // X-Signature: sha256=<hex HMAC-SHA256(secret, body)>.
+                    json!({ "hmac": {
+                        "algo": "sha256",
+                        "header": "X-Signature",
+                        "prefix": "sha256=",
+                        "secret": format!(
+                            "{{{{secret-file:{}/hmac-{index}}}}}",
+                            crate::paths::HOOKS_SECRETS_DIR
+                        ),
+                    } }),
+                );
+            }
+            Some("bearer") => {
+                start.insert(
+                    "auth".into(),
+                    json!({ "bearer": format!(
+                        "{{{{secret-file:{}/bearer-{index}}}}}",
+                        crate::paths::HOOKS_SECRETS_DIR
+                    ) }),
+                );
+            }
+            Some(other) => {
+                // Including "none": agentd refuses unauthenticated routes on
+                // a non-loopback listener outright — failing here beats a
+                // crash-looping pod.
+                return Err(ConfigError::UnknownWebhookAuth {
+                    auth: other.to_string(),
+                });
+            }
+        }
         if !w.methods.is_empty() {
             // MUST be an array — a scalar silently means "any method".
             start.insert("methods".into(), json!(w.methods));
@@ -383,6 +433,49 @@ mod tests {
         }
     }
 
+    /// P7-1: an authenticated webhook trigger emits the auth block with the
+    /// signature shape PINNED — `algo` is parsed-and-IGNORED by agentd 1.3.1
+    /// (verified upstream: sha512 configs validate and still verify sha256),
+    /// so emitting anything but explicit sha256 would be a silent
+    /// cryptographic-downgrade trap. Hex, GitHub-style prefix, secret-file ref.
+    #[test]
+    fn webhook_auth_emits_pinned_hmac_shape() {
+        let s = spec(
+            r#"
+shape: daemon
+instruction: { text: "persona" }
+triggers:
+  - webhook: { path: /zendesk-events, auth: hmac, methods: [POST] }
+  - webhook: { path: /ci, auth: bearer }
+"#,
+        );
+        let (input, _) = from_v2_spec(&s, None, None, None, vec![]).unwrap();
+        let wf = &input.generated_workflows;
+        let auth0 = &wf[0]["steps"]["start"]["auth"];
+        assert_eq!(auth0["hmac"]["algo"], "sha256");
+        assert_eq!(auth0["hmac"]["header"], "X-Signature");
+        assert_eq!(auth0["hmac"]["prefix"], "sha256=");
+        assert_eq!(
+            auth0["hmac"]["secret"],
+            "{{secret-file:/etc/agentctl/hooks/hmac-0}}"
+        );
+        let auth1 = &wf[1]["steps"]["start"]["auth"];
+        assert_eq!(
+            auth1["bearer"],
+            "{{secret-file:/etc/agentctl/hooks/bearer-1}}"
+        );
+        // Unknown auth refuses at compile (never silently unauthenticated).
+        let bad = spec(
+            r#"
+shape: daemon
+instruction: { text: "persona" }
+triggers:
+  - webhook: { path: /x, auth: sha512-hmac }
+"#,
+        );
+        assert!(from_v2_spec(&bad, None, None, None, vec![]).is_err());
+    }
+
     #[test]
     fn all_ten_kinds_compile_with_pinned_field_names() {
         let s = spec(
@@ -440,6 +533,11 @@ triggers:
         assert_eq!(
             input.webhooks_block.as_ref().unwrap()["listen"],
             WEBHOOK_LISTEN
+        );
+        assert_eq!(
+            input.webhooks_block.as_ref().unwrap()["tls"]["cert"],
+            crate::paths::TLS_CERT,
+            "off-loopback binds MUST serve TLS (agentd refuses plaintext)"
         );
         assert!(
             input.streams_block.as_ref().unwrap()["incidents"]["retention"]["max_events"]

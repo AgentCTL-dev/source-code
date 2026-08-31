@@ -73,6 +73,16 @@ enum Command {
     Resume(verbs::VerbArgs),
     /// Cancel an agent's in-flight run (needs a run id where required).
     Cancel(verbs::VerbArgs),
+    /// Exposure helpers (currently: `expose webhook` — the external hooks
+    /// URL + the route's signing secret).
+    #[command(subcommand)]
+    Expose(ExposeCommand),
+}
+
+#[derive(Subcommand)]
+enum ExposeCommand {
+    /// Show a declared webhook's external hooks URL (+ secret with --show-secret).
+    Webhook(verbs::ExposeWebhookArgs),
 }
 
 #[derive(Subcommand)]
@@ -115,6 +125,7 @@ async fn main() -> Result<()> {
         Command::Uninstall(args) => install::run_uninstall(args).await,
         Command::Login(args) => auth::run_login(args).await,
         Command::Connect(args) => auth::run_connect(args).await,
+        Command::Expose(ExposeCommand::Webhook(args)) => verbs::run_expose_webhook(args).await,
         Command::Whoami(args) => auth::run_whoami(args).await,
         Command::Chat(args) => chat::run_chat(args).await,
         Command::Approve(args) => chat::run_approve(args).await,

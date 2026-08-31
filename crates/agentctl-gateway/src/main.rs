@@ -48,6 +48,9 @@ mod signing;
 mod store;
 mod trusted_proxy;
 
+/// Per-agent fixed-window hooks limiter: (ns, name) → (window start, count).
+type HooksLimiter = Arc<std::sync::Mutex<std::collections::HashMap<(String, String), (i64, u32)>>>;
+
 #[derive(Clone)]
 struct AppState {
     client: Client,
@@ -73,6 +76,13 @@ struct AppState {
     /// replicas. Per-replica (each gateway replica has its own), which
     /// is fine for spreading load; strict global fairness is not required.
     round_robin: Arc<std::sync::atomic::AtomicUsize>,
+    /// Hooks-ingress tenant limits (P7-1): a fixed-window per-agent arrival
+    /// limiter (window start unix, count) + the caps from env.
+    hooks_limiter: HooksLimiter,
+    /// Max deliveries per agent per 60s window (`AGENTCTL_HOOKS_RATE`).
+    hooks_rate: u32,
+    /// Max accepted body bytes (`AGENTCTL_HOOKS_MAX_BODY`).
+    hooks_max_body: usize,
     /// Identity-service wiring for the org route family (RFC 0029 §3):
     /// inbound bearer introspection + per-(user,agent) principal injection.
     /// Unconfigured ⇒ `/orgs/…` refuses 503 (never open, never operator).
@@ -170,6 +180,14 @@ async fn main() {
         // Workers-only tier (P6-3): the COORDINATOR's own `worker` peer dials
         // here — the front-door rule would loop it back onto itself.
         .route("/fleets/{ns}/{name}/workers", post(a2a_fleet_workers_rpc))
+        // Hooks ingress (P7-1, RFC 0029 §5): the EXTERNAL webhook door.
+        // `hooks.<domain>` fronts this same route; authentication is the
+        // AGENT's per-route HMAC/bearer (agentd-enforced) — the gateway adds
+        // exposure gating, method/size/rate caps, audit and metering.
+        .route(
+            "/hooks/{ns}/{name}/{*rest}",
+            axum::routing::any(hooks_proxy),
+        )
         .layer(axum::middleware::from_fn_with_state(
             gate.clone(),
             auth::gate,
@@ -186,6 +204,15 @@ async fn main() {
             // it for non-OIDC agents.
             auth: gate,
             round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            hooks_limiter: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            hooks_rate: std::env::var("AGENTCTL_HOOKS_RATE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+            hooks_max_body: std::env::var("AGENTCTL_HOOKS_MAX_BODY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_048_576),
             identity: identity::IdentityConfig::from_env(),
         });
 
@@ -2297,6 +2324,194 @@ async fn principal_bearer_for(
 /// those methods require, so it reaches the pod directly.
 /// (A fleet's pods are labelled the same way, so this resolves a fleet member
 /// too; picking the first Running replica is the current fan-out policy.)
+/// `ANY /hooks/{ns}/{name}/<path>` — the external webhook door (P7-1).
+///
+/// The gateway is the data plane (RFC 0029 §5): it gates on the Agent's
+/// DECLARED exposure (`spec.expose.webhooks[].path` must name the delivery
+/// path, and a webhook trigger must serve it), enforces method / body-size /
+/// per-agent rate ceilings, then forwards the delivery verbatim to the pod's
+/// webhook listener (`:9494`) — where agentd's per-route HMAC/bearer is THE
+/// authenticator (a bad signature dies there with the secret never leaving
+/// the pod). No ready replica ⇒ 503 + Retry-After, the wake-lane seam P6-5
+/// builds on. Every accepted delivery is metered (`webhook_deliveries`).
+async fn hooks_proxy(
+    State(state): State<AppState>,
+    Path((ns, name, rest)): Path<(String, String, String)>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    let refuse = |code: StatusCode, msg: String| -> Response {
+        state.metrics.inc_hooks_refused();
+        (code, Json(json!({ "error": msg }))).into_response()
+    };
+    let path = format!("/{rest}");
+
+    // The declared surface: an exposure entry naming this path AND a webhook
+    // trigger serving it. Absent either ⇒ 404 (indistinguishable from an
+    // unknown agent — no probing oracle).
+    let agents: Api<agent_api::v1alpha2::Agent> = Api::namespaced(state.client.clone(), &ns);
+    let agent = match agents.get_opt(&name).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return refuse(StatusCode::NOT_FOUND, format!("no webhook at {path:?}")),
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_GATEWAY,
+                format!("read Agent {ns}/{name}: {e}"),
+            )
+        }
+    };
+    let exposed = agent
+        .spec
+        .expose
+        .as_ref()
+        .is_some_and(|e| e.webhooks.iter().any(|w| w.path == path));
+    let trigger = agent
+        .spec
+        .triggers
+        .iter()
+        .filter_map(|t| t.webhook.as_ref())
+        .find(|w| w.path == path);
+    let Some(trigger) = trigger.filter(|_| exposed) else {
+        return refuse(StatusCode::NOT_FOUND, format!("no webhook at {path:?}"));
+    };
+    if !trigger.methods.is_empty()
+        && !trigger
+            .methods
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(method.as_str()))
+    {
+        return refuse(
+            StatusCode::METHOD_NOT_ALLOWED,
+            format!("{method} not allowed on {path:?}"),
+        );
+    }
+
+    // Tenant ceiling: a fixed 60s window per agent (the agent's own
+    // `rate` narrows further inside agentd).
+    {
+        let now = chrono_unix();
+        let mut lim = state.hooks_limiter.lock().unwrap();
+        let slot = lim.entry((ns.clone(), name.clone())).or_insert((now, 0));
+        if now - slot.0 >= 60 {
+            *slot = (now, 0);
+        }
+        slot.1 += 1;
+        if slot.1 > state.hooks_rate {
+            return refuse(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "delivery rate above {}/min for {ns}/{name}",
+                    state.hooks_rate
+                ),
+            );
+        }
+    }
+
+    let bytes = match axum::body::to_bytes(body, state.hooks_max_body).await {
+        Ok(b) => b,
+        Err(_) => {
+            return refuse(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("body above {} bytes", state.hooks_max_body),
+            )
+        }
+    };
+
+    let pod_ip = match resolve(&state.client, &ns, &name).await {
+        Ok(ip) => ip,
+        Err(e) => {
+            // The scale-from-zero seam: senders retry; P6-5's wake lane
+            // turns this into a park/unpark signal.
+            state.metrics.inc_hooks_unreachable();
+            tracing::info!(%ns, %name, error = %e, "hooks delivery with no ready replica");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "10")],
+                Json(json!({ "error": "no ready replica; retry" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Forward verbatim: method + path + query + body + headers (minus the
+    // hop-by-hop set). The HMAC signature header rides through untouched.
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    // The listener serves the agent's operator-issued certs; `na` carries
+    // the chart CA (and the control-plane client cert, harmless here).
+    let url = format!("https://{pod_ip}:9494{path}{query}");
+    let rm =
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
+    let mut req = state.na.request(rm, &url).body(bytes.to_vec());
+    for (k, v) in headers.iter() {
+        let lk = k.as_str().to_ascii_lowercase();
+        if matches!(
+            lk.as_str(),
+            "host" | "content-length" | "connection" | "transfer-encoding" | "te" | "upgrade"
+        ) {
+            continue;
+        }
+        if let Ok(vs) = v.to_str() {
+            req = req.header(k.as_str(), vs);
+        }
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            state.metrics.inc_hooks_unreachable();
+            tracing::warn!(%ns, %name, error = %e, "hooks forward failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "10")],
+                Json(json!({ "error": "delivery failed; retry" })),
+            )
+                .into_response();
+        }
+    };
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let out = resp.bytes().await.unwrap_or_default();
+
+    state.metrics.inc_hooks_forwarded();
+    {
+        let pool = state.pool.clone();
+        let ev = agentctl_metering::Event::new(
+            ns.strip_prefix("org-").unwrap_or("").to_string(),
+            ns.clone(),
+            name.clone(),
+            agentctl_metering::KIND_WEBHOOK_DELIVERIES,
+            1,
+            "deliveries",
+        )
+        .dim("path", path.clone())
+        .dim("status", status.as_u16().to_string());
+        tokio::spawn(async move {
+            let _ = agentctl_metering::pg::record(&pool, &ev).await;
+        });
+    }
+    tracing::info!(%ns, %name, %path, status = status.as_u16(), "hooks delivery forwarded");
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        out,
+    )
+        .into_response()
+}
+
+/// Unix seconds now (the hooks limiter's clock).
+fn chrono_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 async fn resolve(client: &Client, ns: &str, name: &str) -> Result<String, String> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
     let lp = ListParams::default().labels(&format!("agentctl.dev/agent={name}"));

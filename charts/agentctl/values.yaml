@@ -215,6 +215,13 @@ gateway:
   enabled: true
   replicas: 1
   logLevel: info               # -> RUST_LOG
+  # Hooks ingress (P7-1): the gateway's /hooks/{ns}/{name}/<path> route is
+  # the ONE external webhook door (front it with your edge at hooks.<domain>).
+  # Authentication happens at the agent (per-route HMAC/bearer, operator-
+  # provisioned secrets); these are the gateway-side tenant ceilings.
+  hooks:
+    ratePerMinute: 120
+    maxBodyBytes: 1048576
   # Stateless A2A gateway: small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }

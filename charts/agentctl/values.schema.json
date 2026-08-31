@@ -155,6 +155,22 @@
               "maximum": 100
             }
           }
+        },
+        "hooks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ratePerMinute": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Per-agent hooks-ingress delivery ceiling per 60s window (429 above)."
+            },
+            "maxBodyBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "description": "Max accepted hooks delivery body in bytes (413 above)."
+            }
+          }
         }
       }
     }

@@ -332,6 +332,13 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     let mut verdict =
         check_handle_uniqueness(&state, &kind, &namespace, name, spec.get("handle")).await;
     if verdict.is_ok() {
+        // Hooks exposure (P7-1): every exposed webhook path must be served
+        // by a declared webhook trigger — an exposure with no listener is a
+        // typo that would 404 externally forever, and RFC 0029 §5 makes
+        // admission the gate.
+        verdict = check_webhook_exposure(&v2_spec);
+    }
+    if verdict.is_ok() {
         // The policy ladder (P2-4): scope-chain floors + registry ceilings,
         // BEFORE the per-object rungs (a floor denial should lead).
         verdict = check_policy_ladder(&state, &namespace, &v2_spec).await;
@@ -1174,6 +1181,29 @@ fn evaluate(
         }
     }
 
+    Ok(())
+}
+
+/// P7-1: every exposed webhook path (`expose.webhooks[].path`) must name a
+/// DECLARED webhook trigger's path — the gateway's hooks proxy gates on both,
+/// so an exposure with no listener would 404 externally forever.
+fn check_webhook_exposure(v2_spec: &agent_api::v1alpha2::AgentSpec) -> Result<(), String> {
+    let Some(expose) = &v2_spec.expose else {
+        return Ok(());
+    };
+    let declared: Vec<&str> = v2_spec
+        .triggers
+        .iter()
+        .filter_map(|t| t.webhook.as_ref().map(|w| w.path.as_str()))
+        .collect();
+    for w in &expose.webhooks {
+        if !declared.contains(&w.path.as_str()) {
+            return Err(format!(
+                "expose.webhooks path {:?} has no matching webhook trigger (declared: {:?})",
+                w.path, declared
+            ));
+        }
+    }
     Ok(())
 }
 

@@ -39,6 +39,8 @@ pub const KIND_WORK_ITEMS: &str = "work_items";
 pub const KIND_SANDBOX_CPU_SECONDS: &str = "sandbox_cpu_seconds";
 pub const KIND_STATE_BYTES: &str = "state_bytes";
 pub const KIND_GATE_EVENTS: &str = "gate_events";
+/// External webhook deliveries forwarded through the hooks ingress (P7-1).
+pub const KIND_WEBHOOK_DELIVERIES: &str = "webhook_deliveries";
 
 /// One usage event (the durable row).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

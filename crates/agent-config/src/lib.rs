@@ -54,6 +54,10 @@ pub mod paths {
     /// principal bearer for each target, projected by the operator into the
     /// `<name>-peer-bearers` Secret — never another user's bearer.
     pub const PEER_BEARERS_DIR: &str = "/etc/agentctl/peer-bearers";
+    /// Webhook route secrets (P7-1 hooks ingress): the operator-provisioned
+    /// HMAC/bearer values (the `<name>-hooks` Secret; `hmac-<i>`/`bearer-<i>`
+    /// per trigger index) the webhook starts' auth blocks reference.
+    pub const HOOKS_SECRETS_DIR: &str = "/etc/agentctl/hooks";
 
     /// The full in-pod path of the config document.
     pub fn config_file() -> String {
@@ -328,6 +332,9 @@ pub enum ConfigError {
     ExternalScheduleNeedsCron,
     /// A schedule trigger with neither `cron` nor `every`.
     ScheduleTriggerNeedsWhen,
+    /// A webhook trigger's `auth` names a mode the compiler cannot render
+    /// (`hmac` | `bearer` | `none`).
+    UnknownWebhookAuth { auth: String },
     /// A trigger union with no member set (CEL-guarded; defense in depth).
     EmptyTrigger,
 }
@@ -358,6 +365,10 @@ impl std::fmt::Display for ConfigError {
             ConfigError::ScheduleTriggerNeedsWhen => {
                 write!(f, "a schedule trigger needs `cron` or `every`")
             }
+            ConfigError::UnknownWebhookAuth { auth } => write!(
+                f,
+                "webhook trigger auth {auth:?} is not supported: use hmac (the default) or                  bearer — agentd refuses unauthenticated routes on its non-loopback                  webhook listener, so `none` cannot render"
+            ),
             ConfigError::EmptyTrigger => write!(f, "a trigger must set exactly one kind"),
         }
     }

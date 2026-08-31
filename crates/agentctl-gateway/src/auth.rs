@@ -100,7 +100,10 @@ pub async fn gate(State(auth): State<Auth>, req: Request, next: Next) -> Respons
 
 /// Whether `path` is one of the always-exempt probe/metrics/JWKS routes.
 fn is_exempt(path: &str) -> bool {
-    EXEMPT.contains(&path)
+    // Hooks-ingress deliveries authenticate at the AGENT (HMAC/bearer per
+    // route, agentd-enforced) — external webhook senders never hold the
+    // control-plane bearer, so the whole /hooks/ family is exempt here.
+    EXEMPT.contains(&path) || path.starts_with("/hooks/")
 }
 
 /// Constant-time check of an `Authorization: Bearer <token>` header against the

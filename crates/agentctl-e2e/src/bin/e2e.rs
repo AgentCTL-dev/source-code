@@ -184,6 +184,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("obo-exchange", "capability", obo_exchange),
         // Connections: consent once via device flow, agents proceed OBO (P5-4)
         scenario!("connections-flow", "capability", connections_flow),
+        // Hooks ingress: external delivery through the gateway, HMAC at agentd (P7-1)
+        scenario!("hooks-ingress", "capability", hooks_ingress),
         // supervisor scale-to-zero: idle park + touch-to-wake (P7-6)
         scenario!("supervisor-park", "control", supervisor_park),
         // billing-ready metering: durable events → attributed export (P7-4)
@@ -546,6 +548,150 @@ async fn supervisor_park(ctx: &Ctx) -> Result<Outcome> {
 
     drop(pf);
     orgs.delete(org, &Default::default()).await.ok();
+    pass()
+}
+
+/// P7-1: the external webhook door. A daemon declares an HMAC webhook
+/// trigger AND exposes it; the operator provisions the route secret; an
+/// "external" delivery through the GATEWAY's `/hooks/{ns}/{name}/<path>`
+/// route lands on agentd's listener where the HMAC is verified and the
+/// workflow fires. The refusal matrix runs at the right layers: bad
+/// signature dies at agentd (401), wrong method / unexposed path / oversized
+/// body die at the gateway (405/404/413). Admission refuses an exposure
+/// with no matching trigger outright.
+async fn hooks_ingress(ctx: &Ctx) -> Result<Outcome> {
+    let ns = &ctx.cfg.ns;
+    let dir = examples_dir();
+    apply_mock_provider(ctx, &dir)?;
+    apply_example(&dir, "modelpool-mock.yaml")?;
+
+    // Admission gate first: exposure without a trigger is a typo that would
+    // 404 forever — refused at the door.
+    let bad = format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: hooked-bad, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"never admitted\" }}\n  intelligence: {{ pool: mockpool }}\n  expose: {{ a2a: true, webhooks: [ {{ path: /nope }} ] }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
+    );
+    if shell::kubectl_apply_stdin(&bad).is_ok() {
+        shell::kubectl(&["delete", "agent", "hooked-bad", "-n", ns, "--wait=false"]).ok();
+        bail!("admission admitted an exposure with no matching webhook trigger");
+    }
+
+    // The real thing: HMAC-authenticated, POST-only, exposed.
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: hooked, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge the delivery in one line\" }}\n  intelligence: {{ pool: mockpool }}\n  expose:\n    a2a: true\n    webhooks: [ {{ path: /zendesk-events }} ]\n  triggers:\n    - webhook: {{ path: /zendesk-events, auth: hmac, methods: [POST] }}\n"
+    ))
+    .context("apply hooked agent")?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
+        Ok(!first_pod(ns, &agent_label("hooked"))
+            .unwrap_or_default()
+            .is_empty())
+    })
+    .await?;
+    let pod = first_pod(ns, &agent_label("hooked"))?;
+    kh::wait_pod_running(&ctx.client, ns, &pod, READY_TIMEOUT).await?;
+
+    // The operator-provisioned route secret — the sender's half of the HMAC.
+    let secret = {
+        let b64 = shell::kubectl(&[
+            "get",
+            "secret",
+            "hooked-hooks",
+            "-n",
+            ns,
+            "-o",
+            "jsonpath={.data.hmac-0}",
+        ])
+        .context("hooks Secret")?;
+        String::from_utf8(base64_decode(b64.trim())?)?
+    };
+    if secret.len() != 64 {
+        bail!(
+            "hooks secret should be 32-byte hex, got {} chars",
+            secret.len()
+        );
+    }
+
+    // "External" delivery: through the GATEWAY route, signed like a real
+    // webhook sender (X-Signature: sha256=<hex HMAC of the body>).
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_GATEWAY, PORT_HTTP, 18119)?;
+    let base = pf.base_url();
+    let body = json!({ "ticket": 42, "status": "solved" }).to_string();
+    let sign = |secret: &str, body: &str| {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+        let tag = ring::hmac::sign(&key, body.as_bytes());
+        let hex: String = tag.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256={hex}")
+    };
+    let url = format!("{base}/hooks/{ns}/hooked/zendesk-events");
+    let resp = ctx
+        .http
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("x-signature", sign(&secret, &body))
+        .body(body.clone())
+        .send()
+        .await
+        .context("signed delivery through the gateway")?;
+    if !resp.status().is_success() {
+        bail!(
+            "signed delivery refused: {} {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+    }
+    // The workflow FIRED — the agent's own run events say so.
+    kh::poll_until(Duration::from_secs(120), Duration::from_secs(5), || async {
+        let logs = shell::kubectl(&["logs", "-n", ns, &pod, "--tail=-1"]).unwrap_or_default();
+        Ok(logs.contains("main-webhook"))
+    })
+    .await
+    .context("webhook firing in the agent log")?;
+
+    // Refusal matrix, each at its own layer.
+    let resp = ctx
+        .http
+        .post(&url)
+        .header("x-signature", "sha256=deadbeef")
+        .body(body.clone())
+        .send()
+        .await?;
+    if resp.status().as_u16() != 401 {
+        bail!(
+            "bad signature should die at agentd with 401, got {}",
+            resp.status()
+        );
+    }
+    let resp = ctx.http.get(&url).send().await?;
+    if resp.status().as_u16() != 405 {
+        bail!(
+            "GET should die at the gateway with 405, got {}",
+            resp.status()
+        );
+    }
+    let resp = ctx
+        .http
+        .post(format!("{base}/hooks/{ns}/hooked/unknown-path"))
+        .body("{}")
+        .send()
+        .await?;
+    if resp.status().as_u16() != 404 {
+        bail!("unexposed path should 404, got {}", resp.status());
+    }
+    let resp = ctx
+        .http
+        .post(&url)
+        .header("x-signature", sign(&secret, &"x".repeat(2 * 1024 * 1024)))
+        .body("x".repeat(2 * 1024 * 1024))
+        .send()
+        .await?;
+    if resp.status().as_u16() != 413 {
+        bail!(
+            "2MiB body should die at the gateway with 413, got {}",
+            resp.status()
+        );
+    }
+
+    drop(pf);
+    shell::kubectl(&["delete", "agent", "hooked", "-n", ns, "--wait=false"]).ok();
     pass()
 }
 
@@ -2926,13 +3072,40 @@ async fn trigger_matrix(ctx: &Ctx) -> Result<Outcome> {
     shell::kubectl(&["get", "deployment", "matrix", "-n", ns])
         .context("eight-trigger daemon must render a Deployment")?;
 
-    // FIRE the webhook through the loopback listener (port-forward reaches
-    // the pod's loopback).
+    // FIRE the webhook through the listener (port-forward to the pod).
+    // Auth-less webhook triggers default to HMAC now (agentd refuses
+    // unauthenticated routes off loopback), so sign like a real sender;
+    // the listener serves the agent's own certs — a trusting client
+    // suffices here (hooks-ingress covers the verified gateway path).
+    let hmac_secret = {
+        let b64 = shell::kubectl(&[
+            "get",
+            "secret",
+            "matrix-hooks",
+            "-n",
+            ns,
+            "-o",
+            "jsonpath={.data.hmac-2}",
+        ])
+        .context("matrix hooks Secret (webhook = trigger index 2)")?;
+        String::from_utf8(base64_decode(b64.trim())?)?
+    };
+    let body = json!({ "build": "1", "status": "green" }).to_string();
+    let signature = {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, hmac_secret.as_bytes());
+        let tag = ring::hmac::sign(&key, body.as_bytes());
+        let hex: String = tag.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256={hex}")
+    };
     let pf = shell::PortForward::pod(ns, &pod, 9494, 19494)?;
-    let resp = ctx
-        .http
-        .post("http://127.0.0.1:19494/hooks/ci")
-        .json(&json!({ "build": "1", "status": "green" }))
+    let insecure = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
+    let resp = insecure
+        .post("https://127.0.0.1:19494/hooks/ci")
+        .header("content-type", "application/json")
+        .header("x-signature", signature)
+        .body(body)
         .send()
         .await
         .context("POST the webhook trigger")?;
