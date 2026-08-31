@@ -459,7 +459,6 @@ async fn supervisor_park(ctx: &Ctx) -> Result<Outcome> {
 
     shell::kubectl(&["apply", "-f", "deploy/crds/organization.yaml"])?;
     let org = "e2e-park";
-    let ns = org_namespace(org);
     let orgs: Api<Organization> = Api::all(ctx.client.clone());
     orgs.patch(
         org,
@@ -3333,7 +3332,6 @@ async fn fleet_static(ctx: &Ctx) -> Result<Outcome> {
 /// pods).
 async fn mention_orchestration(ctx: &Ctx) -> Result<Outcome> {
     use agent_api::org::{org_namespace, Organization, OrganizationSpec};
-    use agent_api::v1alpha2 as v2;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use kube::api::{Api, Patch, PatchParams};
 

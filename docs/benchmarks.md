@@ -137,6 +137,47 @@ durability and HA; scale Postgres throughput horizontally with replicas and a tu
 provisioned database (the bundled `emptyDir` Postgres here is the floor, not a
 production configuration).
 
+## State checkpoint durability throughput (P3-6)
+
+The managed **state plane** (`state.*` seq-CAS checkpointer, mcpg-governed over
+TLS, single-replica bundled Postgres) under a fleet of independent checkpoint
+streams. Each `agents` value is a fleet of that many agents, every one writing
+its own monotonic checkpoint chain (`state.put`, compare-and-set on `seq`),
+each **fenced server-side to its own subject prefix** (`param_exprs`
+`identity.subject_id`). QPS is aggregate; p50/p99 are per-write. This is the
+**governed** path cost — TLS + MCP framing + identity-fenced CTE + fsync — not a
+bare store:
+
+| Fleet (concurrent writers) | Checkpoints/sec | p50 | p99 | Ops | Errors |
+|---|---|---|---|---|---|
+| 1 | 197 | 4.9 ms | 8.6 ms | 1,579 | 0 |
+| 4 | 450 | 8.4 ms | 17.9 ms | 3,607 | 0 |
+| 16 | 637 | 18.4 ms | 55.7 ms | 5,134 | 0 |
+| 64 | **735** | 89.2 ms | 206.6 ms | 5,941 | **0** |
+
+**~5 ms per checkpoint at low concurrency, saturating ~735 checkpoints/sec** on
+a single state replica, with **zero CAS errors** at every level — the seq-CAS
+chain never desynced under sustained load (no lost or double-applied
+checkpoints). The **p99 < 50 ms in-cluster budget holds up to ~4–8 concurrent
+writers per replica** (p99 17.9 ms at 4); beyond that the single Postgres
+saturates and latency climbs (p99 206 ms at 64) while throughput plateaus — the
+same knee, and the same ~500–730/sec single-replica floor, as the durable
+coordination store above, and for the same reason (each write is a row-locked
+SQL `UPSERT` + fsync). This is a **capacity envelope, not a per-agent limit**: a
+real fleet checkpoints occasionally, not thousands/sec, so a single replica
+absorbs a large fleet; when a workload genuinely checkpoints hot, scale state
+replicas and provision Postgres exactly as for coordination. Measured against
+the real state plane on mcpg beta.26 with the tenant fence and TLS active
+throughout.
+
+> The per-IP anonymous rate limiter (mcpg default 600/min + 100 burst) throttles
+> every below-verified caller — including a real header-asserted managed agent.
+> The state service disables it (`anonymous_rate_limit_per_min: 0`): it is
+> internal, reachable only by netpol-admitted agent pods, and every row is
+> already fenced to the caller's own subject prefix, so the internet-facing
+> anti-abuse control is redundant there. Leave it armed on any gateway that
+> faces untrusted callers.
+
 ## Functional coverage (real `agentd`)
 
 The harness exercises every plane against the real agent. Scenarios cover
@@ -182,5 +223,5 @@ make -C e2e bench report          # writes e2e/results/<ts>/*.csv + this file
 make -C e2e e2e bench report KUBECONFIG=<kubeconfig> SKIP_BRINGUP=1
 ```
 
-Raw per-run CSVs (`density`, `overhead`, `cp_trends`, `throughput`, `host.json`) live
-under `e2e/results/` (git-ignored).
+Raw per-run CSVs (`density`, `overhead`, `cp_trends`, `throughput`,
+`state_checkpoint`, `host.json`) live under `e2e/results/` (git-ignored).

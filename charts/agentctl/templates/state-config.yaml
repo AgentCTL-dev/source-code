@@ -55,6 +55,15 @@ data:
         # bindings require. Rises to `verified` when the identity-fenced
         # plugin pin (param_exprs identity.*) lands with P3-2.
         trust_subject_header: true
+        # The per-IP anonymous limiter (default 600/min + 100 burst) throttles
+        # ALL below-verified callers — including a real header-asserted managed
+        # agent under sustained checkpoint load, which would otherwise stall at
+        # 10 writes/s. That limiter defends an internet-facing gateway against
+        # unattributable abuse; the state service is internal — reachable only
+        # by netpol-admitted agent pods, and every row is fenced to the
+        # caller's own subject prefix (param_exprs, below). Both real controls
+        # sit elsewhere, so the redundant per-IP limiter is off here.
+        anonymous_rate_limit_per_min: 0
       plugin_registry:
         # OCI plugin cache on the pod's writable emptyDir (root fs is RO).
         cache_dir: /var/cache/mcpg

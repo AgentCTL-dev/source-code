@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 use agentctl_e2e::{host, prom, results, shell, Ctx};
 
 const SVC_COORDINATION: &str = "agentctl-coordination";
+const SVC_STATE: &str = "agentctl-state";
 const SVC_OPERATOR: &str = "agentctl-operator";
 
 /// The coordination http Service port (chart Service.port `:80` -> container
@@ -92,7 +93,7 @@ async fn main() -> ExitCode {
 /// Run the selected sweeps, writing CSVs + `summary.json` under a fresh run dir.
 async fn run_sweeps(cli: &Cli) -> Result<()> {
     let selected: Vec<&str> = if cli.sweeps.is_empty() {
-        vec!["a", "b", "c", "d", "e"]
+        vec!["a", "b", "c", "d", "e", "f"]
     } else {
         cli.sweeps.iter().map(String::as_str).collect()
     };
@@ -112,7 +113,8 @@ async fn run_sweeps(cli: &Cli) -> Result<()> {
             "c" => sweep_cp_trends(&ctx, &rd, cli.max_n).await?,
             "d" => sweep_throughput(&ctx, &rd, &concurrency_steps(cli), cli.duration_secs).await?,
             "e" => sweep_latency(&ctx, &rd, cli.max_n).await?,
-            other => bail!("unknown sweep {other:?} (want a|b|c|d|e)"),
+            "f" => sweep_state_checkpoint(&ctx, &rd, &concurrency_steps(cli), cli.duration_secs).await?,
+            other => bail!("unknown sweep {other:?} (want a|b|c|d|e|f)"),
         };
         sweeps.insert(s.to_string(), v);
     }
@@ -353,6 +355,191 @@ fn histogram_quantile(m: &prom::Metrics, base: &str, q: f64) -> Option<f64> {
         prev_cum = cum;
     }
     Some(prev_le)
+}
+
+// ===========================================================================
+// (f) state checkpoint throughput (P3-6)
+// ===========================================================================
+
+/// Concurrent state.put (seq-CAS checkpoint) load against the managed state
+/// gateway over TLS at rising concurrency. Each worker holds its OWN MCP
+/// session and asserts a distinct fenced subject (`orgs/bench/w<n>`), writing
+/// monotonically increasing seqs under its own prefix — so the numbers are
+/// pure checkpoint QPS + p50/p99, not contention. "vs fleet size" == the
+/// concurrency ladder (each client is one agent's checkpoint stream).
+async fn sweep_state_checkpoint(
+    ctx: &Ctx,
+    rd: &results::ResultsDir,
+    concurrency: &[u32],
+    duration_secs: u64,
+) -> Result<Value> {
+    let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_STATE, 8787, 18201)?;
+    let base = pf.base_url().replace("http://", "https://");
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for &c in concurrency {
+        let res = state_loadgen(&http, &base, c, Duration::from_secs(duration_secs)).await;
+        rows.push(vec![
+            c.to_string(),
+            fmt2(res.ops_per_sec),
+            fmt4(res.p50_ms),
+            fmt4(res.p99_ms),
+            res.ops.to_string(),
+            res.errors.to_string(),
+        ]);
+        println!(
+            "  agents={c:<4} {:.0} checkpoints/s  p50={:.1}ms p99={:.1}ms ({} ops, {} err)",
+            res.ops_per_sec, res.p50_ms, res.p99_ms, res.ops, res.errors
+        );
+    }
+    drop(pf);
+    rd.write_csv(
+        "state_checkpoint",
+        &["agents", "checkpoints_per_sec", "p50_ms", "p99_ms", "ops", "errors"],
+        &rows,
+    )?;
+    Ok(json!({ "steps": rows.len() }))
+}
+
+/// `concurrency` workers, each with its own MCP session + fenced subject,
+/// looping state.put for `dur`. Returns aggregate checkpoint QPS + latency
+/// percentiles.
+async fn state_loadgen(
+    http: &reqwest::Client,
+    base: &str,
+    concurrency: u32,
+    dur: Duration,
+) -> LoadResult {
+    let mut set = tokio::task::JoinSet::new();
+    let started = Instant::now();
+    for worker in 0..concurrency.max(1) {
+        let http = http.clone();
+        let base = base.to_string();
+        set.spawn(async move {
+            let subject = format!("orgs/bench/w{worker}");
+            let mcp = format!("{base}/mcp");
+            let mut lat: Vec<f64> = Vec::new();
+            let mut ops = 0u64;
+            let mut errors = 0u64;
+            let mut rpc_id = 0u64;
+            // One initialize → session id for this worker.
+            let post = |body: serde_json::Value, session: Option<String>| {
+                let http = http.clone();
+                let mcp = mcp.clone();
+                let subject = subject.clone();
+                async move {
+                    let mut req = http
+                        .post(&mcp)
+                        .header("accept", "application/json, text/event-stream")
+                        .header("mcp-protocol-version", "2025-11-25")
+                        .header("x-mcpg-subject-id", subject)
+                        .json(&body);
+                    if let Some(s) = &session {
+                        req = req.header("mcp-session-id", s.clone());
+                    }
+                    let resp = req.send().await.ok()?;
+                    let sid = resp
+                        .headers()
+                        .get("mcp-session-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let text = resp.text().await.unwrap_or_default();
+                    // mcpg interleaves log notifications in the SSE stream — take
+                    // the LAST frame carrying a result/error, not just the last frame.
+                    let body: serde_json::Value = text
+                        .lines()
+                        .filter_map(|l| l.strip_prefix("data:"))
+                        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+                        .rfind(|v| v.get("result").is_some() || v.get("error").is_some())
+                        .or_else(|| serde_json::from_str(&text).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    Some((body, sid))
+                }
+            };
+            rpc_id += 1;
+            let (_, session) = match post(
+                json!({ "jsonrpc": "2.0", "id": rpc_id, "method": "initialize", "params": {
+                    "protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": { "name": "bench", "version": "0" } } }),
+                None,
+            )
+            .await
+            {
+                Some(v) => v,
+                None => return (0u64, 1u64, Vec::new()),
+            };
+            let _ = post(
+                json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+                session.clone(),
+            )
+            .await;
+            let key = format!("{subject}/ckpt");
+            // Clean slate: delete any leftover from a prior sweep step so the
+            // seq-CAS chain starts fresh at seq 1 (a stale key at seq N would
+            // refuse seq 1 and cascade-fail the whole stream).
+            rpc_id += 1;
+            let _ = post(
+                json!({ "jsonrpc": "2.0", "id": rpc_id, "method": "tools/call",
+                        "params": { "name": "state.delete", "arguments": { "key": key } } }),
+                session.clone(),
+            )
+            .await;
+            // Self-healing seq-CAS: `stored` tracks the last committed seq; each
+            // put attempts stored+1 and resyncs from the refusal's `latest` on
+            // any desync (a transient must not cascade-fail the stream).
+            let mut stored = 0u64;
+            while started.elapsed() < dur {
+                let seq = stored + 1;
+                rpc_id += 1;
+                let op_start = Instant::now();
+                let r = post(
+                    json!({ "jsonrpc": "2.0", "id": rpc_id, "method": "tools/call",
+                            "params": { "name": "state.put", "arguments": {
+                                "key": key, "seq": seq, "state": { "n": seq } } } }),
+                    session.clone(),
+                )
+                .await;
+                lat.push(op_start.elapsed().as_secs_f64() * 1000.0);
+                ops += 1;
+                let sc = r.as_ref().and_then(|(b, _)| b.pointer("/result/structuredContent"));
+                match sc.and_then(|s| s.get("ok")).and_then(|v| v.as_bool()) {
+                    Some(true) => stored = seq,
+                    _ => {
+                        errors += 1;
+                        // Resync from the reported stored seq when present.
+                        if let Some(latest) = sc
+                            .and_then(|s| s.get("latest"))
+                            .and_then(|v| v.as_u64())
+                        {
+                            stored = latest;
+                        }
+                    }
+                }
+            }
+            (ops, errors, lat)
+        });
+    }
+    let mut all_lat: Vec<f64> = Vec::new();
+    let (mut ops, mut errors) = (0u64, 0u64);
+    while let Some(joined) = set.join_next().await {
+        if let Ok((o, e, lat)) = joined {
+            ops += o;
+            errors += e;
+            all_lat.extend(lat);
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64().max(1e-9);
+    all_lat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    LoadResult {
+        ops,
+        errors,
+        ops_per_sec: ops as f64 / elapsed,
+        p50_ms: percentile(&all_lat, 0.50),
+        p99_ms: percentile(&all_lat, 0.99),
+    }
 }
 
 // ===========================================================================
@@ -877,6 +1064,23 @@ fn render_markdown(summary: &Value, rd: &results::ResultsDir) -> String {
              means the host could not fit N (host-bound, not an agentctl limit):\n\n",
         );
         if let Some(t) = csv_table(rd, "latency") {
+            s.push_str(&t);
+            s.push('\n');
+        } else {
+            s.push_str("_(no data captured)_\n\n");
+        }
+    }
+
+    // (f) state checkpoint throughput (P3-6).
+    if sweeps.get("f").is_some() {
+        s.push_str("## State checkpoint throughput (durability)\n\n");
+        s.push_str(
+            "Concurrent `state.put` (seq-CAS checkpoint) against the managed state \
+             plane over TLS, `agents` = a fleet of independent checkpoint streams \
+             (each fenced to its own subject prefix). QPS is aggregate; p50/p99 are \
+             per-write:\n\n",
+        );
+        if let Some(t) = csv_table(rd, "state_checkpoint") {
             s.push_str(&t);
             s.push('\n');
         } else {
