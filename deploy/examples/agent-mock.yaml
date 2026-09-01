@@ -2,13 +2,17 @@
 # that serves the management profile). The operator renders a Deployment whose pod
 # serves its mTLS /mcp surface; the control plane dials it directly to read its
 # capabilities and drive management verbs.
-apiVersion: agentctl.dev/v1alpha1
+apiVersion: agentctl.dev/v1alpha2
 kind: Agent
 metadata:
   name: mock
   namespace: default
 spec:
-  mode: reactive
-  image: mock-agent:dev
-  instruction: "serve the management profile"
-  subscribe: ["queue://noop"]
+  shape: daemon
+  runtime:
+    image: mock-agent:dev
+  instruction:
+    text: "serve the management profile"
+  # A daemon needs a wake source; the a2a listener IS the control surface.
+  expose:
+    a2a: true

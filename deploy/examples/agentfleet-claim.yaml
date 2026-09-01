@@ -1,16 +1,18 @@
 # A claim-mode AgentFleet: an elastic reactive worker pool. The operator renders it
 # to a Deployment with .spec.replicas omitted — KEDA owns the replica count and
 # scales the pool from zero on the work backlog.
-apiVersion: agentctl.dev/v1alpha1
+apiVersion: agentctl.dev/v1alpha2
 kind: AgentFleet
 metadata:
   name: workers
   namespace: default
 spec:
   template:
-    mode: reactive
-    image: ghcr.io/agentd-dev/agentd:1.0.0
-    subscribe: ["queue://jobs"]
+    shape: daemon
+    runtime:
+      image: ghcr.io/agentd-dev/agentd:1.0.0
+    expose:
+      a2a: true
   scaling:
     mode: claim
     minReplicas: 0

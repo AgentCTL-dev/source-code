@@ -21,9 +21,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// V1 types are the operator's internal render IR (the CRD serves only
+// v1alpha2 now; the watched v2 objects are converted to this shape via
+// `v2::convert::agent_object_v2_to_v1` before rendering).
+use agent_api::v1alpha2 as v2;
 use agent_api::{
-    AauthIdentityStatus, Agent, AgentFleet, AgentSpec, Condition, ContractStatus, IdentityStatus,
-    Mode, ModelPool, ScaleMode,
+    AauthIdentityStatus, AgentFleet, AgentSpec, Condition, ContractStatus, IdentityStatus, Mode,
+    ModelPool, ScaleMode,
 };
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
@@ -239,7 +243,7 @@ pub enum Error {
 /// duration histogram around the actual work in [`reconcile_inner`]. A failed
 /// reconcile (transient apiserver/finalizer error) emits a Warning Event.
 #[tracing::instrument(skip_all, fields(agent = %agent.name_any()))]
-pub async fn reconcile(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+pub async fn reconcile(agent: Arc<v2::Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let start = Instant::now();
     let result = reconcile_inner(agent.clone(), ctx.clone()).await;
     ctx.metrics
@@ -292,9 +296,9 @@ async fn publish_event<K>(
 
 /// Reconcile one `Agent`: wrap apply/cleanup in the deletion finalizer so the
 /// owned workload is reclaimed in order before the object disappears.
-async fn reconcile_inner(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+async fn reconcile_inner(agent: Arc<v2::Agent>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let ns = agent.namespace().ok_or(Error::MissingNamespace)?;
-    let agents: Api<Agent> = Api::namespaced(ctx.client.clone(), &ns);
+    let agents: Api<v2::Agent> = Api::namespaced(ctx.client.clone(), &ns);
 
     finalizer(&agents, FINALIZER, agent, |event| async move {
         match event {
@@ -307,10 +311,14 @@ async fn reconcile_inner(agent: Arc<Agent>, ctx: Arc<Ctx>) -> Result<Action, Err
 }
 
 /// The `Apply` branch: render, server-side-apply the workload, patch status.
-async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Error> {
+/// The watched object is v1alpha2; render + status still speak the v1 IR, so
+/// convert once up front and drive the rest of the body off that.
+async fn apply(v2agent: Arc<v2::Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Error> {
+    let agent = Arc::new(v2::convert::agent_object_v2_to_v1(&v2agent));
     let name = agent.name_any();
     let observed = agent.metadata.generation;
-    let agents: Api<Agent> = Api::namespaced(ctx.client.clone(), ns);
+    // Status is Merge-patched (JSON) onto the served v1alpha2 object.
+    let agents: Api<v2::Agent> = Api::namespaced(ctx.client.clone(), ns);
 
     // AAuth identity (RFC 0023): resolve the opt-in up front. An opted-in Agent
     // whose provider/admin channel is unconfigured is a USER/config error —
@@ -404,7 +412,11 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     // builder) → SSA it as `<name>-config` → render the pod shell around it.
     // A compose/render rejection is a USER error (invalid spec) →
     // Validated=False, not a retried failure.
-    let owner = agent
+    // Owner ref MUST come from the live v1alpha2 object (not the down-converted
+    // v1 IR, whose TypeMeta is the unserved v1alpha1) — else children carry a
+    // v1alpha1 ownerReference the GC can no longer resolve, wedging foreground
+    // deletion (the owner hangs on `foregroundDeletion` forever).
+    let owner = v2agent
         .controller_owner_ref(&())
         .expect("Agent CRs always carry name+uid on the live object");
     let intelligence = resolve_model_endpoint(&ctx.client, ns, &agent.spec).await;
@@ -771,7 +783,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
 /// dies with its Secret either way, so a failed revoke degrades to hygiene
 /// (the enrollment record lingers until the orphan sweep), never a wedged
 /// deletion (RFC 0023 §7.3).
-async fn cleanup(agent: &Agent, ctx: &Ctx, ns: &str) -> Action {
+async fn cleanup(agent: &v2::Agent, ctx: &Ctx, ns: &str) -> Action {
     let name = agent.name_any();
     if let Some(spec) = agent.spec.identity.as_ref().and_then(|i| i.aauth.as_ref()) {
         if let Some(provider) = ctx.aauth.resolve_provider(spec) {
@@ -786,7 +798,7 @@ async fn cleanup(agent: &Agent, ctx: &Ctx, ns: &str) -> Action {
 /// from status (or an admin lookup by registration label); a never-enrolled
 /// Agent instead has its pending allowed-key registration withdrawn. Every
 /// step is best-effort and logged.
-async fn revoke_identity(agent: &Agent, ctx: &Ctx, ns: &str, name: &str, provider: &str) {
+async fn revoke_identity(agent: &v2::Agent, ctx: &Ctx, ns: &str, name: &str, provider: &str) {
     let label = crate::aauth::registration_label(ns, name);
     // Prefer the identity status; fall back to an admin lookup.
     let local = agent
@@ -1892,7 +1904,7 @@ pub fn error_backoff() -> Duration {
 }
 
 /// Requeue with a short backoff on any reconcile error.
-pub fn error_policy(_agent: Arc<Agent>, err: &Error, _ctx: Arc<Ctx>) -> Action {
+pub fn error_policy(_agent: Arc<v2::Agent>, err: &Error, _ctx: Arc<Ctx>) -> Action {
     warn!(error = %err, "reconcile failed; requeueing");
     Action::requeue(error_backoff())
 }
@@ -1904,7 +1916,7 @@ pub fn error_policy(_agent: Arc<Agent>, err: &Error, _ctx: Arc<Ctx>) -> Action {
 /// Reconcile one `AgentFleet`, recording reconcile metrics around the work in
 /// [`reconcile_fleet_inner`] (shared counters/histogram with the `Agent` loop).
 #[tracing::instrument(skip_all, fields(fleet = %fleet.name_any()))]
-pub async fn reconcile_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+pub async fn reconcile_fleet(fleet: Arc<v2::AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let start = Instant::now();
     let result = reconcile_fleet_inner(fleet.clone(), ctx.clone()).await;
     ctx.metrics
@@ -1926,9 +1938,9 @@ pub async fn reconcile_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Ac
 /// Reconcile one `AgentFleet`: render it to a Deployment (claim) or StatefulSet
 /// (shard) and apply it, wrapped in the deletion finalizer (the workload is
 /// owner-referenced, so GC reclaims it).
-async fn reconcile_fleet_inner(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
+async fn reconcile_fleet_inner(fleet: Arc<v2::AgentFleet>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let ns = fleet.namespace().ok_or(Error::MissingNamespace)?;
-    let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), &ns);
+    let fleets: Api<v2::AgentFleet> = Api::namespaced(ctx.client.clone(), &ns);
 
     finalizer(&fleets, FINALIZER, fleet, |event| async move {
         match event {
@@ -1943,10 +1955,15 @@ async fn reconcile_fleet_inner(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>) -> Result<
     .map_err(|e| Error::Finalizer(Box::new(e)))
 }
 
-async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Error> {
+async fn apply_fleet(
+    v2fleet: Arc<v2::AgentFleet>,
+    ctx: Arc<Ctx>,
+    ns: &str,
+) -> Result<Action, Error> {
+    let fleet = Arc::new(v2::convert::fleet_object_v2_to_v1(&v2fleet));
     let name = fleet.name_any();
     let observed = fleet.metadata.generation;
-    let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
+    let fleets: Api<v2::AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
 
     // On a successful render we also surface the scale-subresource projection:
     // `.status.replicas` (the observed/desired replica count) and
@@ -1961,7 +1978,9 @@ async fn apply_fleet(fleet: Arc<AgentFleet>, ctx: Arc<Ctx>, ns: &str) -> Result<
     // consumers). Every member mounts ONE shared document; per-member identity
     // is `AGENT_POD_NAME` (the store fence), and partition semantics live in
     // the fleet's own workflows/config, upstream of the agent (ADR-0009).
-    let owner = fleet
+    // Owner ref from the live v1alpha2 object, not the v1 IR (see the Agent
+    // path) — a v1alpha1 ownerReference wedges the fleet's foreground deletion.
+    let owner = v2fleet
         .controller_owner_ref(&())
         .expect("AgentFleet CRs always carry name+uid on the live object");
     let mut worker_spec = fleet.spec.template.clone();
@@ -2617,7 +2636,7 @@ async fn patch_resizing_status(
     observed_gen: Option<i64>,
     msg: &str,
 ) {
-    let fleets: Api<AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
+    let fleets: Api<v2::AgentFleet> = Api::namespaced(ctx.client.clone(), ns);
     let cond = resizing_condition(observed_gen, msg);
     let Ok(cond_json) = serde_json::to_value(&cond) else {
         return;
@@ -2777,7 +2796,7 @@ fn desired_fleet_status(
 }
 
 /// Requeue with a short backoff on any fleet reconcile error.
-pub fn error_policy_fleet(_fleet: Arc<AgentFleet>, err: &Error, _ctx: Arc<Ctx>) -> Action {
+pub fn error_policy_fleet(_fleet: Arc<v2::AgentFleet>, err: &Error, _ctx: Arc<Ctx>) -> Action {
     warn!(error = %err, "fleet reconcile failed; requeueing");
     Action::requeue(error_backoff())
 }
@@ -2793,7 +2812,8 @@ fn mode_label(mode: Mode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_api::{AgentSpec, Substrate};
+    // The render tests exercise the pure v1-shaped render IR directly.
+    use agent_api::{Agent, AgentSpec, Substrate};
 
     fn agent(mode: Mode) -> Agent {
         let mut a = Agent::new(

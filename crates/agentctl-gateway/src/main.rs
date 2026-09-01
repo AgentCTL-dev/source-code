@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use agent_api::{Agent, AgentFleet};
+use agent_api::v1alpha2::{Agent, AgentFleet};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -1736,11 +1736,11 @@ async fn list_agents(
             for a in list {
                 let ns = a.metadata.namespace.unwrap_or_default();
                 let name = a.metadata.name.unwrap_or_default();
-                // `spec.mode` is a required enum; project its lowercase wire form.
-                let mode = serde_json::to_value(a.spec.mode)
+                // `spec.shape` is a required enum; project its lowercase wire form.
+                let shape = serde_json::to_value(a.spec.shape)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned));
-                let mut row = registry_row("Agent", &ns, &name, mode.as_deref(), &base_url);
+                let mut row = registry_row("Agent", &ns, &name, shape.as_deref(), &base_url);
                 row["origin"] = json!("local");
                 rows.push(row);
             }

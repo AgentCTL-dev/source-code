@@ -1,11 +1,15 @@
 # A minimal once-mode Agent: the operator renders it to a Job, issues its serving
 # certificate, and projects the agent's live capabilities into Agent.status.
-apiVersion: agentctl.dev/v1alpha1
+apiVersion: agentctl.dev/v1alpha2
 kind: Agent
 metadata:
   name: demo
   namespace: default
 spec:
-  mode: once
-  image: ghcr.io/agentd-dev/agentd:1.0.0
-  instruction: "Read /data/report.md and write a 3-bullet summary to /data/summary.md"
+  shape: job
+  triggers:
+    - once: {}
+  runtime:
+    image: ghcr.io/agentd-dev/agentd:1.0.0
+  instruction:
+    text: "Read /data/report.md and write a 3-bullet summary to /data/summary.md"

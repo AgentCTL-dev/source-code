@@ -51,7 +51,6 @@ use serde_json::{json, Map, Value};
 
 use agent_api::ModelPool;
 
-mod convert;
 mod metrics;
 
 /// Where the serving cert + key are mounted (a TLS `Secret` volume).
@@ -131,7 +130,6 @@ async fn main() {
         .route("/mutate", post(mutate))
         // CRD conversion (P2-1b): the multi-version Agent/AgentFleet CRDs
         // point their spec.conversion webhook here.
-        .route("/convert", post(convert_handler))
         .with_state(AppState {
             client,
             allowed_registries: allowed_registries.clone(),
@@ -241,12 +239,6 @@ async fn serve_metrics(
 /// `spec.template` for `AgentFleet`), and returns an `AdmissionReview` verdict
 /// (`allowed` + a denial message).
 #[tracing::instrument(name = "admission.validate", skip_all)]
-/// `POST /convert` — ConversionReview for the multi-version CRDs. Pure and
-/// synchronous; the heavy lifting is `agent_api::v1alpha2::convert`.
-async fn convert_handler(Json(review): Json<Value>) -> Json<Value> {
-    Json(convert::convert_review(&review))
-}
-
 async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> Json<Value> {
     let request = &review["request"];
     let uid = request["uid"].as_str().unwrap_or_default().to_string();
@@ -372,20 +364,7 @@ async fn validate(State(state): State<AppState>, Json(review): Json<Value>) -> J
     }
     state.metrics.record(verdict.is_ok());
 
-    // Deprecation notices for v1alpha1 writers (the DoD's "convert with
-    // warnings": conversion is lossless, the author still hears about it).
-    // Deprecation notices for v1alpha1 writers. The apiserver hands the
-    // webhook the v2 view even for v1 writes, so the notices derive from the
-    // reconstructed v1 down-view (lossless round-trip). Agent-level only —
-    // a fleet's template rides the same reconstruction inside its view.
-    let warnings = if request["requestKind"]["version"].as_str() == Some("v1alpha1")
-        || object["apiVersion"].as_str() == Some("agentctl.dev/v1alpha1")
-    {
-        v1_deprecation_warnings("Agent", &v1_view)
-    } else {
-        Vec::new()
-    };
-    Json(admission_response_with_warnings(&uid, verdict, warnings))
+    Json(admission_response_with_warnings(&uid, verdict, Vec::new()))
 }
 
 /// Run the full policy (registry + trifecta + model.pool existence) against ONE
@@ -450,7 +429,7 @@ async fn check_handle_uniqueness(
     let effective = agent_api::effective_handle(declared, name);
 
     let mut holders: Vec<(String, String, String)> = Vec::new(); // (kind, name, handle)
-    let agents: kube::Api<agent_api::Agent> =
+    let agents: kube::Api<agent_api::v1alpha2::Agent> =
         kube::Api::namespaced(state.client.clone(), namespace);
     match agents.list(&Default::default()).await {
         Ok(list) => {
@@ -465,7 +444,7 @@ async fn check_handle_uniqueness(
             return Ok(());
         }
     }
-    let fleets: kube::Api<agent_api::AgentFleet> =
+    let fleets: kube::Api<agent_api::v1alpha2::AgentFleet> =
         kube::Api::namespaced(state.client.clone(), namespace);
     match fleets.list(&Default::default()).await {
         Ok(list) => {
@@ -990,36 +969,6 @@ fn admission_response_with_warnings(
         "kind": "AdmissionReview",
         "response": resp
     })
-}
-
-/// The v1alpha1→v1alpha2 migration notices for a spec written at v1alpha1
-/// (the conversion itself is lossless; these tell the author what to update).
-fn v1_deprecation_warnings(kind: &str, spec: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    match kind {
-        "Agent" => {
-            if let Ok(v1) = serde_json::from_value::<agent_api::AgentSpec>(spec.clone()) {
-                let (_, warnings) = agent_api::v1alpha2::convert::agent_v1_to_v2(&v1);
-                out.extend(
-                    warnings
-                        .into_iter()
-                        .map(|w| format!("agentctl.dev/v1alpha1 is deprecated: {w}")),
-                );
-            }
-        }
-        "AgentFleet" => {
-            if let Ok(v1) = serde_json::from_value::<agent_api::AgentFleetSpec>(spec.clone()) {
-                let (_, warnings) = agent_api::v1alpha2::convert::fleet_v1_to_v2(&v1);
-                out.extend(
-                    warnings
-                        .into_iter()
-                        .map(|w| format!("agentctl.dev/v1alpha1 is deprecated: {w}")),
-                );
-            }
-        }
-        _ => {}
-    }
-    out
 }
 
 // --- decision logic (pure) -------------------------------------------------

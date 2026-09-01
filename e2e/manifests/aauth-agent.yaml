@@ -13,16 +13,20 @@
 #   - mode: once — agentd connects its MCP servers at startup (the SIGNED
 #     initialize/tools handshake the mock asserts), runs one instruction
 #     against the mock ModelPool, and exits cleanly.
-apiVersion: agentctl.dev/v1alpha1
+apiVersion: agentctl.dev/v1alpha2
 kind: Agent
 metadata:
   name: aauth-once
   namespace: default
 spec:
-  mode: once
-  image: agentd:1.3.1
-  instruction: "Say hello in one short sentence."
-  model:
+  shape: job
+  triggers:
+    - once: {}
+  runtime:
+    image: agentd:1.3.1
+  instruction:
+    text: "Say hello in one short sentence."
+  intelligence:
     pool: mockpool
   # Inline, direct-dial MCP server (no gateway); the agent signs via aauth.
   mcpServers:

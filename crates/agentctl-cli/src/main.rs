@@ -17,7 +17,8 @@ mod create;
 mod install;
 mod verbs;
 
-use agent_api::{Agent, AgentStatus, Mode, Substrate};
+use agent_api::v1alpha2::{Agent, AgentStatus, Shape};
+use agent_api::Substrate;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use k8s_openapi::jiff::Timestamp;
@@ -259,14 +260,12 @@ fn phase_of(status: &AgentStatus) -> &str {
     status.phase.as_deref().unwrap_or("-")
 }
 
-/// Canonical wire spelling of a [`Mode`] (matches the serde rename).
-fn mode_str(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Once => "once",
-        Mode::Loop => "loop",
-        Mode::Reactive => "reactive",
-        Mode::Schedule => "schedule",
-        Mode::Workflow => "workflow",
+/// Canonical wire spelling of a [`Shape`] (matches the serde rename).
+fn shape_str(shape: Shape) -> &'static str {
+    match shape {
+        Shape::Daemon => "daemon",
+        Shape::Job => "job",
+        Shape::Cron => "cron",
     }
 }
 
@@ -310,15 +309,15 @@ fn get_row(agent: &Agent, now: Timestamp, wide: bool) -> Vec<String> {
         .creation_timestamp()
         .map_or_else(|| "-".to_string(), |t| format_age(now, t.0));
 
-    let mut row = vec![agent.name_any(), mode_str(agent.spec.mode).to_string()];
+    let mut row = vec![agent.name_any(), shape_str(agent.spec.shape).to_string()];
     if wide {
         // Surface the real binding (the ModelPool), not the decorative model id.
         row.push(
             agent
                 .spec
-                .model
+                .intelligence
                 .as_ref()
-                .and_then(|m| m.pool.clone())
+                .and_then(|i| i.pool.clone())
                 .unwrap_or_else(|| "-".to_string()),
         );
     }
@@ -335,7 +334,7 @@ fn header_row(wide: bool, all_ns: bool) -> Vec<String> {
         h.push("NAMESPACE".to_string());
     }
     h.push("NAME".to_string());
-    h.push("MODE".to_string());
+    h.push("SHAPE".to_string());
     if wide {
         h.push("POOL".to_string());
     }
@@ -384,23 +383,26 @@ fn describe_agent(agent: &Agent, now: Timestamp) -> String {
     if let Some(ns) = agent.namespace() {
         out.push_str(&format!("Namespace:   {ns}\n"));
     }
-    out.push_str(&format!("Mode:        {}\n", mode_str(spec.mode)));
+    out.push_str(&format!("Shape:       {}\n", shape_str(spec.shape)));
     out.push_str(&format!(
         "Image:       {}\n",
-        spec.image.as_deref().unwrap_or("-")
+        spec.runtime
+            .as_ref()
+            .and_then(|r| r.image.as_deref())
+            .unwrap_or("-")
     ));
     out.push_str(&format!(
         "Model Pool:  {}\n",
-        spec.model
+        spec.intelligence
             .as_ref()
-            .and_then(|m| m.pool.as_deref())
+            .and_then(|i| i.pool.as_deref())
             .unwrap_or("-")
     ));
     out.push_str(&format!(
         "Model:       {}\n",
-        spec.model
+        spec.intelligence
             .as_ref()
-            .and_then(|m| m.id.as_deref())
+            .and_then(|i| i.model.as_deref())
             .unwrap_or("-")
     ));
     out.push_str(&format!(
@@ -465,7 +467,8 @@ fn wants_wide(output: Option<&str>) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_api::{AgentSpec, Condition, ContractStatus, ModelBinding};
+    use agent_api::v1alpha2::{AgentSpec, Intelligence, RuntimeSelector, Shape};
+    use agent_api::{Condition, ContractStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 
     /// A fixed reference instant (2023-11-14T22:13:20Z) for clock-free tests.
@@ -518,9 +521,9 @@ mod tests {
     }
 
     #[test]
-    fn mode_and_substrate_spellings() {
-        assert_eq!(mode_str(Mode::Once), "once");
-        assert_eq!(mode_str(Mode::Reactive), "reactive");
+    fn shape_and_substrate_spellings() {
+        assert_eq!(shape_str(Shape::Job), "job");
+        assert_eq!(shape_str(Shape::Daemon), "daemon");
         assert_eq!(substrate_str(Substrate::KataHybrid), "kata-hybrid");
         assert_eq!(
             substrate_str(Substrate::SidecarEmptydir),
@@ -546,10 +549,11 @@ mod tests {
         let mut a = agent(
             "demo",
             AgentSpec {
-                mode: Mode::Reactive,
-                model: Some(ModelBinding {
+                shape: Shape::Daemon,
+                intelligence: Some(Intelligence {
                     pool: Some("gpt".to_string()),
-                    id: Some("frontier-1".to_string()),
+                    model: Some("frontier-1".to_string()),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -562,22 +566,22 @@ mod tests {
         a.metadata.creation_timestamp = Some(Time(ts(NOW - 2 * 86_400)));
 
         let narrow = get_row(&a, now, false);
-        assert_eq!(narrow, vec!["demo", "reactive", "True", "Running", "2d"]);
+        assert_eq!(narrow, vec!["demo", "daemon", "True", "Running", "2d"]);
 
         // The wide column surfaces the ModelPool binding (pool), not the id.
         let wide = get_row(&a, now, true);
-        assert_eq!(
-            wide,
-            vec!["demo", "reactive", "gpt", "True", "Running", "2d"]
-        );
+        assert_eq!(wide, vec!["demo", "daemon", "gpt", "True", "Running", "2d"]);
     }
 
     #[test]
     fn get_row_handles_missing_status_and_creation() {
         let now = ts(NOW);
         let a = agent("bare", AgentSpec::default());
-        // Default mode is `once`; no status, no creationTimestamp.
-        assert_eq!(get_row(&a, now, false), vec!["bare", "once", "-", "-", "-"]);
+        // Default shape is `daemon`; no status, no creationTimestamp.
+        assert_eq!(
+            get_row(&a, now, false),
+            vec!["bare", "daemon", "-", "-", "-"]
+        );
     }
 
     #[test]
@@ -606,11 +610,15 @@ mod tests {
         let mut a = agent(
             "demo",
             AgentSpec {
-                mode: Mode::Loop,
-                image: Some("ghcr.io/example/agent:1".to_string()),
-                model: Some(ModelBinding {
+                shape: Shape::Daemon,
+                runtime: Some(RuntimeSelector {
+                    image: Some("ghcr.io/example/agent:1".to_string()),
+                    ..Default::default()
+                }),
+                intelligence: Some(Intelligence {
                     pool: Some("gpt".to_string()),
-                    id: Some("frontier-1".to_string()),
+                    model: Some("frontier-1".to_string()),
+                    ..Default::default()
                 }),
                 substrate: Some(Substrate::StockUnix),
                 ..Default::default()
@@ -629,7 +637,7 @@ mod tests {
 
         let text = describe_agent(&a, now);
         assert!(text.contains("Name:        demo"));
-        assert!(text.contains("Mode:        loop"));
+        assert!(text.contains("Shape:       daemon"));
         assert!(text.contains("Image:       ghcr.io/example/agent:1"));
         assert!(text.contains("Substrate:   stock-unix"));
         assert!(text.contains("Age:         5h"));

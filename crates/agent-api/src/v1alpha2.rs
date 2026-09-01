@@ -1188,6 +1188,47 @@ pub mod convert {
 
     /// v1alpha2 → v1alpha1, LOSSY for v2-only fields — every drop is a
     /// warning. Exists only for old readers; v1alpha2 is the storage version.
+    /// A full v1 `Agent` render-IR from a v2 `Agent`: v2's metadata carries
+    /// over verbatim and the spec is down-converted. Used ONLY as the operator's
+    /// internal render input — never sent to the API (v1alpha1 is not served).
+    pub fn agent_object_v2_to_v1(a: &super::Agent) -> crate::Agent {
+        crate::Agent {
+            metadata: a.metadata.clone(),
+            spec: agent_v2_to_v1(&a.spec).0,
+            status: None,
+        }
+    }
+
+    /// The fleet analogue of [`agent_object_v2_to_v1`].
+    pub fn fleet_object_v2_to_v1(f: &super::AgentFleet) -> crate::AgentFleet {
+        crate::AgentFleet {
+            metadata: f.metadata.clone(),
+            spec: fleet_v2_to_v1(&f.spec).0,
+            status: None,
+        }
+    }
+
+    /// A full v1alpha2 `Agent` from a v1 `Agent` (metadata verbatim, spec
+    /// up-converted LOSSLESSLY). Clients that still build the v1 render-IR
+    /// (e.g. test fixtures) convert through this at the create boundary since
+    /// v1alpha1 is no longer served — the API only speaks v1alpha2.
+    pub fn agent_object_v1_to_v2(a: &crate::Agent) -> super::Agent {
+        super::Agent {
+            metadata: a.metadata.clone(),
+            spec: agent_v1_to_v2(&a.spec).0,
+            status: None,
+        }
+    }
+
+    /// The fleet analogue of [`agent_object_v1_to_v2`].
+    pub fn fleet_object_v1_to_v2(f: &crate::AgentFleet) -> super::AgentFleet {
+        super::AgentFleet {
+            metadata: f.metadata.clone(),
+            spec: fleet_v1_to_v2(&f.spec).0,
+            status: None,
+        }
+    }
+
     pub fn agent_v2_to_v1(v2: &AgentSpec) -> (crate::AgentSpec, Vec<String>) {
         let mut warnings = Vec::new();
         let mut mode = match v2.shape {

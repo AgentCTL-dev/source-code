@@ -1,16 +1,18 @@
 # A claim-mode AgentFleet backed by the mock-agent image, so its pods serve the
 # management profile over their mTLS /mcp surface — enough for the gateway to
 # project (and JWS-sign) a fleet-level Agent Card.
-apiVersion: agentctl.dev/v1alpha1
+apiVersion: agentctl.dev/v1alpha2
 kind: AgentFleet
 metadata:
   name: mockfleet
   namespace: default
 spec:
   template:
-    mode: reactive
-    image: mock-agent:dev
-    subscribe: ["queue://noop"]
+    shape: daemon
+    runtime:
+      image: mock-agent:dev
+    expose:
+      a2a: true
   scaling:
     mode: claim
     minReplicas: 1

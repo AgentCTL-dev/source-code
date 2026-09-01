@@ -12,14 +12,18 @@
 #     + mock-provider.yaml first); the agent dials that pool's endpoint (the OpenAI-
 #     shaped mock) and the once-mode run reaches a clean exit 0.
 #   - image: agentd:1.0.0 — the real contract-1.0 reference agent (images.sh builds/loads it).
-apiVersion: agentctl.dev/v1alpha1
+apiVersion: agentctl.dev/v1alpha2
 kind: Agent
 metadata:
   name: intel-once
   namespace: default
 spec:
-  mode: once
-  image: agentd:1.0.0
-  instruction: "Summarize the input in one sentence."
-  model:
+  shape: job
+  triggers:
+    - once: {}
+  runtime:
+    image: agentd:1.0.0
+  instruction:
+    text: "Summarize the input in one sentence."
+  intelligence:
     pool: mockpool

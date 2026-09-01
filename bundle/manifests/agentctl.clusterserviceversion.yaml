@@ -21,26 +21,27 @@ metadata:
     alm-examples: |-
       [
         {
-          "apiVersion": "agentctl.dev/v1alpha1",
+          "apiVersion": "agentctl.dev/v1alpha2",
           "kind": "Agent",
           "metadata": { "name": "summarizer", "namespace": "default" },
           "spec": {
-            "mode": "once",
-            "image": "ghcr.io/agentctl-dev/mock-agent:1.3.0",
-            "instruction": "Read /data/report.md and write a 3-bullet summary to /data/summary.md",
-            "model": { "pool": "mockpool" },
+            "shape": "job",
+            "triggers": [{ "once": {} }],
+            "runtime": { "image": "ghcr.io/agentctl-dev/mock-agent:1.3.0" },
+            "instruction": { "text": "Read /data/report.md and write a 3-bullet summary to /data/summary.md" },
+            "intelligence": { "pool": "mockpool" },
             "substrate": "stock-unix"
           }
         },
         {
-          "apiVersion": "agentctl.dev/v1alpha1",
+          "apiVersion": "agentctl.dev/v1alpha2",
           "kind": "AgentFleet",
           "metadata": { "name": "workers", "namespace": "default" },
           "spec": {
             "template": {
-              "mode": "reactive",
-              "image": "ghcr.io/agentctl-dev/mock-agent:1.3.0",
-              "subscribe": ["queue://jobs"]
+              "shape": "daemon",
+              "runtime": { "image": "ghcr.io/agentctl-dev/mock-agent:1.3.0" },
+              "expose": { "a2a": true }
             },
             "scaling": {
               "mode": "claim",
@@ -151,16 +152,16 @@ spec:
   customresourcedefinitions:
     owned:
       - name: agents.agentctl.dev
-        version: v1alpha1
+        version: v1alpha2
         kind: Agent
         displayName: Agent
         description: >-
           One logical agent: an instruction + bindings rendered to a workload
-          whose shape follows `mode` (once→Job, schedule→CronJob,
-          loop/reactive→Deployment). Declared capabilities (exec/egress/secrets)
-          are gated by the admission webhook.
+          whose kind follows `shape` (job→Job, cron→CronJob, daemon→Deployment).
+          Declared capabilities (exec/egress/secrets) are gated by the admission
+          webhook.
       - name: agentfleets.agentctl.dev
-        version: v1alpha1
+        version: v1alpha2
         kind: AgentFleet
         displayName: AgentFleet
         description: >-

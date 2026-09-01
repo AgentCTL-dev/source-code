@@ -3404,8 +3404,8 @@ async fn dispatcher_fanout(ctx: &Ctx) -> Result<Outcome> {
     });
     let wf_json = serde_json::to_string(&coord_wf)?.replace('\n', " ");
     shell::kubectl_apply_stdin(&format!(
-        "apiVersion: agentctl.dev/v1alpha1\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  scaling: {{ mode: shard, shards: 2 }}\n  template:\n    mode: reactive\n    image: \"agentd:1.3.1\"\n    instruction: \"answer the ask in one short line\"\n    surfaces: {{ a2a: true }}\n  coordinator:\n    distribution: a2a\n    template:\n      mode: reactive\n      image: \"agentd:1.3.1\"\n      instruction: \"dispatch inbound asks to the worker pool\"\n      surfaces: {{ a2a: true }}\n      workflow:\n        inline: {}\n",
-        serde_json::to_string(&wf_json)?
+        "apiVersion: agentctl.dev/v1alpha2\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  scaling: {{ mode: shard, shards: 2 }}\n  template:\n    runtime: {{ image: \"agentd:1.3.1\" }}\n    instruction: {{ text: \"answer the ask in one short line\" }}\n    expose: {{ a2a: true }}\n  coordinator:\n    distribution: a2a\n    template:\n      runtime: {{ image: \"agentd:1.3.1\" }}\n      instruction: {{ text: \"dispatch inbound asks to the worker pool\" }}\n      expose: {{ a2a: true }}\n      workflows:\n        - inline: {0}\n",
+        wf_json
     ))?;
 
     // Workers 2/2 + the coordinator pod Running.
@@ -3644,7 +3644,7 @@ async fn shard_resize(ctx: &Ctx) -> Result<Outcome> {
     let name = "fleet-resize";
     let apply = |shards: u32| {
         shell::kubectl_apply_stdin(&format!(
-            "apiVersion: agentctl.dev/v1alpha1\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  scaling: {{ mode: shard, shards: {shards} }}\n  template:\n    mode: reactive\n    image: \"agentd:1.3.1\"\n    instruction: \"hold this partition\"\n    surfaces: {{ a2a: true }}\n"
+            "apiVersion: agentctl.dev/v1alpha2\nkind: AgentFleet\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  scaling: {{ mode: shard, shards: {shards} }}\n  template:\n    runtime: {{ image: \"agentd:1.3.1\" }}\n    instruction: {{ text: \"hold this partition\" }}\n    expose: {{ a2a: true }}\n"
         ))
     };
     apply(2)?;
@@ -4867,7 +4867,7 @@ async fn policy_ladder(ctx: &Ctx) -> Result<Outcome> {
     // GREEN: the same edit with no consumers is a plain registry change.
     shell::kubectl(&["delete", "agent", "ladder-ok", "-n", ns, "--wait=false"])?;
     kh::poll_until(GC_TIMEOUT, Duration::from_secs(2), || async {
-        Ok(kh::api::<Agent>(&ctx.client, ns)
+        Ok(kh::api::<agent_api::v1alpha2::Agent>(&ctx.client, ns)
             .get_opt("ladder-ok")
             .await?
             .is_none())
@@ -4986,7 +4986,7 @@ async fn org_access_policy(ctx: &Ctx) -> Result<Outcome> {
             .labels
             .get_or_insert_with(Default::default)
             .insert("team".into(), team.into());
-        kh::apply(&ctx.client, &ns, name, &agent).await?;
+        kh::apply_agent(&ctx.client, &ns, name, &agent).await?;
     }
     for name in ["eng-bot", "mkt-bot"] {
         kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
@@ -5136,7 +5136,7 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
     agent.spec.handle = Some("helper".to_string());
     agent.spec.display_name = Some("Helper Assistant".to_string());
     agent.metadata.namespace = Some(ns.clone());
-    kh::apply(&ctx.client, &ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ns, name, &agent).await?;
 
     // A duplicate handle is refused at admission, naming the holder.
     let mut dupe = agentd_agent(ctx, "impostor", Mode::Reactive, "idle");
@@ -5147,8 +5147,11 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
     });
     dupe.spec.handle = Some("helper".to_string());
     dupe.metadata.namespace = Some(ns.clone());
-    match kh::api::<Agent>(&ctx.client, &ns)
-        .create(&Default::default(), &dupe)
+    match kh::api::<agent_api::v1alpha2::Agent>(&ctx.client, &ns)
+        .create(
+            &Default::default(),
+            &agent_api::v1alpha2::convert::agent_object_v1_to_v2(&dupe),
+        )
         .await
     {
         Ok(_) => bail!("a duplicate handle was ADMITTED — uniqueness rung is not enforcing"),
@@ -5272,7 +5275,7 @@ async fn org_route_user(ctx: &Ctx) -> Result<Outcome> {
     }
 
     drop(pf);
-    kh::api::<Agent>(&ctx.client, &ns)
+    kh::api::<agent_api::v1alpha2::Agent>(&ctx.client, &ns)
         .delete(name, &Default::default())
         .await
         .ok();
@@ -5822,7 +5825,7 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
         principals: vec![subject.to_string()],
         ..Default::default()
     });
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
 
     // The operator mints + projects BEFORE the workload; the pod then mounts
     // the Secret. If identity isn't armed the Agent goes Validated=False.
@@ -5832,7 +5835,7 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
     let mut bearer = String::new();
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
         // Surface the misconfiguration loudly instead of timing out.
-        let a = kh::api::<Agent>(&ctx.client, &ctx.cfg.ns).get(name).await?;
+        let a = kh::api::<agent_api::v1alpha2::Agent>(&ctx.client, &ctx.cfg.ns).get(name).await?;
         if let Some(s) = &a.status {
             if s.phase.as_deref() == Some("Invalid") {
                 bail!(
@@ -6083,7 +6086,8 @@ async fn org_tenancy(ctx: &Ctx) -> Result<Outcome> {
 
     // The quota actually enforces: agent #6 must be refused by the apiserver.
     // (Quota usage sync is asynchronous; poll the creates.)
-    let agents_api: Api<Agent> = Api::namespaced(ctx.client.clone(), &ns_name);
+    let agents_api: Api<agent_api::v1alpha2::Agent> =
+        Api::namespaced(ctx.client.clone(), &ns_name);
     let mut refused = false;
     for i in 0..6 {
         let mut a = agentd_agent(ctx, &format!("quota-probe-{i}"), Mode::Reactive, "idle");
@@ -6095,6 +6099,7 @@ async fn org_tenancy(ctx: &Ctx) -> Result<Outcome> {
             ..Default::default()
         });
         a.metadata.namespace = Some(ns_name.clone());
+        let a = agent_api::v1alpha2::convert::agent_object_v1_to_v2(&a);
         match agents_api.create(&Default::default(), &a).await {
             Ok(_) => {}
             Err(kube::Error::Api(e)) if e.code == 403 && e.message.contains("exceeded quota") => {
@@ -6277,7 +6282,7 @@ fn pod_exit_code(ns: &str, label: &str) -> Result<i64> {
 
 /// Delete an `Agent` and await GC (the standard scenario cleanup).
 async fn cleanup_agent(ctx: &Ctx, name: &str) -> Result<()> {
-    kh::delete_and_wait::<Agent>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await
+    kh::delete_and_wait::<agent_api::v1alpha2::Agent>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await
 }
 
 /// One MCP `tools/call` against a coordination `/mcp` endpoint, returning the
@@ -6359,7 +6364,7 @@ async fn prov_once_ready_exit(ctx: &Ctx) -> Result<Outcome> {
         pool: Some("mockpool".to_string()),
         id: Some("mock-model-v1".to_string()),
     });
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
 
     // The Agent's Ready can flip true before the Job pod exits, so wait for the
     // pod to TERMINATE, then assert the contract exit code + `complete` intent.
@@ -6390,7 +6395,7 @@ async fn prov_reactive_capabilities(ctx: &Ctx) -> Result<Outcome> {
         a2a: true,
         ..Default::default()
     });
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
 
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
@@ -6455,7 +6460,7 @@ async fn run_mgmt_verb(ctx: &Ctx, verb: &str) -> Result<Outcome> {
         a2a: true,
         ..Default::default()
     });
-    kh::apply(&ctx.client, &ctx.cfg.ns, &name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, &name, &agent).await?;
     let pod = wait_for_first_pod(ctx, &name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -6504,7 +6509,7 @@ async fn mgmt_rbac_403(ctx: &Ctx) -> Result<Outcome> {
         a2a: true,
         ..Default::default()
     });
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -6708,7 +6713,7 @@ async fn claim_lease_expiry_reoffer(ctx: &Ctx) -> Result<Outcome> {
 async fn claim_scale_zero_n_zero(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-fleet";
     let fleet = claim_fleet(ctx, name);
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &fleet).await?;
+    kh::apply_fleet(&ctx.client, &ctx.cfg.ns, name, &fleet).await?;
 
     // Producer: push a backlog through coordination (drives the KEDA external scaler).
     let pf = shell::PortForward::service(&ctx.cfg.system_ns, SVC_COORDINATION, PORT_HTTP, 18093)?;
@@ -6753,7 +6758,7 @@ async fn claim_scale_zero_n_zero(ctx: &Ctx) -> Result<Outcome> {
         );
     }
 
-    kh::delete_and_wait::<AgentFleet>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await?;
+    kh::delete_and_wait::<agent_api::v1alpha2::AgentFleet>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await?;
     pass()
 }
 
@@ -6801,7 +6806,7 @@ async fn shard_k_of_n(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-shard";
     let shards = 3u32;
     let fleet = shard_fleet(ctx, name, shards);
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &fleet).await?;
+    kh::apply_fleet(&ctx.client, &ctx.cfg.ns, name, &fleet).await?;
 
     // The operator names the StatefulSet after the FLEET (not `agentfleet-<name>`).
     let sts = name.to_string();
@@ -6837,7 +6842,7 @@ async fn shard_k_of_n(ctx: &Ctx) -> Result<Outcome> {
         ),
     };
 
-    kh::delete_and_wait::<AgentFleet>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await?;
+    kh::delete_and_wait::<agent_api::v1alpha2::AgentFleet>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await?;
     outcome
 }
 
@@ -6849,7 +6854,7 @@ async fn shard_k_of_n(ctx: &Ctx) -> Result<Outcome> {
 async fn a2a_card_jws(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-a2a-card";
     let agent = a2a_agent(ctx, name);
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -6902,7 +6907,7 @@ async fn a2a_card_jws(ctx: &Ctx) -> Result<Outcome> {
 async fn a2a_message_send(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-a2a-send";
     let agent = a2a_agent(ctx, name);
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -6936,7 +6941,7 @@ async fn a2a_message_send(ctx: &Ctx) -> Result<Outcome> {
 async fn a2a_message_stream(ctx: &Ctx) -> Result<Outcome> {
     let name = "e2e-a2a-stream";
     let agent = a2a_agent(ctx, name);
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -6993,7 +6998,7 @@ async fn conf_exit_codes(ctx: &Ctx) -> Result<Outcome> {
     let table = contract::ExitCodeTable::vendored();
     let name = "e2e-conf-exit";
     let agent = agentd_agent(ctx, name, Mode::Once, "exit cleanly");
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
 
     // Wait for the Job pod to TERMINATE (Ready can precede exit), then assert the
     // terminal code is a registered member of the frozen table. Any contract code
@@ -7023,7 +7028,7 @@ async fn conf_metrics_registry(ctx: &Ctx) -> Result<Outcome> {
         metrics: true,
         a2a: true,
     });
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -7075,7 +7080,7 @@ async fn sec_oidc(ctx: &Ctx) -> Result<Outcome> {
 
     let name = "e2e-oidc";
     let agent = a2a_agent(ctx, name);
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -7130,7 +7135,7 @@ async fn sec_trusted_proxy(ctx: &Ctx) -> Result<Outcome> {
 
     let name = "e2e-tproxy";
     let agent = a2a_agent(ctx, name);
-    kh::apply(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
+    kh::apply_agent(&ctx.client, &ctx.cfg.ns, name, &agent).await?;
     let pod = wait_for_first_pod(ctx, name).await?;
     kh::wait_pod_running(&ctx.client, &ctx.cfg.ns, &pod, READY_TIMEOUT).await?;
 
@@ -7325,7 +7330,8 @@ async fn sec_aauth(ctx: &Ctx) -> Result<Outcome> {
 
     // The operator learns the enrolled identity into status.identity.aauth
     // once the agent self-enrolls (allowlist consumed).
-    let agents: kube::Api<Agent> = kube::Api::namespaced(ctx.client.clone(), &ctx.cfg.ns);
+    let agents: kube::Api<agent_api::v1alpha2::Agent> =
+        kube::Api::namespaced(ctx.client.clone(), &ctx.cfg.ns);
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
         let a = agents.get("aauth-once").await?;
         Ok(a.status

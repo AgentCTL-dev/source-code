@@ -19,7 +19,7 @@ use kube::{Api, Client};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use agent_api::Agent;
+use agent_api::v1alpha2::Agent;
 
 /// The field-manager string for server-side apply (kube-rs requires one).
 const FIELD_MANAGER: &str = "agentctl-e2e";
@@ -54,6 +54,41 @@ where
     api.patch(name, &pp, &Patch::Apply(obj))
         .await
         .with_context(|| format!("apply {name} in {ns}"))
+}
+
+/// Server-side-apply an Agent, converting the v1 render-IR fixture to the
+/// v1alpha2 object the API serves. The suite's fixture builders speak the v1
+/// `AgentSpec` (mode/surfaces/model); v1alpha1 is no longer served, so every
+/// create crosses this boundary and up-converts LOSSLESSLY first.
+pub async fn apply_agent(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    v1: &agent_api::Agent,
+) -> Result<Agent> {
+    apply(
+        client,
+        ns,
+        name,
+        &agent_api::v1alpha2::convert::agent_object_v1_to_v2(v1),
+    )
+    .await
+}
+
+/// The fleet analogue of [`apply_agent`].
+pub async fn apply_fleet(
+    client: &Client,
+    ns: &str,
+    name: &str,
+    v1: &agent_api::AgentFleet,
+) -> Result<agent_api::v1alpha2::AgentFleet> {
+    apply(
+        client,
+        ns,
+        name,
+        &agent_api::v1alpha2::convert::fleet_object_v1_to_v2(v1),
+    )
+    .await
 }
 
 /// Create a typed CR (errors if it already exists).

@@ -36,8 +36,10 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
-/// API group/version these resources are owned by (agent-api `GROUP`).
-const API_VERSION: &str = "agentctl.dev/v1alpha1";
+/// API group/version these resources are owned by (agent-api `GROUP`). MUST be
+/// the SERVED storage version: a stale v1alpha1 ownerReference is unresolvable
+/// by the GC once v1alpha1 is unserved, wedging foreground deletion.
+const API_VERSION: &str = "agentctl.dev/v1alpha2";
 
 /// In-pod mount of the workload's own serving identity — the cert-manager
 /// `Certificate` Secret ([`serving_secret_name`], keys `tls.crt`/`tls.key`).

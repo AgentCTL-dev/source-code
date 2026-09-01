@@ -17,7 +17,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use agent_api::{Agent, AgentFleet, Organization};
+use agent_api::v1alpha2::{Agent, AgentFleet};
+use agent_api::Organization;
 use agentctl_operator::controller::{
     error_policy, error_policy_fleet, reconcile, reconcile_fleet, ApiTokenConfig, Ctx, ScalerConfig,
 };
