@@ -505,6 +505,7 @@ async fn apply(agent: Arc<Agent>, ctx: Arc<Ctx>, ns: &str) -> Result<Action, Err
     };
     let composed = match compose_document_v2(
         &ctx.client,
+        &ctx.identity_http,
         ns,
         &name,
         &agent.spec,
@@ -906,8 +907,10 @@ fn compose_document(
 /// MCPService endpoints, and run the trigger compiler. Returns the
 /// projection, the resolved MCP bindings, the render shape, and the granted
 /// services' secret refs (for the pod's env wiring).
+#[allow(clippy::too_many_arguments)]
 async fn compose_document_v2(
     client: &Client,
+    http: &reqwest::Client,
     ns: &str,
     name: &str,
     v1_spec: &AgentSpec,
@@ -1054,6 +1057,32 @@ async fn compose_document_v2(
         .await
         .map_err(|e| e.to_string())?;
     input.peers = peers;
+
+    // OCI WorkflowSet bundles (P3-3/P7-7): resolve each `workflows[].setRef` to
+    // its workflow documents and inline them alongside the generated ones. The
+    // ref is digest-pinned, so the pull is integrity-checked end to end. A bad
+    // bundle fails the reconcile loudly (never a silent partial config).
+    let set_refs: Vec<&str> = v2_spec
+        .workflows
+        .iter()
+        .filter_map(|w| w.set_ref.as_deref())
+        .collect();
+    if !set_refs.is_empty() {
+        let insecure = std::env::var("AGENTCTL_OCI_INSECURE_REGISTRIES").unwrap_or_default();
+        for reference in set_refs {
+            let files = crate::oci::pull_bundle(http, reference, &insecure)
+                .await
+                .map_err(|e| format!("resolve WorkflowSet {reference:?}: {e}"))?;
+            for f in files {
+                let doc: serde_json::Value = serde_json::from_slice(&f.content)
+                    .or_else(|_| serde_yaml::from_slice(&f.content))
+                    .map_err(|e| {
+                        format!("WorkflowSet {reference:?} file {:?} is not a JSON/YAML workflow document: {e}", f.name)
+                    })?;
+                input.generated_workflows.push(doc);
+            }
+        }
+    }
 
     let projection = agent_config::build_projection(&input).map_err(|e| e.to_string())?;
     Ok((projection, mcp, shape, grant_secret_refs, peer_bearers))

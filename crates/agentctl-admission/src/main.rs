@@ -1194,12 +1194,21 @@ fn evaluate(
 /// resolver yet — refuse it with a clear message rather than silently
 /// dropping it (inline + configMapRef sources render fully today).
 fn check_workflow_sources(v2_spec: &agent_api::v1alpha2::AgentSpec) -> Result<(), String> {
+    // An OCI WorkflowSet ref MUST be digest-pinned (`…@sha256:<64-hex>`): that
+    // digest is the operator's integrity guarantee when it pulls the bundle, so
+    // a mutable tag — unverifiable — is refused here rather than failing later
+    // in the reconcile loop.
     for wf in &v2_spec.workflows {
-        if wf.set_ref.is_some() {
-            return Err(
-                "workflows[].setRef (OCI WorkflowSet bundles) is not yet resolvable;                  use an inline workflow or configMapRef"
-                    .to_string(),
-            );
+        if let Some(reference) = &wf.set_ref {
+            let digest = reference.split_once('@').map(|(_, d)| d);
+            let ok =
+                digest.is_some_and(|d| d.starts_with("sha256:") && d.len() == "sha256:".len() + 64);
+            if !ok {
+                return Err(format!(
+                    "workflows[].setRef {reference:?} must be digest-pinned \
+                     (`<registry>/<repo>@sha256:<64-hex>`) so the bundle can be verified"
+                ));
+            }
         }
     }
     Ok(())

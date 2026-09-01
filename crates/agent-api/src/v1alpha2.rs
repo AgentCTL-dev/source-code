@@ -1268,13 +1268,21 @@ pub mod convert {
             subscribe,
             loop_,
             schedule,
-            workflow: v2.workflows.first().map(|w| crate::WorkflowSource {
-                inline: w.inline.as_ref().map(|v| match v {
-                    serde_json::Value::String(raw) => raw.clone(),
-                    other => other.to_string(),
+            // Only a workflow with a v1-representable source (inline /
+            // configMapRef) down-converts; an OCI `setRef` entry is v2-only
+            // (the stash preserves it) — emitting a v1 `workflow` for it would
+            // be an object with neither source, which the v1 CRD schema refuses.
+            workflow: v2
+                .workflows
+                .iter()
+                .find(|w| w.inline.is_some() || w.config_map_ref.is_some())
+                .map(|w| crate::WorkflowSource {
+                    inline: w.inline.as_ref().map(|v| match v {
+                        serde_json::Value::String(raw) => raw.clone(),
+                        other => other.to_string(),
+                    }),
+                    config_map_key_ref: w.config_map_ref.clone(),
                 }),
-                config_map_key_ref: w.config_map_ref.clone(),
-            }),
             limits: v2.limits.clone(),
             capabilities: v2.capabilities.clone(),
             access: v2.access.clone(),

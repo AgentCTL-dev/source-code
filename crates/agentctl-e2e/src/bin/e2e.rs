@@ -196,6 +196,8 @@ fn catalogue() -> Vec<Scenario> {
         scenario!("sandbox-run", "capability", sandbox_run),
         // Artifacts façade: put/get/list over S3 (MinIO), org-fenced + quota (P3-3)
         scenario!("artifacts-flow", "capability", artifacts_flow),
+        // OCI WorkflowSet bundles: a digest-pinned setRef resolves + projects (P7-7)
+        scenario!("oci-bundles", "capability", oci_bundles),
         // Store classes: ephemeral/local/managed all render + run (P3-4)
         scenario!("store-classes", "capability", store_classes),
         // Lifecycle verbs: backup/restore/reset/stop/start/migrate on a managed
@@ -2094,6 +2096,178 @@ async fn artifacts_flow(ctx: &Ctx) -> Result<Outcome> {
     }
 
     drop(pf);
+    pass()
+}
+
+fn oci_sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::new().chain_update(bytes).finalize())
+}
+
+/// Monolithic blob upload to a registry:2 (POST an upload, PUT the blob with
+/// its digest). Returns the `sha256:<hex>` digest.
+async fn oci_push_blob(
+    http: &reqwest::Client,
+    base: &str,
+    repo: &str,
+    blob: &[u8],
+) -> Result<String> {
+    let digest = format!("sha256:{}", oci_sha256_hex(blob));
+    let start = http
+        .post(format!("{base}/v2/{repo}/blobs/uploads/"))
+        .send()
+        .await?;
+    if !start.status().is_success() && start.status().as_u16() != 202 {
+        bail!(
+            "blob upload start {}: {}",
+            start.status(),
+            start.text().await.unwrap_or_default()
+        );
+    }
+    let loc = start
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .context("registry gave no upload Location")?
+        .to_string();
+    let loc = if loc.starts_with("http") {
+        loc
+    } else {
+        format!("{base}{loc}")
+    };
+    let sep = if loc.contains('?') { '&' } else { '?' };
+    let put = http
+        .put(format!("{loc}{sep}digest={digest}"))
+        .header("content-type", "application/octet-stream")
+        .body(blob.to_vec())
+        .send()
+        .await?;
+    if !put.status().is_success() {
+        bail!(
+            "blob PUT {}: {}",
+            put.status(),
+            put.text().await.unwrap_or_default()
+        );
+    }
+    Ok(digest)
+}
+
+/// P7-7: a digest-pinned OCI **WorkflowSet** `setRef` is pulled by the operator,
+/// verified against its digest, and its workflow documents are projected into
+/// the agent's rendered config. Also proves admission refuses a mutable-tag ref.
+async fn oci_bundles(ctx: &Ctx) -> Result<Outcome> {
+    let sys = &ctx.cfg.system_ns;
+    // A throwaway in-cluster registry:2 (the operator pulls from it over HTTP —
+    // its `.svc` host is on the operator's insecure-by-locality list).
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: {{ name: agentctl-oci-registry, namespace: {sys} }}\nspec:\n  replicas: 1\n  selector: {{ matchLabels: {{ app: agentctl-oci-registry }} }}\n  template:\n    metadata: {{ labels: {{ app: agentctl-oci-registry }} }}\n    spec:\n      containers:\n        - name: registry\n          image: registry:2\n          ports: [{{ containerPort: 5000 }}]\n---\napiVersion: v1\nkind: Service\nmetadata: {{ name: agentctl-oci-registry, namespace: {sys} }}\nspec:\n  selector: {{ app: agentctl-oci-registry }}\n  ports: [{{ port: 5000, targetPort: 5000 }}]\n"
+    ))?;
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || async {
+        let r = shell::kubectl(&[
+            "get",
+            "deploy",
+            "-n",
+            sys,
+            "agentctl-oci-registry",
+            "-o",
+            "jsonpath={.status.readyReplicas}",
+        ])
+        .unwrap_or_default();
+        Ok(r.trim() == "1")
+    })
+    .await
+    .context("registry never Ready")?;
+
+    let pf = shell::PortForward::service(sys, "agentctl-oci-registry", 5000, 15055)?;
+    let base = pf.base_url();
+    let repo = "workflowsets/greet";
+
+    // A valid dialect-3 workflow document, pushed as the bundle's one layer.
+    let wf = "name: oci-greet\nversion: 3\nsteps: {}\n";
+    let layer_digest = oci_push_blob(&ctx.http, &base, repo, wf.as_bytes()).await?;
+    let config = b"{}";
+    let config_digest = oci_push_blob(&ctx.http, &base, repo, config).await?;
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": config_digest, "size": config.len() },
+        "layers": [ { "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                      "digest": layer_digest, "size": wf.len(),
+                      "annotations": { "org.opencontainers.image.title": "greet.yaml" } } ],
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_digest = format!("sha256:{}", oci_sha256_hex(&manifest_bytes));
+    let put = ctx
+        .http
+        .put(format!("{base}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest_bytes)
+        .send()
+        .await?;
+    if !put.status().is_success() {
+        bail!(
+            "manifest PUT {}: {}",
+            put.status(),
+            put.text().await.unwrap_or_default()
+        );
+    }
+
+    // Apply an Agent whose workflow is the digest-pinned bundle.
+    let ns = &ctx.cfg.ns;
+    let name = "oci-agent";
+    let reg_host = format!("agentctl-oci-registry.{sys}.svc.cluster.local:5000");
+    let set_ref = format!("{reg_host}/{repo}@{manifest_digest}");
+    shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  shape: job\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"idle\" }}\n  intelligence: {{ pool: mockpool }}\n  triggers:\n    - once: {{}}\n  workflows:\n    - setRef: \"{set_ref}\"\n"
+    ))?;
+
+    // The operator resolves + projects the bundle into the rendered config —
+    // assert the workflow lands in the agentd config's workflows[].
+    kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
+        let cm = format!("{name}-config");
+        let ns = ns.to_string();
+        async move {
+            let doc = shell::kubectl(&[
+                "get",
+                "cm",
+                "-n",
+                &ns,
+                &cm,
+                "-o",
+                "jsonpath={.data.agentd\\.json}",
+            ])
+            .unwrap_or_default();
+            let v: Value = serde_json::from_str(&doc).unwrap_or(Value::Null);
+            Ok(v["workflows"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|w| w["name"] == json!("oci-greet"))))
+        }
+    })
+    .await
+    .context("OCI WorkflowSet did not project into the rendered config")?;
+
+    // Admission refuses a mutable-tag (unverifiable) setRef.
+    let mutable = shell::kubectl_apply_stdin(&format!(
+        "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: oci-mutable, namespace: {ns} }}\nspec:\n  shape: job\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"idle\" }}\n  intelligence: {{ pool: mockpool }}\n  triggers:\n    - once: {{}}\n  workflows:\n    - setRef: \"{reg_host}/{repo}:latest\"\n"
+    ));
+    match mutable {
+        Err(e) if format!("{e:#}").contains("digest-pinned") => {}
+        Err(e) => bail!("mutable setRef refused for the wrong reason: {e:#}"),
+        Ok(_) => bail!("admission ADMITTED a mutable-tag setRef (should be digest-pinned)"),
+    }
+
+    drop(pf);
+    shell::kubectl(&["delete", "agent", "-n", ns, name, "--wait=false"]).ok();
+    shell::kubectl(&[
+        "delete",
+        "deploy,svc",
+        "-n",
+        sys,
+        "agentctl-oci-registry",
+        "--wait=false",
+    ])
+    .ok();
     pass()
 }
 
