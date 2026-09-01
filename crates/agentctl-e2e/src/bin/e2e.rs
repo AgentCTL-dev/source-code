@@ -5651,6 +5651,14 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     // survives kill -9.
     let ns = &ctx.cfg.ns;
     let name = "state-probe";
+    let prefix = format!("orgs/{ns}/{name}");
+    // Hermetic start: purge anything left under this agent's prefix by a prior
+    // run. The prefix is REUSED across runs and agentd writes one run-cursor key
+    // PER loop tick (never GC'd) plus a per-pod manifest/context — left to
+    // accumulate they eventually push the whole-prefix export past mcpg's FFI
+    // payload cap (the admin snapshot rides a single frame), which the existence
+    // check below now surfaces loudly instead of reading as "no checkpoints".
+    call(90, "state.admin.purge", json!({ "prefix": prefix.clone() })).await?;
     shell::kubectl_apply_stdin(&format!(
         "apiVersion: agentctl.dev/v1alpha2\nkind: Agent\nmetadata: {{ name: {name}, namespace: {ns} }}\nspec:\n  shape: daemon\n  runtime: {{ image: \"agentd:1.3.1\" }}\n  instruction: {{ text: \"acknowledge ticks in one line\" }}\n  expose: {{ a2a: true }}\n  store: {{ class: managed }}\n  triggers:\n    - loop: {{ interval: 30s }}\n"
     ))?;
@@ -5669,15 +5677,30 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     // the agent-tool `state.list` is fenced to the caller's own subject, so
     // a cross-agent read there returns nothing (that IS the fence, tested
     // below); the admin tool is unfenced by design (operator/control plane).
-    let prefix = format!("orgs/{ns}/{name}");
+    //
+    // The whole prefix exports over ONE mcpg FFI frame (256 KiB host cap), so a
+    // tool error there (payload over cap) MUST surface — reading it as "no
+    // items" is exactly how a capped snapshot silently masquerades as an empty
+    // store (see docs/v2/known-limits.md).
+    fn snapshot_items(c: &Value) -> Result<Vec<Value>> {
+        if c["isError"] == json!(true) {
+            bail!(
+                "state.admin.snapshot failed (256 KiB FFI payload cap — see \
+                 docs/v2/known-limits.md): {}",
+                c["content"][0]["text"]
+            );
+        }
+        Ok(c["structuredContent"]["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(3), || {
         let prefix = prefix.clone();
         let call = &call;
         async move {
             let r = call(12, "state.admin.snapshot", json!({ "prefix": prefix })).await?;
-            Ok(r["structuredContent"]["items"]
-                .as_array()
-                .is_some_and(|k| !k.is_empty()))
+            Ok(!snapshot_items(&r)?.is_empty())
         }
     })
     .await
@@ -5725,10 +5748,7 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         json!({ "prefix": prefix.clone() }),
     )
     .await?;
-    if !r["structuredContent"]["items"]
-        .as_array()
-        .is_some_and(|k| !k.is_empty())
-    {
+    if snapshot_items(&r)?.is_empty() {
         bail!("checkpoints vanished across the SIGKILL: {r}");
     }
 
@@ -5835,7 +5855,9 @@ async fn a2a_principals_gate(ctx: &Ctx) -> Result<Outcome> {
     let mut bearer = String::new();
     kh::poll_until(READY_TIMEOUT, Duration::from_secs(2), || async {
         // Surface the misconfiguration loudly instead of timing out.
-        let a = kh::api::<agent_api::v1alpha2::Agent>(&ctx.client, &ctx.cfg.ns).get(name).await?;
+        let a = kh::api::<agent_api::v1alpha2::Agent>(&ctx.client, &ctx.cfg.ns)
+            .get(name)
+            .await?;
         if let Some(s) = &a.status {
             if s.phase.as_deref() == Some("Invalid") {
                 bail!(
@@ -6086,8 +6108,7 @@ async fn org_tenancy(ctx: &Ctx) -> Result<Outcome> {
 
     // The quota actually enforces: agent #6 must be refused by the apiserver.
     // (Quota usage sync is asynchronous; poll the creates.)
-    let agents_api: Api<agent_api::v1alpha2::Agent> =
-        Api::namespaced(ctx.client.clone(), &ns_name);
+    let agents_api: Api<agent_api::v1alpha2::Agent> = Api::namespaced(ctx.client.clone(), &ns_name);
     let mut refused = false;
     for i in 0..6 {
         let mut a = agentd_agent(ctx, &format!("quota-probe-{i}"), Mode::Reactive, "idle");
@@ -6282,7 +6303,8 @@ fn pod_exit_code(ns: &str, label: &str) -> Result<i64> {
 
 /// Delete an `Agent` and await GC (the standard scenario cleanup).
 async fn cleanup_agent(ctx: &Ctx, name: &str) -> Result<()> {
-    kh::delete_and_wait::<agent_api::v1alpha2::Agent>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await
+    kh::delete_and_wait::<agent_api::v1alpha2::Agent>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT)
+        .await
 }
 
 /// One MCP `tools/call` against a coordination `/mcp` endpoint, returning the
@@ -6758,7 +6780,13 @@ async fn claim_scale_zero_n_zero(ctx: &Ctx) -> Result<Outcome> {
         );
     }
 
-    kh::delete_and_wait::<agent_api::v1alpha2::AgentFleet>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await?;
+    kh::delete_and_wait::<agent_api::v1alpha2::AgentFleet>(
+        &ctx.client,
+        &ctx.cfg.ns,
+        name,
+        GC_TIMEOUT,
+    )
+    .await?;
     pass()
 }
 
@@ -6842,7 +6870,13 @@ async fn shard_k_of_n(ctx: &Ctx) -> Result<Outcome> {
         ),
     };
 
-    kh::delete_and_wait::<agent_api::v1alpha2::AgentFleet>(&ctx.client, &ctx.cfg.ns, name, GC_TIMEOUT).await?;
+    kh::delete_and_wait::<agent_api::v1alpha2::AgentFleet>(
+        &ctx.client,
+        &ctx.cfg.ns,
+        name,
+        GC_TIMEOUT,
+    )
+    .await?;
     outcome
 }
 
