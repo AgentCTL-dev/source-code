@@ -18,7 +18,7 @@ here traces to a row there and to a live e2e scenario.
 | **P6** Fleets + scaling | P6-1..6 | ✅ **Complete** | fleet-static, shard-resize, dispatcher-fanout, fleet-budget, webhook-scale-zero |
 | **P7** GA surfaces (hooks, dashboards, audit, metering, scale-to-zero, hardening) | P7-1..6 done, P7-7 this doc | ✅ Done | hooks-ingress, metering-export, audit-trail, supervisor-park |
 
-**52 e2e scenarios; last full catalogue: 49 passed / 3 documented skips / 0
+**53 e2e scenarios; last full catalogue: 50 passed / 3 documented skips / 0
 failed** (full run, 2026-08-31). The three skips are environmental, not gaps:
 `sec-oidc`/`sec-trusted-proxy` (a pre-existing unarmed-gate gap superseded by
 the P1 identity-gateway authn scenarios) and `sec-netpol` (needs a Calico lane —
@@ -49,7 +49,7 @@ pairing, the whole state plane landed on the proven P3-1 checkpointer:
 ## GA gates — all green
 
 - [x] **Every plane live-verified in a real cluster** against real agentd
-      1.3.1, blessed mcpg beta.26, and a bundled MinIO (not mocks) — 49/52
+      1.3.1, blessed mcpg beta.26, and a bundled MinIO (not mocks) — 50/53
       scenarios pass, the 3 skips documented and environmental.
 - [x] **Fail-closed by construction** — audited in the hardening pass
       (P7-5): identity admin refuses without a token, the exchange refuses a
@@ -67,24 +67,30 @@ pairing, the whole state plane landed on the proven P3-1 checkpointer:
 - [x] **The "build on agentctl" guide** and the multi-tenant hardening
       checklist (P7-5, [build-on-agentctl.md](build-on-agentctl.md)).
 
+## Landed after the GA gate
+
+- **OCI-bundle resolution** (`workflows[].setRef`). The operator pulls a
+  digest-pinned OCI WorkflowSet, verifies it (manifest + every layer against its
+  digest), and projects the workflow documents into the rendered config;
+  admission validates the digest-pin. Hand-rolled on reqwest + SigV4-free
+  digest verification to stay deny-clean. Live e2e `oci-bundles`.
+- **Audit HTTP-sink cutover.** Tenant gateways ship their own AuditEvents to
+  identity's ingest door via mcpg's `dev.mcpg.audit.http` sink; the mcpg-native
+  → audit/v1 mapping moved server-side into identity (keyed on the upstream
+  request id), and the file-tailing shipper sidecar is retired. Live e2e
+  `audit-trail`.
+
 ## Deferred to post-GA (polish, not gates)
 
-- **OCI-bundle resolution for registry sets.** `WorkflowSource.set_ref` and
-  `SkillSet` are wire-modeled in the CRD (v1alpha2), and inline + ConfigMap
-  workflow sources are fully rendered and tested today. Resolving a `set_ref`
-  as an *OCI artifact* (pull + verify + project) is an additive operator
-  feature that does not change the CRD contract — it slots behind the existing
-  `set_ref` field when the bundle registry story is prioritized. Air-gapped
-  installs use OCI mirrors for the same refs.
 - **Docs-site refresh.** The reference docs (`docs/*.md`) and the v2 set
   (`docs/v2/*`) are current; the public agentctl.dev site render is a
   presentation pass, not a capability.
-- **The two upstream defects found this program**, both confirmed in source by
-  the mcpg/agentd sessions and riding their next waves, with our side already
-  correct against them: mcpg's `x-request-id`→AuditEvent gap and its
-  zero-gate-plugin tools/call-unaudited bug (our audit e2e asserts the honest
-  join meanwhile); agentd's `a2a.principals`/`webhooks` silent-no-op reload
-  paths (our config-hash already treats both as restart-required).
+- **Upstream items** riding the mcpg/agentd sessions, with our side already
+  correct against them: mcpg's zero-gate-plugin tools/call-unaudited bug (our
+  audit e2e asserts the honest join meanwhile); agentd's
+  `a2a.principals`/`webhooks` silent-no-op reload paths (our config-hash treats
+  both as restart-required). The `x-request-id`→AuditEvent gap is closed on
+  beta.26 (`upstream_request_id`), which the audit mapping now keys on.
 
 ## Verdict
 
