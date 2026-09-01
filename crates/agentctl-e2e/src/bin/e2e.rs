@@ -5647,9 +5647,11 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         bail!("get after delete not absent: {r}");
     }
 
-    // A value LARGER than one mcpg FFI frame (256 KiB) is NOT off-limits: a
-    // single-frame `state.get` errors on the cap, but `state.admin.read_chunk`
-    // streams it back byte-losslessly (docs/v2/known-limits.md). ~400 KiB blob.
+    // A value well over the DEFAULT 256 KiB FFI frame is not off-limits. With
+    // the gateway's raised `ffi_limits.max_payload_bytes` it returns in ONE
+    // `state.get` (the primary path); `state.admin.read_chunk` streams the SAME
+    // value (the fallback for anything over whatever cap is configured). Assert
+    // BOTH reproduce it byte-for-byte (docs/v2/known-limits.md). ~400 KiB blob.
     let big_key = format!("{driver_subj}/oversized");
     let blob = "z".repeat(400_000);
     let put = call(
@@ -5661,9 +5663,9 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     if sc(&put)["ok"] != json!(true) {
         bail!("oversized put refused: {put}");
     }
-    let capped = call(41, "state.get", json!({ "key": big_key })).await?;
-    if capped["isError"] != json!(true) {
-        bail!("expected state.get of an oversized value to hit the FFI frame cap: {capped}");
+    let whole = call(41, "state.get", json!({ "key": big_key })).await?;
+    if sc(&whole)["state"]["blob"] != json!(blob) || sc(&whole)["state"]["marker"] != json!("big") {
+        bail!("single-call state.get did not reproduce the large value (raised cap?): {whole}");
     }
     let mut text = String::new();
     let mut offset: u64 = 1;
@@ -5695,6 +5697,40 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         bail!("chunked read did not reproduce the oversized value byte-for-byte");
     }
     call(43, "state.delete", json!({ "key": big_key })).await?;
+
+    // The WRITE counterpart: `state.admin.write_chunk` stages ordered slices and
+    // `state.admin.write_commit` assembles them — the path for a value larger
+    // than the request body. Here two 30 KiB slices reassemble a 60 KiB value.
+    let staged_key = format!("{driver_subj}/staged");
+    let staged_val = json!({ "parts": "x".repeat(60_000) });
+    let vtext = serde_json::to_string(&staged_val).context("serialize staged value")?;
+    let mid = vtext.len() / 2;
+    call(
+        44,
+        "state.admin.write_chunk",
+        json!({ "key": staged_key, "seq": 1, "ord": 1, "chunk": &vtext[..mid] }),
+    )
+    .await?;
+    call(
+        45,
+        "state.admin.write_chunk",
+        json!({ "key": staged_key, "seq": 1, "ord": 2, "chunk": &vtext[mid..] }),
+    )
+    .await?;
+    let commit = call(
+        46,
+        "state.admin.write_commit",
+        json!({ "key": staged_key, "seq": 1, "chunks": 2 }),
+    )
+    .await?;
+    if sc(&commit)["ok"] != json!(true) {
+        bail!("write_commit refused: {commit}");
+    }
+    let readback = call(47, "state.get", json!({ "key": staged_key })).await?;
+    if sc(&readback)["state"] != staged_val {
+        bail!("chunked write did not reproduce the value: {readback}");
+    }
+    call(48, "state.delete", json!({ "key": staged_key })).await?;
 
     // Leg 2: a managed-store agent checkpoints through the SAME service and
     // survives kill -9.

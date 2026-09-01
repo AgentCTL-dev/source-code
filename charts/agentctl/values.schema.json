@@ -585,6 +585,16 @@
      "type": "string",
      "description": "backend-sql plugin OCI reference."
     },
+    "ffiMaxPayloadBytes": {
+     "type": "integer",
+     "minimum": 262144,
+     "description": "Per-plugin FFI result-frame cap in bytes (mcpg default 262144). Single-call get/snapshot ceiling; larger values stream via chunked read/write."
+    },
+    "maxRequestBodyMb": {
+     "type": "integer",
+     "minimum": 1,
+     "description": "Gateway request-body cap in MiB (write/restore ceiling). No upper bound in mcpg; buffered in memory."
+    },
     "replicas": {
      "type": "integer",
      "minimum": 0

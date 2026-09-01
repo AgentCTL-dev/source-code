@@ -557,6 +557,15 @@ state:
   # Boots on beta.26: the #664 entity-vtable fix resolves the multi-same-class
   # cdylib registration collision that parked the pairing on beta.24.
   pluginImage: "ghcr.io/mcpg-dev/plugins/backend-sql:protocol-1"
+  # Per-plugin FFI RESULT-frame cap (mcpg host default 262144 B). Raised so a
+  # single get/snapshot of a large value/prefix returns in ONE call and agentd's
+  # own single-frame boot restore handles a checkpoint up to this size; anything
+  # larger still streams via the chunked read/write tools (docs/v2/known-limits.md).
+  ffiMaxPayloadBytes: 16777216
+  # Request-body ceiling (tool arguments + restore bodies). The FFI cap is
+  # return-side only, so this is the write-side ceiling. Buffered in memory —
+  # size against the pod memory limit below. No upper bound in mcpg validation.
+  maxRequestBodyMb: 32
   replicas: 1
   resources:
     requests: { cpu: 50m, memory: 64Mi }

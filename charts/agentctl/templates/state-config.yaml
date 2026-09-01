@@ -39,7 +39,10 @@ data:
         bind_address: "0.0.0.0:8787"
         mcp_path: "/mcp"
         health_path: "/health"
-        max_request_body_mb: 4
+        # Input ceiling (tool ARGUMENTS + restore bodies): the FFI cap below is
+        # RETURN-side only, so this body limit is the write-side ceiling. No
+        # upper bound in mcpg validation; sized against pod memory (buffered).
+        max_request_body_mb: {{ $st.maxRequestBodyMb | default 32 }}
         # TLS termination on the same listener (P3): agentd refuses to dial a
         # plaintext MCP endpoint off-loopback, so the state gateway serves
         # HTTPS with the chart-CA cert the managed agent already trusts. The
@@ -88,6 +91,14 @@ data:
         class: backend
         source: { oci: "{{ $st.pluginImage }}" }
         granted_capabilities: ["network_outbound"]
+        # Raise the per-plugin FFI RESULT-frame cap (mcpg host default 262144 B)
+        # so a single get/snapshot of a large value/prefix returns in ONE call —
+        # the primary path. `agentctl backup` still keyset-paginates and streams
+        # anything beyond this via read_chunk, so there is no HARD limit; this
+        # just sets where single-call stops (and how large a checkpoint agentd's
+        # own single-frame `state.get` can restore). See docs/v2/known-limits.md.
+        ffi_limits:
+          max_payload_bytes: {{ $st.ffiMaxPayloadBytes | default 16777216 }}
 
     mcp:
       capabilities:
@@ -405,6 +416,89 @@ data:
                 row_mode: single
                 read_only: true
                 timeout_ms: 15000
+
+          - name: state.admin.write_chunk
+            title: "Single-value chunked write (stage)"
+            description: >-
+              Stage one ordered slice of a value too large for a single request
+              body. Slices are stored as ROWS (one per `ord`), so assembly at
+              commit is O(n), not repeated text rewrites. Retrying the same
+              (key, ord) is idempotent. Follow the whole ordered run with
+              state.admin.write_commit, which assembles + UPSERTs. Unfenced admin
+              (docs/v2/known-limits.md).
+            annotations: { read_only: false, idempotent: true, destructive: false, open_world: false }
+            input_schema:
+              type: object
+              required: [key, seq, ord, chunk]
+              properties:
+                key: { type: string, minLength: 1, maxLength: 1024 }
+                seq: { type: integer, minimum: 1 }
+                ord: { type: integer, minimum: 1 }
+                chunk: { type: string }
+                _meta: { type: object }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                sql: |
+                  INSERT INTO agent_state_staging (key, ord, seq, chunk, updated_at)
+                  VALUES (:key, CAST(:ord AS int), :seq, :chunk, now())
+                  ON CONFLICT (key, ord) DO UPDATE
+                    SET chunk = EXCLUDED.chunk, seq = EXCLUDED.seq, updated_at = now()
+                params: [key, seq, ord, chunk]
+                row_mode: affected_rows
+                timeout_ms: 15000
+
+          - name: state.admin.write_commit
+            title: "Single-value chunked write (commit)"
+            description: >-
+              Assemble the staged slices for `key` (ord 1..`chunks`, in order),
+              UPSERT the reassembled JSON into agent_state at `seq`, and clear the
+              staging rows. Returns {ok, chunks_cleared}. If the assembled text is
+              not valid JSON the whole statement rolls back (staging survives for
+              retry) and the tool errors. Unfenced admin.
+            annotations: { read_only: false, idempotent: true, destructive: false, open_world: false }
+            input_schema:
+              type: object
+              required: [key, seq, chunks]
+              properties:
+                key: { type: string, minLength: 1, maxLength: 1024 }
+                seq: { type: integer, minimum: 1 }
+                chunks: { type: integer, minimum: 1 }
+                _meta: { type: object }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                # string_agg reassembles the ordered slices (O(n)); CAST to jsonb
+                # parses the whole; UPSERT last-writer-wins (matches restore); then
+                # clear ALL staging for the key. Stale ords beyond :chunks (a prior
+                # partial) are excluded from assembly and cleared here.
+                sql: |
+                  WITH assembled AS (
+                    SELECT string_agg(chunk, '' ORDER BY ord) AS buf
+                    FROM agent_state_staging
+                    WHERE key = :key AND ord <= CAST(:chunks AS int)
+                  ), applied AS (
+                    INSERT INTO agent_state (key, seq, state, updated_at)
+                    SELECT :key, :seq, CAST(buf AS jsonb), now()
+                    FROM assembled WHERE buf IS NOT NULL
+                    ON CONFLICT (key) DO UPDATE
+                      SET seq = EXCLUDED.seq, state = EXCLUDED.state, updated_at = now()
+                    RETURNING 1
+                  ), cleaned AS (
+                    DELETE FROM agent_state_staging WHERE key = :key RETURNING 1
+                  )
+                  SELECT
+                    EXISTS (SELECT 1 FROM applied) AS ok,
+                    (SELECT count(*) FROM cleaned) AS chunks_cleared
+                params: [key, seq, chunks]
+                row_mode: single
+                timeout_ms: 30000
 
           - name: state.admin.restore
             title: "Prefix restore (import)"

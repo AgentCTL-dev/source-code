@@ -64,6 +64,18 @@ spec:
                     seq        bigint NOT NULL,
                     state      jsonb NOT NULL,
                     updated_at timestamptz NOT NULL DEFAULT now()
+                  );
+                  -- Staging for chunked WRITE of a value larger than the mcpg
+                  -- request body: state.admin.write_chunk appends one row per
+                  -- ordered slice, state.admin.write_commit string_aggs them into
+                  -- agent_state and clears the key (docs/v2/known-limits.md).
+                  CREATE TABLE IF NOT EXISTS agent_state_staging (
+                    key        text NOT NULL,
+                    ord        int  NOT NULL,
+                    seq        bigint NOT NULL,
+                    chunk      text NOT NULL,
+                    updated_at timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY (key, ord)
                   );" && exit 0
                 echo "postgres not ready ($i/30); retrying in 5s" >&2
                 sleep 5

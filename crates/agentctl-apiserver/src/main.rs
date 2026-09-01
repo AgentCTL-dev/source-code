@@ -196,7 +196,13 @@ async fn main() {
                 .ok()
                 .filter(|s| !s.is_empty()),
         })
-        .fallback(not_found);
+        .fallback(not_found)
+        // `restore` carries a whole backup as its body; the default 2 MiB axum
+        // limit would cap it. Only the front-proxy (mTLS-gated) can reach this
+        // surface, so lift the ingress ceiling well above realistic backups —
+        // the state hop below streams any single value via chunked write
+        // (docs/v2/known-limits.md).
+        .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024));
 
     let addr: SocketAddr = "0.0.0.0:6443".parse().unwrap();
     let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls));
@@ -1273,6 +1279,24 @@ async fn restore_batched(
     let mut bytes = 0usize;
     for it in items {
         let sz = serde_json::to_string(it).map(|s| s.len()).unwrap_or(0);
+        // A single item too big for one body is UPSERTed alone via chunked
+        // write (staged append) — no value's size limits restore.
+        if sz > BUDGET {
+            if !batch.is_empty() {
+                total += restore_call(http, url, &batch).await?;
+                batch.clear();
+                bytes = 0;
+            }
+            let key = it
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or("restore item missing key")?;
+            let seq = it.get("seq").and_then(Value::as_i64).unwrap_or(1);
+            let state = it.get("state").ok_or("restore item missing state")?;
+            write_chunked(http, url, key, seq, state).await?;
+            total += 1;
+            continue;
+        }
         if !batch.is_empty() && bytes + sz > BUDGET {
             total += restore_call(http, url, &batch).await?;
             batch.clear();
@@ -1285,6 +1309,55 @@ async fn restore_batched(
         total += restore_call(http, url, &batch).await?;
     }
     Ok(total)
+}
+
+/// The char slice size for a chunked WRITE. Large — the request body tolerates
+/// it — so a big value stages in few round-trips while staying under
+/// `max_request_body_mb`.
+const WRITE_CHUNK_CHARS: usize = 1_000_000;
+
+/// UPSERT one value of ANY size by staging ordered char-slices via
+/// `state.admin.write_chunk` then `state.admin.write_commit` — the write
+/// counterpart to [`read_chunked`], so a value larger than one request body
+/// round-trips (docs/v2/known-limits.md).
+async fn write_chunked(
+    http: &reqwest::Client,
+    url: &str,
+    key: &str,
+    seq: i64,
+    state: &Value,
+) -> Result<(), String> {
+    let text = serde_json::to_string(state).map_err(|e| format!("serialize {key}: {e}"))?;
+    let chars: Vec<char> = text.chars().collect();
+    let mut ord: u64 = 0;
+    let mut i = 0usize;
+    while i < chars.len() {
+        ord += 1;
+        let end = (i + WRITE_CHUNK_CHARS).min(chars.len());
+        let chunk: String = chars[i..end].iter().collect();
+        state_admin_call(
+            http,
+            url,
+            "state.admin.write_chunk",
+            json!({ "key": key, "seq": seq, "ord": ord, "chunk": chunk }),
+        )
+        .await?;
+        i = end;
+    }
+    if ord == 0 {
+        return Err(format!("write_chunked {key}: empty value"));
+    }
+    let sc = state_admin_call(
+        http,
+        url,
+        "state.admin.write_commit",
+        json!({ "key": key, "seq": seq, "chunks": ord }),
+    )
+    .await?;
+    if sc.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("write_commit {key}: not ok: {sc}"));
+    }
+    Ok(())
 }
 
 /// One `state.admin.restore` call for a batch of items.
