@@ -1281,7 +1281,9 @@ spec:
         "--timeout=180s",
     ])
     .context("tenant gateway rollout")?;
-    // The shipper sidecar must be part of the pod (P7-3 wiring proof).
+    // The HTTP audit sink wiring proof (P7-3 cutover): the gateway ships its
+    // own AuditEvents to identity's ingest door — its container carries the
+    // AUDIT_COLLECTOR_TOKEN env, and there is NO file-tailing shipper sidecar.
     let containers = shell::kubectl(&[
         "get",
         "deploy",
@@ -1291,8 +1293,20 @@ spec:
         "-o",
         "jsonpath={.spec.template.spec.containers[*].name}",
     ])?;
-    if !containers.contains("audit-shipper") {
-        bail!("tenant gateway has no audit-shipper sidecar: {containers}");
+    if containers.split_whitespace().count() != 1 {
+        bail!("tenant gateway is not a single container (shipper not retired?): {containers}");
+    }
+    let env_names = shell::kubectl(&[
+        "get",
+        "deploy",
+        "agentctl-mcpg",
+        "-n",
+        &ns,
+        "-o",
+        "jsonpath={.spec.template.spec.containers[0].env[*].name}",
+    ])?;
+    if !env_names.contains("AUDIT_COLLECTOR_TOKEN") {
+        bail!("tenant gateway is not wired for the HTTP audit sink (no AUDIT_COLLECTOR_TOKEN): {env_names}");
     }
 
     let admin_token = {
@@ -1444,7 +1458,7 @@ spec:
     // request LOG (`upstream_request_id`), never in the AuditEvent, and a
     // FEDERATED tools/call currently writes no audit record at all — so the
     // mcpg join asserts the hash-chained session/catalog records that DO
-    // exist, org-forced by the shipper's token, and tightens to tool.call +
+    // exist, org-forced by the ingest token, and tightens to tool.call +
     // request-id when upstream lands the fixes.
     let _ = &trail;
     let raw = |path: String| shell::kubectl(&["get", "--raw", &path]);

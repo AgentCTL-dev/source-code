@@ -517,13 +517,27 @@ async fn audit_ingest(
             "token subject names no namespace",
         ));
     }
-    let mut records: Vec<agentctl_audit::Record> = if body.is_array() {
+    // The workload the mcpg-native mapping attributes (the token's subject
+    // names `<namespace>/<workload>`); org/ns are forced below regardless.
+    let workload = sub.split('/').nth(1).unwrap_or("mcpg");
+    // Accept BOTH shapes per record: an `audit/v1` Record verbatim, or an
+    // mcpg-native AuditEvent (what the `dev.mcpg.audit.http` sink POSTs) mapped
+    // server-side. Detection is the record's `schema` tag.
+    let raw: Vec<Value> = if body.is_array() {
         serde_json::from_value(body).map_err(|e| err(StatusCode::BAD_REQUEST, e))?
     } else {
-        vec![serde_json::from_value(body).map_err(|e| err(StatusCode::BAD_REQUEST, e))?]
+        vec![body]
     };
-    if records.len() > 1000 {
+    if raw.len() > 1000 {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "batch over 1000"));
+    }
+    let mut records: Vec<agentctl_audit::Record> = Vec::with_capacity(raw.len());
+    for v in raw {
+        if v.get("schema").and_then(Value::as_str) == Some(agentctl_audit::SCHEMA) {
+            records.push(serde_json::from_value(v).map_err(|e| err(StatusCode::BAD_REQUEST, e))?);
+        } else {
+            records.push(agentctl_audit::map_mcpg_native(&v, workload));
+        }
     }
     let org = ns.strip_prefix("org-").unwrap_or("").to_string();
     let mut stored = 0usize;

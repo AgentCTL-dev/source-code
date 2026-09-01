@@ -56,7 +56,13 @@ pub struct TenantMcpgConfig {
     /// The audit shipper sidecar image (`AGENTCTL_AUDIT_SHIPPER_IMAGE`,
     /// P7-3): tails the gateway's hash-chained audit file into identity's
     /// ingest door. Absent ⇒ audit stays pod-local (file sink only).
+    /// SUPERSEDED by the HTTP sink below when it is configured.
     pub audit_shipper_image: Option<String>,
+    /// Digest-pinned OCI ref of mcpg's `dev.mcpg.audit.http` sink plugin
+    /// (`AGENTCTL_MCPG_AUDIT_HTTP_PLUGIN`, P7-3 cutover). When set, the gateway
+    /// ships its own AuditEvents to identity's ingest door and the shipper
+    /// sidecar is DROPPED. Absent ⇒ the shipper (if any) is used.
+    pub audit_http_plugin_oci: Option<String>,
     /// mcpg license posture for the BUSL plugin (`AGENTCTL_MCPG_NON_PRODUCTION`):
     /// the gateway's license gate refuses the plugin on the community tier
     /// without `license.non_production_use` (e2e/dev) or an entitling token
@@ -76,6 +82,10 @@ impl TenantMcpgConfig {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
             audit_shipper_image: std::env::var("AGENTCTL_AUDIT_SHIPPER_IMAGE")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            audit_http_plugin_oci: std::env::var("AGENTCTL_MCPG_AUDIT_HTTP_PLUGIN")
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
@@ -105,6 +115,26 @@ pub struct OboWiring {
 /// The plugin id + the provider key the `cred://` URIs reference.
 const EXCHANGE_PLUGIN_ID: &str = "dev.mcpg.credential.oauth-token-exchange";
 const EXCHANGE_PROVIDER: &str = "agentctl";
+
+/// The first-class HTTP audit sink (P7-3 cutover): the gateway ships its own
+/// AuditEvents straight to identity's ingest door, retiring the file-tailing
+/// audit-shipper sidecar.
+pub const AUDIT_HTTP_PLUGIN_ID: &str = "dev.mcpg.audit.http";
+/// The env the gateway container reads the ingest token from (referenced by
+/// the plugin config as `${env.AUDIT_COLLECTOR_TOKEN}`).
+pub const AUDIT_COLLECTOR_TOKEN_ENV: &str = "AUDIT_COLLECTOR_TOKEN";
+
+/// Wiring for the `dev.mcpg.audit.http` sink. Present ⇒ the gateway ships audit
+/// off-pod itself (no shipper sidecar).
+#[derive(Clone, Debug)]
+pub struct AuditHttpWiring {
+    /// Digest-pinned plugin OCI ref.
+    pub plugin_oci: String,
+    /// Identity's `/v1/audit/ingest` URL.
+    pub ingest_url: String,
+    /// `license.non_production_use` (the BUSL plugin's e2e/dev entitlement).
+    pub non_production: bool,
+}
 
 /// A registry entry eligible for federation, reduced to what the config
 /// needs. Pure input to [`render_config`].
@@ -178,6 +208,7 @@ pub fn render_config(
     entries: &[FederationEntry],
     tier: Option<&VerifiedTier>,
     obo: Option<&OboWiring>,
+    audit_http: Option<&AuditHttpWiring>,
 ) -> String {
     let obo_active = obo.is_some() && tier.is_some();
     let mut any_obo = false;
@@ -259,6 +290,13 @@ pub fn render_config(
     } else {
         "header_asserted"
     };
+    let mut audit_sinks = vec![json!({
+        "kind": "dev.mcpg.builtin.audit.local-file",
+        "config": { "path": "/var/log/mcpg/audit.log" },
+    })];
+    if audit_http.is_some() {
+        audit_sinks.push(json!({ "kind": AUDIT_HTTP_PLUGIN_ID }));
+    }
     let mut doc = json!({
         "gateway": {
             "server": {
@@ -279,10 +317,10 @@ pub fn render_config(
             "audit": {
                 "enabled": true,
                 "required": true,
-                "sinks": [{
-                    "kind": "dev.mcpg.builtin.audit.local-file",
-                    "config": { "path": "/var/log/mcpg/audit.log" },
-                }],
+                // Always the pod-local file (debugging); when the HTTP sink is
+                // wired the gateway ALSO ships every event to identity's ingest
+                // door itself — the retirement of the file-tailing shipper.
+                "sinks": audit_sinks,
             },
         },
         "mcp": { "federations": federations },
@@ -301,10 +339,13 @@ pub fn render_config(
             }
         });
     }
+    // Plugins: the OBO credential-exchange (when an obo federation survived) and
+    // the HTTP audit sink (when wired) — each BUSL, each needing the license gate.
+    let mut plugins: Vec<Value> = Vec::new();
+    let mut needs_license = false;
     if any_obo {
-        // Emitted ONLY when an obo federation survived the gates above.
         let w = obo.expect("any_obo implies wiring");
-        doc["plugins"] = json!([{
+        plugins.push(json!({
             "id": EXCHANGE_PLUGIN_ID,
             "class": "credential_issuer",
             "source": { "oci": w.plugin_oci },
@@ -319,12 +360,35 @@ pub fn render_config(
                     }
                 }
             },
-        }]);
-        if w.non_production {
-            // The plugin is BUSL: the community license gate needs this (or
-            // an entitling token) or the whole gateway refuses to boot.
-            doc["license"] = json!({ "non_production_use": true });
-        }
+        }));
+        needs_license |= w.non_production;
+    }
+    if let Some(a) = audit_http {
+        plugins.push(json!({
+            "id": AUDIT_HTTP_PLUGIN_ID,
+            "class": "audit_sink",
+            "source": { "oci": a.plugin_oci },
+            // It dials identity's ingest door off-pod.
+            "granted_capabilities": ["network_outbound"],
+            "config": {
+                "url": a.ingest_url,
+                "token": format!("${{env.{AUDIT_COLLECTOR_TOKEN_ENV}}}"),
+                "timeout_ms": 5000,
+                "max_retries": 2,
+                "max_batch_events": 256,
+            },
+        }));
+        needs_license |= a.non_production;
+    }
+    if !plugins.is_empty() {
+        doc["plugins"] = Value::Array(plugins);
+    }
+    if needs_license {
+        // The plugins are BUSL: the community license gate needs this (or an
+        // entitling token) or the whole gateway refuses to boot.
+        doc["license"] = json!({ "non_production_use": true });
+    }
+    if any_obo {
         // Partition the HOST credential cache per raw bearer (mcpg keys on
         // the resolved subject by default): without this, two bearers
         // sharing a `sub` would share the cached upstream credential even
@@ -362,6 +426,7 @@ fn meta(ns: &str, org: &str, owner: &OwnerReference) -> ObjectMeta {
 }
 
 /// The tenant gateway Deployment. Pure.
+#[allow(clippy::too_many_arguments)]
 pub fn desired_deployment(
     ns: &str,
     org: &str,
@@ -369,9 +434,27 @@ pub fn desired_deployment(
     entries: &[FederationEntry],
     token_refs: &[(String, agent_api::SecretKeyRef)],
     audit_shipper: Option<&str>,
+    // The ingest-token Secret name when the HTTP audit sink is used — its
+    // `token` key is mounted as `AUDIT_COLLECTOR_TOKEN` on the GATEWAY
+    // container (the plugin config references it), and no shipper sidecar runs.
+    audit_http_token_secret: Option<&str>,
     owner: &OwnerReference,
 ) -> Deployment {
     let mut env: Vec<EnvVar> = Vec::new();
+    if let Some(secret) = audit_http_token_secret {
+        env.push(EnvVar {
+            name: AUDIT_COLLECTOR_TOKEN_ENV.to_string(),
+            value_from: Some(EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: secret.to_string(),
+                    key: "token".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
     for (entry, r) in token_refs {
         env.push(EnvVar {
             name: federation_token_env(entry),
@@ -679,24 +762,24 @@ pub async fn ensure_tenant_gateway(
     };
 
     let pp = PatchParams::apply(FIELD_MANAGER).force();
-    let cm = ConfigMap {
-        metadata: meta(ns, org, owner),
-        data: Some(BTreeMap::from([(
-            "config.yaml".to_string(),
-            render_config(&entries, tier.as_ref(), obo.as_ref()),
-        )])),
-        ..Default::default()
-    };
-    let cms: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), ns);
-    cms.patch(TENANT_GATEWAY_NAME, &pp, &Patch::Apply(&cm))
-        .await?;
 
-    // The audit shipper (P7-3): mint the ingest token FIRST (the sidecar
-    // mounts its Secret), every reconcile — stateless EdDSA, and a fresh
-    // mint heals an identity provider-key restart. Mint failure ⇒ ship
-    // without the sidecar this round (audit stays pod-local, warned).
-    let mut shipper = ctx.tenant_mcpg.audit_shipper_image.clone();
-    if shipper.is_some() {
+    // Audit off-pod (P7-3): the HTTP sink (the gateway ships its own events)
+    // SUPERSEDES the file-tailing shipper sidecar when its plugin is
+    // configured. Either reads the same operator-minted ingest token — minted
+    // every reconcile (stateless EdDSA; a fresh mint heals an identity
+    // provider-key restart) and BEFORE the config is rendered, so the http-sink
+    // plugin is only declared when its `${env.AUDIT_COLLECTOR_TOKEN}` will
+    // actually resolve (an unresolved env would fail the gateway's config load).
+    let want_http = ctx.tenant_mcpg.audit_http_plugin_oci.is_some() && ctx.identity.url.is_some();
+    let want_shipper = !want_http && ctx.tenant_mcpg.audit_shipper_image.is_some();
+    let mut audit_http: Option<AuditHttpWiring> = None;
+    let mut shipper = ctx
+        .tenant_mcpg
+        .audit_shipper_image
+        .clone()
+        .filter(|_| want_shipper);
+    let mut http_token = false;
+    if want_http || want_shipper {
         match crate::identity::mint_ingest_token(&ctx.identity_http, &ctx.identity, ns).await {
             Ok(token) => {
                 use k8s_openapi::api::core::v1::Secret;
@@ -718,13 +801,41 @@ pub async fn ensure_tenant_gateway(
                 secrets
                     .patch(AUDIT_SHIPPER_SECRET, &pp, &Patch::Apply(&desired))
                     .await?;
+                if want_http {
+                    let identity_url = ctx.identity.url.clone().expect("want_http implies url");
+                    audit_http = Some(AuditHttpWiring {
+                        plugin_oci: ctx
+                            .tenant_mcpg
+                            .audit_http_plugin_oci
+                            .clone()
+                            .expect("want_http implies plugin"),
+                        ingest_url: format!(
+                            "{}/v1/audit/ingest",
+                            identity_url.trim_end_matches('/')
+                        ),
+                        non_production: ctx.tenant_mcpg.non_production_license,
+                    });
+                    http_token = true;
+                }
             }
             Err(e) => {
-                tracing::warn!(ns, error = %e, "audit-shipper token mint failed; audit stays pod-local this round");
+                tracing::warn!(ns, error = %e, "audit ingest token mint failed; audit stays pod-local this round");
                 shipper = None;
             }
         }
     }
+
+    let cm = ConfigMap {
+        metadata: meta(ns, org, owner),
+        data: Some(BTreeMap::from([(
+            "config.yaml".to_string(),
+            render_config(&entries, tier.as_ref(), obo.as_ref(), audit_http.as_ref()),
+        )])),
+        ..Default::default()
+    };
+    let cms: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), ns);
+    cms.patch(TENANT_GATEWAY_NAME, &pp, &Patch::Apply(&cm))
+        .await?;
 
     let deploy = desired_deployment(
         ns,
@@ -733,6 +844,11 @@ pub async fn ensure_tenant_gateway(
         &entries,
         &token_refs,
         shipper.as_deref(),
+        if http_token {
+            Some(AUDIT_SHIPPER_SECRET)
+        } else {
+            None
+        },
         owner,
     );
     let deploys: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
@@ -814,6 +930,7 @@ mod tests {
             ],
             None,
             None,
+            None,
         );
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert!(
@@ -860,7 +977,7 @@ mod tests {
             issuer: "http://agentctl-identity.agentctl-system".into(),
             audience: gateway_audience("org-acme"),
         };
-        let yaml = render_config(&[entry("state", &["state.*"])], Some(&tier), None);
+        let yaml = render_config(&[entry("state", &["state.*"])], Some(&tier), None, None);
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(
             doc["gateway"]["server"]["trust_subject_header"],
@@ -894,6 +1011,7 @@ mod tests {
             &[e, entry("state", &["state.*"])],
             Some(&test_tier()),
             Some(&test_obo()),
+            None,
         );
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         let feds = doc["mcp"]["federations"].as_sequence().unwrap();
@@ -942,13 +1060,19 @@ mod tests {
             &[e.clone(), entry("state", &["state.*"])],
             None,
             Some(&test_obo()),
+            None,
         );
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(doc["mcp"]["federations"].as_sequence().unwrap().len(), 1);
         assert!(doc.get("plugins").is_none());
         assert!(doc.get("license").is_none());
         // Verified but unwired: same drop.
-        let yaml = render_config(&[e, entry("state", &["state.*"])], Some(&test_tier()), None);
+        let yaml = render_config(
+            &[e, entry("state", &["state.*"])],
+            Some(&test_tier()),
+            None,
+            None,
+        );
         let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(doc["mcp"]["federations"].as_sequence().unwrap().len(), 1);
         assert!(doc.get("plugins").is_none());

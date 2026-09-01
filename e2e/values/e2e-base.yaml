@@ -89,8 +89,9 @@ tenantMcpg:
   # bite it). BUSL: the license gate passes on non_production_use in e2e.
   exchangePlugin: "ghcr.io/mcpg-dev/plugins/credential-oauth-token-exchange@sha256:b6b6563b750967afcd68ca857161f27e8c1869155f3f4c4690c39214869e77a8"
   nonProductionLicense: true
-  # P7-3: ship the tenant gateways' audit files into the queryable trail.
-  auditShipperImage: "agentctl/audit-shipper:dev"
+  # P7-3 cutover: the first-class HTTP audit sink (mcpg dev.mcpg.audit.http).
+  # Verified digest; the gateway ships events to identity ingest, no sidecar.
+  auditHttpPlugin: "ghcr.io/mcpg-dev/plugins/audit-http@sha256:83e6b0024224f66c2f92ce5613077c25b5cf6f837565b6801bbab0417472d1bb"
 
 # Identity plane (P1): the identity service (federated OIDC + principal
 # minting) with durable custody in the bundled Postgres. The api-token Secret

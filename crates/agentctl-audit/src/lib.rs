@@ -114,6 +114,84 @@ impl Record {
     }
 }
 
+/// Parse an RFC 3339 timestamp to a Unix second (days-from-civil, no chrono).
+pub fn rfc3339_to_unix(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let y_adj = y - i64::from(mo <= 2);
+    let era = y_adj.div_euclid(400);
+    let yoe = y_adj - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3600 + mi * 60 + sec)
+}
+
+/// Map an **mcpg-native** `AuditEvent` (what the `dev.mcpg.audit.http` sink
+/// POSTs) into an [`Record`]. org/namespace stay empty — the ingest door forces
+/// them from the caller's token. Records already in the `audit/v1` shape
+/// (`schema` = [`SCHEMA`]) are parsed directly and never routed here.
+pub fn map_mcpg_native(v: &serde_json::Value, workload: &str) -> Record {
+    let action = v
+        .get("action")
+        .and_then(|a| a.as_str())
+        .map(|a| {
+            if a.starts_with("mcpg.") {
+                a.to_string()
+            } else {
+                format!("mcpg.{a}")
+            }
+        })
+        .unwrap_or_else(|| "mcpg.raw".to_string());
+    let outcome = match v.get("outcome").and_then(|o| o.as_str()) {
+        Some(o) if o.eq_ignore_ascii_case("success") || o.eq_ignore_ascii_case("ok") => OUTCOME_OK,
+        Some(_) => OUTCOME_REFUSED,
+        None => OUTCOME_OK,
+    };
+    let mut r = Record::new("mcpg", "", "", workload.to_string(), &action, outcome);
+    if let Some(ts) = v
+        .get("occurred_at")
+        .and_then(|t| t.as_str())
+        .and_then(rfc3339_to_unix)
+    {
+        r.ts = ts;
+    }
+    if let Some(sub) = v.pointer("/actor/subject_id").and_then(|s| s.as_str()) {
+        r = r.user(sub.to_string());
+    }
+    // The per-request join key: prefer the caller-forwarded upstream request id
+    // (our x-request-id, echoed by beta.26), else mcpg's own request_id.
+    if let Some(req) = v
+        .get("upstream_request_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| v.get("request_id").and_then(|s| s.as_str()))
+    {
+        r = r.trail(req.to_string());
+    }
+    let mut dims = BTreeMap::new();
+    for (k, ptr) in [
+        ("resource", "/resource"),
+        ("event_id", "/event_id"),
+        ("prev_event_hash", "/prev_event_hash"),
+        ("node_id", "/node_id"),
+        ("trust", "/actor/trust_level"),
+        ("request_id", "/request_id"),
+    ] {
+        if let Some(val) = v.pointer(ptr).and_then(|s| s.as_str()) {
+            dims.insert(k.to_string(), val.to_string());
+        }
+    }
+    r.dims = dims;
+    r
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
