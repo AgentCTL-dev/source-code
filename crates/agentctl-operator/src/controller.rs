@@ -1047,6 +1047,14 @@ async fn compose_document_v2(
         }
     };
 
+    // Bound run-cursor growth for managed agents (U10a): agentd evicts terminal
+    // runs past keep_last; its own default is unbounded, so the platform sets it.
+    // Operator env AGENTCTL_RUN_RETENTION_KEEP_LAST (chart
+    // operator.runRetentionKeepLast, default 1000); 0/unset ⇒ agentd's unbounded.
+    let run_retention_keep_last = std::env::var("AGENTCTL_RUN_RETENTION_KEEP_LAST")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|n| *n > 0);
     let (mut input, shape) = agent_config::v2::from_v2_spec_with_store(
         &v2_spec,
         intel,
@@ -1054,6 +1062,7 @@ async fn compose_document_v2(
         aauth_provider,
         mcp.clone(),
         store,
+        run_retention_keep_last,
     )
     .map_err(|e| e.to_string())?;
 

@@ -70,12 +70,13 @@ pub fn from_v2_spec(
         aauth_provider,
         mcp,
         crate::StoreSelector::File,
+        None,
     )
 }
 
 /// [`from_v2_spec`] with the operator-resolved store placement (`class:
 /// managed` → the state-service selector the operator computes; the compiler
-/// itself cannot know the org/agent prefix).
+/// itself cannot know the org/agent prefix) and the run-retention bound.
 pub fn from_v2_spec_with_store(
     spec: &api::AgentSpec,
     intelligence: Option<ResolvedIntelligence>,
@@ -83,6 +84,7 @@ pub fn from_v2_spec_with_store(
     aauth_provider: Option<String>,
     mcp: Vec<ResolvedMcp>,
     store: crate::StoreSelector,
+    run_retention_keep_last: Option<u32>,
 ) -> Result<(ConfigInput, RenderShape), ConfigError> {
     let shape = derive_shape(spec)?;
     let persona = spec.instruction.as_ref().and_then(|i| i.text.clone());
@@ -145,6 +147,7 @@ pub fn from_v2_spec_with_store(
         serve_a2a: spec.expose.as_ref().map(|e| e.a2a).unwrap_or(true),
         allow_trifecta: false,
         store,
+        run_retention_keep_last,
         generated_workflows: generated,
         webhooks_block,
         streams_block: (!streams.is_empty()).then_some(Value::Object(streams)),

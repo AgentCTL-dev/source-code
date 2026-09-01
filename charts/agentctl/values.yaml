@@ -143,6 +143,12 @@ operator:
   # silent this many seconds (its daemon scales to 0; the next conversation
   # wakes it through the normal provisioning flow). 0 = never park.
   supervisorIdleParkSeconds: 0
+  # Bound run-cursor growth for managed agents: rendered as
+  # store.retention.runs.keep_last on every agent config (agentd evicts terminal
+  # runs past it; its own default is unbounded). A long-lived daemon writes one
+  # run key per loop tick, so without this a managed prefix grows over uptime.
+  # 0 disables (keeps agentd's unbounded default). See docs/v2/known-limits.md.
+  runRetentionKeepLast: 1000
   # Leader-elected singleton: default to the small footprint (was resources.small).
   resources:
     requests: { cpu: 25m, memory: 32Mi }

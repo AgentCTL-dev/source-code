@@ -329,6 +329,12 @@ spec:
             - name: AGENTCTL_STATE_URL
               value: {{ printf "https://agentctl-state.%s.svc.cluster.local.:8787/mcp" $ns | quote }}
             {{- end }}
+            # Bound run-cursor growth (U10a): rendered as
+            # store.retention.runs.keep_last on every managed agent config —
+            # agentd evicts terminal runs past it (its own default is unbounded).
+            # 0 disables (keeps agentd's unbounded default). docs/v2/known-limits.md.
+            - name: AGENTCTL_RUN_RETENTION_KEEP_LAST
+              value: {{ .Values.operator.runRetentionKeepLast | default 1000 | quote }}
             {{- if .Values.tenantMcpg.enabled }}
             # Tenant capability plane (P5-1): the blessed mcpg image every
             # managed org namespace gets its governance proxy from.

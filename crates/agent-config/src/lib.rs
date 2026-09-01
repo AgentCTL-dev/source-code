@@ -206,6 +206,11 @@ pub struct ConfigInput {
     pub allow_trifecta: bool,
     /// Durable-state placement (P3 store classes).
     pub store: StoreSelector,
+    /// Bound run-cursor growth: `store.retention.runs.keep_last` (agentd evicts
+    /// terminal runs past it). `None` ⇒ agentd's default (unbounded). Rendered
+    /// for managed agents so a long-lived daemon's prefix doesn't grow without
+    /// bound over uptime (docs/v2/known-limits.md).
+    pub run_retention_keep_last: Option<u32>,
     /// Generated trigger workflows (P2-8: the v2 `triggers[]` compiler's
     /// output — full dialect-3 documents appended to `workflows`).
     pub generated_workflows: Vec<Value>,
@@ -299,6 +304,7 @@ impl ConfigInput {
             serve_a2a: true,
             allow_trifecta: false,
             store: StoreSelector::File,
+            run_retention_keep_last: None,
             generated_workflows: Vec::new(),
             webhooks_block: None,
             streams_block: None,
@@ -853,6 +859,14 @@ pub fn build(input: &ConfigInput) -> Result<ConfigDoc, ConfigError> {
                 "store".into(),
                 json!({ "kind": "mcp", "prefix": prefix, "mcp": { "server": server } }),
             );
+        }
+    }
+    // Bound run-cursor growth (agentd evicts terminal runs past keep_last). One
+    // key per loop tick accumulates without this; agentd's own default is
+    // unbounded, so the platform sets it for the agents it manages.
+    if let Some(keep) = input.run_retention_keep_last {
+        if let Some(Value::Object(store)) = doc.get_mut("store") {
+            store.insert("retention".into(), json!({ "runs": { "keep_last": keep } }));
         }
     }
     let run_until = if is_daemon(input.mode) {

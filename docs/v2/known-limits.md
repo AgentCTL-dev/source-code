@@ -62,11 +62,19 @@ round-trips a ~400 KiB value through both `state.get` and `read_chunk`, and a
 value through `write_chunk`/`write_commit`. There is no per-value or per-prefix
 read-back size limit.
 
-**Residual — agentd run-cursor GC (data-plane).** The size ceiling is gone; the
-only open item is growth. agentd writes one `run/<workflow>-<runid>` key per
-loop tick and never GCs completed cursors, so a managed prefix grows without
-bound over uptime (orphaned per-pod on every restart; the Agent CR's deletion
-does not purge the store). Only agentd can bound the steady-state size — filed
-as PLAN U10(a). agentd's own restore of a checkpoint *larger than* the (now
-16 MiB) cap would still need chunked reads on its side — U10(b) — but no agentd
-checkpoint approaches that, and raising `ffi_limits` further is a config change.
+**Growth — bounded (was the last residual).** The size ceiling is gone; growth
+is now bounded too. agentd writes one `run/<workflow>-<runid>` key per loop tick
+and its own default retention is unbounded, so a managed prefix used to grow with
+uptime. agentd confirmed (and we live-verified on 1.3.1) that
+`store.retention.runs.keep_last` evicts terminal runs; the operator now renders
+it on every managed agent (default 1000, chart `operator.runRetentionKeepLast`,
+`0` disables), so steady-state size tracks retained + concurrent runs, not
+uptime. That closes PLAN U10(a).
+
+**Data-plane follow-ups (agentd, non-blocking).** (b) agentd is adding a
+write-side bound `store.max_value_bytes` (refuse a checkpoint it couldn't read
+back in one frame) — a backstop that at a 16 MiB cap essentially never fires; we
+render it a few percent under the gateway `ffi_limits` cap once it ships, until
+then unset. And a drift-proof future: mcpg advertising its effective result cap
+on `initialize` (queued with mcpg) so agentd defaults `max_value_bytes` from it
+instead of an operator keeping two numbers in sync.
