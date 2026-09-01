@@ -102,21 +102,31 @@ async fn main() {
     {
         let s3 = state.s3.clone();
         tokio::spawn(async move {
+            // Ensure the bucket at startup AND periodically thereafter: a MinIO
+            // restart on an emptyDir (the dev default) loses the bucket, so a
+            // periodic idempotent re-ensure self-heals it (a bucket we own
+            // returns 409 = success). Backs off fast until first ready, then
+            // re-checks every 30s.
+            let mut ready = false;
             let mut attempts = 0u64;
             loop {
                 match s3.ensure_bucket().await {
                     Ok(()) => {
-                        tracing::info!("artifacts bucket ready");
-                        return;
+                        if !ready {
+                            tracing::info!("artifacts bucket ready");
+                            ready = true;
+                        }
                     }
                     Err(e) => {
                         attempts += 1;
                         if attempts % 10 == 1 {
-                            tracing::warn!(error = %e, attempts, "bucket not ready yet; retrying");
+                            tracing::warn!(error = %e, attempts, "bucket not ready; retrying");
                         }
+                        ready = false;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let backoff = if ready { 30 } else { 3 };
+                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
             }
         });
     }
