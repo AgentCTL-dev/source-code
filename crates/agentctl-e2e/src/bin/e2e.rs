@@ -5647,6 +5647,55 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         bail!("get after delete not absent: {r}");
     }
 
+    // A value LARGER than one mcpg FFI frame (256 KiB) is NOT off-limits: a
+    // single-frame `state.get` errors on the cap, but `state.admin.read_chunk`
+    // streams it back byte-losslessly (docs/v2/known-limits.md). ~400 KiB blob.
+    let big_key = format!("{driver_subj}/oversized");
+    let blob = "z".repeat(400_000);
+    let put = call(
+        40,
+        "state.put",
+        json!({ "key": big_key, "seq": 1, "state": { "blob": blob, "marker": "big" } }),
+    )
+    .await?;
+    if sc(&put)["ok"] != json!(true) {
+        bail!("oversized put refused: {put}");
+    }
+    let capped = call(41, "state.get", json!({ "key": big_key })).await?;
+    if capped["isError"] != json!(true) {
+        bail!("expected state.get of an oversized value to hit the FFI frame cap: {capped}");
+    }
+    let mut text = String::new();
+    let mut offset: u64 = 1;
+    loop {
+        let ch = call(
+            42,
+            "state.admin.read_chunk",
+            json!({ "key": big_key, "offset": offset, "length": 40000 }),
+        )
+        .await?;
+        let part = ch["structuredContent"]["chunk"].as_str().unwrap_or("");
+        let len = ch["structuredContent"]["len"].as_u64().unwrap_or(0);
+        if part.is_empty() {
+            break;
+        }
+        text.push_str(part);
+        offset += part.chars().count() as u64;
+        if offset > len {
+            break;
+        }
+    }
+    let restored: Value = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "reassemble oversized value ({} chars) from chunks",
+            text.len()
+        )
+    })?;
+    if restored["blob"] != json!(blob) || restored["marker"] != json!("big") {
+        bail!("chunked read did not reproduce the oversized value byte-for-byte");
+    }
+    call(43, "state.delete", json!({ "key": big_key })).await?;
+
     // Leg 2: a managed-store agent checkpoints through the SAME service and
     // survives kill -9.
     let ns = &ctx.cfg.ns;

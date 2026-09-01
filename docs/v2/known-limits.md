@@ -1,71 +1,75 @@
 # Known limits
 
-Operational ceilings that are correct-but-bounded, with the evidence that found
-them and the state of the fix. None are data-loss bugs — the durable writes are
-always sound; the limits are on **bulk read-back**.
+Operational ceilings, with the evidence that found them and the state of the
+fix. None are data-loss bugs — the durable writes are always sound.
 
-## State read-back and the 256 KiB FFI frame — MITIGATED
+## State read-back and the 256 KiB FFI frame — FIXED (control plane)
 
 **The limit.** A `dev.mcpg.backend.sql` tool returns its result to the mcpg host
-over one FFI frame with a **262 144-byte (256 KiB) payload cap**. Any tool that
-aggregated a whole key prefix into one result (`state.admin.snapshot`, and the
-`agentctl backup` / `migrate` verbs and the `state-durability` existence check
-that rode it) therefore had an implicit ceiling: you can *write* more state under
-a prefix than you could read back in one call. Over the cap the tool returns a
-tool-execution error, not rows:
+over one FFI frame with a **262 144-byte (256 KiB) payload cap** (an mcpg host
+constant, not configurable from our config). Any read that put a whole prefix —
+or even one large value — into a single result therefore had a ceiling:
+`state.admin.snapshot` / `state.get` over the cap returned a tool-execution
+error, not rows:
 
 ```
 isError: true
 "backend plugin returned an FFI payload of 531159 bytes exceeding the host cap of 262144 bytes"
 ```
 
+The write direction has no such 256 KiB cap — a `state.put` of a 500 KiB value is
+accepted (verified live). It is bounded only by the state gateway's
+`max_request_body_mb: 4`. So a value could be *written* and then be unreadable —
+a real inaccessibility, not just a backup nicety.
+
 **Why a prefix grows.** A `store.class: managed` daemon checkpoints under
-`orgs/<ns>/<agent>/<pod>/…`:
-
-- `manifest/agent`, `context/root` — one per pod, rewritten in place.
-- `run/<workflow>-<runid>` — **one new key per loop tick / run**, and agentd does
-  **not** GC completed run cursors → unbounded over uptime.
-- Keys are namespaced by pod name, so every restart/reschedule orphans the old
-  pod's keys under the shared agent prefix (deleting the Agent CR does not purge
-  the store — checkpoints outlive the workload so `restore`/`migrate` can run
-  against a dead pod).
-
-So the export payload was `O(total checkpoints ever written under the prefix)`.
+`orgs/<ns>/<agent>/<pod>/…`: `manifest`/`context` per pod (rewritten in place),
+plus `run/<workflow>-<runid>` — **one new key per loop tick**, never GC'd, and
+orphaned per-pod on every restart (the Agent CR's deletion does not purge the
+store, so `restore`/`migrate` can run against a dead pod).
 
 **Discovered by** the 2026-09-01 `state-durability` investigation: a reused agent
-name accumulated 302 keys / 531 KiB, the snapshot errored, and the check read the
-null `structuredContent.items` as "no checkpoints" and timed out — which
-initially looked like an agentd checkpoint gap. agentd's checkpointing was
-correct throughout; only the whole-prefix *read-back* blew the frame.
+name accumulated 302 keys / 531 KiB, the snapshot errored, and the null result
+read as "no checkpoints" — which first looked like an agentd checkpoint gap. It
+was not; agentd's writes were correct, only the read-back overflowed the frame.
 
-**Fix — shipped (agentctl-side).**
-- **Keys-only enumeration** — a new `state.admin.list` returns `{key, seq}`
-  *without* the state blob. A key row is ~100 B vs a ~KiB envelope, so the same
-  key count clears the frame by orders of magnitude. The existence check and
-  `migrate`'s zero-loss seq compare use it; both never pull state.
-- **Keyset pagination** — `state.admin.snapshot` (and `state.admin.list`) now
-  take `after` / `limit` and return `next` (the page's last key; null when
-  empty). `agentctl backup` walks pages (`after = next`) until an empty page and
-  concatenates — an arbitrarily large prefix backs up over many under-cap frames.
-  `limit` defaults to 100 for snapshot (conservative for the ~KiB envelopes) and
-  1000 for the keys-only list.
-- **Errors surface** — both the apiserver's state client and the e2e helper now
-  fail on `result.isError` instead of reading a capped payload as an empty
-  result (the silent mode that started the whole investigation).
+**Fix — shipped, agentctl-side, verified live on `backend-sql:protocol-1`.**
+Two independent axes, so **no value size and no prefix size is off-limits**:
 
-Verified live against the real `backend-sql:protocol-1` plugin: a 552 KiB /
-400-key prefix backs up completely (all 400 rows over multiple pages), keys-only
-lists it in one small page, and a deliberately over-cap single page still errors.
+- **Across keys — keyset pagination.** `state.admin.snapshot` / `state.admin.list`
+  take `after` / `limit` and return `next`; a walk (`after = next`) pages a whole
+  prefix over many under-cap frames. `state.admin.list` is keys-only
+  (`{key, seq}`, no state blob), so existence checks and `migrate`'s seq compare
+  never pull state at all.
+- **Within one value — chunked read.** `state.admin.read_chunk {key, offset,
+  length}` returns `substring(state::text …)` + total `len`; concatenating the
+  ordered char-slices reproduces the value byte-for-byte (md5-verified), then it
+  parses as JSON. A single value of *any* size streams back over as many
+  under-cap frames as it needs.
+- **The verbs use both.** `agentctl backup`'s `snapshot_all` batches via
+  paginated snapshot, HALVES `limit` when a page is over the frame, and — for one
+  value too big even at `limit 1` — streams it with `read_chunked`. `restore`
+  UPSERTs the backup in batches under the gateway body. The apiserver state
+  client and the e2e helper now surface `result.isError` instead of reading a
+  capped payload as empty.
 
-**One residual invariant.** A *single* state envelope must be < the 256 KiB frame
-(agentd's are ~1–6 KiB) — pagination bounds a page's row *count*, not one row's
-size. This holds for agentd; a backend that stored a multi-hundred-KiB envelope
-would need byte-budgeted paging instead.
+Verified: a 552 KiB / 400-key prefix backs up completely; a prefix holding a
+single **700 KiB** value (2.7× the frame) backs up, restores, and comes back
+byte-intact; the `state-durability` e2e round-trips a ~400 KiB value through
+`read_chunk`. There is no longer a per-value or per-prefix read-back size limit
+on the control-plane path.
 
-**Still open — agentd-side (upstream ask).** Pagination makes the read-back
-tolerate unbounded growth; it does not stop the store from growing. **Run-cursor
-GC in agentd** (retain only live / last-N run cursors) is the only fix that keeps
-a prefix's steady-state size bounded by *concurrent* runs rather than uptime.
-Tracked as an upstream agentd ask (docs/v2/PLAN.md, U-series); until it lands a
-managed agent's prefix grows one key per tick, and backup/list cost grows with
-it (correctly, just not for free).
+**Residual A — the write/restore body (configurable, not the FFI frame).** A
+single value must fit the state gateway's request body (`max_request_body_mb`,
+default 4 MiB) to be written or restored. This is the SAME channel agentd writes
+through, so it is not an agentctl-imposed limit: if agentd could write the
+value, we can back it up and restore it. Raise `max_request_body_mb` to lift it;
+values beyond a single body would need chunked *write* (staged append), which
+nothing today requires.
+
+**Residual B — agentd's own runtime `state.get` (data-plane).** agentd restores a
+checkpoint at boot with a single `state.get`, which is one frame — so a
+checkpoint agentd itself wrote larger than 256 KiB (a big `context`, say) would
+fail agentd's own restore. Only agentd can fix this (chunk its restore reads, or
+cap an individual checkpoint's size); tracked with the run-cursor GC ask (PLAN
+U10). agentctl's backup/migrate of such a value already works via `read_chunk`.

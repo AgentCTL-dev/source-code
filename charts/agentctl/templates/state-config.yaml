@@ -366,6 +366,46 @@ data:
                 read_only: true
                 timeout_ms: 15000
 
+          - name: state.admin.read_chunk
+            title: "Single-value chunked read"
+            description: >-
+              Read a slice of ONE key's state text — `substring(state::text FROM
+              :offset FOR :length)` (offset 1-based, length in CHARACTERS) plus
+              the value's total `len`. This is how a value LARGER than the
+              256 KiB FFI frame is read back: stream it across many under-cap
+              chunks and concatenate the ordered slices (byte-lossless — verified
+              by md5), then parse the whole as JSON. `length` MUST keep one frame
+              under the cap; 40000 chars is safe even for 4-byte code points plus
+              JSON re-escaping (schema caps it at 60000). `len` is null for an
+              absent key. Unfenced admin (docs/v2/known-limits.md).
+            annotations: { read_only: true, idempotent: true, open_world: false }
+            input_schema:
+              type: object
+              required: [key, offset, length]
+              properties:
+                key: { type: string, minLength: 1, maxLength: 1024 }
+                offset: { type: integer, minimum: 1 }
+                length: { type: integer, minimum: 1, maximum: 60000 }
+                _meta: { type: object }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                # CAST offset/length to int — the plugin binds params as text
+                # (same reason state.get casts :seq); substring(text FROM int FOR
+                # int) will not resolve against text-typed params otherwise.
+                sql: |
+                  SELECT substring(state::text FROM CAST(:offset AS int) FOR CAST(:length AS int)) AS chunk,
+                         length(state::text) AS len
+                  FROM agent_state
+                  WHERE key = :key
+                params: [key, offset, length]
+                row_mode: single
+                read_only: true
+                timeout_ms: 15000
+
           - name: state.admin.restore
             title: "Prefix restore (import)"
             description: >-

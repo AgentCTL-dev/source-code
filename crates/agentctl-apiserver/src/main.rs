@@ -884,15 +884,11 @@ async fn lifecycle_verb(
             let items = serde_json::from_slice::<Value>(body)
                 .ok()
                 .and_then(|v| v.get("items").cloned())
+                .and_then(|v| v.as_array().cloned())
                 .ok_or("restore needs a JSON body {\"items\": [...]} from `agentctl backup`")?;
-            let sc = state_admin_call(
-                &state.na,
-                url,
-                "state.admin.restore",
-                json!({ "items": items }),
-            )
-            .await?;
-            let n = sc.get("restored").and_then(Value::as_i64).unwrap_or(0);
+            // Batch under the state gateway's request-body limit so a large
+            // backup restores completely (docs/v2/known-limits.md).
+            let n = restore_batched(&state.na, url, &items).await?;
             Ok((format!("{n} rows restored"), Value::Null))
         }
         "reset" => {
@@ -1145,10 +1141,53 @@ async fn state_admin_call(
         .ok_or_else(|| format!("state {tool}: no structuredContent in response"))
 }
 
-/// Walk `state.admin.snapshot` keyset pages and concatenate every {key, seq,
-/// state} row under `prefix`. The whole prefix cannot ride one FFI frame
-/// (256 KiB host cap), so a backup pages it — `next` is the resume cursor, an
-/// empty page ends the walk (docs/v2/known-limits.md).
+/// True when a state tool failed on mcpg's per-result FFI frame cap.
+fn is_frame_cap(err: &str) -> bool {
+    err.contains("exceeding the host cap") || err.contains("FFI payload")
+}
+
+/// The chunk size (characters) for `state.admin.read_chunk`. Kept well under the
+/// FFI frame even for 4-byte code points + JSON re-escaping of the returned
+/// slice (the tool's schema caps `length` at 60000).
+const READ_CHUNK_CHARS: u64 = 40_000;
+
+/// Read ONE key's full state by streaming `state.admin.read_chunk` slices and
+/// reassembling them — the byte-lossless path for a value LARGER than one FFI
+/// frame (docs/v2/known-limits.md). Concatenated char-slices reproduce
+/// `state::text` exactly; parse the whole as JSON.
+async fn read_chunked(http: &reqwest::Client, url: &str, key: &str) -> Result<Value, String> {
+    let mut text = String::new();
+    let mut offset: u64 = 1;
+    loop {
+        let sc = state_admin_call(
+            http,
+            url,
+            "state.admin.read_chunk",
+            json!({ "key": key, "offset": offset, "length": READ_CHUNK_CHARS }),
+        )
+        .await?;
+        let part = sc.get("chunk").and_then(Value::as_str).unwrap_or("");
+        let len = sc.get("len").and_then(Value::as_u64).unwrap_or(0);
+        if part.is_empty() {
+            break;
+        }
+        text.push_str(part);
+        offset += part.chars().count() as u64;
+        if offset > len {
+            break;
+        }
+    }
+    if text.is_empty() {
+        return Err(format!("read_chunk {key}: value absent or empty"));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("reassemble state for {key}: {e}"))
+}
+
+/// Walk a whole prefix and return every {key, seq, state} row. The export cannot
+/// ride one FFI frame (256 KiB host cap), so it is ADAPTIVE: batch via
+/// keyset-paginated `state.admin.snapshot`, halving `limit` when a page is over
+/// the frame; a single key too large even at limit 1 is streamed via
+/// `read_chunked`. No value size is off-limits (docs/v2/known-limits.md).
 async fn snapshot_all(
     http: &reqwest::Client,
     url: &str,
@@ -1157,27 +1196,101 @@ async fn snapshot_all(
     let mut out = Vec::new();
     let mut after: Option<String> = None;
     loop {
-        let mut args = json!({ "prefix": prefix });
-        if let Some(a) = &after {
-            args["after"] = json!(a);
-        }
-        let sc = state_admin_call(http, url, "state.admin.snapshot", args).await?;
-        let items = sc
-            .get("items")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if items.is_empty() {
-            break;
-        }
-        let next = sc.get("next").and_then(Value::as_str).map(str::to_string);
-        out.extend(items);
-        match next {
-            Some(n) => after = Some(n),
-            None => break,
+        let mut limit: u64 = 100;
+        let page = loop {
+            let mut args = json!({ "prefix": prefix, "limit": limit });
+            if let Some(a) = &after {
+                args["after"] = json!(a);
+            }
+            match state_admin_call(http, url, "state.admin.snapshot", args).await {
+                Ok(sc) => break Some(sc),
+                Err(e) if is_frame_cap(&e) && limit > 1 => limit /= 2,
+                // limit == 1 and STILL over the frame: one oversized value.
+                Err(e) if is_frame_cap(&e) => break None,
+                Err(e) => return Err(e),
+            }
+        };
+        match page {
+            Some(sc) => {
+                let items = sc
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if items.is_empty() {
+                    break;
+                }
+                let next = sc.get("next").and_then(Value::as_str).map(str::to_string);
+                out.extend(items);
+                match next {
+                    Some(n) => after = Some(n),
+                    None => break,
+                }
+            }
+            None => {
+                // Identify the offending key (keys-only list always fits) and
+                // stream its state in chunks, then continue past it.
+                let mut largs = json!({ "prefix": prefix, "limit": 1 });
+                if let Some(a) = &after {
+                    largs["after"] = json!(a);
+                }
+                let listed = state_admin_call(http, url, "state.admin.list", largs).await?;
+                let it = listed
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.first())
+                    .cloned()
+                    .ok_or_else(|| "oversized-key isolation: list returned no key".to_string())?;
+                let key = it
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .ok_or("list item missing key")?
+                    .to_string();
+                let seq = it.get("seq").and_then(Value::as_i64).unwrap_or(0);
+                let state = read_chunked(http, url, &key).await?;
+                out.push(json!({ "key": key, "seq": seq, "state": state }));
+                after = Some(key);
+            }
         }
     }
     Ok(out)
+}
+
+/// UPSERT `items` in batches whose serialized size stays under the state
+/// gateway's request-body limit, summing the restored-row counts. A large
+/// backup (from [`snapshot_all`]) thus restores completely; a single item
+/// larger than the budget still goes alone (the write path tolerates it up to
+/// the gateway body — far above any agentd checkpoint).
+async fn restore_batched(
+    http: &reqwest::Client,
+    url: &str,
+    items: &[Value],
+) -> Result<i64, String> {
+    // Well under the state gateway's `max_request_body_mb: 4`.
+    const BUDGET: usize = 3_000_000;
+    let mut total = 0i64;
+    let mut batch: Vec<Value> = Vec::new();
+    let mut bytes = 0usize;
+    for it in items {
+        let sz = serde_json::to_string(it).map(|s| s.len()).unwrap_or(0);
+        if !batch.is_empty() && bytes + sz > BUDGET {
+            total += restore_call(http, url, &batch).await?;
+            batch.clear();
+            bytes = 0;
+        }
+        batch.push(it.clone());
+        bytes += sz;
+    }
+    if !batch.is_empty() {
+        total += restore_call(http, url, &batch).await?;
+    }
+    Ok(total)
+}
+
+/// One `state.admin.restore` call for a batch of items.
+async fn restore_call(http: &reqwest::Client, url: &str, batch: &[Value]) -> Result<i64, String> {
+    let sc = state_admin_call(http, url, "state.admin.restore", json!({ "items": batch })).await?;
+    Ok(sc.get("restored").and_then(Value::as_i64).unwrap_or(0))
 }
 
 /// One streamable-HTTP POST to the state gateway, returning the last
