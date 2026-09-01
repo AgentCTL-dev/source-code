@@ -53,8 +53,9 @@ impl IdentityConfig {
     }
 }
 
-/// Mint the audit-shipper's ingest token (P7-3): a workload JWT with the
-/// dedicated `agentctl:audit-ingest` audience, sub `<ns>/audit-shipper` —
+/// Mint the audit ingest token (P7-3): a workload JWT with the dedicated
+/// `agentctl:audit-ingest` audience, sub `<ns>/mcpg` (the tenant gateway that
+/// emits the events) —
 /// identity's ingest door forces org attribution from it. Re-minted every
 /// org reconcile (stateless EdDSA; a fresh token also heals an identity
 /// provider-key restart).
@@ -69,7 +70,7 @@ pub async fn mint_ingest_token(
     let mut req = http
         .post(format!("{}/admin/mcpg-token", url.trim_end_matches('/')))
         .json(&serde_json::json!({
-            "workload": format!("{ns}/audit-shipper"),
+            "workload": format!("{ns}/mcpg"),
             "audience": "agentctl:audit-ingest",
             "ttl": 7 * 24 * 3600,
         }));

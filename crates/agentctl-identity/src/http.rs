@@ -475,13 +475,14 @@ async fn connections_poll(
 
 // -- audit ingest (P7-3) ------------------------------------------------------
 
-/// `POST /v1/audit/ingest` — the shipper door for audit records born outside
+/// `POST /v1/audit/ingest` — the door for audit records born outside
 /// our PG (the tenant mcpg's hash-chained file sink). SELF-AUTHENTICATING:
 /// the bearer is one of our own EdDSA workload JWTs with the dedicated
-/// `agentctl:audit-ingest` audience (operator-minted into the shipper's
+/// `agentctl:audit-ingest` audience (operator-minted into the emitter's
 /// Secret) — same trust root as every other verifier. Batch of `audit/v1`
-/// records, pre-mapped by the shipper; component is FORCED from the token's
-/// subject namespace so a shipper cannot impersonate another org's stream.
+/// records (audit/v1 verbatim, or an mcpg-native event mapped server-side);
+/// component is FORCED from the token's subject namespace so an emitter cannot
+/// impersonate another org's stream.
 async fn audit_ingest(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -508,7 +509,7 @@ async fn audit_ingest(
             "token audience is not agentctl:audit-ingest",
         ));
     }
-    // sub = "<namespace>/<shipper>": the org boundary the records must stay in.
+    // sub = "<namespace>/<emitter>": the org boundary the records must stay in.
     let sub = claims.get("sub").and_then(Value::as_str).unwrap_or("");
     let ns = sub.split('/').next().unwrap_or("");
     if ns.is_empty() {

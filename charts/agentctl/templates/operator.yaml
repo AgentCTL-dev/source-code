@@ -345,15 +345,9 @@ spec:
               value: "true"
             {{- end }}
             {{- with .Values.tenantMcpg.auditHttpPlugin }}
-            # P7-3 cutover: the first-class dev.mcpg.audit.http sink plugin.
-            # When set, each tenant gateway ships its own AuditEvents to
-            # identity's ingest door and the shipper sidecar is dropped.
+            # P7-3: the first-class dev.mcpg.audit.http sink plugin — each tenant
+            # gateway ships its own AuditEvents to identity's ingest door.
             - name: AGENTCTL_MCPG_AUDIT_HTTP_PLUGIN
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.tenantMcpg.auditShipperImage }}
-            # P7-3 (superseded by auditHttpPlugin): the file-tailing sidecar.
-            - name: AGENTCTL_AUDIT_SHIPPER_IMAGE
               value: {{ . | quote }}
             {{- end }}
             {{- end }}

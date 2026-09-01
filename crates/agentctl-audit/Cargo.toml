@@ -16,17 +16,9 @@ tracing = "0.1"
 deadpool-postgres = "0.14"
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 
-# The shipper bin (tails a foreign audit file — the tenant mcpg's — and
-# POSTs mapped records to identity's ingest door). Plain in-cluster HTTP.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# Workspace feature-unification pulls reqwest's manual-roots TLS in — a
-# crypto provider must be installed before any Client builds.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Async runtime for the PG sink (deadpool/tokio-postgres) + the unit tests.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-[[bin]]
-name = "agentctl-audit-shipper"
-path = "src/bin/shipper.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -591,14 +591,10 @@ tenantMcpg:
   nonProductionLicense: false
   # P7-3 audit pipeline. Prefer the FIRST-CLASS HTTP sink: a digest-pinned OCI
   # ref of mcpg's `dev.mcpg.audit.http` plugin. When set, each tenant gateway
-  # ships its own AuditEvents to identity's ingest door and the shipper sidecar
-  # is dropped (the mapping to audit/v1 happens server-side in identity). BUSL —
+  # ships its own AuditEvents to identity's ingest door (off-pod audit)
+  # with the mapping to audit/v1 done server-side in identity. BUSL —
   # needs nonProductionLicense (dev/e2e) or an entitling license.
   auditHttpPlugin: ""
-  # LEGACY fallback (superseded by auditHttpPlugin): the shipper sidecar image
-  # (tails the tenant gateway's audit file into identity's ingest door; empty =
-  # audit stays pod-local in the file sink).
-  auditShipperImage: ""
 
 # The sandbox cell (P5-5): sandbox.run executes code in single-use,
 # capability-stripped pods in a network-denied cell namespace. Register it in

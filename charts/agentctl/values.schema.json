@@ -632,10 +632,6 @@
     },
     "auditHttpPlugin": {
      "type": "string"
-    },
-    "auditShipperImage": {
-     "type": "string",
-     "description": "P7-3: audit-shipper sidecar image tailing each tenant gateway's audit file into identity's ingest door; empty disables shipping."
     }
    }
   },
