@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 [package]
 name = "agentctl-sandbox"
-version = "1.3.0"
+version.workspace = true
 description = "agentctl sandbox cell: the sandbox.* MCP backend — code runs in single-use, capability-stripped pods inside a network-denied cell namespace (warm pool for latency; RuntimeClass/Kata optional), with capped artifacts I/O. BUSL-1.1 control plane."
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "agent-api"
-version = "1.3.0"
+version.workspace = true
 description = "agentctl CRD types (Agent, AgentFleet, ModelPool) as kube-rs CustomResources."
 edition.workspace = true
 rust-version.workspace = true

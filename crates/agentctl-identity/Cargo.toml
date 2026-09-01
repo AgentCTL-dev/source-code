@@ -7,7 +7,7 @@
 # RFC 8693 exchange and the AAuth provider role land on this same skeleton.
 [package]
 name = "agentctl-identity"
-version = "1.3.0"
+version.workspace = true
 description = "agentctl identity service: OIDC federation, token validation, principal minting, grant custody (RFC 0028)"
 edition.workspace = true
 rust-version.workspace = true

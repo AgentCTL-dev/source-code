@@ -39,6 +39,7 @@ exclude = [
 ]
 
 [workspace.package]
+version = "0.1.0"   # v2 platform baseline (alpha API: agentctl.dev/v1alpha2)
 edition = "2021"
 rust-version = "1.89"   # resolved deps (enum-ordinalize 1.89, kube 4.0.0 1.88) require it
 license = "Apache-2.0"

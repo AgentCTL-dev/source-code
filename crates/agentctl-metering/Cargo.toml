@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "agentctl-metering"
-version = "1.3.0"
+version.workspace = true
 description = "agentctl billing-ready metering: the versioned usage-event vocabulary (attributed {org, namespace, workload, user}), the durable Postgres sink, and the period aggregation/export the invoice pipeline reads. Apache-2.0 — the vocabulary is a public contract."
 edition.workspace = true
 rust-version.workspace = true

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "agentctl-audit"
-version = "1.3.0"
+version.workspace = true
 description = "agentctl audit trail: the versioned audit-record vocabulary (attributed {org, namespace, workload, user} with trail/task correlation), the durable Postgres sink every control-plane component writes, and the filtered query the management API serves. Apache-2.0 — the record shape is a public contract."
 edition.workspace = true
 rust-version.workspace = true

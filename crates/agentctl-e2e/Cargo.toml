@@ -14,7 +14,7 @@
 # (no openssl, no aws-lc-rs, no C toolchain) — matching the rest of agentctl.
 [package]
 name = "agentctl-e2e"
-version = "1.3.0"
+version = "0.1.0"
 description = "agentctl end-to-end and scale/resource benchmark harness: drives every plane against a real conformant agent (agentd) on kind, asserts via /metrics and CR-status oracles, and quantifies per-agent overhead, control-plane scaling trends, coordination throughput, and scale latency. Excluded from the workspace; needs a cluster to run."
 edition = "2021"
 rust-version = "1.89"
@@ -61,6 +61,8 @@ jsonwebtoken = "9"
 # workload key + RFC 9421 hwk/jwt signing, same primitives the stack links.
 ring = "0.17"
 base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
 # `rustls-tls` is ring-backed in reqwest 0.12 (→ no aws-lc-rs, no C toolchain).
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",

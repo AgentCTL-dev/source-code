@@ -11,8 +11,8 @@ description: >-
   repository yet — the operator's tenant-mcpg wiring lands in the capability
   plane wave and will consume whichever mcpg release is installed).
 type: application
-version: 1.3.0            # chart version
-appVersion: "1.3.0"
+version: 0.1.0            # chart version
+appVersion: "0.1.0"
 keywords: [agents, ai, operator, control-plane, a2a, mcp]
 home: https://github.com/AgentCTL-dev/source-code
 sources:
