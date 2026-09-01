@@ -873,15 +873,10 @@ async fn lifecycle_verb(
         }
         "backup" => {
             let url = state_url(state)?;
-            let sc = state_admin_call(
-                &state.na,
-                url,
-                "state.admin.snapshot",
-                json!({ "prefix": agent_prefix(ns, name) }),
-            )
-            .await?;
-            let items = sc.get("items").cloned().unwrap_or_else(|| json!([]));
-            let n = items.as_array().map(Vec::len).unwrap_or(0);
+            // Page the whole prefix (keyset walk) — a large managed agent's
+            // export exceeds one FFI frame (docs/v2/known-limits.md).
+            let items = snapshot_all(&state.na, url, &agent_prefix(ns, name)).await?;
+            let n = items.len();
             Ok((format!("{n} checkpoint rows"), json!({ "items": items })))
         }
         "restore" => {
@@ -1057,28 +1052,42 @@ async fn wait_running_pod(
     ))
 }
 
-/// `state.admin.snapshot` → a `{key: seq}` map for zero-loss comparison.
+/// Walk `state.admin.list` (keys-only) keyset pages → a `{key: seq}` map for the
+/// zero-loss migrate compare. Keys-only stays tiny and paginated, so it never
+/// trips the snapshot FFI frame cap regardless of how much state a prefix holds.
 async fn snapshot_seqs(
     http: &reqwest::Client,
     url: &str,
     prefix: &str,
 ) -> Result<std::collections::BTreeMap<String, i64>, String> {
-    let sc = state_admin_call(
-        http,
-        url,
-        "state.admin.snapshot",
-        json!({ "prefix": prefix }),
-    )
-    .await?;
     let mut m = std::collections::BTreeMap::new();
-    if let Some(items) = sc.get("items").and_then(Value::as_array) {
-        for it in items {
+    let mut after: Option<String> = None;
+    loop {
+        let mut args = json!({ "prefix": prefix });
+        if let Some(a) = &after {
+            args["after"] = json!(a);
+        }
+        let sc = state_admin_call(http, url, "state.admin.list", args).await?;
+        let items = sc
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if items.is_empty() {
+            break;
+        }
+        let next = sc.get("next").and_then(Value::as_str).map(str::to_string);
+        for it in &items {
             if let (Some(k), Some(s)) = (
                 it.get("key").and_then(Value::as_str),
                 it.get("seq").and_then(Value::as_i64),
             ) {
                 m.insert(k.to_string(), s);
             }
+        }
+        match next {
+            Some(n) => after = Some(n),
+            None => break,
         }
     }
     Ok(m)
@@ -1121,9 +1130,54 @@ async fn state_admin_call(
     if let Some(err) = body.pointer("/error") {
         return Err(format!("state {tool}: {err}"));
     }
+    // A tool-execution error is a SUCCESSFUL JSON-RPC response with
+    // result.isError — surface it (e.g. the 256 KiB FFI snapshot payload cap)
+    // instead of reading the null structuredContent as an empty result.
+    if body.pointer("/result/isError").and_then(Value::as_bool) == Some(true) {
+        let msg = body
+            .pointer("/result/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or("tool execution error");
+        return Err(format!("state {tool}: {msg}"));
+    }
     body.pointer("/result/structuredContent")
         .cloned()
         .ok_or_else(|| format!("state {tool}: no structuredContent in response"))
+}
+
+/// Walk `state.admin.snapshot` keyset pages and concatenate every {key, seq,
+/// state} row under `prefix`. The whole prefix cannot ride one FFI frame
+/// (256 KiB host cap), so a backup pages it — `next` is the resume cursor, an
+/// empty page ends the walk (docs/v2/known-limits.md).
+async fn snapshot_all(
+    http: &reqwest::Client,
+    url: &str,
+    prefix: &str,
+) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut args = json!({ "prefix": prefix });
+        if let Some(a) = &after {
+            args["after"] = json!(a);
+        }
+        let sc = state_admin_call(http, url, "state.admin.snapshot", args).await?;
+        let items = sc
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if items.is_empty() {
+            break;
+        }
+        let next = sc.get("next").and_then(Value::as_str).map(str::to_string);
+        out.extend(items);
+        match next {
+            Some(n) => after = Some(n),
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 /// One streamable-HTTP POST to the state gateway, returning the last

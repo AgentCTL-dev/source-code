@@ -258,17 +258,84 @@ data:
 
           # --- admin (P3-2): snapshot/restore a per-agent prefix -----------
           - name: state.admin.snapshot
-            title: "Prefix snapshot (export)"
+            title: "Prefix snapshot (export, keyset-paginated)"
             description: >-
-              Export every {key, seq, state} under a prefix as a single JSON
-              array — the durable backup unit for `agentctl backup` and the
-              input to state.admin.restore. Read-only.
+              Export {key, seq, state} rows under a prefix as one ordered PAGE —
+              the durable backup unit for `agentctl backup` and the input to
+              state.admin.restore. The whole result rides one mcpg FFI frame
+              (256 KiB host cap), so a large prefix MUST be walked: return keys
+              strictly after `after`, ordered by key, at most `limit`; `next` is
+              the page's last key (null when the page is empty). Pass `next`
+              back as `after` to continue; an empty page ends the walk. `limit`
+              defaults to 100 — conservative for the ~KiB agentd state envelopes,
+              so one page stays under the frame cap (a single envelope must be
+              < the cap, which agentd's are). See docs/v2/known-limits.md.
             annotations: { read_only: true, idempotent: true, open_world: false }
             input_schema:
               type: object
               required: [prefix]
               properties:
                 prefix: { type: string, minLength: 1, maxLength: 1024 }
+                after: { type: string, minLength: 1, maxLength: 1024, description: "Keyset cursor: return keys strictly greater than this." }
+                limit: { type: integer, minimum: 1, maximum: 1000 }
+                _meta: { type: object }
+              additionalProperties: false
+            backend:
+              kind: sql
+              driver: postgres
+              url: "${env.DATABASE_URL}"
+              query:
+                # Keyset page (seek method): `key > :after` beats OFFSET at depth,
+                # and `next = max(key)` is the resume cursor. Aggregate the page
+                # into one array; the scalar subquery reads the same CTE.
+                sql: |
+                  WITH page AS (
+                    SELECT key, seq, state FROM agent_state
+                    WHERE starts_with(key, :prefix)
+                      AND (CAST(:after AS text) IS NULL OR key > CAST(:after AS text))
+                    ORDER BY key
+                    LIMIT :limit
+                  )
+                  SELECT
+                    COALESCE(
+                      jsonb_agg(
+                        jsonb_build_object('key', key, 'seq', seq, 'state', state)
+                        ORDER BY key
+                      ),
+                      '[]'::jsonb
+                    ) AS items,
+                    (SELECT max(key) FROM page) AS next
+                  FROM page
+                params: [prefix, after, limit]
+                param_exprs:
+                  # after/limit are optional on the wire but SQL params are not —
+                  # bind SQL NULL / the default when absent (the state.get seq
+                  # pattern; the CAST keeps NULL text-typed for the comparison).
+                  after: "has(arguments.after) ? arguments.after : null"
+                  limit: "has(arguments.limit) ? arguments.limit : 100"
+                row_mode: single
+                read_only: true
+                timeout_ms: 15000
+
+          - name: state.admin.list
+            title: "Prefix key scan (keys-only, keyset-paginated)"
+            description: >-
+              List {key, seq} (NO state blob) under a prefix as one ordered
+              keyset page — the cheap enumeration / existence primitive. Because
+              it never pulls `state`, the payload is ~orders of magnitude smaller
+              than state.admin.snapshot (a run-cursor key is ~100 B vs a ~KiB
+              envelope), so it clears the FFI frame cap for far larger prefixes.
+              Same `after` / `limit` / `next` walk as state.admin.snapshot;
+              `limit` defaults to 1000. Unfenced admin (explicit prefix) — used
+              by the existence check and by `migrate`'s zero-loss seq compare.
+            annotations: { read_only: true, idempotent: true, open_world: false }
+            input_schema:
+              type: object
+              required: [prefix]
+              properties:
+                prefix: { type: string, minLength: 1, maxLength: 1024 }
+                after: { type: string, minLength: 1, maxLength: 1024, description: "Keyset cursor: return keys strictly greater than this." }
+                limit: { type: integer, minimum: 1, maximum: 10000 }
                 _meta: { type: object }
               additionalProperties: false
             backend:
@@ -277,16 +344,24 @@ data:
               url: "${env.DATABASE_URL}"
               query:
                 sql: |
-                  SELECT COALESCE(
-                           jsonb_agg(
-                             jsonb_build_object('key', key, 'seq', seq, 'state', state)
-                             ORDER BY key
-                           ),
-                           '[]'::jsonb
-                         ) AS items
-                  FROM agent_state
-                  WHERE starts_with(key, :prefix)
-                params: [prefix]
+                  WITH page AS (
+                    SELECT key, seq FROM agent_state
+                    WHERE starts_with(key, :prefix)
+                      AND (CAST(:after AS text) IS NULL OR key > CAST(:after AS text))
+                    ORDER BY key
+                    LIMIT :limit
+                  )
+                  SELECT
+                    COALESCE(
+                      jsonb_agg(jsonb_build_object('key', key, 'seq', seq) ORDER BY key),
+                      '[]'::jsonb
+                    ) AS items,
+                    (SELECT max(key) FROM page) AS next
+                  FROM page
+                params: [prefix, after, limit]
+                param_exprs:
+                  after: "has(arguments.after) ? arguments.after : null"
+                  limit: "has(arguments.limit) ? arguments.limit : 1000"
                 row_mode: single
                 read_only: true
                 timeout_ms: 15000

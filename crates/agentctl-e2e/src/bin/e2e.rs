@@ -5678,14 +5678,15 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     // a cross-agent read there returns nothing (that IS the fence, tested
     // below); the admin tool is unfenced by design (operator/control plane).
     //
-    // The whole prefix exports over ONE mcpg FFI frame (256 KiB host cap), so a
-    // tool error there (payload over cap) MUST surface — reading it as "no
-    // items" is exactly how a capped snapshot silently masquerades as an empty
-    // store (see docs/v2/known-limits.md).
-    fn snapshot_items(c: &Value) -> Result<Vec<Value>> {
+    // Existence is a KEYS-ONLY read (`state.admin.list`): it never pulls the
+    // state blobs, so it clears mcpg's 256 KiB FFI frame cap that the full
+    // `state.admin.snapshot` export rides (docs/v2/known-limits.md). A tool
+    // error MUST still surface — reading it as "no items" is exactly how a
+    // capped read silently masquerades as an empty store.
+    fn admin_items(c: &Value) -> Result<Vec<Value>> {
         if c["isError"] == json!(true) {
             bail!(
-                "state.admin.snapshot failed (256 KiB FFI payload cap — see \
+                "state admin read failed (see the FFI payload cap — \
                  docs/v2/known-limits.md): {}",
                 c["content"][0]["text"]
             );
@@ -5699,8 +5700,8 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
         let prefix = prefix.clone();
         let call = &call;
         async move {
-            let r = call(12, "state.admin.snapshot", json!({ "prefix": prefix })).await?;
-            Ok(!snapshot_items(&r)?.is_empty())
+            let r = call(12, "state.admin.list", json!({ "prefix": prefix })).await?;
+            Ok(!admin_items(&r)?.is_empty())
         }
     })
     .await
@@ -5742,13 +5743,8 @@ async fn state_durability(ctx: &Ctx) -> Result<Outcome> {
     if restarts.trim() != "0" {
         bail!("restored agent restarted {restarts} times (split-brain or store outage?)");
     }
-    let r = call(
-        13,
-        "state.admin.snapshot",
-        json!({ "prefix": prefix.clone() }),
-    )
-    .await?;
-    if snapshot_items(&r)?.is_empty() {
+    let r = call(13, "state.admin.list", json!({ "prefix": prefix.clone() })).await?;
+    if admin_items(&r)?.is_empty() {
         bail!("checkpoints vanished across the SIGKILL: {r}");
     }
 
